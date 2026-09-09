@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. Foundation: リポジトリ基盤と横断型
-- [ ] 1.1 ワークスペースとクレートをスキャフォールドする
+- [x] 1.1 ワークスペースとクレートをスキャフォールドする
   - リポジトリルートに Cargo ワークスペースを作成する（本クレートがリポジトリ最初のクレートである）
   - `crates/document-format/` をライブラリクレートとしてワークスペースに登録する
   - `zip` 8.x、`serde` / `serde_json`、`tempfile`、`blake3`、`ulid`、`thiserror` を依存に追加する

@@ -1,0 +1,53 @@
+[package]
+name = "document-format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "jxcel ドキュメント形式: 決定的 ZIP + JSON の読み書き"
+
+# ---------------------------------------------------------------------------
+# 依存方針（design.md「Allowed Dependencies」・steering structure.md 準拠）
+#
+# 1. tauri 禁止: この Cargo.toml に tauri を追加してはならない。推移的依存も不可
+#    （`cargo tree` のどこにも tauri が現れてはならない）。本クレートは GUI を
+#    起動せずにテストできなければならない。
+# 2. 他の jxcel ドメインクレートへの依存禁止: 本クレートは依存グラフの最下層
+#    （ルート）であり、schema-engine / version-control 等の下流クレートは
+#    本クレートに依存する側であり、逆方向の依存は不可。
+# 3. flate2 の圧縮バックエンドは miniz_oxide に固定: `default-features = false` +
+#    `features = ["rust_backend"]` により miniz_oxide を強制し、zlib（libz-sys）/
+#    zlib-ng（libz-ng-sys）の C バインディングを依存ツリーに入れない。
+# 注意: zip 8.x の素の `deflate` feature は「既定バックエンド束」であり
+# `deflate-zopfli` と `deflate-flate2-zlib-rs`（flate2 の zlib-rs feature）を
+# 誘発する。miniz_oxide 固定には `deflate-flate2`（= `_deflate-any` + dep:flate2）
+# だけを有効化する。zlib（libz-sys）/ zlib-ng / zlib-rs / zopfli はいずれも入れない。
+# ---------------------------------------------------------------------------
+[dependencies]
+# ZIP コンテナの読み書き（design: zip 8.x）。既定を落とし、deflate は
+# flate2 経由（deflate-flate2）のみ有効化。素の `deflate` feature は
+# zlib-rs / zopfli を誘発するため使わない（上記依存方針 3 参照）。
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
+# flate2 バックエンド固定の宣言（上記コメント 3 参照: miniz_oxide 固定、
+# zlib / zlib-ng feature 無効）。zip の deflate パスと同一ノードに統一される。
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.27"
+blake3 = "1.8"
+ulid = "3.0"
+thiserror = "2.0"
+
+[dev-dependencies]
+criterion = "0.8"
+
+[lib]
+name = "document_format"
+path = "src/lib.rs"
+
+# criterion ベンチターゲット（harness 直結）。実ベンチ（10 万行 × 30 列）は
+# タスク 8.9 で benches/large_document.rs として追加する。ここはハーネスの
+# 動作確認用の最小スケフォールド。
+[[bench]]
+name = "scaffold"
+harness = false

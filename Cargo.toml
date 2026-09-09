@@ -1,0 +1,16 @@
+# jxcel Cargo workspace
+#
+# 依存ポリシー（.kiro/steering 準拠）:
+# - tauri への依存を一切持たないこと（推移的依存も含む不可）。
+#   本ワークスペースのクレートは GUI を起動せずにテスト可能でなければならない。
+# - 他の jxcel ドメインクレートへの依存を持たないこと
+#   （document-format は依存グラフの最下層 = ルートクレートである）。
+[workspace]
+resolver = "2"
+members = ["crates/document-format"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
