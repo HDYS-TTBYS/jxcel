@@ -1,0 +1,20 @@
+# Rust build output
+/target
+**/target/
+
+# Cargo.lock は意図的に追跡する（jxcel はライブラリではなくアプリケーションのため）
+
+# Frontend
+node_modules/
+dist/
+
+# Claude Code のローカル上書き設定
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+*.swp
