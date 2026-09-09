@@ -2,8 +2,10 @@
 //! ZIP コンテナに格納された JSON テキストとメモリ上のドキュメントモデルを
 //! 双方向に変換する。同一内容は常に同一バイト列になる（決定的出力）。
 
+pub mod error;
 pub mod ids;
 
+pub use error::{DocumentError, FormatVersion, IdKind};
 pub use ids::{
     AttachmentId, Blake3Digest, IdFactory, IdParseError, RowId, SheetId, TypeDefId,
 };
