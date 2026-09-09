@@ -1,0 +1,49 @@
+# ベンチマーク実行経路（tasks.md 1.2 / Requirement 8.3）
+#
+# 計測環境（要件 8.3「SSD を搭載した 4 コア以上の一般的なデスクトップ環境」）:
+#   GitHub-hosted ランナー（ubuntu-latest / macos-latest / windows-latest）は
+#   SSD ストレージ搭載・4 コア以上であることが GitHub 公式に明記されており、
+#   この要件の計測環境条件を満たす。この前提の下で open/save の所要時間を計測する。
+#
+# 予算アサーション（開く 3 秒 / 保存 2 秒）の配線は task 8.9 で行う。
+# 本ワークフローは criterion による計測値の記録と保存のみを行う。
+name: Bench
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 週次（月曜 03:00 UTC）で回帰傾向を記録する
+    - cron: "0 3 * * 1"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+
+jobs:
+  bench:
+    name: criterion (${{ matrix.os }})
+    # 計測環境 = GitHub-hosted ランナー（SSD・4 コア以上）— 要件 8.3
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # criterion: ベースライン名は OS 横断で「main」として保存する
+      - name: Bench (criterion, baseline=main)
+        run: cargo bench --workspace -- --save-baseline=main
+
+      - name: Upload criterion report
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-${{ matrix.os }}
+          path: target/criterion
+          if-no-files-found: error

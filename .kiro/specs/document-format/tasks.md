@@ -11,7 +11,7 @@
   - `cargo test` と `cargo bench --no-run` が成功し、`cargo tree` に `tauri` が現れない
   - _Requirements: 3.1, 3.2_
 
-- [ ] 1.2 CI パイプラインを構築する
+- [x] 1.2 CI パイプラインを構築する
   - Linux / macOS / Windows の 3 OS マトリクスでビルドとテストを実行する
   - `cargo audit` をゲートとして組み込み、`zip` ≥ 2.3.0 の下限を満たすことを確認する
   - ベンチマークを実行する経路を用意する（計測環境として SSD 搭載・4 コア以上のランナーを選ぶ）
@@ -275,3 +275,10 @@
   - ベンチマークを CI に組み込み、予算超過を機能追加と同時に検出できるようにする
   - _Depends: 1.2, 7.1, 7.2_
   - _Requirements: 8.1, 8.2, 8.3, 8.5_
+
+## Implementation Notes
+- 実行環境: ホストに C ツールチェーンが無い（gcc なし・sudo なし）。`~/.local/bin/cargo` は podman イメージ `localhost/rustdev:1.98`（rust 1.98 + gcc）内で cargo を実行するシム。すべての cargo コマンドはリポジトリルートから実行すること（シムが git toplevel を同一絶対パスにバインドマウントする）。コンテナ内のファイルは rootless podman によりホストユーザー所有で作られる
+- zip 8.6.0 の素の `deflate` feature は `[deflate-zopfli, deflate-flate2-zlib-rs]` のバンドルで zlib-rs を誘発する。`deflate-flate2` のみを使うこと（`deflate-zopfli` / `deflate-flate2-zlib-rs` を有効化する feature 変更は miniz_oxide 固定とゴールデンテストを壊す）
+- criterion 0.8: `criterion_main!` は群名必須、`criterion::black_box` は非推奨で `std::hint::black_box` を使う
+- ulid は 3.0 に解決済み（design は major 未固定）。ulid 3 の API で実装すること
+- `[lib] bench = false` が必須（crates/document-format/Cargo.toml）: libtest 自動ベンチが `cargo bench --workspace -- --save-baseline=...` のファンアウトで criterion フラグを弾き、ベンチ経路がexit 101 になる（task 1.2 で発覚）。決定的ベンチは `[[bench]]` ターゲットのみで運用する

@@ -44,6 +44,10 @@ criterion = "0.8"
 [lib]
 name = "document_format"
 path = "src/lib.rs"
+# libtest 自動ベンチターゲットを無効化し、criterion フラグが cargo bench
+# --workspace にファンアウトしても壊れないようにする（決定的ベンチは
+# 下記の [[bench]] ターゲットのみ。libtest 側は --save-baseline を弾くため）
+bench = false
 
 # criterion ベンチターゲット（harness 直結）。実ベンチ（10 万行 × 30 列）は
 # タスク 8.9 で benches/large_document.rs として追加する。ここはハーネスの

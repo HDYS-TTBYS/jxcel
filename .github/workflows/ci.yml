@@ -1,0 +1,62 @@
+# CI パイプライン（tasks.md 1.2 / Requirements 3.2, 8.3）
+#   - test : Linux / macOS / Windows の 3 OS マトリクスでビルドとテストを実行する
+#     （決定的シリアライズは OS を跨いだバイト同一性を要求するため 3 OS 必須）
+#   - audit: cargo audit をゲートとして組み込む。非 0 終了で即パイプライン失敗
+#     （例外・スキップ・エラー無視の設定は一切許可しない）
+# zip >= 2.3.0 の下限（RUSTSEC-2025-0168、design.md Security Considerations）は
+# scripts/check-zip-floor.sh が Cargo.lock の解決版を機械検査する（両ジョブで実行）。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+      # zip >= 2.3.0 下限検査: スクリプトは POSIX sh。Windows でも Git Bash を使う
+      - name: zip floor check (>= 2.3.0)
+        shell: bash
+        run: bash scripts/check-zip-floor.sh Cargo.lock
+
+  audit:
+    name: Security audit (cargo audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # ゲート厳守: cargo audit が非 0 で終わったらここでパイプラインを落とす
+      - name: cargo audit
+        run: cargo audit
+
+      - name: zip floor check (>= 2.3.0)
+        run: bash scripts/check-zip-floor.sh Cargo.lock
