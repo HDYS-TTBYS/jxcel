@@ -2,6 +2,12 @@
 //! ZIP コンテナに格納された JSON テキストとメモリ上のドキュメントモデルを
 //! 双方向に変換する。同一内容は常に同一バイト列になる（決定的出力）。
 
+pub mod ids;
+
+pub use ids::{
+    AttachmentId, Blake3Digest, IdFactory, IdParseError, RowId, SheetId, TypeDefId,
+};
+
 #[cfg(test)]
 mod scaffold_tests {
     /// スキャフォールドの証明: deflate 経路（flate2 / miniz_oxide バックエンド）が
