@@ -50,15 +50,27 @@
 //! 値は `serde_json::value::RawValue` が捕捉した原文のバイト列であり、汎用 JSON 値型を
 //! 経由しない（規則 3 の例外ではなく、規則 3 を満たすための仕組みである）。
 //!
+//! # 行データの NDJSON 符号化（タスク 3.3。要件 3.4 / 3.5）
+//!
+//! [`ndjson`] が 1 レコード = 1 テキスト行の符号化（[`ndjson::write_ndjson`] /
+//! [`ndjson::read_ndjson`]）を担う。行末を `\n` に固定する規則、行の分割規則、
+//! 失敗時の無出力は同サブモジュールの docs にある。このコーデックはレコード型
+//! （`Serialize` / `DeserializeOwned`）とレコード列だけを受け取り、**入力列の順序を
+//! そのまま行順にする**。シートの保持する行順序と結線する `RowsCodec`（タスク 4.5）は
+//! 本層の上に載る（本層は `model` に依存しないため、シートの行順序を知り得ない）。
+//!
 //! # 依存方向
 //!
 //! `Ids / Value / EntryName → Model → Json → Parts → Container → Api` の一方向
 //! （design「Architecture Integration」）。本モジュールは [`crate::value`] /
 //! [`crate::error`] にのみ依存し、`parts` / `container` / `model` に依存しない。
+//! [`ndjson`] も同じ規律を守る（依存は [`crate::error`] と [`determinism`] に限る）。
 
 pub mod determinism;
+pub mod ndjson;
 
 pub use determinism::{
     write_cell, write_json, write_ordered_object, PreservedField, PreservedFields,
     PreservingObjectWriter,
 };
+pub use ndjson::{read_ndjson, write_ndjson};

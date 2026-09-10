@@ -174,7 +174,10 @@ fn write_error(reason: &dyn fmt::Display) -> DocumentError {
 
 /// 書き出しの入出力失敗を写す。`retried` は rename リトライの枯渇を表すため
 /// 本モジュールは常に `false`（保存経路だけが `true` を構築し得る）。
-fn io_error(source: io::Error) -> DocumentError {
+///
+/// NDJSON コーデック（タスク 3.3）も書き出しの最後の 1 回で同じ写像を使う
+/// （入出力失敗の写像を 2 つ持たない）。
+pub(crate) fn io_error(source: io::Error) -> DocumentError {
     DocumentError::Io {
         source,
         retried: false,

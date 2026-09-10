@@ -1,11 +1,11 @@
-//! クレート外から見た決定的 JSON 出力と未知フィールドの保持
-//! （タスク 3.1 / 3.2。要件 2.4, 3.3, 3.6, 6.2, 6.3）。
+//! クレート外から見た決定的 JSON 出力・未知フィールドの保持・NDJSON の符号化
+//! （タスク 3.1 / 3.2 / 3.3。要件 2.4, 3.3, 3.4, 3.5, 3.6, 6.2, 6.3）。
 //!
 //! このファイルは統合テストであり、クレートの**公開面だけ**を使う。
-//! `document_format::json::` 直下の再エクスポートと `document_format::json::determinism::`
-//! 経由の双方がクレート外から見えることをコンパイル時に示す
-//! （`write_json` / `write_ordered_object` / `write_cell` / `PreservedFields` /
-//! `PreservingObjectWriter`）。
+//! `document_format::json::` 直下の再エクスポートと `document_format::json::determinism::` /
+//! `document_format::json::ndjson::` 経由の双方がクレート外から見えることをコンパイル時に
+//! 示す（`write_json` / `write_ordered_object` / `write_cell` / `PreservedFields` /
+//! `PreservingObjectWriter` / `write_ndjson` / `read_ndjson`）。
 //!
 //! # 列順序は呼び出し元（スキーマ側）が与える
 //!
@@ -23,11 +23,14 @@
 //! キー順序の決定性そのもの（構造体のフィールド宣言順、非 ASCII の UTF-8 出力、
 //! `-0.0` の正規化、非有限値の拒否）と、保持の詳細（値の verbatim 性・位置の表現・
 //! 失敗時の無出力）は `src/json/determinism.rs` の単体テストと doctest が網羅する。
-//! ここは公開経路が機能することを示す最小の確認に留める。
+//! NDJSON の規則（行末の固定、値の中の改行、順序の保存、行粒度の差分、空行・不正行の
+//! 拒否）は `src/json/ndjson.rs` の単体テストと doctest が網羅する。ここは公開経路が
+//! 機能することを示す最小の確認に留める。
 
 use document_format::json::determinism;
 use document_format::json::{
-    write_cell, write_json, write_ordered_object, PreservedFields, PreservingObjectWriter,
+    read_ndjson, write_cell, write_json, write_ordered_object, write_ndjson, PreservedFields,
+    PreservingObjectWriter,
 };
 use document_format::{CellValue, DocumentError};
 use serde::de::{self, MapAccess, Visitor};
@@ -206,4 +209,120 @@ fn unknown_fields_survive_a_read_write_cycle_from_outside_the_crate() {
     writer.finish().expect("オブジェクトの確定が失敗した");
 
     assert_eq!(INPUT, String::from_utf8(out).expect("出力は UTF-8"), "往復でバイト列が変わった");
+}
+
+// ---------------------------------------------------------------------------
+// NDJSON コーデック（タスク 3.3。要件 3.4, 3.5）
+// ---------------------------------------------------------------------------
+
+/// シートの行を模したレコード（フィールド宣言順 = スキーマが決める列順）。
+///
+/// 本クレートはこの型を知らない（コーデックはレコード列とテキストだけを扱う）。
+/// 行データ特有の結線（`Sheet` の行順序）はタスク 4.5 の RowsCodec が担う。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct RowProbe {
+    id: String,
+    label: CellValue,
+    amount: CellValue,
+}
+
+/// 呼び出し元が与えるエントリの文脈（`sheets/<sheet-id>.jsonl`）。
+const SHEET_ENTRY: &str = "sheets/01J2X3Z000000000000000000.jsonl";
+
+/// クレート外から見た経路: `json::` 直下の再エクスポートと `json::ndjson::` の双方で
+/// 書き出しと読み込みができ、1 レコード = 1 行・行末 `\n`・往復同一が成立する。
+#[test]
+fn ndjson_codec_is_usable_from_outside_the_crate() {
+    let rows = vec![
+        RowProbe {
+            id: "01".into(),
+            label: CellValue::Text("a\nb".into()),
+            amount: CellValue::Int(1),
+        },
+        RowProbe { id: "02".into(), label: CellValue::Null, amount: CellValue::Float(-0.0) },
+    ];
+
+    let mut out = Vec::new();
+    write_ndjson(&mut out, SHEET_ENTRY, &rows).expect("書き出しが失敗した");
+    // 要件 3.4: 1 レコード = 1 テキスト行、行末は `\n` に固定（最後の行も終端する）。
+    // 値の中の改行はエスケープされ、`-0.0` は `0.0` として書かれる（3.1 の正規化）。
+    assert_eq!(
+        "{\"id\":\"01\",\"label\":\"a\\nb\",\"amount\":1}\n\
+         {\"id\":\"02\",\"label\":null,\"amount\":0.0}\n",
+        String::from_utf8(out.clone()).expect("出力は UTF-8"),
+    );
+    assert_eq!(rows.len(), out.iter().filter(|&&byte| byte == b'\n').count());
+    assert!(!out.contains(&b'\r'), "出力に `\\r` が含まれる");
+
+    let decoded: Vec<RowProbe> = read_ndjson(&out, SHEET_ENTRY).expect("読み込みが失敗した");
+    assert_eq!(rows, decoded, "往復でレコードが変わった");
+
+    // `json::ndjson::` 直下経由でも同じ公開面が見える（0 レコードは 0 バイト）。
+    let empty: Vec<RowProbe> = Vec::new();
+    let mut second = Vec::new();
+    document_format::json::ndjson::write_ndjson(&mut second, SHEET_ENTRY, &empty)
+        .expect("空の書き出しが失敗した");
+    assert!(second.is_empty());
+    let decoded_empty: Vec<RowProbe> =
+        document_format::json::ndjson::read_ndjson(&second, SHEET_ENTRY).expect("読み込みが失敗した");
+    assert!(decoded_empty.is_empty());
+}
+
+/// クレート外から見た順序と行粒度: 呼び出し元が与えたレコード列の順序（シートが保持する
+/// 行順序を模し、ULID 昇順でも追加順でもない）がそのまま行順になり、1 レコードのセル
+/// 変更はちょうど 1 行だけを変える（要件 3.4 / 3.5）。
+#[test]
+fn ndjson_keeps_the_row_order_and_line_granularity_the_caller_supplies() {
+    let rows = vec![
+        RowProbe {
+            id: "01J2X3Z000000000000000002".into(),
+            label: CellValue::Text("b".into()),
+            amount: CellValue::Int(2),
+        },
+        RowProbe {
+            id: "01J2X3Z000000000000000003".into(),
+            label: CellValue::Text("c".into()),
+            amount: CellValue::Int(3),
+        },
+        RowProbe {
+            id: "01J2X3Z000000000000000001".into(),
+            label: CellValue::Text("a".into()),
+            amount: CellValue::Int(1),
+        },
+    ];
+    let mut out = Vec::new();
+    write_ndjson(&mut out, SHEET_ENTRY, &rows).expect("書き出しが失敗した");
+    let encoded = String::from_utf8(out).expect("出力は UTF-8");
+
+    let ids: Vec<String> = encoded
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<RowProbe>(line).expect("行が単一の JSON オブジェクトでない").id
+        })
+        .collect();
+    assert_eq!(
+        vec![
+            "01J2X3Z000000000000000002",
+            "01J2X3Z000000000000000003",
+            "01J2X3Z000000000000000001",
+        ],
+        ids,
+        "行順が入力順と異なる（コードックが独自の順序を課している）",
+    );
+
+    // 要件 3.5: 1 セルの変更 → 変化する行はちょうど 1 行。
+    let mut changed = rows.clone();
+    changed[1].label = CellValue::Text("changed".into());
+    let mut changed_out = Vec::new();
+    write_ndjson(&mut changed_out, SHEET_ENTRY, &changed).expect("書き出しが失敗した");
+    let changed_text = String::from_utf8(changed_out).expect("出力は UTF-8");
+
+    let before: Vec<&str> = encoded.lines().collect();
+    let after: Vec<&str> = changed_text.lines().collect();
+    assert_eq!(before.len(), after.len(), "レコード数が同じなのに行数が変わった");
+    assert_eq!(
+        1,
+        before.iter().zip(&after).filter(|(before, after)| before != after).count(),
+        "1 セルの変更が 1 行に収まっていない",
+    );
 }
