@@ -86,17 +86,53 @@
 //!      通る）。
 //! 2. **決定的符号化**: [`ContainerCodec::encode`]（タスク 5.2。決定性パラメータは
 //!    固定済み。要件 3.1, 3.2, 3.6）。
-//! 3. **原子的書き込み**: [`AtomicWriter::commit`]（タスク 5.1）。**書き込みはこの 1 箇所
+//! 3. **変換後の初回保存の退避**: [`DocumentFormatApi::save`] は、`document` が
+//!    [`Document::was_converted_from_an_older_format`] を立てているときだけ、変換前の
+//!    ファイルを `<ファイル名>.bak` へ退避する（要件 6.4。下の節「変換後の初回保存の
+//!    退避」）。
+//! 4. **原子的書き込み**: [`AtomicWriter::commit`]（タスク 5.1）。**書き込みはこの 1 箇所
 //!    だけ**であり、`std::fs::write` などを直接使わない。
 //!
-//! 1〜2 のいずれかで失敗した場合、3 に到達しないため `path` のファイルは一切変更されない。
-//! 3 が `Err` を返す場合も対象は保存前のままである（[`AtomicWriter::commit`] の不変条件。
+//! 1〜3 のいずれかで失敗した場合、4 に到達しないため `path` のファイルは一切変更されない。
+//! 4 が `Err` を返す場合も対象は保存前のままである（[`AtomicWriter::commit`] の不変条件。
 //! タスク 5.1 の裁定）。成功した場合だけ `path` が新しい内容になる。したがって `save` の
 //! `Err` は常に「`path` は保存前の内容のまま」を意味する（要件 5.6。design の `save`
-//! 事後条件）。
+//! 事後条件）。退避の作成に失敗した場合（3 の失敗）も同じく保存は中止され、対象は保存前の
+//! ままである。
 //!
-//! **変換後の初回保存の退避（要件 6.4）は後続タスク 7.4 が足す**: 本経路は退避の分岐を
-//! 持たず、design の Service Interface のシグネチャも変えない。
+//! ## 変換後の初回保存の退避（要件 6.4）
+//!
+//! [`DocumentFormatApi::save`] は、`document` が
+//! [`Document::was_converted_from_an_older_format`] を立てている場合（＝ 読み込み時に
+//! 形式変換が適用された場合）だけ、**符号化の後・対象の置換の前**に変換前のファイルを退避
+//! する。分岐は 3 つである:
+//!
+//! 1. **対象が存在しない**（新規保存）: ディスク上に変換前の内容が無いため退避を作らず、
+//!    そのまま保存する。
+//! 2. **退避先に既存の退避ファイルがある**: 上書きしない（既存の退避＝変換前の原本を保持し
+//!    続ける。これにより 2 回目以降の保存で原本が失われない＝「初回保存で残す」を満たす）。
+//!    そのまま保存する。
+//! 3. **それ以外**: 対象の現在のバイト列を読み、退避先へ書いてから保存する。
+//!
+//! **退避先は対象と同一ディレクトリの `<ファイル名>.bak`** である（例: `doc.jxcel` →
+//! `doc.jxcel.bak`）。書き込みは [`AtomicWriter::commit`] を使い、部分的な退避を残さない
+//! （`fs::copy` のような非原子的な経路を使わない。`atomic_save.rs` のロジックは変更しない）。
+//! したがって退避は**内容のコピー**であり、`AtomicWriter` の規約どおり**対象のファイルモード
+//! （パーミッション）やその他のメタデータは引き継がない**（`atomic_save.rs` の docs「モードを
+//! 継承しない」を参照）。
+//!
+//! 退避の作成に失敗した場合は [`DocumentError::Io`]（`retried: false`）で**保存を中止する**:
+//! 要件 6.4 の「変換前のファイルを保持する」を守れない状態で対象を上書きしないためであり、
+//! `Err` ⇒ `path` は保存前のままという本メソッドの事後条件とも一致する。
+//!
+//! **保持期間の方針**（design「Risks: 退避の保持期間の方針は実装時に決める」への回答）:
+//! 本実装は退避を**作るだけで、削除も上書きもしない**。削除（および保持期間の管理）は
+//! 呼び出し元の責務である。この方針は design の Risk「ディスク容量を二重に消費する」を
+//! そのまま受け入れる（退避は変換前のファイル 1 つ分である）。
+//!
+//! 「変換済み」の標識は wire 形式に含まれない（[`Document`] の docs 参照）ため、退避が
+//! 作られるのは**読み込み経路から直接得たモデルの初回保存だけ**であり、保存済みの
+//! ファイルを開き直したモデルでは `false` である。
 //!
 //! ## `migrated_from` を `gate` の事前判定から得る理由
 //!
@@ -150,7 +186,7 @@ pub use model::{
 };
 pub use value::{CellValue, NestedValue, from_json_bytes, to_json_bytes};
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::container::{AtomicWriter, ContainerCodec};
 // パート層の自由関数はトレイトの `to_parts` / `from_parts` と同じ名前である。どちらの層の
@@ -217,7 +253,11 @@ pub trait DocumentFormatApi {
     ///
     /// 処理順はモジュール docs「保存の順序」にある。ファイル I/O は本メソッドだけが担い、
     /// 不変条件の検証・パート構築・ダイジェスト算出・決定的符号化・原子的書き込みは
-    /// 下位層の 1 経路を呼ぶ。変換後の初回保存の退避（要件 6.4）は後続タスク 7.4 が足す。
+    /// 下位層の 1 経路を呼ぶ。`document` が
+    /// [`Document::was_converted_from_an_older_format`] を立てている場合（読み込み時に形式
+    /// 変換が適用された場合）は、符号化の後・対象の置換の前に変換前のファイルを
+    /// `<ファイル名>.bak` へ退避する（要件 6.4。モジュール docs「変換後の初回保存の退避」）。
+    /// 退避に失敗した場合は保存を中止し、対象は保存前のまま残る。
     fn save(&self, document: &Document, path: &Path) -> Result<(), DocumentError>;
 
     /// ドキュメントを論理エントリ集合として取り出す（`version-control` 向け。要件 2.2, 2.3）。
@@ -314,7 +354,14 @@ impl DocumentFormatApi for DocumentFormat {
         // 2. 決定的符号化（タスク 5.2）。同じパート集合からは常に同じバイト列になる。
         let bytes = ContainerCodec::encode(&parts)?;
 
-        // 3. 原子的書き込み（タスク 5.1 の 1 箇所）。`Err` は「対象が置換されていない」
+        // 3. 変換後の初回保存の退避（要件 6.4）。読み込み時に形式変換が適用された文書だけが
+        //    対象である（`Document` が運ぶ標識。wire 形式には含まれない）。対象の置換より
+        //    前に行い、失敗したら保存を中止する（対象は保存前のまま）。
+        if document.was_converted_from_an_older_format() {
+            preserve_pre_conversion_file(path)?;
+        }
+
+        // 4. 原子的書き込み（タスク 5.1 の 1 箇所）。`Err` は「対象が置換されていない」
         //    ことを意味する（`commit` の不変条件）。
         AtomicWriter::commit(path, &bytes)
     }
@@ -376,9 +423,160 @@ fn migrated_from_verdict(verdict: VersionVerdict) -> Option<FormatVersion> {
     }
 }
 
+/// 読み込み時に形式変換が適用された文書の保存で、変換前のファイルを `<ファイル名>.bak` へ
+/// 退避する（要件 6.4）。
+///
+/// 分岐はモジュール docs「変換後の初回保存の退避」の 3 つである。退避の書き込みには
+/// [`AtomicWriter::commit`] を使い（部分的な退避を残さない）、失敗した場合は保存を中止する
+/// （`save` は本関数の `Err` で対象の置換へ進まない。`Err` ⇒ 対象は保存前のまま）。
+fn preserve_pre_conversion_file(path: &Path) -> Result<(), DocumentError> {
+    // 1. 新規保存（対象が存在しない）: ディスク上に変換前の内容が無いため退避を作らない。
+    if !path.exists() {
+        return Ok(());
+    }
+    let backup = backup_path(path);
+    // 2. 既存の退避ファイルがある: 上書きしない（変換前の原本を保持し続ける）。
+    //    ディレクトリ等の「退避ファイルでない」実体は 3 へ進み、書き込みの失敗として中止する。
+    if backup.is_file() {
+        return Ok(());
+    }
+    // 3. 対象の現在のバイト列を読み、退避先へ原子的に書く。
+    let current =
+        std::fs::read(path).map_err(|source| DocumentError::Io { source, retried: false })?;
+    AtomicWriter::commit(&backup, &current).map_err(backup_failure)
+}
+
+/// 退避先の確定形: 対象と同一ディレクトリの `<ファイル名>.bak`（例: `doc.jxcel` →
+/// `doc.jxcel.bak`）。
+///
+/// 対象と同じディレクトリに置くのは、退避が対象と同じファイルシステム上にあり、
+/// [`AtomicWriter::commit`] の「同一ディレクトリの一時ファイル＋`rename`」の前提を満たす
+/// ためである。
+fn backup_path(target: &Path) -> PathBuf {
+    let mut name = target.as_os_str().to_os_string();
+    name.push(".bak");
+    PathBuf::from(name)
+}
+
+/// 退避の書き込みの失敗を保存の失敗へ写す。
+///
+/// `retried` は**対象の置換**の `rename` 再試行予算を使い切った場合だけ `true` を指す
+/// （[`crate::container::atomic_save`]）。退避の失敗は対象の保存前の中止であり、対象の置換は
+/// 1 度も走っていないため、[`DocumentError::Io`] の `retried` は常に `false` へ正規化する。
+fn backup_failure(error: DocumentError) -> DocumentError {
+    match error {
+        DocumentError::Io { source, .. } => DocumentError::Io { source, retried: false },
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use crate::migration::steps::synthetic;
+    use crate::parts::document_parts::from_parts_with;
+
+    /// テスト専用の作業ディレクトリ（終了時に必ず削除する）。
+    ///
+    /// 統合テスト `tests/api.rs` の `Scratch` と同じ方針である: 一時ファイルは
+    /// リポジトリ内（`src_tmp_*`）に作り、`Drop`（panic の巻き戻しでも走る）で確実に消す。
+    struct Scratch {
+        path: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            static SEQUENCE: AtomicU32 = AtomicU32::new(0);
+            let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join(format!("src_tmp_{tag}_{}_{sequence}", std::process::id()));
+            fs::create_dir_all(&path).expect("一時ディレクトリを作れる");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn file(&self, name: &str) -> PathBuf {
+            self.path.join(name)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// 公開面の具象実装（design はトレイトのみを指定する）。
+    fn api() -> DocumentFormat {
+        DocumentFormat::new()
+    }
+
+    /// 1 シート 1 行の標本（変換の有無だけを観測する最小の文書）。
+    fn sample_document() -> Document {
+        let mut document = Document::new();
+        let sheet = document.add_sheet("在庫");
+        document
+            .set_sheet_columns(sheet, vec!["name".to_owned()])
+            .expect("標本のシートは実在する");
+        document.set_root_schema(sheet, SchemaPart::empty()).expect("標本のシートは実在する");
+        let row = document.add_row(sheet).expect("標本の行は実在する");
+        document
+            .set_row_values(sheet, row, vec![CellValue::Text("りんご".to_owned())])
+            .expect("標本の行は実在する");
+        document
+    }
+
+    /// 標本を古い版（0.0）の集合として記録したもの（合成チェーンの入力）。
+    fn recorded_at_oldest(document: &Document) -> DocumentParts {
+        let parts = parts_to_parts(document).expect("保存経路");
+        synthetic::recorded_at(synthetic::OLDEST, &parts)
+    }
+
+    /// 古い版の集合を合成チェーンで現行版へ移行して読み込んだ文書。
+    ///
+    /// 移行が実際に適用される唯一の経路であり、`from_parts_with` が「変換済み」を立てる。
+    fn migrated_document(document: &Document) -> Document {
+        from_parts_with(synthetic::MULTI_STEP, &recorded_at_oldest(document))
+            .expect("移行して読める")
+    }
+
+    /// 標本を古い版（0.0）のコンテナとして符号化したバイト列（変換前のファイルの実体）。
+    fn recorded_container_bytes(document: &Document) -> Vec<u8> {
+        ContainerCodec::encode(&recorded_at_oldest(document)).expect("符号化")
+    }
+
+    /// 集合を（エントリ名, バイト列）の列へ写す。
+    fn entries_of(parts: &DocumentParts) -> Vec<(EntryName, Vec<u8>)> {
+        parts.iter().map(|part| (part.name, part.bytes.clone())).collect()
+    }
+
+    /// ディレクトリ直下の名前を昇順で返す（退避の有無の観測）。
+    fn entry_names(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(directory)
+            .expect("作業ディレクトリが読める")
+            .map(|entry| {
+                entry.expect("ディレクトリ要素が読める").file_name().to_string_lossy().into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// ファイルの inode（Unix のみ。原子的置換の代理観測）。
+    #[cfg(unix)]
+    fn inode(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(path).expect("メタデータが読める").ino()
+    }
 
     /// 判定から移行元への写像を両分岐とも固定する（要件 6.2, 6.3）。
     ///
@@ -405,6 +603,161 @@ mod tests {
                 supported: FormatVersion::new(1, 0),
             }),
             "読めない版で移行元が記録された"
+        );
+    }
+
+    /// 「読み込み時に形式変換が適用されたか」は移行の適用結果にだけ従う（要件 6.4）。
+    ///
+    /// 新規文書と現行版の読み込みは `false`、移行が実際に適用された読み込みだけが `true` で
+    /// あることを固定する（`Ok(None)` で立てる変異を殺す）。
+    #[test]
+    fn only_an_applied_migration_marks_the_document_as_converted() {
+        let document = sample_document();
+        assert!(!document.was_converted_from_an_older_format(), "新規文書が変換済みを名乗った");
+
+        let current = parts_to_parts(&document).expect("保存経路");
+        let plain = from_parts_with(synthetic::MULTI_STEP, &current).expect("現行版は読める");
+        assert!(
+            !plain.was_converted_from_an_older_format(),
+            "移行していない読み込みで変換済みが立った"
+        );
+
+        let recorded = synthetic::recorded_at(synthetic::OLDEST, &current);
+        let migrated = from_parts_with(synthetic::MULTI_STEP, &recorded).expect("移行して読める");
+        assert!(
+            migrated.was_converted_from_an_older_format(),
+            "移行が適用されたのに変換済みが立たない"
+        );
+    }
+
+    /// 「変換済み」は wire 形式に含めない（ドキュメントの内容ではない）。
+    ///
+    /// 移行済みの文書を `to_parts` で書き出して読み直すと、現行版として読まれるため
+    /// `false` に戻る。さらに保存バイト列（パート集合）が変換済みの有無に依存しないことを
+    /// 固定する（既存の決定性・往復テストの前提を壊さない）。
+    #[test]
+    fn the_conversion_marker_is_not_persisted() {
+        let migrated = migrated_document(&sample_document());
+        assert!(migrated.was_converted_from_an_older_format());
+
+        let parts = api().to_parts(&migrated).expect("保存経路");
+        let reloaded = parts_from_parts(&parts).expect("現行版として読める");
+        assert!(!reloaded.was_converted_from_an_older_format(), "wire 形式へ変換済みが漏れている");
+        assert_eq!(
+            entries_of(&parts),
+            entries_of(&api().to_parts(&reloaded).expect("保存経路")),
+            "変換済みの状態がパート集合へ漏れている"
+        );
+    }
+
+    /// 変換が適用された文書の初回保存は、変換前のファイルを `<ファイル名>.bak` に残す
+    /// （要件 6.4）。
+    ///
+    /// (a) 退避が変換前のファイルのバイト列と完全一致し、(b) 対象が新しい内容になり、
+    /// (c) 対象が原子的置換されている（inode の変化を代理観測）ことを実測する。
+    #[test]
+    fn save_after_conversion_keeps_the_pre_conversion_file_as_a_backup() {
+        let scratch = Scratch::new("backup_created");
+        let document = sample_document();
+        let migrated = migrated_document(&document);
+
+        // 変換前のファイルを実在させる（古い版のコンテナをそのまま置く）。
+        let path = scratch.file("doc.jxcel");
+        let old_bytes = recorded_container_bytes(&document);
+        fs::write(&path, &old_bytes).expect("書き出し");
+        #[cfg(unix)]
+        let inode_before = inode(&path);
+
+        api().save(&migrated, &path).expect("保存できる");
+
+        let backup = scratch.file("doc.jxcel.bak");
+        assert_eq!(
+            old_bytes,
+            fs::read(&backup).expect("退避が読める"),
+            "退避が変換前のファイルのバイト列と一致しない"
+        );
+        let new_bytes = fs::read(&path).expect("対象が読める");
+        assert_ne!(old_bytes, new_bytes, "対象が変換前のままである");
+        #[cfg(unix)]
+        assert_ne!(inode_before, inode(&path), "対象が原子的置換されていない");
+
+        // 対象は変換後の内容として開ける（退避ではなく対象が新しい内容であることの実測）。
+        let reopened = api().open(&path).expect("保存された対象は開ける");
+        assert_eq!(
+            migrated.sheets().iter().map(|sheet| sheet.name().to_owned()).collect::<Vec<_>>(),
+            reopened.document.sheets().iter().map(|sheet| sheet.name().to_owned()).collect::<Vec<_>>(),
+            "保存された文書の内容が変換後と違う"
+        );
+    }
+
+    /// 退避は上書きされない（2 回目以降の保存で原本が失われない＝「初回保存で残す」。要件 6.4）。
+    #[test]
+    fn an_existing_backup_is_never_overwritten() {
+        let scratch = Scratch::new("backup_kept");
+        let document = sample_document();
+        let migrated = migrated_document(&document);
+        let path = scratch.file("doc.jxcel");
+        let old_bytes = recorded_container_bytes(&document);
+        fs::write(&path, &old_bytes).expect("書き出し");
+
+        api().save(&migrated, &path).expect("初回保存できる");
+        let backup = scratch.file("doc.jxcel.bak");
+        assert_eq!(old_bytes, fs::read(&backup).expect("読める"), "初回の退避が違う");
+
+        api().save(&migrated, &path).expect("2 回目も保存できる");
+        assert_eq!(
+            old_bytes,
+            fs::read(&backup).expect("読める"),
+            "2 回目の保存が退避（変換前の原本）を上書きした"
+        );
+        assert_ne!(old_bytes, fs::read(&path).expect("読める"), "対象が変換前に戻った");
+        assert!(api().open(&path).is_ok(), "2 回目に保存された対象が読めない");
+    }
+
+    /// 新規パスへの変換済み保存は退避を作らない（ディスク上に変換前の内容が無い。要件 6.4）。
+    #[test]
+    fn saving_a_converted_document_to_a_new_path_creates_no_backup() {
+        let scratch = Scratch::new("backup_absent");
+        let migrated = migrated_document(&sample_document());
+        assert!(migrated.was_converted_from_an_older_format(), "移行経路が変換済みを立てていない");
+        let path = scratch.file("fresh.jxcel");
+        assert!(!path.exists(), "標本の対象パスが既に存在する");
+
+        api().save(&migrated, &path).expect("保存できる");
+
+        assert_eq!(
+            vec!["fresh.jxcel".to_owned()],
+            entry_names(scratch.path()),
+            "新規パスへの変換済み保存に退避が付いた"
+        );
+    }
+
+    /// 退避の作成に失敗したら保存を中止し、対象は保存前のままである（要件 6.4 / 5.6）。
+    ///
+    /// 退避先に**ディレクトリ**を置いて `AtomicWriter::commit` の置換を失敗させる。保存は
+    /// `Io { retried: false }` を返し、対象を 1 バイトも変えず、退避先も置き換えない。
+    #[test]
+    fn save_aborts_and_leaves_the_target_untouched_when_the_backup_fails() {
+        let scratch = Scratch::new("backup_failure");
+        let document = sample_document();
+        let migrated = migrated_document(&document);
+        let path = scratch.file("doc.jxcel");
+        let before = recorded_container_bytes(&document);
+        fs::write(&path, &before).expect("書き出し");
+        // 退避先をディレクトリにすると、そこへの `rename` が失敗する。
+        fs::create_dir(scratch.file("doc.jxcel.bak")).expect("ディレクトリを作れる");
+
+        let error = api().save(&migrated, &path).expect_err("退避できない保存は中止される");
+        assert!(
+            matches!(error, DocumentError::Io { retried: false, .. }),
+            "退避の失敗が Io(retried=false) でない: {error:?}"
+        );
+        assert_eq!(before, fs::read(&path).expect("読める"), "退避の失敗で対象が変更された");
+        assert!(scratch.file("doc.jxcel.bak").is_dir(), "退避先のディレクトリが置き換えられた");
+        assert_eq!(
+            vec!["doc.jxcel".to_owned(), "doc.jxcel.bak".to_owned()],
+            entry_names(scratch.path()),
+            "退避の失敗が一時ファイルの残骸を残した"
         );
     }
 }

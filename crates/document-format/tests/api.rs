@@ -825,6 +825,32 @@ fn save_writes_only_the_target_entry() {
     );
 }
 
+/// 形式変換が起きなかった文書の保存は退避を作らない（要件 6.4 の否定側。実経路）。
+///
+/// 現行版のファイルを開いて保存し直しても `<path>.bak` は現れず、作業ディレクトリの
+/// エントリ一覧が対象ファイルだけのままであることを観測する。読み込んだモデルが
+/// 「変換済み」を名乗らないことも公開アクセサで確かめる。
+#[test]
+fn save_without_conversion_creates_no_backup() {
+    let scratch = Scratch::new("save_no_backup");
+    let path = write_document(&scratch, "current.jxcel", &sample());
+
+    let outcome = api().open(&path).expect("現行版は開ける");
+    assert!(outcome.migrated_from.is_none(), "現行版で移行元が記録された");
+    assert!(
+        !outcome.document.was_converted_from_an_older_format(),
+        "現行版の読み込みで変換済みが立った"
+    );
+
+    api().save(&outcome.document, &path).expect("保存できる");
+
+    assert_eq!(
+        vec!["current.jxcel".to_owned()],
+        entry_names(scratch.path()),
+        "変換が起きていない保存に退避が付いた"
+    );
+}
+
 /// 実在しない型定義を参照する文書は保存できない（design「保存フロー」の不変条件検証の段。
 /// 要件 1.7）。
 ///

@@ -70,6 +70,17 @@
 //! の保持を保証する。10 万行超をモデル側で拒否はしない(要件 8.5 の超過通知は読み込み
 //! 経路 `OpenOutcome::beyond_supported_scale` の役割)。
 //!
+//! # 読み込み時の形式変換を覚える状態(要件 6.4)
+//!
+//! [`Document::was_converted_from_an_older_format`] は、そのモデルが読み込み経路
+//! ([`crate::parts::from_parts`])で移行チェーンを適用して得られたものかを表す。設定は
+//! クレート内部の `mark_converted_from_an_older_format` だけであり、
+//! 移行が実際に適用された 1 箇所([`crate::parts::from_parts`])に限る。**この状態は
+//! wire 形式に含めない**: ドキュメントの内容ではないため `document.json` へ書かず、
+//! [`crate::parts::to_parts`] も無視する。したがって `open → save` を繰り返しても
+//! 退避は初回だけであり(保存後の読み直しでは `false`)、既存の往復・決定性テストの
+//! バイト列は変わらない。
+//!
 //! # 後続タスクとの境界
 //!
 //! * 各シートがちょうど 1 つ持つルートスキーマ(要件 1.2)は [`SchemaPart`] の所有であり、
@@ -179,6 +190,14 @@ pub struct Document {
     attachments: AttachmentRegistry,
     /// 解釈しない `document.json` トップレベルのフィールド(前方互換。要件 6.2 / 6.3)。
     preserved: PreservedFields,
+    /// 読み込み時に形式変換(移行)が適用されたか(要件 6.4)。
+    ///
+    /// **ドキュメントの内容ではない**: wire 形式(`document.json` 等)には含めず、
+    /// [`crate::parts::to_parts`] も無視する。したがって `Document → Parts → Document` の
+    /// 往復でこの状態は失われ、再読み込みでは常に `false` から始まる(「変換後の初回保存」を
+    /// 判定できるのは読み込み経路から直接得たモデルだけである)。設定は
+    /// [`crate::parts::from_parts`] が移行を実際に適用した 1 箇所だけで行う。
+    converted_from_an_older_format: bool,
 }
 
 impl Document {
@@ -196,6 +215,7 @@ impl Document {
             sheets: Vec::new(),
             attachments: AttachmentRegistry::new(),
             preserved: PreservedFields::new(),
+            converted_from_an_older_format: false,
         }
     }
 
@@ -211,6 +231,7 @@ impl Document {
             sheets: Vec::new(),
             attachments: AttachmentRegistry::new(),
             preserved: PreservedFields::new(),
+            converted_from_an_older_format: false,
         }
     }
 
@@ -218,6 +239,34 @@ impl Document {
     #[inline]
     pub const fn document_id(&self) -> DocumentId {
         self.id
+    }
+
+    /// 読み込み時に形式変換(移行)が適用されたか(要件 6.4)。
+    ///
+    /// `true` のとき、[`crate::DocumentFormatApi::save`] は**初回の保存**で変換前の
+    /// ファイルを `<ファイル名>.bak` として退避する(要件 6.4)。
+    ///
+    /// **この状態は wire 形式に含めない**: ドキュメントの内容ではなく、読み込み経路が
+    /// 「古いファイルを変換した」ことを覚えているための一時的な標識である。
+    /// [`crate::parts::to_parts`] はこの値を無視するため、保存して読み直した文書は
+    /// `false` に戻る(この設計により、既存の往復・決定性テストのバイト列は変わらない)。
+    /// この値が `true` になるのは、読み込み経路
+    /// ([`crate::parts::from_parts`])が移行チェーンを実際に適用した場合だけである。
+    /// [`Document::new`] と [`crate::parts::from_parts`] の現行版の読み込みは `false` を
+    /// 返す。
+    #[inline]
+    pub const fn was_converted_from_an_older_format(&self) -> bool {
+        self.converted_from_an_older_format
+    }
+
+    /// 「読み込み時に形式変換が適用された」ことを立てる
+    /// ([`crate::parts::from_parts`] が移行を適用した 1 箇所だけが呼ぶ)。
+    ///
+    /// 公開の読み取りは [`Document::was_converted_from_an_older_format`] であり、設定経路を
+    /// 公開面へ出さない(利用側が「変換済み」を自称できると退避の分岐が意味を失う)。
+    #[inline]
+    pub(crate) fn mark_converted_from_an_older_format(&mut self) {
+        self.converted_from_an_older_format = true;
     }
 
     /// `document.json` のトップレベルで保持した未知フィールド(要件 6.2 / 6.3)。

@@ -206,7 +206,7 @@
   - _Depends: 4.1, 4.6, 4.7, 4.8, 6.2_
   - _Requirements: 2.2, 2.3_
 
-- [ ] 7.4 変換後の初回保存における退避を実装する
+- [x] 7.4 変換後の初回保存における退避を実装する
   - 読み込み時に形式変換が適用された場合、その後の初回保存で変換前のファイルを退避として残す
   - 変換が発生しなかった場合に退避が作られないことをテストで示す
   - _Depends: 6.2, 7.2_
@@ -379,3 +379,8 @@
 - **`open` と `from_parts` の同一検証は実測で固定**（`tests/api.rs` のパリティテスト。ダイジェスト改竄 / 未来 major / 宙吊り型参照 / 未登録添付参照 / `TypeDefId` 重複宣言の 5 種で、変種と出現箇所テキストが `Debug` 表記で一致）。コンテナ層にしかない検査（許可リスト・重複パス・マーカー・CRC）は ZIP 固有であり、`DocumentParts` の正準化（マーカー拒否）と `EntryName` の閉じた型により `from_parts` 経路へは構造的に到達不能
 - **ZIP 非経由の実証は `tests/parts_contract.rs`**（新設。`document_format::container` を import せず、ファイル I/O もしない）。往復・エントリ名と中身の列挙・期待集合（`document.json` / シートごとの `schemas`・`sheets` / `attachments/<hex64>.bin` / `manifest.json`、`jxcel` を含まない）・各行エントリが自シートの行のみ（`RowsCodec::decode` で復号して実比較）・2 回の `to_parts` のバイト一致を検証する。**`open` / `save` のテストは `tests/api.rs`、ZIP 非経由の契約は `tests/parts_contract.rs`** と置き場を分けている（前者は `ContainerCodec` を import するため）
 - **task 7.4 への申し送り**: `save(document, path)` は `Document` しか受け取らず「読み込み時に変換が適用された」ことを運ばないため、**退避分岐の判定源**（モデル側に保持するか、`open` の `OpenOutcome` を保存側へ渡す新しい口を作るか）を 7.4 で決める必要がある。`MigrationChain::gate` は副作用なしで「移行が必要か」を判定できるが、「移行が成功したか」は `from_parts` が `Ok` を返したことで分かる
+- task 7.4 で**退避分岐**が入り、Public API 層が完成した。判定源は **`Document` が運ぶ真偽 1 つ**（`was_converted_from_an_older_format()`。設定は `parts::from_parts_with` が `MigrationChain::apply_with` の `Ok(Some(..))` を得た **1 箇所だけ**。`Ok(None)`（現行版）では立てない）。**この標識は wire 形式に含めない**（`to_parts` の出力は標識の真偽に依存せずバイト単位で同一。保存 → `open` し直すと `false` に戻る = 保存されない）。`OpenOutcome::migrated_from`（報告用の版情報）と `Document` の標識（`save` 判断用の「読み込み時の事実」）で役割を分けている
+- `save` の順序は **`to_parts` → `encode` → 退避（必要なときだけ）→ `commit`**（退避は符号化の後なので、符号化失敗では退避を作らない）。**退避の 3 分岐**: ① 対象が存在しない → 作らない ② **退避先に既存の退避ファイルがある → 上書きしない**（原本を保持し続けることで「初回保存で残す」を満たし、2 回目以降の保存でも原本が失われない）③ それ以外 → 対象の現在のバイト列を読み、**`AtomicWriter::commit` で退避先へ書いてから**保存。退避先は**対象と同一ディレクトリの `<ファイル名>.bak`**
+- **退避の失敗は保存の中止**（`Io { retried: false }`）で、対象は保存前のまま（要件 6.4 を守れない状態で上書きしない）。退避は `fs::copy` ではなく `AtomicWriter::commit` を使うため**内容のコピー**であり、**ファイルモード/メタデータは引き継がない**（`atomic_save.rs` の規約。lib.rs の退避節に明記済み）。**保持期間の方針**は「作るだけで削除も上書きもしない」（design の Risks「保持期間の方針は実装時に決める」への回答。削除は呼び出し元の責務）
+- **検証限界（task 7.4 の実測）**: 実 `STEPS` が空のため、**実経路で「変換が適用された文書」はまだ存在しない**。退避分岐の観測は `src/lib.rs` の crate 内部テストが合成ステップ表（`migration::steps::synthetic` の 0.0→0.1→1.0 の実段）と `from_parts_with` で行っている。**非変換時の否定側は `tests/api.rs`**（実経路）。**task 8.7 への申し送り**: 実経路で退避を観測するには「過去版のゴールデン fixture + 実 `MigrationStep`（例 v0→v1）」を追加し、fixture を `open` → `save` して `<名前>.bak` が fixture のバイト列と一致することを統合テストで固定する必要がある
+- **task 8.7 への申し送り（増分）**: 移行のゴールデン fixture を足すときは、**「fixture を開いて保存したときの退避」と「移行後のバイト列が決定的（同一 fixture から同一バイト列）」**の 2 点も固定すること（退避・決定性は 6.4 / 3.1 の実経路の証明になる）

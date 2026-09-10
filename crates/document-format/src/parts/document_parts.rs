@@ -422,11 +422,13 @@ pub fn from_parts(parts: &DocumentParts) -> Result<Document, DocumentError> {
     from_parts_with(STEPS, parts)
 }
 
-/// 移行のステップ表を明示して [`from_parts`] と同じ経路を運ぶ（モジュール内の入口）。
+/// 移行のステップ表を明示して [`from_parts`] と同じ経路を運ぶ（クレート内部の入口）。
 ///
 /// 表を差し替えて段階適用の経路を試すための入口である。**公開面には出さない**（読み込みの
-/// 経路は [`STEPS`] を使い、モジュールのテストだけが合成表を渡す）。
-fn from_parts_with(
+/// 経路は [`STEPS`] を使い、クレート内部のテストだけが合成表を渡す）。`pub(crate)` に
+/// とどめる理由は、呼び出し元が任意の移行表を注入できる経路をクレート外へ作らないためで
+/// ある（[`crate::migration::MigrationChain::apply_with`] と同じ方針）。
+pub(crate) fn from_parts_with(
     steps: &[MigrationStep],
     parts: &DocumentParts,
 ) -> Result<Document, DocumentError> {
@@ -443,7 +445,11 @@ fn from_parts_with(
         verify_indexed_parts(parts, &recorded_manifest)?;
     }
     // 移行が必要な場合だけ集合を所有して組み立て直す（現行版の集合は複製しない。要件 8.1）。
+    // `apply_with` が `Ok(None)` を返すのは現行版（`Openable`）だけであり、`Ok(Some(..))` は
+    // 「移行が 1 段以上実際に適用された」ことを意味する（要件 6.4 の判定材料。ここが
+    // 「変換が発生した」ことを知れる唯一の場所である）。
     let migrated = MigrationChain::apply_with(steps, parts)?;
+    let converted_from_an_older_format = migrated.is_some();
     let parts = migrated.as_ref().unwrap_or(parts);
     // 移行した場合は索引を組み直してから照合する（移行後の集合も同じ 1 経路で検証される）。
     let refreshed = match &migrated {
@@ -533,6 +539,11 @@ fn from_parts_with(
         document.add_attachment(bytes);
     }
     document.set_preserved_fields(document_part.preserved_fields().clone());
+    // 読み込み時に形式変換が適用されたことをモデルへ記録する（要件 6.4）。設定の唯一の
+    // 場所であり、`Ok(None)`（現行版。移行が 1 段も走っていない）では立てない。
+    if converted_from_an_older_format {
+        document.mark_converted_from_an_older_format();
+    }
     Ok(document)
 }
 
