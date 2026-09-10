@@ -61,3 +61,10 @@ bench = false
 [[bench]]
 name = "scaffold"
 harness = false
+
+# 実ベンチ（タスク 8.9。要件 8.1, 8.2, 8.3, 8.5）。10 万行 × 30 列の open / save を
+# criterion で計測し、scripts/check-bench-budget.sh が予算（開く 3 秒 / 保存 2 秒）を
+# 機械検査する（.github/workflows/bench.yml）。
+[[bench]]
+name = "large_document"
+harness = false

@@ -5,8 +5,10 @@
 #   SSD ストレージ搭載・4 コア以上であることが GitHub 公式に明記されており、
 #   この要件の計測環境条件を満たす。この前提の下で open/save の所要時間を計測する。
 #
-# 予算アサーション（開く 3 秒 / 保存 2 秒）の配線は task 8.9 で行う。
-# 本ワークフローは criterion による計測値の記録と保存のみを行う。
+# 予算アサーション（開く 3 秒 / 保存 2 秒。要件 8.1 / 8.2）は
+# scripts/check-bench-budget.sh が criterion の計測値（target/criterion 配下の
+# estimates.json）に対して行い、超過していれば最後のステップでジョブを失敗させる
+# （task 8.9）。本ワークフローは計測値の記録・保存と予算判定を行う。
 name: Bench
 
 on:
@@ -47,3 +49,13 @@ jobs:
           name: criterion-${{ matrix.os }}
           path: target/criterion
           if-no-files-found: error
+
+      # 予算アサーション（開く 3 秒 / 保存 2 秒。要件 8.1 / 8.2。tasks.md 8.9）。
+      # criterion の計測値（target/criterion/**/new/estimates.json）の平均が予算を
+      # 超えていれば非 0 で終了し、このステップでジョブを失敗させる（予算超過を機能追加と
+      # 同時に検出する）。判定は POSIX sh の scripts/check-bench-budget.sh
+      # （Linux / macOS / Windows Git Bash 共用）。計測環境（SSD・4 コア以上）は
+      # このワークフローの runs-on が与える。
+      - name: Performance budget (open 3s / save 2s)
+        shell: bash
+        run: bash scripts/check-bench-budget.sh

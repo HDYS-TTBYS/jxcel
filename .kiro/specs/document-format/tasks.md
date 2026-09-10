@@ -268,7 +268,7 @@
   - _Requirements: 7.1, 7.3, 7.5, 7.6_
   - _Boundary: AttachmentRegistry_
 
-- [ ] 8.9 性能ベンチマークを追加する
+- [x] 8.9 性能ベンチマークを追加する
   - 10 万行 × 30 列のドキュメントで、開く操作が 3 秒以内、保存が 2 秒以内であることを計測する
   - SSD を搭載した 4 コア以上の環境を計測条件として記録する
   - 10 万行を超えるドキュメントが拒否されず、保証対象外の通知が立つことを検証する
@@ -416,3 +416,7 @@
 - task 8.8 で `tests/attachment_registry.rs` が拡張された（計 6 本 = 既存 2 + 新規 4。差分は追加のみ + doc/import 更新）。検証内容: **添付のバイト列が `save`→`open` で 1 バイトも変わらない**（標本: 空 / 1 バイト / **NUL と高ビットを含む非 UTF-8** / **JSON 風 `{"a":1}`（7 バイトのまま = 解釈・正規化されない）** / 非 ASCII UTF-8 / 改行入り / 1 MiB / 同一内容の重複）/ **未参照添付が削除されず `unreferenced_attachments()` に現れ、参照済みは現れない**（混合状態の区別も）/ **参照の保持**（直接セルと入れ子配列内の参照。ZIP 経由と非経由の両方。参照先バイト列を `Document::attachment(id)` で取得可）/ **エントリ名が `attachments/<hex64>.bin` で `<hex64>` が内容ハッシュと一致**（同一内容は 1 件に畳まれる）
 - **「再圧縮しない」（要件 7.5）の解釈（親の裁定。8.8 で doc に明記）**: 本形式はコンテナ全体を ZIP として書くため添付も `Deflate` で格納される（5.2 の確定形: `Stored` は型マーカーだけ）。したがって要件 7.5 の意味は「**本モジュールが添付の内容を解釈・変換しない**」であり、**ZIP の圧縮は透過で可逆**（展開後に元のバイト列が得られる）。**「圧縮しない＝`Stored` で書く」と取り違えないこと**
 - **【運用上の注意】レビュー probe の残骸**: task 8.6 のレビュアーがリポジトリ直下に `.probe-atomic86/`（4 MiB の一時ファイルを含む）を残し、親が削除した。**レビューの probe は `CARGO_MANIFEST_DIR` 配下などに置き、終了前に必ず削除すること**（`git status --porcelain --untracked-files=all` で確認）
+- task 8.9 で `benches/large_document.rs`（**10 万行 × 30 列**の `open` / `save` を criterion で計測）/ `scripts/check-bench-budget.sh`（POSIX sh の予算判定。0 = 予算内 / 1 = 超過 / 2 = 計測値なし・解釈不能 = **fail-closed**）/ `Cargo.toml` の `[[bench]] large_document`（**追加のみ**）/ `.github/workflows/bench.yml` の予算判定ステップ（**追加のみ**）が入った。**実測: open 約 0.62 秒（予算 3 秒、余裕 約 4.8 倍）/ save 約 1.46 秒（予算 2 秒、余裕 約 1.37 倍）**、`cargo bench -p document-format --bench large_document` の所要 約 42 秒（`sample_size=10` / `warm_up=3s` / `measurement=10s`。save は criterion が自動延長して実効約 14.6 秒）
+- **性能予算の判定は criterion の `estimates.json` の `mean.point_estimate`（ns）に対して行う**（予算値は**要件由来のリテラル** `3000000000` / `2000000000`。計測値から予算を導出する自己参照にしない）。**判定不能時は exit 2 で明示的に失敗**させる（黙って通すとベンチが走らなくなっても気付けない）。`--save-baseline=main` でも `new/estimates.json` が生成されるため CI の現行コマンドで機能する
+- **【検証限界（8.9）】** ① **CI 実行そのものはこの環境では検証できない**（Linux のみ。`bench.yml` の YAML とコマンド・判定はローカルで再現実測）② **性能予算は「速い偽計測」（計測値を定数に差し替える等）を原理的に検出できない**（規模・経路の assertion が別層で担保）③ `save` の余裕は約 1.37 倍しかなく、**CI runner の速度差で 2 秒を超えるスプリアス失敗のリスク**がある（閾値は要件値のまま維持し、真の超過時は design の対処順序＝割り当て削減 → `Stored` → SIMD を検討する）④ `bench.yml` は既存の起動条件（`workflow_dispatch` / 週次 `schedule` / `push` の `branches:[main]` かつ `paths:[crates/**]`）のため、**PR では走らない**（「機能追加と同時に検出」は main マージ時点の意味）
+- **8.9 の規模 assertion の教訓**: ベンチ内の「10 万行 × 30 列」の検証は、**定数同士の比較（恒真）にしないこと**。当初 `COLUMNS` 定数自身と比較していたため `COLUMNS=20` 変異が生存し、**要件リテラル 30 との比較**に直して検出できるようにした。行数は `SUPPORTED_ROW_LIMIT` と比較している
