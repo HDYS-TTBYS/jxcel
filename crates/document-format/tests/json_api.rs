@@ -1,0 +1,119 @@
+//! クレート外から見た決定的 JSON 出力（タスク 3.1。要件 2.4, 3.3, 3.6）。
+//!
+//! このファイルは統合テストであり、クレートの**公開面だけ**を使う。
+//! `document_format::json::` 直下の再エクスポートと `document_format::json::determinism::`
+//! 経由の双方がクレート外から見えることをコンパイル時に示す
+//! （`write_json` / `write_ordered_object` / `write_cell`）。
+//!
+//! # 列順序は呼び出し元（スキーマ側）が与える
+//!
+//! 本クレートはスキーマを解釈しないため、動的な列集合の順序を自分では決められない。
+//! ここでは schema-engine が決める列順序を**呼び出し元の責務**として模し、
+//! 「与えた順序がそのまま出る」「順序を変えれば出力も変わる」をクレート外から確かめる
+//! （design「DeterministicJson」Risks の契約）。
+//!
+//! キー順序の決定性そのもの（構造体のフィールド宣言順、非 ASCII の UTF-8 出力、
+//! `-0.0` の正規化、非有限値の拒否）は `src/json/determinism.rs` の単体テストが
+//! 網羅する。ここは公開経路が機能することを示す最小の確認に留める。
+
+use document_format::json::determinism;
+use document_format::json::{write_cell, write_json, write_ordered_object};
+use document_format::{CellValue, DocumentError};
+use serde::Serialize;
+
+/// 行の文脈。セル位置は `<ROW_LOCATION> column <キー>` としてエラーに載る。
+const ROW_LOCATION: &str =
+    "sheet 01J2X3Z0000000000000000001 row 01J2X3Z0000000000000000002";
+
+/// 宣言順（`version`, `document_id`, `sheet_order`）が辞書順と異なる構造体。
+#[derive(Serialize)]
+struct DocumentPartProbe {
+    version: u32,
+    document_id: String,
+    sheet_order: Vec<String>,
+}
+
+/// schema-engine が決める列順序を模した行のセル（並びは辞書順ではない）。
+///
+/// キー（列名）はスキーマ側の語彙、値は本クレートが解釈しないセル値であり、
+/// この対応関係を決めるのは呼び出し元である。
+fn row_cells() -> Vec<(&'static str, CellValue)> {
+    vec![
+        ("数量", CellValue::Decimal("12.50".into())),
+        ("alpha", CellValue::Int(7)),
+        ("備考", CellValue::Text("備考です".into())),
+    ]
+}
+
+/// セルを書き出し口が要求する「キー + 値への参照」の列にする。
+fn columns<'a>(cells: &'a [(&'static str, CellValue)]) -> Vec<(&'static str, &'a CellValue)> {
+    cells.iter().map(|(key, value)| (*key, value)).collect()
+}
+
+#[test]
+fn json_writers_are_usable_from_outside_the_crate() {
+    // 要件 3.3: 構造体はフィールド宣言順で書かれる。
+    let part = DocumentPartProbe {
+        version: 1,
+        document_id: "01J2X3Z0000000000000000000".into(),
+        sheet_order: vec!["売上".into()],
+    };
+    let mut out = Vec::new();
+    write_json(&mut out, &part).expect("構造体の書き出しが失敗した");
+    assert_eq!(
+        "{\"version\":1,\"document_id\":\"01J2X3Z0000000000000000000\",\"sheet_order\":[\"売上\"]}",
+        String::from_utf8(out).expect("出力は UTF-8"),
+    );
+}
+
+#[test]
+fn ordered_columns_follow_the_caller_supplied_schema_order() {
+    let cells = row_cells();
+
+    let mut out = Vec::new();
+    write_ordered_object(&mut out, ROW_LOCATION, &columns(&cells))
+        .expect("列集合の書き出しが失敗した");
+    assert_eq!(
+        "{\"数量\":\"12.50\",\"alpha\":7,\"備考\":\"備考です\"}",
+        String::from_utf8(out).expect("出力は UTF-8"),
+    );
+
+    // スキーマの列順序が変われば出力の順序も変わる（本クレートは並べ替えない）。
+    // 列名と値は組のまま入れ替わる。
+    let reversed: Vec<(&str, &CellValue)> = columns(&cells).into_iter().rev().collect();
+    let mut other = Vec::new();
+    write_ordered_object(&mut other, ROW_LOCATION, &reversed)
+        .expect("列集合の書き出しが失敗した");
+    assert_eq!(
+        "{\"備考\":\"備考です\",\"alpha\":7,\"数量\":\"12.50\"}",
+        String::from_utf8(other).expect("出力は UTF-8"),
+    );
+}
+
+#[test]
+fn non_representable_numbers_are_rejected_without_writing() {
+    // 要件 3.3 系: NaN は型付きエラーで拒否し、部分的な JSON を 1 バイトも書かない。
+    let ok = CellValue::Int(1);
+    let bad = CellValue::Float(f64::NAN);
+    let mut out = Vec::new();
+    let outcome = determinism::write_ordered_object(
+        &mut out,
+        ROW_LOCATION,
+        &[("alpha", &ok), ("備考", &bad)],
+    );
+    match outcome {
+        Err(DocumentError::NonRepresentableNumber { location }) => {
+            assert_eq!(format!("{ROW_LOCATION} column 備考"), location);
+        }
+        other => panic!("{other:?} は非有限値のエラーではない"),
+    }
+    assert!(out.is_empty(), "失敗時に部分的なバイト列が書かれた");
+
+    // セル単位の書き出し口も同じ型付きエラーを返す。
+    let mut sink = Vec::new();
+    assert!(matches!(
+        write_cell(&mut sink, &bad, ROW_LOCATION),
+        Err(DocumentError::NonRepresentableNumber { .. })
+    ));
+    assert!(sink.is_empty(), "失敗時に部分的なバイト列が書かれた");
+}
