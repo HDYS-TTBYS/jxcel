@@ -26,6 +26,33 @@
 //! 含めるかどうか)は parts 層 rows_codec の責務(タスク 3.4, 3.5)で、本モジュールの
 //! 所有するところではない。
 //!
+//! # 列名を保持する(タスク 4.8 の親の裁定)
+//!
+//! [`Sheet`] は**順序付きの列名**([`Sheet::columns`])を持つ。本クレートは列名の中身を
+//! 解釈しない(スキーマの意味論は `schema-engine`)が、行データの wire 形式
+//! (`{"$id":..., <列名>: <値>}`)は列名をキーとするため(tasks 4.5)、
+//! **書き出し時に行の列名一覧が必要**であり、`to_parts` / `save` は列名を外から
+//! 受け取らない(design `DocumentFormatApi` の Service Interface)。さらに 0 行の
+//! シートは行エントリから列順を復元できないため、列名はモデルが起点となって
+//! `document.json` へ永続化される(parts 層 `SheetMeta`)。
+//!
+//! 設定経路は集約ルート経由の [`Document::set_sheet_columns`](super::Document::set_sheet_columns)
+//! だけであり、新規シートは列名 0 個で始まる(既存の `add_sheet` のシグネチャは
+//! 変えない。タスク 4.8 の制約)。
+//!
+//! # 未知フィールドの保持(前方互換。要件 6.2 / 6.3)
+//!
+//! [`Sheet`] は `document.json` のシート要素で解釈しなかったフィールド
+//! ([`crate::json::PreservedFields`])を保持する。読み込み経路が復号済みの保持内容を
+//! ここへ移し、保存経路がそれを `document.json` の同じ位置へ差し戻すことで、
+//! **モデルを経由した往復でも前方互換データが落ちない**(タスク 4.8)。
+//! `PreservedFields` は内部カーソルを等値に含むため、[`Sheet`] に `PartialEq` は
+//! 提供しない(モジュール末尾の規律)。
+//!
+//! 依存方向は `Ids / Value / EntryName → Model → Json → Parts → Container → Api` だが、
+//! この保持だけは `model → json` を引く。**`json` が `model` に依存する向きは無い**
+//! (規律は維持される)。親の裁定による許容である(タスク 4.8)。
+//!
 //! # Clone を実装しない理由
 //!
 //! [`Sheet`] / [`Row`] は `Clone` を実装しない。識別子発行は [`super::Document`] が所有する
@@ -38,6 +65,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ids::{RowId, SheetId};
+use crate::json::PreservedFields;
 use crate::value::CellValue;
 
 use super::schema_part::SchemaPart;
@@ -87,13 +115,18 @@ impl Row {
     }
 }
 
-/// シート: 識別子・名前・ルートスキーマ・順序づけられた 0 個以上の行(design
-///「Domain Model」の ER 図)。
+/// シート: 識別子・名前・ルートスキーマ・順序付きの列名・順序づけられた 0 個以上の行
+/// (design「Domain Model」の ER 図)。
 ///
 /// ルートスキーマは [`SchemaPart`] を**ちょうど 1 つ**持つ(要件 1.2 / design ER 図
 /// `Sheet ||--|| SchemaPart : has_root`)。`Option` でもリストでもないため、0 個・
 /// 2 個の状態は型として表現できない。差し替えは集約ルート経由の
 /// [`super::Document::set_root_schema`] のみで、常に置換である(個数は増えない)。
+///
+/// 列名([`Sheet::columns`])は**順序付きの文字列**であり、本クレートは中身を解釈しない
+/// (何番目の値がどの列かは `schema-engine` が決める)。行データの wire 形式が列名を
+/// キーとするため、書き出しにはこの列名一覧が必要である(モジュール docs
+/// 「列名を保持する」)。
 ///
 /// 変更は集約ルート [`super::Document`] を経由する。この型の公開メソッドは読み取り
 /// アクセッサのみで、変更メソッドは [`super::Document`] が経路として使うための
@@ -103,12 +136,23 @@ pub struct Sheet {
     id: SheetId,
     name: String,
     root_schema: SchemaPart,
+    /// 順序付きの列名(本クレートは中身を解釈しない)。
+    columns: Vec<String>,
     rows: Vec<Row>,
+    /// 解釈しないシート要素のフィールド(前方互換。要件 6.2 / 6.3)。
+    preserved: PreservedFields,
 }
 
 impl Sheet {
     pub(crate) fn new(id: SheetId, name: String) -> Self {
-        Self { id, name, root_schema: SchemaPart::empty(), rows: Vec::new() }
+        Self {
+            id,
+            name,
+            root_schema: SchemaPart::empty(),
+            columns: Vec::new(),
+            rows: Vec::new(),
+            preserved: PreservedFields::new(),
+        }
     }
 
     /// シート識別子(発行後に不変。改名でも変わらない — 要件 1.6)。
@@ -140,13 +184,46 @@ impl Sheet {
         self.root_schema = schema;
     }
 
+    /// 順序付きの列名(設計上、本クレートは中身を解釈しない)。
+    ///
+    /// この順序が行データのキー順になる(`sheets/<ulid>.jsonl`)。0 個のシートは
+    /// 列を持たない正当な状態である(0 行のシートの列名は `document.json` が唯一の
+    /// 永続先。モジュール docs「列名を保持する」)。
+    #[inline]
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+
+    /// 列名を置き換える経路(`Document::set_sheet_columns` が呼ぶ)。
+    ///
+    /// 追加ではなく置換である(列名の中身の妥当性は本クレートでは判定しない)。
+    #[inline]
+    pub(crate) fn set_columns(&mut self, columns: Vec<String>) {
+        self.columns = columns;
+    }
+
+    /// `document.json` のシート要素で保持した未知フィールド(要件 6.2 / 6.3)。
+    ///
+    /// 読み込み経路(`parts::from_parts`)が復号済みの保持内容をここへ移し、
+    /// 保存経路(`parts::to_parts`)が `parts::SheetMeta` へ戻す。
+    #[inline]
+    pub(crate) fn preserved_fields(&self) -> &PreservedFields {
+        &self.preserved
+    }
+
+    /// 保持すべき未知フィールドを据える経路(`parts::from_parts` が呼ぶ)。
+    #[inline]
+    pub(crate) fn set_preserved_fields(&mut self, preserved: PreservedFields) {
+        self.preserved = preserved;
+    }
+
     /// 行順序そのものの添字順で反復する 0 個以上の行(要件 1.1)。
     #[inline]
     pub fn rows(&self) -> &[Row] {
         &self.rows
     }
 
-    /// 名前を書き換める経路(`Document::rename_sheet` が呼ぶ)。
+    /// 名前を書き換える経路(`Document::rename_sheet` が呼ぶ)。
     ///
     /// `name` だけを更新し `id` に触れないため、改名で識別子は変わらない(要件 1.6)。
     #[inline]
@@ -158,6 +235,15 @@ impl Sheet {
     #[inline]
     pub(crate) fn push_row(&mut self, row: Row) {
         self.rows.push(row);
+    }
+
+    /// 復号済みの行の列を**一度に**末尾へ足す(`parts::from_parts` が呼ぶ一括経路)。
+    ///
+    /// 行ごとの探索をしないため O(n) である(要件 8.1)。行順は与えられた順のまま
+    /// (並べ替えない。要件 1.5)。
+    #[inline]
+    pub(crate) fn extend_rows(&mut self, rows: Vec<Row>) {
+        self.rows.extend(rows);
     }
 
     /// 指定行のセル値を置き換える(`Document::set_row_values` が呼ぶ)。

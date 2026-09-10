@@ -17,6 +17,19 @@
 //! 返す**読み取り専用**の操作で、添付を削除も書き換えもしない(削除の API は存在しない)。
 //! 集計の詳細と不透明バイト列の扱いは model/attachment.rs のモジュール docs 参照。
 //!
+//! # ドキュメント識別子を保持する(タスク 4.8 の親の裁定)
+//!
+//! [`Document`] は自分の [`DocumentId`] を持つ([`Document::document_id`])。
+//! `document.json` はこの識別子を永続化する(タスク 4.3)ため、モデルが持たないと
+//! `Document → Parts → Document → Parts` の往復で識別子が再発行され、
+//! 要件 3.1(同一内容 → 同一バイト列)が壊れる。新規文書は [`Document::new`] が
+//! 所有する [`IdFactory`] から 1 個発行し、読み込み経路は
+//! 復号済みの識別子を据える(クレート可視の [`Document::with_document_id`])。
+//!
+//! 列名と未知フィールドも同じ理由でモデルが保持する(それぞれ
+//! [`Document::set_sheet_columns`] と [`Document::set_preserved_fields`]。
+//! model/sheet.rs のモジュール docs「列名を保持する」「未知フィールドの保持」参照)。
+//!
 //! # 順序の保持(要件 1.1, 1.5)
 //!
 //! * シート順序 = [`Document::sheets`] の反復順(`document.json` へのこの順序の永続化は
@@ -78,7 +91,8 @@ mod sheet;
 
 use thiserror::Error;
 
-use crate::ids::{AttachmentId, IdFactory, RowId, SheetId};
+use crate::ids::{AttachmentId, DocumentId, IdFactory, RowId, SheetId};
+use crate::json::PreservedFields;
 use crate::value::CellValue;
 
 pub use attachment::{Attachment, AttachmentRegistry};
@@ -148,25 +162,87 @@ pub struct UnknownRow {
 /// (要件 7.1, 7.5, 7.6。モジュール docs の「添付の集約」参照)。すべての変更はこの型
 /// 経由であり、識別子は所有する [`IdFactory`] から発行される
 /// (一意性が構築で保証される所以。モジュール docs 参照)。
+///
+/// `PartialEq` は提供しない: `document.json` のトップレベルで保持する未知フィールド
+/// ([`crate::json::PreservedFields`])は内部カーソルを等値に含むため、内容の等値を
+/// 素直に表せない([`SchemaPart`] と同じ方針。比較はアクセサか `parts::to_parts` の
+/// バイト列で行う)。
 #[derive(Debug)]
 pub struct Document {
+    /// ドキュメント識別子(`document.json` が永続化する)。
+    id: DocumentId,
     /// 識別子発行口(シート・行で単調カウンタを共有する単発行者)。
     ids: IdFactory,
     /// シート順そのものの列。
     sheets: Vec<Sheet>,
     /// 添付の保持と参照集計(要件 7.1, 7.5, 7.6)。
     attachments: AttachmentRegistry,
+    /// 解釈しない `document.json` トップレベルのフィールド(前方互換。要件 6.2 / 6.3)。
+    preserved: PreservedFields,
 }
 
 impl Document {
     /// 0 シート・0 添付の文書を作る(要件 1.1)。
+    ///
+    /// ドキュメント識別子は所有する [`IdFactory`] から 1 個発行する
+    /// (モジュール docs「ドキュメント識別子を保持する」)。
     #[inline]
     pub fn new() -> Self {
+        let mut ids = IdFactory::new();
+        let id = ids.new_document_id();
         Self {
+            id,
+            ids,
+            sheets: Vec::new(),
+            attachments: AttachmentRegistry::new(),
+            preserved: PreservedFields::new(),
+        }
+    }
+
+    /// 復号済みの識別子を持つ空の文書を作る(`parts::from_parts` が呼ぶ読み込み経路)。
+    ///
+    /// [`Document::new`] は識別子を新規発行するため、ファイルから読んだ識別子を持つ文書には
+    /// 使えない(使えば要件 3.1 の往復同一性が壊れる)。本経路だけが発行済み識別子で
+    /// 文書を始める。
+    pub(crate) fn with_document_id(id: DocumentId) -> Self {
+        Self {
+            id,
             ids: IdFactory::new(),
             sheets: Vec::new(),
             attachments: AttachmentRegistry::new(),
+            preserved: PreservedFields::new(),
         }
+    }
+
+    /// ドキュメント識別子(発行後に不変。`document.json` が永続化する)。
+    #[inline]
+    pub const fn document_id(&self) -> DocumentId {
+        self.id
+    }
+
+    /// `document.json` のトップレベルで保持した未知フィールド(要件 6.2 / 6.3)。
+    ///
+    /// 読み込み経路(`parts::from_parts`)が復号済みの保持内容をここへ移し、
+    /// 保存経路(`parts::to_parts`)が `parts::DocumentPart` へ戻す。
+    #[inline]
+    pub(crate) fn preserved_fields(&self) -> &PreservedFields {
+        &self.preserved
+    }
+
+    /// 保持すべき未知フィールドを据える経路(`parts::from_parts` が呼ぶ)。
+    #[inline]
+    pub(crate) fn set_preserved_fields(&mut self, preserved: PreservedFields) {
+        self.preserved = preserved;
+    }
+
+    /// 復号済みのシート列を文書のシート列として据える(`parts::from_parts` が呼ぶ)。
+    ///
+    /// 順序は**与えられた順のまま**であり、`document.json` の配列順がそのまま
+    /// ドキュメントのシート順序になる(要件 1.1)。識別子を発行しないため、
+    /// [`Document::add_sheet`] では作れない(発行済み識別子が変わってしまう)復元に使う。
+    #[inline]
+    pub(crate) fn restore_sheets(&mut self, sheets: Vec<Sheet>) {
+        self.sheets = sheets;
     }
 
     /// シート順で反復する(要件 1.1。traceability `Document::sheets`)。
@@ -180,6 +256,29 @@ impl Document {
     #[inline]
     pub fn sheet_by_id(&self, sheet: SheetId) -> Option<&Sheet> {
         self.sheets.iter().find(|s| s.id() == sheet)
+    }
+
+    /// 指定シートの列名(順序付き)を置き換える(タスク 4.8 の親の裁定)。
+    ///
+    /// 列名は行データのキー順そのものであり(`sheets/<ulid>.jsonl`)、本クレートは中身を
+    /// 解釈しない(どの列がどの型かは `schema-engine` が決める)。**書き出し経路が
+    /// 列名を外から受け取らない**ため(design `DocumentFormatApi` の Service Interface)、
+    /// 列を持つ文書をメモリ上で組み立てるにはこの経路が要る。既存の
+    /// [`Document::add_sheet`] のシグネチャは変えず、既定を列名 0 個のままにしてある
+    /// (タスク 4.8 の制約)。未知のシートは [`UnknownSheet`] を返し、どのシートの
+    /// 列名も変更しない。
+    pub fn set_sheet_columns(
+        &mut self,
+        sheet: SheetId,
+        columns: Vec<String>,
+    ) -> Result<(), UnknownSheet> {
+        match self.sheets.iter_mut().find(|s| s.id() == sheet) {
+            Some(target) => {
+                target.set_columns(columns);
+                Ok(())
+            }
+            None => Err(UnknownSheet { sheet }),
+        }
     }
 
     /// 名前 `name` のシートを末尾に追加し、発行した識別子を返す(要件 1.1, 1.4)。

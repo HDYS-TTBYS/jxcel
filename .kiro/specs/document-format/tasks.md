@@ -137,7 +137,7 @@
   - 宙吊りの参照が、参照元と参照先を含むエラーとして返ることをテストで示す
   - _Requirements: 1.7, 4.2, 7.4_
 
-- [ ] 4.8 論理エントリ集合の組み立てと分解を実装する
+- [x] 4.8 論理エントリ集合の組み立てと分解を実装する
   - モデルからパート集合を構築し、パート集合からモデルを復元する双方向変換を実装する
   - エントリ名の昇順で決定的に反復し、ファイルシステムの列挙順に依存しないことをテストで示す
   - ZIP の知識を一切持たず、圧縮にも触れないことを型で保証する
@@ -339,3 +339,11 @@
 - **task 4.8 への申し送り（task 4.7 レビュー由来）**: (1) 型定義宣言に `IdDeclaration::with_sheet` を与え忘れると、そのシートの参照が**宙吊りとして誤報**される（fail-loud な設計。誤りの向きが「妥当な文書の拒否」なので、`DocumentParts` からの流し込みで `Ok(())` になる end-to-end テストを 4.8 の受入に含めること）、(2) `validate.rs` は `model` 非依存を保つため、`SchemaPart::type_refs()` 等からの**参照抽出は model / parts 側で行い、テキストの目録として検証器へ渡す**こと
 - **列順序の永続化（task 4.8 で解消する format 決定。親の裁定）**: 行データは列名をキーとするため（task 4.5 の wire 形式）、**書き出し時に行の列名一覧が必要**であり、design の `DocumentFormatApi::to_parts(document)` / `save(document, path)` は列名を外から受け取らない。したがって**列名（順序付き）は `Document` 側が保持**しなければならない。さらに 0 行のシートは行エントリから列順を復元できない（task 4.5）ため、**`document.json` のシート要素（`SheetMeta`）に順序付き列名を永続化**する（design の「`document.json` = ドキュメント ID、シート順序、シートのメタデータ」に含まれる）。よって 4.8 は (a) `Sheet`（model）と `SheetMeta`（parts）に順序付き列名を additive に追加し、(b) `document.json` の確定形を更新（4.3 の確定形テストを追随）し、(c) 行エントリの列順序が `document.json` の列名一覧と一致することを検証する（不一致は `InvalidContainer` の `entry` にエントリ名と理由。新しい変種は足さない）。**本クレートは列名の中身を解釈しない**（単に運ぶだけ。schema-engine が決める）
 - 本クレートはスキーマを解釈しないため、**列名の供給（書き込み時）と列順の解釈（読み込み時）は `document.json` と行エントリのキー順序で完結**する
+- task 4.8 でパート層の公開契約が確定した: `parts/document_parts.rs` の `DocumentParts` / `Part { name, bytes, digest }` / `to_parts` / `from_parts`。不変条件は「エントリ名昇順の決定的反復」「全 `Part` の `digest` が `bytes` と一致（`integrity::digest_part` 経由）」。`ZIP` の知識も `std::fs` の列挙も持たない
+- `from_parts` の処理順は **manifest 解決 → 完全性照合（`IntegrityMismatch` / `MissingPart`）→ 復号 → 構造検証（`StructuralValidator`。型定義宣言に `with_sheet` 必須）→ 行の列順序と `document.json` の列名一覧の一致検証 → モデル構築**。**すべての検証がモデル構築の前に完了**し、失敗時に部分的モデルを返さない（要件 5.4）。行の投入は `SheetRows::into_rows()`（所有権移動）+ `Sheet::extend_rows()` の一括経路で、`Document::set_row_values` を行ごとに呼ばない（O(n) を実測: 2 万行 351ms）
+- **`document.json` の確定形が変わった（task 4.8）**: シート要素は `{"sheet_id": <ULID>, "name": <文字列>, "columns": [<列名>...]}`。**`columns` は必須キー**（0 列でも `"columns":[]` を書く）。キー順は `sheet_id` → `name` → `columns`。0 行シートの列名はこの経路でのみ往復する（行エントリからは復元不能）
+- **`jxcel`（型マーカー）は `DocumentParts` に含めない**（構築時に `InvalidContainer` で拒否）。コンテナ層が `Stored`・先頭エントリとして自分で書き、復号時に集合から外す。**`manifest.json` の索引にも `jxcel` を含めない**
+- **task 5.2 / 5.3 が従うべき契約（task 4.8 レビュー由来）**: (i) 符号化はマーカーを `Stored`・先頭に自身で書き、その後に `DocumentParts::iter()` の昇順で各パートを `Deflate` で書く、(ii) 復号はマーカーを外してから残りを `(EntryName, 展開後バイト列)` として `DocumentParts::from_entries` に渡す（マーカーを渡すと拒否される = 意図どおり）、(iii) **ダイジェストは非圧縮（展開後）バイト列から算出**されるので照合も展開後のバイト列で行う、(iv) `decode(encode(p)) == p` は「マーカー除去 + 展開後バイト列」で成立する（`DocumentParts` に `PartialEq` は無いので等値確認は `iter()` の名前・バイト列比較で行う）、(v) 許可リスト（要件 2.5）と同一パスの重複拒否（2.6）はコンテナ層で先に適用する、(vi) 「実体 → 索引」の監査（索引に無い実体パートの拒否）を足すかは 5.3 の判断（現状は受理される。design の「manifest が唯一の権威ある索引」を厳格に読むなら 5.3 で追加し、受理範囲が狭まることを記録する）
+- **task 6.1 / 6.2 への申し送り**: `DocumentParts::format_version()` は索引の記録値をそのまま返す（ゲートは無い。現行 1.0 以外も `from_parts` は読もうとする）。バージョンゲート（新しい major は `UnsupportedVersion`、古い形式は移行チェーン）を `from_parts` の前段に置くか内部に挿すかは 6.1 で決めること
+- **task 7.x への申し送り**: `open` は `from_parts` と同じ検証経路を通す（検証を二重化しない）。公開面は `parts::` 配下の `to_parts` / `from_parts` / `DocumentParts` / `Part` を再輸出するだけで足りる
+- **task 8.9 の計測対象**: 添付バイト列は `from_parts(&DocumentParts)` の借用契約により 1 回複製される（巨大添付でピークメモリが二重）。`DocumentParts` は全パート分の `Vec<u8>` を保持する

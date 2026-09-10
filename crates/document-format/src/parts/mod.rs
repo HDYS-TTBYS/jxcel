@@ -6,20 +6,22 @@
 //!
 //! 現在あるのは **manifest パート**（`manifest.json`）と **document パート**
 //! （`document.json`）、**シート別スキーマパート**（`schemas/<sheet-ulid>.json`）、
-//! **シート別行データパート**（`sheets/<sheet-ulid>.jsonl`）、および復号済みパート群に
-//! 対する**構造検証**（[`validate`]）である:
+//! **シート別行データパート**（`sheets/<sheet-ulid>.jsonl`）、復号済みパート群に
+//! 対する**構造検証**（[`validate`]）、そして**論理エントリ集合そのもの**
+//! （[`document_parts`]。タスク 4.8）である:
 //!
 //! | モジュール | エントリ | 責務 |
 //! |------------|----------|------|
 //! | [`manifest`] | `manifest.json` | 形式バージョン、パート索引、パートごとのダイジェスト（唯一の権威ある索引） |
-//! | [`document_part`] | `document.json` | ドキュメント識別子、シート順序、シートのメタデータ（安定メタデータ） |
+//! | [`document_part`] | `document.json` | ドキュメント識別子、シート順序、シートのメタデータ（列名を含む） |
 //! | [`schema_codec`] | `schemas/<sheet-ulid>.json` | シートごとのスキーマ（ルートスキーマ + ネスト型定義）の符号化・復号 |
 //! | [`rows_codec`] | `sheets/<sheet-ulid>.jsonl` | シートごとの行データ（1 行 1 オブジェクトの NDJSON）の符号化・復号 |
 //! | [`validate`] | — | 復号済みパート群の目録に対する構造検証（識別子の一意性、スキーマの存在、参照の実在性） |
+//! | [`document_parts`] | 上記の全形 + `attachments/<hex64>.bin` | 論理エントリ集合（[`DocumentParts`] / [`Part`]）と、モデル ⇄ 集合の双方向変換（[`to_parts`] / [`from_parts`]） |
 //!
-//! 論理エントリ集合そのものの型 `DocumentParts`（エントリ名 → バイト列 + ダイジェストの
-//! 決定的な集合）と、残るパート（`attachments/*.bin`）の符号化は後続タスク（4.8）で
-//! 本層に加わる。
+//! 論理エントリ集合は**エントリ名の昇順で決定的に反復**し（[`DocumentParts::iter`]）、
+//! ZIP の知識も圧縮も持たない。`manifest.json` が他の全パートを索引し、全シートが
+//! schema エントリと rows エントリを持つ（0 行のシートも空の行エントリを持つ）。
 //!
 //! # パートごとの順序規則
 //!
@@ -46,12 +48,14 @@
 //! 算出する）。
 
 pub mod document_part;
+pub mod document_parts;
 pub mod manifest;
 pub mod rows_codec;
 pub mod schema_codec;
 pub mod validate;
 
 pub use document_part::{DocumentPart, SheetMeta};
+pub use document_parts::{from_parts, to_parts, DocumentParts, Part};
 pub use manifest::{resolve_manifest, ManifestEntry, ManifestPart};
 pub use rows_codec::{RowsCodec, RowsEncodeError, SheetRows};
 pub use schema_codec::SchemaCodec;

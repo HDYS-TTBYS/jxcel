@@ -8,7 +8,9 @@
 //! - **シート順序**: [`DocumentPart::sheets`] の配列順が**そのまま**ドキュメントの
 //!   シート順序である（要件 1.1 のモデル順。タスク 4.8 が `Document::sheets` の反復順と
 //!   この順序を結線する）。
-//! - **シートのメタデータ**: シート識別子とシート名の組 [`SheetMeta`] のみ。
+//! - **シートのメタデータ**: シート識別子・シート名・順序付きの列名の組 [`SheetMeta`]。
+//!   列名を永続化する理由（0 行のシートは行エントリから列順を復元できない）は
+//!   [`SheetMeta`] の docs にある。
 //!
 //! # 派生値も揮発値も持たない
 //!
@@ -17,8 +19,9 @@
 //! 内部処理順序に依存する値を出力に含めない）にも反する。必要な読み手は権威ある源から
 //! 計算する（行数は `sheets/<ulid>.jsonl`、ダイジェストは `manifest.json` の索引）。
 //! 符号化は入力の**純関数**であり、同じ内容は構築経路や時刻によらず常に同じバイト列に
-//! なる（要件 3.1, 3.6）。キー集合は下記の 4 つに固定されており、時刻・環境・乱数に
-//! 由来する項目は無い。
+//! なる（要件 3.1, 3.6）。キー集合は下記の 5 つに固定されており、時刻・環境・乱数に
+//! 由来する項目は無い。列名は**派生値ではなく入力**である（本クレートは列名の中身を
+//! 解釈できないため、行データからもスキーマからも再計算できない）。
 //!
 //! # JSON 形式（本クレートが所有する確定形）
 //!
@@ -29,14 +32,18 @@
 //! {
 //!   "document_id": "<26 文字 ULID>",
 //!   "sheets": [
-//!     {"sheet_id": "<26 文字 ULID>", "name": "<シート名>"}
+//!     {"sheet_id": "<26 文字 ULID>", "name": "<シート名>", "columns": ["<列名>"]}
 //!   ]
 //! }
 //! ```
 //!
 //! - トップレベルのキーは `document_id` → `sheets` の順に固定し（[`DocumentPart`] の
-//!   フィールド宣言順）、シート要素のキーは `sheet_id` → `name` の順に固定する
-//!   （[`SheetMeta`] のフィールド宣言順。要件 3.3）。キー集合はこの 4 つだけである。
+//!   フィールド宣言順）、シート要素のキーは `sheet_id` → `name` → `columns` の順に
+//!   固定する（[`SheetMeta`] のフィールド宣言順。要件 3.3）。キー集合はこの 5 つだけである。
+//! - **`columns` は必須キーである**（タスク 4.8 で追加）。列名 0 個のシートも
+//!   `"columns":[]` として書く: 確定形が常に同じキー集合を持つため、欠落を空列として
+//!   受け入れる余地（= 2 つ目の受理形）を作らない。列名の並びは与えられた順のままで、
+//!   並べ替えも正規化もしない（本クレートは列名の中身を解釈しない）。
 //! - 識別子は 26 文字の Crockford base32 テキスト（大文字）として書く
 //!   （[`DocumentId`] / [`SheetId`] の `Display`）。解析には両型の `FromStr` を使い、
 //!   **正準形に一致しない表記（小文字など）は拒否する**: 受理して書き戻すと表記が
@@ -51,6 +58,8 @@
 //!   [`PreservingObjectWriter`] で 1 件ずつ書き出して配列を組み、その配列を raw 値として
 //!   トップレベルへ差し込む（[`RawValue`] が verbatim の唯一の経路）。`from_string` は
 //!   本クレートが生成した妥当な JSON 配列を 1 回検証するだけで、値を再解釈も再整形もしない。
+//! - **本パートの列名は不透明である**（どの列がどの型かは `schema-engine` が決める。
+//!   design「スキーマ・ペイロードの不透明性」）。本パートは順序付きの文字列として運ぶだけである。
 //!
 //! # シート順序は並べ替えない（`manifest.json` との違い）
 //!
@@ -92,7 +101,7 @@
 //!   分類であり、`DuplicateId`（識別子体系の一意性）ではない。**識別子の全体一意性
 //!   （行・型定義・添付をまたぐ検証）は本パートの責務ではなく、タスク 4.6 の担当である。**
 //! - **順序は検証しない**: シートの任意の並びが正当である（上記「シート順序は
-//!   並べ替えない」）。
+//!   並べ替えない」）。列名の並びも同様に検証しない（本クレートは中身を解釈しない）。
 //! - **0 枚のシートは正当である**（要件 1.1: 0 個以上のシート）。
 //!
 //! `PartialEq` は提供しない（[`DocumentPart`] / [`SheetMeta`] の docs）。
@@ -108,9 +117,10 @@
 //! | 失敗 | 返す変種と文脈 |
 //! |------|----------------|
 //! | JSON として不正 / トップレベルがオブジェクトでない | [`DocumentError::InvalidContainer`]（`entry` = `document.json: <理由>`） |
-//! | 必須キー欠落・型違い（`document_id` / `sheets` / `sheet_id` / `name`） | 同上 |
+//! | 必須キー欠落・型違い（`document_id` / `sheets` / `sheet_id` / `name` / `columns`） | 同上 |
 //! | 識別子が正準形の 26 文字 ULID でない | 同上 |
 //! | `sheets` が配列でない / シート要素がオブジェクトでない | 同上 |
+//! | `columns` が文字列の配列でない | 同上 |
 //! | 同一ファイル内でシート識別子が重複 | 同上 |
 //! | 既知キーの重複（トップレベル / シート要素） | 同上 |
 //! | 内部の組み立てが壊れた場合（本クレートが生成した配列の raw 化失敗） | 同上（起こり得ない経路だが `panic` しない） |
@@ -134,25 +144,39 @@ const SHEETS_KEY: &str = "sheets";
 const SHEET_ID_KEY: &str = "sheet_id";
 /// シート要素の既知キー: シート名（宣言順の 2 番目）。
 const NAME_KEY: &str = "name";
+/// シート要素の既知キー: 順序付きの列名（宣言順の 3 番目。タスク 4.8 で追加）。
+const COLUMNS_KEY: &str = "columns";
 
-/// シート 1 枚分のメタデータ: シート識別子とシート名（design「Container Entry Layout」の
-/// 「シートのメタデータ」）。
+/// シート 1 枚分のメタデータ: シート識別子・シート名・順序付きの列名
+/// （design「Container Entry Layout」の「シートのメタデータ」）。
 ///
-/// **この 2 つ以外を持たない**（行数・ダイジェスト・保存時刻のような派生値と揮発値を
-/// 置かない。モジュール docs「派生値も揮発値も持たない」）。シート名は任意の UTF-8 文字列で、
+/// **派生値と揮発値を持たない**（行数・ダイジェスト・保存時刻のような値は置かない。
+/// モジュール docs「派生値も揮発値も持たない」）。シート名は任意の UTF-8 文字列で、
 /// 本パートは正規化もサニタイズもしない（[`SheetMeta::new`] は文字列をそのまま保持し、
 /// 符号化は `serde_json` の文字列エスケープ規則で書く）。
+///
+/// # 列名を持つ理由（タスク 4.8 の親の裁定）
+///
+/// 行データの wire 形式は列名をキーとする（`sheets/<ulid>.jsonl`。タスク 4.5）ため、
+/// 書き出し時に行の列名一覧が必要である。さらに **0 行のシートは行エントリから列順を
+/// 復元できない**（0 バイトのエントリは列順を書く行を持たない）ため、`document.json` が
+/// その唯一の永続先になる。列名の中身は本クレートにとって不透明である
+/// （どの列がどの型かは `schema-engine` が決める。design「スキーマ・ペイロードの不透明性」）。
+/// 列名 0 個のシートは正当であり、その場合も `columns` キーは空配列として書く
+/// （確定形は常に同じキー集合を持つ。モジュール docs「JSON 形式」）。
 ///
 /// 要素の中の未知キーは 1 件ごとに [`PreservedFields`] が原文の位置ごと保持し、
 /// [`SheetMeta::to_json_bytes`] が差し戻す（モジュール docs「未知フィールドの保持」）。
 ///
 /// `PartialEq` は提供しない（[`DocumentPart`] と同じ理由: 保持している未知フィールドの
-/// 比較には読み込みカーソルが混じる。内容は [`SheetMeta::sheet_id`] / [`SheetMeta::name`] の
-/// 写像か符号化したバイト列で判定する）。
+/// 比較には読み込みカーソルが混じる。内容は [`SheetMeta::sheet_id`] / [`SheetMeta::name`] /
+/// [`SheetMeta::columns`] の写像か符号化したバイト列で判定する）。
 #[derive(Debug, Clone)]
 pub struct SheetMeta {
     sheet_id: SheetId,
     name: String,
+    /// 順序付きの列名（本クレートは中身を解釈しない）。空配列も正当である。
+    columns: Vec<String>,
     /// 解釈しない要素内のフィールド（前方互換。要件 6.2 / 6.3）。
     preserved: PreservedFields,
 }
@@ -162,12 +186,32 @@ impl SheetMeta {
     ///
     /// シート名は正規化もサニタイズもせず、与えられた文字列をそのまま保持する
     /// （空文字列・前後の空白・制御文字・非 ASCII・絵文字がそのまま往復する）。
+    /// 列名は 0 個で始まり、必要なら [`SheetMeta::with_columns`] で与える。
     pub const fn new(sheet_id: SheetId, name: String) -> Self {
         Self {
             sheet_id,
             name,
+            columns: Vec::new(),
             preserved: PreservedFields::new(),
         }
+    }
+
+    /// 列名（順序付き）を与える（ビルダー。[`SheetMeta::new`] の意味は変えない）。
+    ///
+    /// 順序はそのまま出力のキー順になる（並べ替えない）。
+    pub fn with_columns(mut self, columns: Vec<String>) -> Self {
+        self.columns = columns;
+        self
+    }
+
+    /// 保持すべき未知フィールドを据える（読み込み経路の復元用。`parts::from_parts` が
+    /// 復号済みの保持内容をそのまま渡す）。
+    ///
+    /// クレート可視である: 外部の呼び出し元が任意の保持内容を詐称できる経路を作らない
+    /// （保持内容は復号の副産物としてのみ生まれる）。
+    pub(crate) fn with_preserved(mut self, preserved: PreservedFields) -> Self {
+        self.preserved = preserved;
+        self
     }
 
     /// シート識別子。
@@ -180,9 +224,22 @@ impl SheetMeta {
         &self.name
     }
 
+    /// 順序付きの列名（本クレートは中身を解釈しない）。
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+
+    /// `document.json` のシート要素で保持した未知キー（原文の位置ごと。要件 6.2 / 6.3）。
+    ///
+    /// 読み込み経路 `parts::from_parts` がこれをモデル（`Sheet`）へ移し、保存経路が
+    /// [`SheetMeta::with_preserved`] で戻す。
+    pub(crate) fn preserved_fields(&self) -> &PreservedFields {
+        &self.preserved
+    }
+
     /// 要素 1 件を確定形の JSON オブジェクトとして書き出す。
     ///
-    /// キー順序は宣言順（`sheet_id` → `name`）で、未知キーは
+    /// キー順序は宣言順（`sheet_id` → `name` → `columns`）で、未知キーは
     /// [`PreservedFields::record_known_field`] と対になる位置へ差し戻す。失敗したときは
     /// 1 バイトも書かない（[`PreservingObjectWriter`] の規律を継承）。
     fn to_json_bytes(&self) -> Result<Vec<u8>, DocumentError> {
@@ -190,6 +247,7 @@ impl SheetMeta {
         let mut writer = PreservingObjectWriter::new(&mut out, &self.preserved);
         writer.write_known(SHEET_ID_KEY, &self.sheet_id)?;
         writer.write_known(NAME_KEY, &self.name)?;
+        writer.write_known(COLUMNS_KEY, &self.columns)?;
         writer.finish()?;
         Ok(out)
     }
@@ -239,6 +297,20 @@ impl DocumentPart {
     /// ドキュメントのシート順序（配列順がそのまま順序である）。
     pub fn sheets(&self) -> &[SheetMeta] {
         &self.sheets
+    }
+
+    /// `document.json` のトップレベルで保持した未知キー（原文の位置ごと。要件 6.2 / 6.3）。
+    ///
+    /// 読み込み経路 `parts::from_parts` がこれをモデル（`Document`）へ移し、保存経路が
+    /// [`DocumentPart::with_preserved`] で戻す。
+    pub(crate) fn preserved_fields(&self) -> &PreservedFields {
+        &self.preserved
+    }
+
+    /// 保持すべき未知フィールドを据える（読み込み経路の復元用。クレート可視）。
+    pub(crate) fn with_preserved(mut self, preserved: PreservedFields) -> Self {
+        self.preserved = preserved;
+        self
     }
 
     /// 確定形の JSON バイト列へ符号化する（コンパクトな UTF-8・末尾改行なし）。
@@ -312,6 +384,7 @@ impl DocumentPart {
             let RawSheet {
                 sheet_id: sheet_id_text,
                 name,
+                columns,
                 duplicate_known,
                 preserved,
             } = raw_sheet;
@@ -324,6 +397,7 @@ impl DocumentPart {
             sheets.push(SheetMeta {
                 sheet_id: parse_canonical_sheet_id(&sheet_id_text)?,
                 name,
+                columns,
                 preserved,
             });
         }
@@ -363,6 +437,7 @@ impl DocumentPart {
 struct RawSheet {
     sheet_id: String,
     name: String,
+    columns: Vec<String>,
     /// 2 回以上現れた既知キー（診断のための記録。件数を 1 対 1 に保つため拒否する）。
     duplicate_known: Option<&'static str>,
     preserved: PreservedFields,
@@ -374,7 +449,7 @@ impl<'de> Deserialize<'de> for RawSheet {
     }
 }
 
-/// シート要素（`{"sheet_id":..,"name":..}`）を読む訪問者。
+/// シート要素（`{"sheet_id":..,"name":..,"columns":[..]}`）を読む訪問者。
 struct RawSheetVisitor;
 
 impl<'de> Visitor<'de> for RawSheetVisitor {
@@ -387,6 +462,7 @@ impl<'de> Visitor<'de> for RawSheetVisitor {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawSheet, A::Error> {
         let mut sheet_id: Option<String> = None;
         let mut name: Option<String> = None;
+        let mut columns: Option<Vec<String>> = None;
         let mut duplicate_known: Option<&'static str> = None;
         let mut preserved = PreservedFields::new();
 
@@ -407,6 +483,13 @@ impl<'de> Visitor<'de> for RawSheetVisitor {
                     name = Some(map.next_value()?);
                     preserved.record_known_field();
                 }
+                COLUMNS_KEY => {
+                    if columns.is_some() {
+                        duplicate_known = Some(COLUMNS_KEY);
+                    }
+                    columns = Some(map.next_value()?);
+                    preserved.record_known_field();
+                }
                 _ => preserved.capture(&key, &mut map)?,
             }
         }
@@ -417,10 +500,17 @@ impl<'de> Visitor<'de> for RawSheetVisitor {
         let Some(name) = name else {
             return Err(de::Error::missing_field(NAME_KEY));
         };
+        // `columns` は確定形の必須キーである（列名 0 個でも空配列として常に書く。
+        // モジュール docs「JSON 形式」）。欠落を空列として受け入れると、確定形が 2 つに
+        // 分かれて往復のバイト同一性が条件付きになる。
+        let Some(columns) = columns else {
+            return Err(de::Error::missing_field(COLUMNS_KEY));
+        };
 
         Ok(RawSheet {
             sheet_id,
             name,
+            columns,
             duplicate_known,
             preserved,
         })
@@ -556,16 +646,27 @@ mod tests {
     /// 確定形のキー集合（宣言順）。出力に時刻・実行環境・乱数由来の項目が無いことを
     /// 回帰として固定する（要件 3.6）。
     const TOP_LEVEL_KEYS: [&str; 2] = ["document_id", "sheets"];
-    const SHEET_KEYS: [&str; 2] = ["sheet_id", "name"];
+    const SHEET_KEYS: [&str; 3] = ["sheet_id", "name", "columns"];
 
     /// 標本のシート識別子 1 個。
     fn sheet_id(index: usize) -> SheetId {
         SHEET_IDS[index].parse().expect("標本は正準 ULID")
     }
 
+    /// 標本の列名（順序付き。`index` ごとに異なる並びにして、列名の取り違えを検出できる
+    /// ようにする。空のシートも含む）。
+    fn columns(index: usize) -> Vec<String> {
+        match index % 3 {
+            0 => ["a", "b"].iter().map(|name| (*name).to_string()).collect(),
+            1 => Vec::new(),
+            _ => ["量", "$id", "notes"].iter().map(|name| (*name).to_string()).collect(),
+        }
+    }
+
     /// 標本のシートのメタデータ 1 件。
     fn sheet(index: usize) -> SheetMeta {
         SheetMeta::new(sheet_id(index), SHEET_NAMES[index].to_owned())
+            .with_columns(columns(index))
     }
 
     /// 標本のシートのメタデータを `order` の添字順に並べる。
@@ -587,12 +688,14 @@ mod tests {
     /// [`DocumentPart`] / [`SheetMeta`] は保持している未知フィールド（内部カーソルを
     /// 含む）を等値比較に持ち込まないため `PartialEq` を持たない。内容の比較はこの写像か
     /// 符号化したバイト列で行う。
-    fn fingerprint(part: &DocumentPart) -> (DocumentId, Vec<(SheetId, String)>) {
+    fn fingerprint(part: &DocumentPart) -> (DocumentId, Vec<(SheetId, String, Vec<String>)>) {
         (
             part.document_id(),
             part.sheets()
                 .iter()
-                .map(|sheet| (sheet.sheet_id(), sheet.name().to_owned()))
+                .map(|sheet| {
+                    (sheet.sheet_id(), sheet.name().to_owned(), sheet.columns().to_vec())
+                })
                 .collect(),
         )
     }
@@ -607,11 +710,15 @@ mod tests {
 
     /// 確定形のシート要素 1 件（キー名と順序をテスト側の定数で組み立てる。
     /// 実装の経路には依存しない）。
-    fn element_json(id_text: &str, name: &str) -> String {
+    fn element_json(id_text: &str, name: &str, columns: &[String]) -> String {
         let id_key = SHEET_KEYS[0];
         let name_key = SHEET_KEYS[1];
+        let columns_key = SHEET_KEYS[2];
         let quoted = serde_json::to_string(name).expect("シート名のエスケープ");
-        format!(r#"{{"{id_key}":"{id_text}","{name_key}":{quoted}}}"#)
+        let encoded = serde_json::to_string(columns).expect("列名のエスケープ");
+        format!(
+            r#"{{"{id_key}":"{id_text}","{name_key}":{quoted},"{columns_key}":{encoded}}}"#
+        )
     }
 
     /// 確定形の全体（キー `document_id` → `sheets` の順、要素は与えられた順のまま）。
@@ -620,7 +727,7 @@ mod tests {
         let sheets_key = TOP_LEVEL_KEYS[1];
         let elements: Vec<String> = order
             .iter()
-            .map(|&index| element_json(SHEET_IDS[index], SHEET_NAMES[index]))
+            .map(|&index| element_json(SHEET_IDS[index], SHEET_NAMES[index], &columns(index)))
             .collect();
         format!(r#"{{"{id_key}":"{id_text}","{sheets_key}":[{}]}}"#, elements.join(","))
     }
@@ -728,18 +835,26 @@ mod tests {
         assert_eq!(first, decoded.to_json_bytes().expect("再符号化"));
     }
 
-    /// 確定形: キー名・キー順序・識別子のテキスト表記を文字列リテラルで固定する
+    /// 確定形: キー名・キー順序・識別子のテキスト表記・列名の配列を文字列リテラルで固定する
     /// （モジュール docs「JSON 形式」の確定形そのもの。task 5.2 / 8.2 のゴールデンの基準）。
     #[test]
     fn wire_form_is_the_documented_confirmed_shape() {
         let part = DocumentPart::new(
             document_id(),
-            vec![SheetMeta::new(sheet_id(0), "在庫".to_owned())],
+            vec![
+                SheetMeta::new(sheet_id(0), "在庫".to_owned()),
+                sheet(1),
+            ],
         )
         .expect("標本は妥当");
         let text = String::from_utf8(part.to_json_bytes().expect("符号化")).expect("UTF-8");
         assert_eq!(
-            r#"{"document_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","sheets":[{"sheet_id":"01K4ANRRG004HMASW9NF6YY093","name":"在庫"}]}"#,
+            concat!(
+                r#"{"document_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","sheets":["#,
+                r#"{"sheet_id":"01K4ANRRG004HMASW9NF6YY093","name":"在庫","columns":[]},"#,
+                r#"{"sheet_id":"01K4ANRSF804HMASW9QKFG04HM","name":"📊 データ","columns":[]}"#,
+                r#"]}"#
+            ),
             text,
             "確定形が変わっている"
         );
@@ -757,6 +872,63 @@ mod tests {
         assert_eq!(document_id(), decoded.document_id());
     }
 
+    /// 列名は確定形の必須キーであり、**空配列として常に書かれる**（タスク 4.8 で追加）。
+    /// 列名の並びは与えられた順のままで、並べ替えも正規化もされない（本クレートは列名の
+    /// 中身を解釈しない）。0 個・複数個・非 ASCII・`$` 始まり（行データの予約キーと衝突する
+    /// 名前）を分散させて確かめる。
+    #[test]
+    fn columns_are_mandatory_and_preserved_verbatim() {
+        let expected = vec![
+            ("01K4ANRRG004HMASW9NF6YY093", Vec::new()),
+            ("01K4ANRSF804HMASW9QKFG04HM", vec!["zone".to_owned(), "a".to_owned()]),
+            ("01K4ANRTEG04HMASW9SQR128T5", vec!["$id".to_owned(), "量".to_owned()]),
+        ];
+        let part = DocumentPart::new(
+            document_id(),
+            vec![
+                SheetMeta::new(expected[0].0.parse().expect("標本は正準 ULID"), "空".to_owned())
+                    .with_columns(expected[0].1.clone()),
+                SheetMeta::new(expected[1].0.parse().expect("標本は正準 ULID"), "在庫".to_owned())
+                    .with_columns(expected[1].1.clone()),
+                SheetMeta::new(expected[2].0.parse().expect("標本は正準 ULID"), "予約".to_owned())
+                    .with_columns(expected[2].1.clone()),
+            ],
+        )
+        .expect("標本は妥当");
+
+        let bytes = part.to_json_bytes().expect("符号化");
+        let text = String::from_utf8(bytes.clone()).expect("UTF-8");
+        assert_eq!(
+            concat!(
+                r#"{"document_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","sheets":["#,
+                r#"{"sheet_id":"01K4ANRRG004HMASW9NF6YY093","name":"空","columns":[]},"#,
+                r#"{"sheet_id":"01K4ANRSF804HMASW9QKFG04HM","name":"在庫","columns":["zone","a"]},"#,
+                r#"{"sheet_id":"01K4ANRTEG04HMASW9SQR128T5","name":"予約","columns":["$id","量"]}"#,
+                r#"]}"#
+            ),
+            text,
+            "列名の確定形が変わっている"
+        );
+
+        // 列名が往復で保たれ（順序も含む）、要素ごとに取り違えられない。
+        let decoded = DocumentPart::from_json_bytes(&bytes).expect("復号");
+        let observed: Vec<Vec<String>> =
+            decoded.sheets().iter().map(|sheet| sheet.columns().to_vec()).collect();
+        let wanted: Vec<Vec<String>> = expected.iter().map(|(_, columns)| columns.clone()).collect();
+        assert_eq!(wanted, observed, "列名が往復で変わった");
+        assert_eq!(bytes, decoded.to_json_bytes().expect("再符号化"));
+
+        // `columns` の欠落は確定形の逸脱として拒否する（空列として黙って受け入れない）。
+        let without_columns = text.replace(r#","columns":[]"#, "");
+        assert_ne!(text, without_columns, "標本に空の列名が無く、欠落の検証にならない");
+        match DocumentPart::from_json_bytes(without_columns.as_bytes()) {
+            Err(DocumentError::InvalidContainer { entry }) => {
+                assert!(entry.starts_with("document.json: "), "entry が違う: {entry}");
+            }
+            other => panic!("列名の欠落が拒否されない: {other:?}"),
+        }
+    }
+
     /// 未知フィールド保持: 未知キーがトップレベルに現れても（`document_id` の前・
     /// `document_id` と `sheets` の間・`sheets` の後ろ）、読み→書き戻しが**バイト単位**に
     /// 元へ戻る（要件 6.2 / 6.3）。
@@ -764,8 +936,8 @@ mod tests {
     fn unknown_top_level_fields_round_trip_byte_for_byte() {
         let elements = format!(
             "{},{}",
-            element_json(SHEET_IDS[0], SHEET_NAMES[0]),
-            element_json(SHEET_IDS[1], SHEET_NAMES[1])
+            element_json(SHEET_IDS[0], SHEET_NAMES[0], &columns(0)),
+            element_json(SHEET_IDS[1], SHEET_NAMES[1], &columns(1))
         );
         let cases = [
             // 前（既知フィールドの手前）
@@ -806,23 +978,23 @@ mod tests {
         let name_a = serde_json::to_string(SHEET_NAMES[0]).expect("エスケープ");
         let name_b = serde_json::to_string(SHEET_NAMES[1]).expect("エスケープ");
         let name_c = serde_json::to_string(SHEET_NAMES[2]).expect("エスケープ");
-        // 先頭（sheet_id の手前）と間（sheet_id と name のあいだ）
+        // 先頭（sheet_id の手前）と間（sheet_id と name のあいだ。列名は末尾）
         let first = format!(
-            r#"{{"future_display":"wide","sheet_id":"{}","declared_rows":3,"name":{name_a}}}"#,
+            r#"{{"future_display":"wide","sheet_id":"{}","declared_rows":3,"name":{name_a},"columns":["a","b"]}}"#,
             SHEET_IDS[0]
         );
-        // 間
+        // 間（sheet_id と name のあいだ）。列名は空配列（必須キー）。
         let second = format!(
-            r#"{{"sheet_id":"{}","color":"magenta","name":{name_b}}}"#,
+            r#"{{"sheet_id":"{}","color":"magenta","name":{name_b},"columns":[]}}"#,
             SHEET_IDS[1]
         );
-        // 末尾（name の後ろ）
+        // 末尾（columns の後ろ）
         let third = format!(
-            r#"{{"sheet_id":"{}","name":{name_c},"version_added":2}}"#,
+            r#"{{"sheet_id":"{}","name":{name_c},"columns":["$id","量"],"version_added":2}}"#,
             SHEET_IDS[2]
         );
         // 未知キーを持たない要素
-        let fourth = element_json(SHEET_IDS[3], SHEET_NAMES[3]);
+        let fourth = element_json(SHEET_IDS[3], SHEET_NAMES[3], &columns(3));
 
         let input = format!(
             r#"{{"document_id":"{DOC_ID_TEXT}","sheets":[{first},{second},{third},{fourth}]}}"#
@@ -855,7 +1027,7 @@ mod tests {
         let id = DOC_ID_TEXT;
         let a = SHEET_IDS[0];
         let b = SHEET_IDS[1];
-        let element = element_json(a, SHEET_NAMES[0]);
+        let element = element_json(a, SHEET_NAMES[0], &columns(0));
         let lowercase_id = id.to_lowercase();
         let lowercase_sheet = a.to_lowercase();
         let short_id = &id[..25];
@@ -892,6 +1064,36 @@ mod tests {
             (
                 "シート要素に name が無い",
                 format!(r#"{{"document_id":"{id}","sheets":[{{"sheet_id":"{a}"}}]}}"#),
+            ),
+            (
+                "シート要素に columns が無い（必須キー）",
+                format!(
+                    r#"{{"document_id":"{id}","sheets":[{{"sheet_id":"{a}","name":"x"}}]}}"#
+                ),
+            ),
+            (
+                "columns が配列でない",
+                format!(
+                    r#"{{"document_id":"{id}","sheets":[{{"sheet_id":"{a}","name":"x","columns":"a"}}]}}"#
+                ),
+            ),
+            (
+                "columns の要素が文字列でない",
+                format!(
+                    r#"{{"document_id":"{id}","sheets":[{{"sheet_id":"{a}","name":"x","columns":[1]}}]}}"#
+                ),
+            ),
+            (
+                "columns が null",
+                format!(
+                    r#"{{"document_id":"{id}","sheets":[{{"sheet_id":"{a}","name":"x","columns":null}}]}}"#
+                ),
+            ),
+            (
+                "既知キーの重複（シート要素の columns）",
+                format!(
+                    r#"{{"document_id":"{id}","sheets":[{{"sheet_id":"{a}","name":"x","columns":[],"columns":[]}}]}}"#
+                ),
             ),
             (
                 "シート名が文字列でない",
