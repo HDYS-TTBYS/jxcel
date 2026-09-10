@@ -31,7 +31,6 @@
 //! 「パート層の確定形が変わった」ときにも落ちる。
 
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use document_format::container::writer::marker_bytes;
@@ -46,7 +45,7 @@ use document_format::{
 
 mod common;
 
-use common::{central_headers, local_headers};
+use common::{central_headers, fixture_path, local_headers};
 
 /// 標本ドキュメントの識別子（正準 Crockford base32 大文字 26 文字）。
 const DOCUMENT_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -56,13 +55,6 @@ const SHEET_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FB0";
 const ROW_ID_PREFIX: &str = "01ARZ3NDEKTSV4RRFFQ69G";
 /// 標本の行数（Deflate が自明にならない程度の分量を持たせる）。
 const ROW_COUNT: u32 = 40;
-/// 期待バイト列（ゴールデンファイル）の絶対パス。
-///
-/// 置き場は design「File Structure Plan」の `tests/fixtures/bytes/` である。テストの
-/// 作業ディレクトリに依存しないよう、マニフェストの位置から組み立てる。
-fn fixture_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bytes/golden_container.zip")
-}
 
 /// 標本シートの列名（`document.json` の列順が権威であり、行エントリのキー順と一致させる）。
 fn columns() -> Vec<String> {

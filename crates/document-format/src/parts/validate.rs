@@ -152,8 +152,9 @@
 //! - panic しない: 空の目録・空テキストの宣言・空テキストの参照を含め、どんな目録でも
 //!   [`Result`] を返す（添字参照も `unwrap` も持たない）。
 //! - `serde_json` の汎用値型・マップ型を経由しない（親モジュール [`crate::parts`] の規則）。
-//!   セル値を走査するのは [`crate::value`] の [`CellValue`] / [`NestedValue`] であり、
-//!   モデル型（`Document` / `Sheet` / `Row`）は参照しない。
+//!   セル値を走査するのは [`crate::value`] の [`CellValue`] /
+//!   [`NestedValue`](crate::value::NestedValue) であり、モデル型（`Document` / `Sheet` /
+//!   `Row`）は参照しない。
 //!
 //! # 対象外
 //!
@@ -229,8 +230,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{DocumentError, IdKind};
-use crate::ids::{AttachmentId, TypeDefId};
-use crate::value::{CellValue, NestedValue};
+use crate::ids::TypeDefId;
+use crate::value::{visit_attachment_references, CellValue};
 
 /// 識別子 1 個の宣言（[`PartInventory`] の要素）。
 ///
@@ -266,11 +267,6 @@ impl IdDeclaration {
         self.sheet = Some(sheet.into());
         self
     }
-
-    /// 所属シート（未設定なら `None`）。
-    pub fn sheet(&self) -> Option<&str> {
-        self.sheet.as_deref()
-    }
 }
 
 /// 型定義参照 1 件（要件 1.7, 4.2。タスク 4.7）。
@@ -300,7 +296,7 @@ impl TypeRefDeclaration {
 ///
 /// セル値の [`CellValue::Attachment`] 1 個に対応する。`id` は添付識別子のテキスト形であり、
 /// 添付の宣言（`IdKind::Attachment`）と同じ正準形である（[`PartInventory::declare_attachment_refs`]
-/// が [`AttachmentId`] から作る）。
+/// が [`AttachmentId`](crate::ids::AttachmentId) から作る）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentRefDeclaration {
     /// 参照元を示す診断用テキスト（例 `sheets/<ulid>.jsonl line 7`）。
@@ -404,9 +400,9 @@ impl PartInventory {
 
     /// セル値 1 つから添付参照を再帰的に集め、`from` を参照元として目録に加える（要件 7.4）。
     ///
-    /// たどるのは [`NestedValue::Object`] の**値**と [`NestedValue::Array`] の**要素**であり、
-    /// 参照として数えるのは [`CellValue::Attachment`] だけである
-    /// （[`crate::model::AttachmentRegistry::unreferenced_attachments`] と同じ再帰規約。
+    /// 走査規則（たどるのは `Nested` の内側だけ、参照として数えるのは
+    /// [`CellValue::Attachment`] だけ）の実装は [`visit_attachment_references`] が唯一の
+    /// 場所である（[`crate::model::AttachmentRegistry::unreferenced_attachments`] と同じ規則。
     /// あちらは集合へ、こちらは出現列へ集める）。深さに制限は無く、同じセルの中の複数の参照は
     /// 出現順にそのまま並ぶ（重複も排除しない）。`from` はセルを指すテキスト（例
     /// `sheets/<ulid>.jsonl line 7`）であり、ネストの位置までは区別しない（要件 7.4 が要求
@@ -414,14 +410,10 @@ impl PartInventory {
     /// として数えない（要件 7.3）。
     pub fn declare_attachment_refs(&mut self, from: impl Into<String>, value: &CellValue) {
         let from = from.into();
-        let mut ids = Vec::new();
-        collect_attachment_refs(value, &mut ids);
-        for id in ids {
-            self.attachment_refs.push(AttachmentRefDeclaration {
-                from: from.clone(),
-                id: id.to_string(),
-            });
-        }
+        let references = &mut self.attachment_refs;
+        visit_attachment_references(value, &mut |id| {
+            references.push(AttachmentRefDeclaration { from: from.clone(), id: id.to_string() });
+        });
     }
 
     /// シート参照（パートのエントリ名が指すシート）を 1 件加える（要件 4.2）。
@@ -599,30 +591,5 @@ fn canonical_type_def_id(text: &str) -> String {
     match text.parse::<TypeDefId>() {
         Ok(id) => id.to_string(),
         Err(_) => text.to_owned(),
-    }
-}
-
-/// [`CellValue`] から [`CellValue::Attachment`] の参照を**出現順に**集める。
-///
-/// たどるのは `Nested` の内側だけである: オブジェクトの**値**と配列の要素を再帰的に見て、
-/// 鍵（文字列）や `Text` / `Decimal` の内容は参照として数えない
-/// （[`crate::model::AttachmentRegistry::unreferenced_attachments`] と同じ再帰規約。
-/// 重複は排除しない）。
-fn collect_attachment_refs(value: &CellValue, out: &mut Vec<AttachmentId>) {
-    match value {
-        CellValue::Attachment(id) => {
-            out.push(*id);
-        }
-        CellValue::Nested(NestedValue::Object(entries)) => {
-            for (_, inner) in entries {
-                collect_attachment_refs(inner, out);
-            }
-        }
-        CellValue::Nested(NestedValue::Array(items)) => {
-            for inner in items {
-                collect_attachment_refs(inner, out);
-            }
-        }
-        _ => {}
     }
 }

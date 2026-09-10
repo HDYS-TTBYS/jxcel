@@ -172,6 +172,44 @@ impl NestedValue {
     }
 }
 
+/// [`CellValue`] から [`CellValue::Attachment`] の参照を**出現順**に訪問する。
+///
+/// たどるのは [`NestedValue`] の内側だけである: [`NestedValue::Object`] の**値**と
+/// [`NestedValue::Array`] の**要素**を再帰的に訪れ、キー(文字列)や `Text` / `Decimal`
+/// の内容は参照として数えない(要件 7.3)。深さに制限は無く、同じセルの中の複数の参照は
+/// 出現順にそのまま訪れる(重複も排除しない)。
+///
+/// # 本クレートでこの規則を実装する唯一の場所
+///
+/// 添付参照の走査には 2 つの利用元がある: 結果を集合へ集める
+/// [`crate::model::AttachmentRegistry::unreferenced_attachments`] と、
+/// 結果を出現列へ集める
+/// [`crate::parts::PartInventory::declare_attachment_refs`] である。
+/// 参照の走査規則の実装はここ 1 箇所だけに置く。`value.rs` は `model` と `parts` の
+/// **双方が依存する最下層**であり、ここに置けば片方だけを直して他方が黙って漏れる状態が
+/// 構造的に起こり得ない([`NestedValue`] に変種が増えたときの走査の更新もこの 1 関数で
+/// 済み、両層が同じ更新を共有する)。
+///
+/// 訪問のたびに識別子を `visit` へ渡すビジターである: 呼び出し元は集合
+/// ([`HashSet`](std::collections::HashSet))でも出現列([`Vec`])でも、結果を確保し直さずに
+/// そのまま集められる(戻り値で `Vec` を確保させない)。
+pub fn visit_attachment_references(value: &CellValue, visit: &mut dyn FnMut(AttachmentId)) {
+    match value {
+        CellValue::Attachment(id) => visit(*id),
+        CellValue::Nested(NestedValue::Object(entries)) => {
+            for (_, inner) in entries {
+                visit_attachment_references(inner, visit);
+            }
+        }
+        CellValue::Nested(NestedValue::Array(items)) => {
+            for inner in items {
+                visit_attachment_references(inner, visit);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// `0` の符号を落とす(`-0.0 == 0.0` であることから、符号だけを検査できる)。
 #[inline]
 fn canonicalize_zero(value: f64) -> f64 {
@@ -662,6 +700,70 @@ mod tests {
         let again = encode(&back);
         assert_eq!(wire, again, "再エンコードがバイト単位で一致しない");
         again
+    }
+
+    /// 共通の添付参照走査器(`visit_attachment_references`)が、入れ子の Object / Array の
+    /// **双方**を複数階層たどり、`CellValue::Attachment` だけを参照として訪れること。
+    ///
+    /// この規則の実装は本関数 1 箇所であり、`model` / `parts` の両利用元がここへ依存する
+    /// (走査器の docs「本クレートでこの規則を実装する唯一の場所」)。したがって本テストは
+    /// 走査器の境界(どの変種を降り、どれを数えないか)を直接固定する:
+    ///
+    /// - Object の**値**を降りる(キーは降りない)。
+    /// - Array の**要素**を降りる。
+    /// - Attachment 以外(`Text` / `Decimal` / `Int` / `Null` など)は数えない。
+    ///   **特に同じ hex 文字列を持つ `Text` / `Decimal` は参照ではない**(要件 7.3)。
+    #[test]
+    fn attachment_references_are_visited_through_nested_objects_and_arrays() {
+        let direct = attach(b"direct");
+        let in_array = attach(b"array");
+        let deep = attach(b"deep");
+        let not_a_reference = attach(b"textual");
+
+        let value = CellValue::Nested(NestedValue::Object(vec![
+            ("direct".to_owned(), CellValue::Attachment(direct)),
+            (
+                "list".to_owned(),
+                CellValue::Nested(NestedValue::Array(vec![
+                    CellValue::Attachment(in_array),
+                    CellValue::Nested(NestedValue::Object(vec![(
+                        "deep".to_owned(),
+                        CellValue::Nested(NestedValue::Array(vec![CellValue::Attachment(deep)])),
+                    )])),
+                ])),
+            ),
+            ("decimal".to_owned(), CellValue::Decimal(not_a_reference.to_hex())),
+            ("text".to_owned(), CellValue::Text(not_a_reference.to_hex())),
+            ("count".to_owned(), CellValue::Int(1)),
+            ("nothing".to_owned(), CellValue::Null),
+        ]));
+
+        let mut visited = Vec::new();
+        value::visit_attachment_references(&value, &mut |id| visited.push(id));
+        assert_eq!(
+            vec![direct, in_array, deep],
+            visited,
+            "入れ子の Object / Array を出現順にたどっていない"
+        );
+
+        // トップレベルが Attachment の場合もただ 1 件を訪れる。
+        let mut top_level = Vec::new();
+        value::visit_attachment_references(
+            &CellValue::Attachment(direct),
+            &mut |id| top_level.push(id),
+        );
+        assert_eq!(vec![direct], top_level, "トップレベルの添付が訪れない");
+
+        // Attachment を 1 つも含まない値は何も訪れない。
+        let mut none = Vec::new();
+        value::visit_attachment_references(
+            &CellValue::Nested(NestedValue::Object(vec![(
+                not_a_reference.to_hex(),
+                CellValue::Text(not_a_reference.to_hex()),
+            )])),
+            &mut |id| none.push(id),
+        );
+        assert!(none.is_empty(), "参照でない値が訪問された: {none:?}");
     }
 
     // --- (a) int / float の型ドリフトは起こり得ない ----------------------------------

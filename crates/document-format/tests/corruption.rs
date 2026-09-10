@@ -27,6 +27,7 @@
 //! |----------|--------|------|
 //! | ダイジェスト改竄 | `from_parts` の完全性照合（段 3） | `IntegrityMismatch { entry }` |
 //! | 識別子の重複（`TypeDef` / `Row`） | `from_parts` の構造検証（段 5） | `DuplicateId { kind, id, occurrences }` |
+//! | シート識別子の重複（`document.json`） | `from_parts` のパート復号（段 4）。復号が検証より先に走るため | `InvalidContainer { entry }`（識別子と**全出現位置**。要件 4.3） |
 //! | 宙吊りの型定義参照 | 同上 | `DanglingTypeRef { from, to }` |
 //! | 宙吊りの添付参照 | 同上 | `DanglingAttachmentRef { from, id }` |
 //! | スキーマ欠落 | 同上 | `MissingSchema { sheet }` |
@@ -250,6 +251,58 @@ fn duplicate_row_ids_are_reported_with_their_occurrences() {
                     && expected_sheets
                         .iter()
                         .all(|sheet| occurrences.iter().any(|entry| entry.contains(sheet)))
+            }
+            _ => false,
+        },
+    );
+}
+
+/// `document.json` に同一のシート識別子を 2 回書いたコンテナは、識別子と**全出現位置**つきで
+/// 中止される（要件 4.3）。
+///
+/// **実ファイル経路（`open`）で固定する**のが要点である。`DocumentPart` の復号（`from_parts`
+/// の段 4）は構造検証（段 5）より先に走るため、この入力は `DuplicateId` ではなく
+/// `InvalidContainer`（コンテナ不正。`document_part.rs` の裁定）として報告される。したがって
+/// 本テストは変種（`InvalidContainer`）まで固定する。`entry` には識別子と、**2 つの出現位置
+/// の両方**（`document.json sheets[0]` / `document.json sheets[1]`）が載らなければならない
+/// （片方だけでは要件 4.3 の「その出現箇所」を満たさない）。
+///
+/// 重複は `document.json` の本文字列をもう 1 枚のシートの識別子へ書き換えて作り、索引を
+/// 組み直してコンテナへ戻す（ZIP の生バイトをパッチしない）。
+#[test]
+fn duplicate_sheet_identifiers_are_reported_with_all_occurrences() {
+    let scratch = Scratch::new("duplicate_sheet");
+    let document = sample();
+    let sheets = document.sheets();
+    assert!(sheets.len() >= 2, "標本は 2 枚以上のシートを持つ");
+    let first = sheets[0].id().to_string();
+    let second = sheets[1].id().to_string();
+    assert_ne!(first, second, "標本のシート識別子は元々異なる");
+
+    let parts = to_parts(&document).expect("標本はパート集合へ取り出せる");
+    let version = parts.format_version();
+    let mut entries = entries_of(&parts);
+    let slot = entries
+        .iter()
+        .position(|(name, _)| *name == EntryName::Document)
+        .expect("標本は document.json を持つ");
+    let text = String::from_utf8(entries[slot].1.clone()).expect("document.json は UTF-8");
+    // 2 枚目のシートの識別子を 1 枚目へ書き換え、`sheets[0]` と `sheets[1]` を重複させる。
+    let tampered = text.replacen(&second, &first, 1);
+    assert_ne!(text, tampered, "シート識別子の書き換えが起きていない");
+    entries[slot].1 = tampered.into_bytes();
+
+    let occurrence_0 = format!("{} sheets[0]", EntryName::Document);
+    let occurrence_1 = format!("{} sheets[1]", EntryName::Document);
+    assert_open_rejects(
+        &scratch,
+        "duplicate_sheet",
+        rebuilt_with_manifest(version, entries),
+        move |error| match error {
+            DocumentError::InvalidContainer { entry } => {
+                entry.contains(&first)
+                    && entry.contains(&occurrence_0)
+                    && entry.contains(&occurrence_1)
             }
             _ => false,
         },

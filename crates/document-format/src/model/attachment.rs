@@ -22,12 +22,14 @@
 //!
 //! # 参照集計(要件 7.3 の帰結)
 //!
-//! セル値の列から [`CellValue::Attachment`] を再帰的に集める: [`NestedValue::Object`] の
-//! 値と [`NestedValue::Array`] の要素の双方をたどる。参照として数えるのは
-//! `CellValue::Attachment` だけで、同じ hex 文字列を内容に持つ `Text` / `Decimal` や
-//! オブジェクトのキーは参照ではない。参照が実在するかの検証(要件 7.4 の
-//! `DanglingAttachmentRef`)は読み込み経路 `StructuralValidator`(タスク 4.7)の責務で、
-//! 本モジュールは検証も報告もしない。
+//! セル値の列から [`CellValue::Attachment`] を再帰的に集める。走査規則(たどるのは
+//! `Nested` の内側だけ、参照として数えるのは `CellValue::Attachment` だけ)の実装は
+//! **本モジュールではなく** [`crate::value::visit_attachment_references`] が持つ:
+//! `parts` 層の [`crate::parts::PartInventory::declare_attachment_refs`] と同じ規則であり、
+//! 規則を 2 箇所に置くと [`crate::value::NestedValue`] に変種が増えたときに片方だけを
+//! 直して黙って漏れる(コンパイルで強制されない)。両層が依存する最下層 `crate::value` に
+//! 1 つだけ置く。参照が実在するかの検証(要件 7.4 の `DanglingAttachmentRef`)は読み込み
+//! 経路 `StructuralValidator`(タスク 4.7)の責務で、本モジュールは検証も報告もしない。
 //!
 //! # 未参照の添付を削除しない(要件 7.6)
 //!
@@ -47,7 +49,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use crate::ids::AttachmentId;
-use crate::value::{CellValue, NestedValue};
+use crate::value::{visit_attachment_references, CellValue};
 
 /// 添付 1 件: content-addressed 識別子と不透明なバイト列(要件 7.1, 7.5)。
 ///
@@ -132,10 +134,11 @@ impl AttachmentRegistry {
 
     /// 渡されたセル値の列から**参照されていない**添付の識別子を昇順で返す(要件 7.6)。
     ///
-    /// 参照は [`CellValue::Attachment`] を [`NestedValue::Object`] の値と
-    /// [`NestedValue::Array`] の要素へ再帰的にたどって集める。**集計は読み取り専用**で、
-    /// レジストリを削除も書き換えもしない(削除の API は存在しない)。未登録の識別子を
-    /// 参照していても失敗しない(実在検証はタスク 4.7 の責務)。
+    /// 参照は [`CellValue::Attachment`] を [`NestedValue`](crate::value::NestedValue) の
+    /// Object の値と Array の要素へ再帰的にたどって集める(規則の実装は
+    /// [`visit_attachment_references`] が唯一の場所。モジュール docs「参照集計」)。
+    /// **集計は読み取り専用**で、レジストリを削除も書き換えもしない(削除の API は存在
+    /// しない)。未登録の識別子を参照していても失敗しない(実在検証はタスク 4.7 の責務)。
     ///
     /// 返り値の順序は [`AttachmentId`] の昇順であり、シート・行の順序や添付の登録順に
     /// 依存しない。参照済みの識別子は登録済みか否かに関わらず結果に影響しない。
@@ -148,36 +151,15 @@ impl AttachmentRegistry {
         // 観測されない。
         let mut referenced: HashSet<AttachmentId> = HashSet::new();
         for value in values {
-            collect_references(value, &mut referenced);
+            visit_attachment_references(value, &mut |id| {
+                referenced.insert(id);
+            });
         }
         self.entries
             .keys()
             .copied()
             .filter(|id| !referenced.contains(id))
             .collect()
-    }
-}
-
-/// [`CellValue`] から [`CellValue::Attachment`] の参照を再帰的に集める。
-///
-/// たどるのは `Nested` の内側だけである: オブジェクトの**値**と配列の要素を見て、
-/// キー(文字列)や `Text` / `Decimal` の内容は参照として数えない。
-fn collect_references(value: &CellValue, out: &mut HashSet<AttachmentId>) {
-    match value {
-        CellValue::Attachment(id) => {
-            out.insert(*id);
-        }
-        CellValue::Nested(NestedValue::Object(entries)) => {
-            for (_, inner) in entries {
-                collect_references(inner, out);
-            }
-        }
-        CellValue::Nested(NestedValue::Array(items)) => {
-            for inner in items {
-                collect_references(inner, out);
-            }
-        }
-        _ => {}
     }
 }
 

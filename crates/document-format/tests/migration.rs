@@ -48,20 +48,18 @@ use document_format::entry_name::MANIFEST_ENTRY;
 use document_format::migration::steps::STEPS;
 use document_format::parts::{from_parts, to_parts, DocumentParts, ManifestEntry, ManifestPart};
 use document_format::{
-    Document, DocumentError, DocumentFormat, DocumentFormatApi, EntryName, FormatVersion,
-    CURRENT_FORMAT_VERSION,
+    Document, DocumentError, DocumentFormatApi, EntryName, FormatVersion, CURRENT_FORMAT_VERSION,
 };
+
+mod common;
+
+use common::api;
 
 /// 本実装の現行バージョン。
 ///
 /// クレートの**単一定義**から導出する（テスト内に `1.0` を直書きしない。「現行が 1.0 である」
 /// ことの固定は `src/migration/mod.rs` の `the_current_version_is_one_zero` が担う）。
 const CURRENT: FormatVersion = CURRENT_FORMAT_VERSION;
-
-/// 公開経路を起動する実装（design はトレイトのみを指定するため、無状態の具象型を使う）。
-fn api() -> DocumentFormat {
-    DocumentFormat::new()
-}
 
 /// 標本の文書。ゲートの判定は内容に依存しないため 0 シートの最小の文書で足りる。
 fn sample() -> Document {

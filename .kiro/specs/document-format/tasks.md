@@ -420,3 +420,17 @@
 - **性能予算の判定は criterion の `estimates.json` の `mean.point_estimate`（ns）に対して行う**（予算値は**要件由来のリテラル** `3000000000` / `2000000000`。計測値から予算を導出する自己参照にしない）。**判定不能時は exit 2 で明示的に失敗**させる（黙って通すとベンチが走らなくなっても気付けない）。`--save-baseline=main` でも `new/estimates.json` が生成されるため CI の現行コマンドで機能する
 - **【検証限界（8.9）】** ① **CI 実行そのものはこの環境では検証できない**（Linux のみ。`bench.yml` の YAML とコマンド・判定はローカルで再現実測）② **性能予算は「速い偽計測」（計測値を定数に差し替える等）を原理的に検出できない**（規模・経路の assertion が別層で担保）③ `save` の余裕は約 1.37 倍しかなく、**CI runner の速度差で 2 秒を超えるスプリアス失敗のリスク**がある（閾値は要件値のまま維持し、真の超過時は design の対処順序＝割り当て削減 → `Stored` → SIMD を検討する）④ `bench.yml` は既存の起動条件（`workflow_dispatch` / 週次 `schedule` / `push` の `branches:[main]` かつ `paths:[crates/**]`）のため、**PR では走らない**（「機能追加と同時に検出」は main マージ時点の意味）
 - **8.9 の規模 assertion の教訓**: ベンチ内の「10 万行 × 30 列」の検証は、**定数同士の比較（恒真）にしないこと**。当初 `COLUMNS` 定数自身と比較していたため `COLUMNS=20` 変異が生存し、**要件リテラル 30 との比較**に直して検出できるようにした。行数は `SUPPORTED_ROW_LIMIT` と比較している
+
+## 最終検証（`/kiro-validate-impl`）の記録
+
+全 39 サブタスクの完了後、フィーチャー横断の検証を 4 つの観点（テスト実行＋スモーク / 要件カバレッジ / 設計整合 / タスク間統合・境界監査）で実施した。**初回は NO-GO**（下表の R1・R2 と衛生上の残骸）、**修正後に再検証して GO**。
+
+- **R1【要件 4.3 の未達。修正済み】** `document.json` の**重複シート識別子**は `DocumentPart` の復号が `StructuralValidator` より先に拒否するため、`DuplicateId { occurrences }` に到達せず、`InvalidContainer` のメッセージにも**出現箇所が載っていなかった**（要件 4.3 は「重複した識別子と**その出現箇所**を含むエラー」を要求）。→ **分類は `InvalidContainer` のまま**（`document_part.rs` の裁定。コンテナ不正と同じ分類）で、**識別子と全出現位置**（`document.json sheets[i]`、0 始まり、`inventory_of` と同一の綴り）を `entry` に載せるよう修正。重複が 3 件以上でも全位置を載せる。テストは `tests/corruption.rs`（実ファイル `open` 経路）。**`DuplicateId` へ寄せる変更はしない**
+- **R2【重複実装。修正済み】** 添付参照の再帰走査が `model/attachment.rs` と `parts/validate.rs` に**別々に実装**されていた（`NestedValue` に変種が増えると片方だけ直して黙って漏れる）。→ **`src/value.rs` の `visit_attachment_references(value, &mut dyn FnMut(AttachmentId))` 1 箇所**へ統合（**ビジターで `Vec` を確保させない**）。両層がこれを呼ぶ。`value.rs` は `model` と `parts` の双方が依存する最下層であることが選定理由
+- **R3〜R5【衛生。修正済み】** `tests/container_writer.rs` のローカル `fixture_path`（8.5 移行の取り残し）と `tests/migration.rs` のローカル `api()` を削除して `tests/common` の唯一の定義に寄せた。死コード `IdDeclaration::sheet()`（参照 0 件）を削除
+- **記録のみ（変更しない）**:
+  - **`model → json` の辺**（`PreservedFields`）は design の依存鎖「各層は左方向にのみ依存する」に対する**例外**であり、タスク 4.8 の親裁定として `model/sheet.rs` の doc に記載済み（`json → model` の逆向きは無い）。**design 本文は「逆流は誤り」のままなので、design の記載と実装の例外を突き合わせるのは仕様オーナーの作業**（本スペックの実装は裁定に従っている）
+  - `tests/document_parts.rs` の同名ヘルパ（`sheet_metadata` / `rows` / `schemas` / `attachments`）は `common` と**戻り型が異なる**ため完全なコピーではなく、統合しない
+  - `MigrationChain::apply`（design が名付けた公開入口）と `PartInventory::declare_attachment_ref`（テストが使う builder）は**孤児ではない**（削除しない）
+- **検証の判定材料（再検証時点の実測）**: `cargo test --workspace` = **391 passed / 1 ignored / 0 failed**（既存テストの消失ゼロ。新規は `value.rs` の走査器テストと `tests/corruption.rs` の R1 テストの 2 本のみ）／`cargo build --workspace --all-targets` 警告 0／`cargo bench --workspace --no-run` 成功／要件カバレッジは **46/46 基準**に対応あり／層の逆流は上記の 1 件のみ（裁定済み）／`zip` の参照は `container/` の 2 ファイルのみ／エラー表の 10 変種が実在し新変種なし
+- **未解決の検証限界（受け入れ済み）**: ① 移行（6.2 / 6.3 / 6.4）の**実経路**は v1 のみの形式のため合成チェーンでのみ検証（実 `STEPS` は空）② OS 間バイト一致（3.2）は **CI の 3 OS マトリクス**でのみ検証（本環境は Linux のみ）③ 計測環境の規定（8.3）は**文書依存**（実行時検査なし）④ 原子性の**耐久性**（`sync_all` / 親 fsync）は電源断を模擬しない限り観測不能で、`tests/atomic_save.rs` は `#![cfg(unix)]`（**Windows では 0 テスト**）⑤ 性能予算は「速い偽計測」を原理的に検出できない（規模・経路の assertion が別層で担保）

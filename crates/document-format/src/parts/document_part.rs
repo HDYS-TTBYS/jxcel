@@ -100,6 +100,9 @@
 //!   `document.json` は自己矛盾であり不正である。コンテナの重複パス（要件 2.6）と同じ
 //!   分類であり、`DuplicateId`（識別子体系の一意性）ではない。**識別子の全体一意性
 //!   （行・型定義・添付をまたぐ検証）は本パートの責務ではなく、タスク 4.6 の担当である。**
+//!   報告する `entry` には識別子だけでなく**その識別子を持つ全要素の出現箇所**
+//!   （`document.json sheets[i]`。0 始まり）を載せる（要件 4.3 は「重複した識別子と
+//!   **その出現箇所**を含むエラー」を要求する。`canonicalize` の docs）。
 //! - **順序は検証しない**: シートの任意の並びが正当である（上記「シート順序は
 //!   並べ替えない」）。列名の並びも同様に検証しない（本クレートは中身を解釈しない）。
 //! - **0 枚のシートは正当である**（要件 1.1: 0 個以上のシート）。
@@ -121,7 +124,7 @@
 //! | 識別子が正準形の 26 文字 ULID でない | 同上 |
 //! | `sheets` が配列でない / シート要素がオブジェクトでない | 同上 |
 //! | `columns` が文字列の配列でない | 同上 |
-//! | 同一ファイル内でシート識別子が重複 | 同上 |
+//! | 同一ファイル内でシート識別子が重複（識別子と**全出現箇所**を `entry` へ載せる。要件 4.3） | 同上 |
 //! | 既知キーの重複（トップレベル / シート要素） | 同上 |
 //! | 内部の組み立てが壊れた場合（本クレートが生成した配列の raw 化失敗） | 同上（起こり得ない経路だが `panic` しない） |
 
@@ -413,19 +416,37 @@ impl DocumentPart {
     ///
     /// **並べ替えはしない**（シート順序はデータ。モジュール docs「シート順序は
     /// 並べ替えない」）。したがって重複の検出も `manifest.json` の索引のような昇順への
-    /// 整列後の隣接比較では行えず、先行要素との総当たりで行う（1 ドキュメントのシート数は
+    /// 整列後の隣接比較では行えず、出現位置の収集で行う（1 ドキュメントのシート数は
     /// 高々数十であり、順序を壊さない検査の方を優先する）。
+    ///
+    /// 重複した識別子は**その識別子を持つ全要素の位置**（`sheets[<0 始まりの添字>]`）を
+    /// 添えて報告する（要件 4.3「重複した識別子と**その出現箇所**を含むエラーとして報告」）。
+    /// 出現箇所の綴りは [`crate::parts::DocumentParts`] の目録が使う
+    /// `document.json sheets[i]` と揃える（[`EntryName::Document`] の表示テキスト +
+    /// ` sheets[i]`。両者の語彙を一致させ、同じ違反が層によって別の綴りにならないように
+    /// する）。最初に重複した（初出順で最初の）識別子について、出現順に全てを載せる。
     fn canonicalize(sheets: Vec<SheetMeta>) -> Result<Vec<SheetMeta>, DocumentError> {
+        // 識別子 → その識別子を持つ全要素の添字（出現順）。件数が小さいため線形探索で足り、
+        // 出現順のままの `Vec` は `HashMap` の反復順に依存しない（決定性。要件 3.6）。
+        let mut occurrences: Vec<(SheetId, Vec<usize>)> = Vec::new();
         for (index, sheet) in sheets.iter().enumerate() {
-            let duplicate = sheets[..index]
-                .iter()
-                .any(|earlier| earlier.sheet_id == sheet.sheet_id);
-            if duplicate {
-                return Err(invalid_document(format!(
-                    "duplicate sheet identifier `{}`",
-                    sheet.sheet_id
-                )));
+            match occurrences.iter_mut().find(|(id, _)| *id == sheet.sheet_id) {
+                Some((_, positions)) => positions.push(index),
+                None => occurrences.push((sheet.sheet_id, vec![index])),
             }
+        }
+
+        if let Some((id, positions)) =
+            occurrences.iter().find(|(_, positions)| positions.len() > 1)
+        {
+            let locations = positions
+                .iter()
+                .map(|index| format!("{} sheets[{index}]", EntryName::Document))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(invalid_document(format!(
+                "duplicate sheet identifier `{id}` at {locations}"
+            )));
         }
         Ok(sheets)
     }
