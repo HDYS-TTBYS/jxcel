@@ -1,10 +1,15 @@
-//! クレート外から見た公開 API の経路（タスク 7.1 / 7.2。要件 4.1, 5.2, 5.4, 5.5, 5.6, 8.2, 8.5）。
+//! クレート外から見た公開 API の経路（タスク 7.1 / 7.2 / 7.3。要件 2.2, 2.3, 4.1, 5.2,
+//! 5.4, 5.5, 5.6, 8.2, 8.5）。
 //!
 //! このファイルは統合テストであり、クレートの**公開面だけ**を使う。design
 //! 「Public API Layer / DocumentFormatApi」の `open`（7.1）が実ファイルを読み、ZIP 復号
 //! （タスク 5.3）・パート層の 1 経路（タスク 4.8 / 6.1 / 6.2）を通して [`OpenOutcome`] を
 //! 返すこと、`save`（7.2）がパート構築（4.8）・決定的符号化（5.2）・原子的書き込み（5.1）を
-//! この順に接続すること（要件 8.2）を確かめる。
+//! この順に接続すること（要件 8.2）を確かめる。タスク 7.3 の **ZIP を経由しない**公開契約
+//! （モデル ⇄ パート集合）は `tests/parts_contract.rs` が担う（あちらは
+//! `document_format::container` を import しないことで ZIP 非経由を実証する）。ここでは
+//! ファイル経由の `open` とパーツ経由の `from_parts` が**同一の検証**を通ることだけを
+//! `open_and_from_parts_report_the_same_validation_errors` で確かめる。
 //!
 //! 読み込み経路で検証する横断的な性質は次の 4 つである（レビュー教訓に従い対象を分散させる）:
 //!
@@ -184,11 +189,13 @@ fn entries_of(parts: &DocumentParts) -> Vec<(EntryName, Vec<u8>)> {
 
 /// 索引（`manifest.json`）を実体から組み直したエントリ集合を返す。
 ///
-/// ダイジェスト照合を通過させたまま後段（構造検証）だけを壊す入力を作るのに使う。
-fn rebuilt_with_manifest(
+/// ダイジェスト照合を通過させたまま後段（構造検証・バージョンゲート）だけを壊す入力を作る
+/// のに使う。`open`（ファイル経由）と `from_parts`（パーツ経由）の両方へ同じ集合を渡せる
+/// よう、コンテナのバイト列ではなくエントリ列を返す。
+fn with_rebuilt_manifest(
     version: FormatVersion,
     mut entries: Vec<(EntryName, Vec<u8>)>,
-) -> Vec<u8> {
+) -> Vec<(EntryName, Vec<u8>)> {
     entries.retain(|(name, _)| *name != EntryName::Manifest);
     let index: Vec<ManifestEntry> = entries
         .iter()
@@ -199,7 +206,35 @@ fn rebuilt_with_manifest(
         .to_json_bytes()
         .expect("符号化");
     entries.push((EntryName::Manifest, manifest));
-    encode_entries(entries)
+    entries
+}
+
+/// 索引（`manifest.json`）を実体から組み直したコンテナのバイト列を返す。
+fn rebuilt_with_manifest(version: FormatVersion, entries: Vec<(EntryName, Vec<u8>)>) -> Vec<u8> {
+    encode_entries(with_rebuilt_manifest(version, entries))
+}
+
+/// 同じ違反入りの集合を、ファイル経由（`open`）とパーツ経由（`from_parts`）の両方へ通し、
+/// **同一の検証**で拒否されること（変種と診断文脈を含めて一致すること）を実測する。
+///
+/// 比較は `Debug` 表記である（design「`open` と `from_parts` は同一の検証経路を通る」）。
+fn assert_open_and_from_parts_agree(
+    scratch: &Scratch,
+    tag: &str,
+    entries: Vec<(EntryName, Vec<u8>)>,
+) {
+    let path = scratch.file(&format!("parity_{tag}.jxcel"));
+    fs::write(&path, encode_entries(entries.clone())).expect("書き出し");
+
+    let from_file = api().open(&path).expect_err("違反入りのコンテナは開けない");
+    let parts = DocumentParts::from_entries(entries).expect("標本の集合は妥当");
+    let from_memory = api().from_parts(&parts).expect_err("違反入りの集合は復元できない");
+
+    assert_eq!(
+        format!("{from_file:?}"),
+        format!("{from_memory:?}"),
+        "open と from_parts の違反報告が一致しない ({tag})"
+    );
 }
 
 /// シートの（識別子, 名前, 列名）を文書順に写す。
@@ -924,4 +959,67 @@ fn save_replaces_the_directory_entry_instead_of_rewriting_in_place() {
     let second = fs::metadata(&path).expect("メタデータが読める").ino();
 
     assert_ne!(first, second, "上書きが inode を差し替えていない（原子的置換でない）");
+}
+
+// --- 論理エントリ集合の公開契約（タスク 7.3。要件 2.2, 2.3） ---------------------------
+
+/// 同じ違反内容について、`open`（ファイル経由）と `from_parts`（パーツ経由）が同一の検証で
+/// 拒否する（design「`open` と `from_parts` は同一の検証経路を通る」）。
+///
+/// 比較は `Debug` 表記（変種と、保持する診断文脈＝出現箇所テキストの全体）。`from_parts` は
+/// パーツ層の 1 経路をそのまま呼ぶため、この一致は Api 層が検証を抱え込んでいないことの
+/// 観測である。5 種を測る: ダイジェスト改竄（読む前段の照合）・現行より新しい形式バージョン
+/// （ゲート）・宙吊り型定義参照・未登録添付参照・`TypeDefId` の重複宣言（いずれも構造検証）。
+#[test]
+fn open_and_from_parts_report_the_same_validation_errors() {
+    let scratch = Scratch::new("contract_parity");
+    let golden = ContainerCodec::decode(&fs::read(fixture_path()).expect("読める"))
+        .expect("ゴールデンは復号できる");
+
+    // (a) ダイジェスト改竄: 実体だけを差し替え、索引の記録を古いまま残す。
+    let mut digest_case = entries_of(&golden);
+    let slot = digest_case
+        .iter()
+        .position(|(name, _)| matches!(name, EntryName::Rows { .. }))
+        .expect("ゴールデンは行エントリを持つ");
+    digest_case[slot].1.extend_from_slice(b" ");
+    assert_open_and_from_parts_agree(&scratch, "digest", digest_case);
+
+    // (b) 現行より新しい形式バージョン: 索引の記録だけを 2.0 へ差し替える（ゲートの検証）。
+    assert_open_and_from_parts_agree(
+        &scratch,
+        "version",
+        with_rebuilt_manifest(FormatVersion::new(2, 0), entries_of(&golden)),
+    );
+
+    // (c) 宙吊り型定義参照: ダイジェストは合わせたまま、実在しない型定義を参照させる。
+    let sheet = golden
+        .iter()
+        .find_map(|part| match part.name {
+            EntryName::Schema { sheet } => Some(sheet),
+            _ => None,
+        })
+        .expect("ゴールデンはスキーマエントリを持つ");
+    let dangling = SchemaPart::parse(SCHEMA_DANGLING_REF).expect("標本のスキーマは妥当");
+    let (schema_entry, schema_bytes) = SchemaCodec::encode(sheet, &dangling).expect("符号化");
+    let mut structural = entries_of(&golden);
+    let slot = structural
+        .iter()
+        .position(|(name, _)| *name == schema_entry)
+        .expect("スキーマエントリが実在する");
+    structural[slot].1 = schema_bytes;
+    assert_open_and_from_parts_agree(
+        &scratch,
+        "structural",
+        with_rebuilt_manifest(golden.format_version(), structural),
+    );
+
+    // (d) 未登録添付参照（構造検証。パート構築までは成功する）。
+    let unregistered =
+        to_parts(&document_with_unregistered_attachment()).expect("パート構築は成功する");
+    assert_open_and_from_parts_agree(&scratch, "attachment", entries_of(&unregistered));
+
+    // (e) 型定義識別子の重複宣言（構造検証。パート構築までは成功する）。
+    let duplicate = to_parts(&document_with_duplicate_type_def()).expect("パート構築は成功する");
+    assert_open_and_from_parts_agree(&scratch, "duplicate", entries_of(&duplicate));
 }

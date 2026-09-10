@@ -199,7 +199,7 @@
   - _Depends: 4.1, 4.2, 4.8, 5.1, 5.2_
   - _Requirements: 8.2_
 
-- [ ] 7.3 論理エントリ集合の公開契約を結線する
+- [x] 7.3 論理エントリ集合の公開契約を結線する
   - モデルとパート集合を ZIP を経由せずに相互変換する公開経路を提供する
   - 開く経路と同一の検証が適用されることを、検証ロジックを 2 箇所に持たない形で保証する
   - `version-control` がこの経路のみでドキュメントの中身に到達できることをテストで示す
@@ -375,3 +375,7 @@
 - `parts::validate_document(document)` は **`from_parts` と同一の `inventory_of`（借用ベースの共通関数）でモデルから目録を組み、`StructuralValidator::validate` を 1 回呼ぶだけ**の薄い経路である（**規則の実装は 4.7 の 1 箇所のまま**。規則を書き写さないこと）。出現箇所テキストも `inventory_of` の 1 箇所で組み立てるため、**同じ違反は読み込み経路と同一の文言で報告される**（`save` と `from_parts(&to_parts(..))` のエラーが一致するパリティテストで固定）。ワイヤ形の整合（行の値の個数と列数の一致、列名の重複）は `to_parts` 側の検査のまま
 - **`AtomicWriter` を使っていることの代理観測**: `tests/api.rs` に `#[cfg(unix)]` のテストを置き、**上書き保存で対象の inode が変わる**ことを確認している（rename による置換の代理観測。`commit` を `std::fs::write` に差し替える変異をこれが殺す。クラッシュ耐性そのものは観測不能）。inode の再利用は「一時ファイルが対象 inode を保持したまま生成される」ため起きず、偽陽性/偽陰性は生じない
 - **task 7.3 への申し送り**: 公開 `to_parts` は（`save` と違い）`validate_document` を呼ばない。公開契約として `to_parts` が構造検証を担うのか、`from_parts` 側の検証に委ねるのかを明示して決めること。**task 8.x への申し送り**: ゴールデン fixture の schema は型参照を持たないため、**型参照の誤検出防止の主たる防衛線は往復テスト**である（8.x で補強する余地）
+- task 7.3 で design の Service Interface の 4 メソッドが揃った（`open` / `save` / `to_parts` / `from_parts`）。`to_parts(document)` は **`parts::validate_document(document)?` → `parts::to_parts(document)`** の順で、**書き出し側の不変条件検証を含む**（`version-control` が「読み込み経路が拒否する集合」を手に入れられない。task 7.2 の裁定の帰結）。`from_parts(parts)` は `parts::from_parts(parts)` をそのまま呼ぶ（`open` と同じ 1 経路）。**Api 層に検証ロジックを持ち込まない**。`save` は `self.to_parts(document)?` → `encode` → `commit` に寄せてあり、**検証は `to_parts` 経由の 1 回だけ**
+- **`open` と `from_parts` の同一検証は実測で固定**（`tests/api.rs` のパリティテスト。ダイジェスト改竄 / 未来 major / 宙吊り型参照 / 未登録添付参照 / `TypeDefId` 重複宣言の 5 種で、変種と出現箇所テキストが `Debug` 表記で一致）。コンテナ層にしかない検査（許可リスト・重複パス・マーカー・CRC）は ZIP 固有であり、`DocumentParts` の正準化（マーカー拒否）と `EntryName` の閉じた型により `from_parts` 経路へは構造的に到達不能
+- **ZIP 非経由の実証は `tests/parts_contract.rs`**（新設。`document_format::container` を import せず、ファイル I/O もしない）。往復・エントリ名と中身の列挙・期待集合（`document.json` / シートごとの `schemas`・`sheets` / `attachments/<hex64>.bin` / `manifest.json`、`jxcel` を含まない）・各行エントリが自シートの行のみ（`RowsCodec::decode` で復号して実比較）・2 回の `to_parts` のバイト一致を検証する。**`open` / `save` のテストは `tests/api.rs`、ZIP 非経由の契約は `tests/parts_contract.rs`** と置き場を分けている（前者は `ContainerCodec` を import するため）
+- **task 7.4 への申し送り**: `save(document, path)` は `Document` しか受け取らず「読み込み時に変換が適用された」ことを運ばないため、**退避分岐の判定源**（モデル側に保持するか、`open` の `OpenOutcome` を保存側へ渡す新しい口を作るか）を 7.4 で決める必要がある。`MigrationChain::gate` は副作用なしで「移行が必要か」を判定できるが、「移行が成功したか」は `from_parts` が `Ok` を返したことで分かる
