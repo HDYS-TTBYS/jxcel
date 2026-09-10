@@ -220,7 +220,7 @@
   - _Depends: 7.1, 7.2, 7.3_
   - _Requirements: 2.2, 2.3, 4.1_
 
-- [ ] 8.2 決定性を検証する
+- [x] 8.2 決定性を検証する
   - 同一ドキュメントを 2 回保存してバイト単位で一致することを検証する
   - CI マトリクスで Linux / macOS / Windows の出力が一致することを検証する
   - _Depends: 1.2, 7.2_
@@ -387,3 +387,6 @@
 - task 8.1 で検証用の共通ヘルパ **`tests/common/mod.rs`** ができた（`Scratch`（リポジトリ内・`Drop` で削除）/ `snapshot` / `entry_names` / **`document_view` と `assert_same_document`（完全比較）** / 標本 5 種（最小・複数シート＋0 行・値の網羅・未参照添付・未知フィールド）/ 違反文書ビルダ）。`tests/api.rs` / `tests/parts_contract.rs` / `tests/roundtrip.rs` が `mod common;` で共有する。**`tests/common/mod.rs` は `document_format::container` を import しない**（ZIP 非経由の契約を import 一覧で示すため、コンテナ依存のヘルパは `tests/api.rs` 側に置く）。`dead_code` は複数バイナリが部分集合を使うため理由コメント付きで許容
 - **8.x の比較は `common::document_view` / `assert_same_document` を再利用すること**（第二の比較規約を作らない）。比較は ① `document_id` ② シート（**文書順**・ID・名前・**列順**・保持フィールド）③ 行（**行順**・`RowId`・`CellValue`）④ スキーマ（`root` と型定義 `definition` の**verbatim バイト列**・型参照）⑤ 添付（ID＋バイト列）⑥ 未参照添付 ⑦ **wire 射影（`to_parts` のエントリ名とバイト列）** の 7 観測点。7 は保持フィールドの公開アクセサが `pub(crate)` のため（`src/` 無変更で済ませるための射影）であり、`to_parts` は決定性があるので有効
 - 8.1 の往復は 3 経路（フルサーキット / `save`→`open` / ZIP 経由と非経由の 3 者一致）を**それぞれ独立テスト**で、**標本をループして**検証し、コミット済みゴールデン fixture を実ファイル経路でも通す。**未参照添付が往復で落ちないこと**も押さえている（要件 7.6 の前提。本格検証は 8.8）。`roundtrip.rs` の `the_comparison_view_separates_every_observable_aspect` が「比較の強度」の自己検査（各観測点を 1 箇所ずつ変えて検出）を担う。**`assert_same_document` の個別アサートを 1 つ抜く変異は `parts` 射影の比較に隠れて生存する**（冗長観測のため能力欠落ではないが、`parts` 比較を外す変更を入れるときは注意）
+- **【決定性の意味。重要】** 「同じ内容が常に同じバイト列」（要件 3.1）の「同じ内容」は**同じ識別子を持つ文書**を意味する: `DocumentId` / `SheetId` / `RowId` / 添付 ID は内容の一部であり、`Document::new` / `add_sheet` / `add_row` は ULID を発行するため、**新規作成した文書のバイト列がプロセスごとに違うのは違反ではない**（実測: `save(sample())` が同一コマンド 2 回で 2011 / 2019 バイト）。したがって**期待バイト列をコミットして比較するアンカーは、識別子まで固定された入力でなければならない**。既成の実体は `tests/fixtures/bytes/golden_container.zip`（5.2 が手で組んだ固定 ID の集合から生成）であり、**task 8.2 はこれを唯一のアンカーにした**（新規 fixture は作らない）。この解釈は `tests/determinism.rs` の module doc に明記済み
+- task 8.2 で `tests/determinism.rs`（4 本）と **`.github/workflows/ci.yml` への 1 ステップ追加**（`cargo test -p document-format --test determinism`）が入った。CI の 3 OS マトリクス（ubuntu / macos / windows）で**同一のコミット済み期待バイト列**と比較するため、これが要件 3.2（OS 間のバイト一致）の実測機構になる。検証内容は ① アンカー文書の `save` 出力 == fixture バイト列（かつ `encode(to_parts(..))` とも一致、1.1 秒待って別ディレクトリへ 2 回目保存でも一致）② `common` の 5 標本で別パス・別ディレクトリへの 2 回保存がバイト一致 ③ `save` 出力 == `encode(to_parts(..))` ④ **ファイルに落ちたバイト列**の生ヘッダで固定係数（日時 `(0x0000, 0x0021)` / `0o100644` / host system `3` / 順序 / マーカー `Stored` 先頭 / 他 `Deflate` / データディスクリプタ不在）を確認
+- **検証限界（task 8.2 の実測）**: ① 圧縮レベル 6→9 は **miniz_oxide が同一バイトを出すため等価**（差が出るのは低レベル側。6→1 は検出される）② `.last_modified_time` / `.system` / `.unix_permissions` の**明示固定を外す**変異は、この環境では crate 既定値が固定値と一致するため生存する（`.system` は Windows で差が出るので **CI の Windows レグだけが観測点**。これも CI マトリクスが必要な理由）③ 時刻依存は「現在時刻由来の値を**明示的に注入**する」変異（固定を外すのではなく）で検出できる ④ 新しい flag の `sleep(1.1s)` は秒境界を確実に跨ぐが、時刻依存自体はアンカー比較と生ヘッダ検査も捉えるため**防御的冗長**（CI の実行時間を 1 秒強使う）
