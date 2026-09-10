@@ -153,7 +153,7 @@
   - _Requirements: 5.6_
   - _Boundary: AtomicWriter_
 
-- [ ] 5.2 決定的な ZIP 書き出しを実装する
+- [x] 5.2 決定的な ZIP 書き出しを実装する
   - 更新日時、パーミッション、ホスト OS バイト、エントリ順序をすべて明示的に固定し、crate の既定値に依存しない
   - データディスクリプタを使わず、型マーカーを無圧縮で先頭に置く
   - 同一のパート集合に対して常に同一のバイト列を返すことをテストで示す
@@ -351,3 +351,8 @@
 - **不変条件「`Err` を返すなら対象は保存前のまま」を守ること（task 5.1 の裁定）**: design の保存フロー事後条件（`Err` ⇒ `path` は保存前の内容）と design エラー表の `Io` 応答「既存ファイルは無変更（5.6）」を守るため、**`rename` 成立後は `Err` を返さない**。親ディレクトリの同期は試行するが**失敗は握り潰して `Ok(())`**（失われうるのは置換の永続化だけ。**部分的に書かれたファイルにはならない**）。この判断と caveat は `atomic_save.rs` の doc に明記済みで、旧挙動（置換後の同期失敗を `Err` にする）は変異としてテストが検出する。**後続タスク（5.3 / 7.1 / 7.2）も「`Err` ⇒ 対象不変」を前提にしてよい**
 - 一時ファイルを使う保存を書くときの検証限界（task 5.1 レビューの実測）: 「ファイルの `sync_all` を外す」「親ディレクトリの fsync を外す」の 2 変異は**テストでは検出できない**（電源断を模擬しない限り耐久性は観測不能）。順序は `strace` 等の外部トレースで確認するほかない。テストで殺せるのは構造（同一ディレクトリ性・`rename` によるエントリ差し替え・失敗時の対象不変・一時ファイル非残留）までである
 - `AtomicWriter` は**モード（パーミッション）を継承しない**（`fs::write` 相当の既定）。シンボリックリンクはリンク自体が置換される。これらは doc に明記済み
+- task 5.2 で `container/writer.rs` に `ContainerCodec::encode(parts: &DocumentParts) -> Result<Vec<u8>, DocumentError>` が入った（無状態の inherent 型 + 関連関数。design の trait 形ではない）。**task 5.3 は同じ型に `decode` を追加する**（型を分けない）。決定性パラメータは `FileOptions::DEFAULT`（const。**`default()` は使わない**）から `MARKER_OPTIONS` / `PART_OPTIONS` を組み立てて明示固定: 更新日時 `DateTime::DEFAULT`（1980-01-01、MS-DOS 生値 `0x0000` / `0x0021`）、unix permissions `0o644`、`System::Unix`（ホスト OS バイト 3）、圧縮レベル 6。マーカーは `Stored`・先頭、他は `Deflate`、出力は `Cursor<Vec<u8>>`（**データディスクリプタ不使用**）。失敗は `DocumentError::Io { source, retried: false }`
+- **型マーカーの内容は `jxcel\n<major>.<minor>\n` で、バージョンは `parts.format_version()`（= 索引 `manifest.json` の記録値）から導出**する（`marker_bytes(version: FormatVersion)`）。**第二のリテラルを持たない**。マーカーは固定オフセットでの早期判定用の写しであり、**権威は常に索引**（正式なゲートは 6.1）。両者の一致は `the_type_marker_carries_the_manifest_format_version` が `zip::ZipArchive` 経由で値比較して固定する
+- **ゴールデン `tests/fixtures/bytes/golden_container.zip`（2125 バイト、sha256 `479b506b…`）が決定性の最終防衛線**。実文書（`DocumentPart` / `SchemaCodec` / `RowsCodec` / `ManifestPart` を公開 API から構築、6 エントリ）を符号化したバイト列で、テストはファイルのバイト列を期待値として読む（**実装の出力から期待値を組み立てない**）。`flate2` / `miniz_oxide` を更新したときに差分がここで顕在化するので、**再生成が必要になった場合は一時的な `#[ignore]` テストで作り直し、生成コードを残さない**（手順はテスト doc に記載済み）
+- **検証限界（task 5.2 レビューの実測）**: 明示固定を外しても**この環境では crate 既定値が同じ値になるため生存する変異**が 4 つある（`.last_modified_time` / `.unix_permissions` / `.system` / `.compression_level` の明示を外す）。値そのものは統合テストの**生ヘッダのリテラル期待値**とゴールデンが固定しており、`System` の明示は Windows でのみ差が出る（`time` feature 有効時は既定が現在時刻になる）。**「今は同じ値だから」を理由に明示指定を削除しないこと**（design は「crate の既定値に依存しない」と要求している）。テストが殺せるのは構造（順序・マーカーの位置と圧縮方式・日時/permissions の値・`encode` の再現性・標本間の一致）までである
+- **変異検査の手順（task 5.2 で 1 人目のレビュアーが変異を適用したまま中断し、親が復元する事故が起きた）**: 変異は必ず「バックアップ → ハッシュ記録 → 変異 → 観測 → **バイト単位で復元 → ハッシュ一致確認**」の順で 1 つずつ行い、**終了前に `git status --porcelain --untracked-files=all` が期待どおりであること**を確認する。変異観測は `cargo test -p document-format ...` に限定してよい（`--workspace` を毎回回すと時間とコンテキストを浪費する）
