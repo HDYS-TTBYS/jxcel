@@ -5,17 +5,19 @@
 //! 圧縮にも触れない（コンテナ層 = タスク 5.x の責務）。
 //!
 //! 現在あるのは **manifest パート**（`manifest.json`）と **document パート**
-//! （`document.json`）、**シート別スキーマパート**（`schemas/<sheet-ulid>.json`）である:
+//! （`document.json`）、**シート別スキーマパート**（`schemas/<sheet-ulid>.json`）、
+//! **シート別行データパート**（`sheets/<sheet-ulid>.jsonl`）である:
 //!
 //! | モジュール | エントリ | 責務 |
 //! |------------|----------|------|
 //! | [`manifest`] | `manifest.json` | 形式バージョン、パート索引、パートごとのダイジェスト（唯一の権威ある索引） |
 //! | [`document_part`] | `document.json` | ドキュメント識別子、シート順序、シートのメタデータ（安定メタデータ） |
 //! | [`schema_codec`] | `schemas/<sheet-ulid>.json` | シートごとのスキーマ（ルートスキーマ + ネスト型定義）の符号化・復号 |
+//! | [`rows_codec`] | `sheets/<sheet-ulid>.jsonl` | シートごとの行データ（1 行 1 オブジェクトの NDJSON）の符号化・復号 |
 //!
 //! 論理エントリ集合そのものの型 `DocumentParts`（エントリ名 → バイト列 + ダイジェストの
-//! 決定的な集合）と、残るパート（`sheets/*.jsonl` / `attachments/*.bin`）の符号化は
-//! 後続タスク（4.5, 4.8）で本層に加わる。
+//! 決定的な集合）と、残るパート（`attachments/*.bin`）の符号化は後続タスク（4.8）で
+//! 本層に加わる。
 //!
 //! # パートごとの順序規則
 //!
@@ -25,7 +27,9 @@
 //! 与えられた順序をそのまま保持して並べ替えない（[`document_part`]）。**逆の規則**で
 //! あるため、どちらの規則かを迷わないよう両モジュールの docs に理由を書いてある。
 //! `schemas/<sheet-ulid>.json` の型定義の並びも同じ側であり、エンベロープ内の出現順を
-//! そのまま書く（[`schema_codec`]）。
+//! そのまま書く（[`schema_codec`]）。`sheets/<sheet-ulid>.jsonl` も同じ側であり、
+//! **行順は与えられた順序のまま**（シートの行順序そのものがデータ。ULID 昇順にも辞書順にも
+//! ソートしない）で、列順は呼び出し元が与えた順序のままである（[`rows_codec`]）。
 //!
 //! # 依存方向
 //!
@@ -41,8 +45,10 @@
 
 pub mod document_part;
 pub mod manifest;
+pub mod rows_codec;
 pub mod schema_codec;
 
 pub use document_part::{DocumentPart, SheetMeta};
 pub use manifest::{resolve_manifest, ManifestEntry, ManifestPart};
+pub use rows_codec::{RowsCodec, RowsEncodeError, SheetRows};
 pub use schema_codec::SchemaCodec;
