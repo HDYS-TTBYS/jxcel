@@ -1,11 +1,21 @@
-//! Document 集約ルートと構造的不変条件(タスク 2.1。要件 1.1, 1.5, 1.6, 8.4)。
+//! Document 集約ルートと構造的不変条件(タスク 2.1 / 2.3。要件 1.1, 1.5, 1.6, 7.1, 7.5, 7.6, 8.4)。
 //!
 //! # 集約ルート
 //!
 //! design「Domain Model」: **集約ルートは [`Document`]**。すべての変更は `Document` を
-//! 経由し、シート・行は `Document` の外で独立に存在しない。[`Sheet`] の変更メソッドは
-//! クレート可視(`Document` が委譲する経路)で、外部から可変のシートを得る口は無い
-//! ([`Document::sheet_by_id`] は共有参照しか返さない)。
+//! 経由し、シート・行・添付は `Document` の外で独立に存在しない。[`Sheet`] の変更
+//! メソッドはクレート可視(`Document` が委譲する経路)で、外部から可変のシートを得る
+//! 口は無い([`Document::sheet_by_id`] は共有参照しか返さない)。
+//!
+//! # 添付の集約(要件 7.1, 7.5, 7.6)
+//!
+//! 添付は [`AttachmentRegistry`] が一手に保持し、[`Document`] が所有する
+//! (design ER 図 `Document ||--o{ Attachment : holds`)。追加は
+//! [`Document::add_attachment`](content-addressed で冪等)、取得は
+//! [`Document::attachment`]、未参照の一覧は [`Document::unreferenced_attachments`] である。
+//! 後者は全シート・全行のセル値を集計して [`AttachmentId`] 昇順で
+//! 返す**読み取り専用**の操作で、添付を削除も書き換えもしない(削除の API は存在しない)。
+//! 集計の詳細と不透明バイト列の扱いは model/attachment.rs のモジュール docs 参照。
 //!
 //! # 順序の保持(要件 1.1, 1.5)
 //!
@@ -28,13 +38,16 @@
 //! 重複注入の API 口は存在しない(他文書で発行した識別子は対象文書に挿入する経路が
 //! 無いため入り込めない)。読み込み時の重複検出・報告(要件 4.3 の `DuplicateId`)は
 //! 読み込み経路 `StructuralValidator` の役割で、本モデルの責務ではない。
+//! 添付の識別子は content-addressed(内容の BLAKE3)なので、同一バイト列の再登録は
+//! 同一エントリへの冪等な登録であり、重複した識別子を作る経路が無い。
 //!
 //! # design エラー表との関係
 //!
 //! design エラー表の 10 変種([`DocumentError`](crate::error::DocumentError))は I/O・
-//! 形式破損の診断である。モデル操作の失敗(実在しないシートの指定、順列でない並び替え
+//! 形式破損の診断である。モデル操作の失敗(実在しないシート・行の指定、順列でない並び替え
 //! 要求)は表のどの変種にも対応しないため、`DocumentError` に増やさず本モジュールの
-//! 最小ローカル型 [`UnknownSheet`] / [`ReorderError`] とする([`IdParseError`](crate::ids::IdParseError) と同じ
+//! 最小ローカル型 [`UnknownSheet`] / [`UnknownRow`] / [`ReorderError`] とする
+//! ([`IdParseError`](crate::ids::IdParseError) と同じ
 //! 「表に無いものはローカルに暫く置く」パターン)。panic にしないので呼び出し元が
 //! 実行時エラーとして扱える。
 //!
@@ -50,18 +63,25 @@
 //!   タスク 2.2 で [`Sheet::root_schema`] として結線済みである(新規シートは
 //!   [`SchemaPart::empty`] で初期化し、差し替えは [`Document::set_root_schema`] の置換
 //!   のみ = 0 個・2 個を作る口は無い)。
-//! * 添付レジストリ(タスク 2.3)、永続化(4.x)、行に値を設定する経路(parts 復路 3.x)は
-//!   本タスクの範囲外。
+//! * 添付はタスク 2.3 で結線済みである: 保持と参照集計は [`AttachmentRegistry`] が行い、
+//!   `attachments/<hex>.bin` への符号化は parts 層(タスク 4.3)、参照の実在検証
+//!   (要件 7.4 の `DanglingAttachmentRef`)は読み込み経路 `StructuralValidator`
+//!   (タスク 4.7)の責務で、本モジュールは添付の内容も参照整合性も解釈しない。
+//! * 行に値を設定する経路は [`Document::set_row_values`] として用意した(行データの
+//!   復号 = タスク 4.5 が消費する)。永続化(4.x)は本モジュールの範囲外。
 //! * [`Document`] / [`Sheet`] / [`Row`] は `Clone` を実装しない(識別子発行状態の clone
 //!   方針が未定。model/sheet.rs の「Clone を実装しない理由」参照)。
 
+mod attachment;
 mod schema_part;
 mod sheet;
 
 use thiserror::Error;
 
-use crate::ids::{IdFactory, RowId, SheetId};
+use crate::ids::{AttachmentId, IdFactory, RowId, SheetId};
+use crate::value::CellValue;
 
+pub use attachment::{Attachment, AttachmentRegistry};
 pub use schema_part::{RawField, RawJson, SchemaPart, TypeDef};
 pub use sheet::{Row, Sheet};
 
@@ -105,10 +125,25 @@ pub struct UnknownSheet {
     pub sheet: SheetId,
 }
 
+/// 実在しない行の指定([`Document::set_row_values`])。
+///
+/// [`UnknownSheet`] と同じく、design エラー表(I/O・形式診断の 10 変種)に対応変種が
+/// 無いモデル操作の失敗である。指定シートに属さない行(他シートの行・他文書の行)も
+/// 同じ失敗として報告し、panic しない。
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("no row {row} in sheet")]
+pub struct UnknownRow {
+    /// 指定されたが存在しなかった行識別子。
+    pub row: RowId,
+}
+
 /// jxcel ドキュメントの集約ルート。
 ///
 /// 0 個以上のシートを保持し(要件 1.1)、シート順序は [`Document::sheets`] の順である。
-/// すべての変更はこの型経由であり、識別子は所有する [`IdFactory`] から発行される
+/// 添付も [`Document`] が保持し(design ER 図 `Document ||--o{ Attachment : holds`)、
+/// 行のセル値からの参照は [`Document::unreferenced_attachments`] で集計される
+/// (要件 7.1, 7.5, 7.6。モジュール docs の「添付の集約」参照)。すべての変更はこの型
+/// 経由であり、識別子は所有する [`IdFactory`] から発行される
 /// (一意性が構築で保証される所以。モジュール docs 参照)。
 #[derive(Debug)]
 pub struct Document {
@@ -116,13 +151,19 @@ pub struct Document {
     ids: IdFactory,
     /// シート順そのものの列。
     sheets: Vec<Sheet>,
+    /// 添付の保持と参照集計(要件 7.1, 7.5, 7.6)。
+    attachments: AttachmentRegistry,
 }
 
 impl Document {
-    /// 0 シートの文書を作る(要件 1.1)。
+    /// 0 シート・0 添付の文書を作る(要件 1.1)。
     #[inline]
     pub fn new() -> Self {
-        Self { ids: IdFactory::new(), sheets: Vec::new() }
+        Self {
+            ids: IdFactory::new(),
+            sheets: Vec::new(),
+            attachments: AttachmentRegistry::new(),
+        }
     }
 
     /// シート順で反復する(要件 1.1。traceability `Document::sheets`)。
@@ -218,6 +259,65 @@ impl Document {
             .ok_or(ReorderError::UnknownSheet { sheet })?
             .reorder_rows(order)
     }
+
+    /// 任意のバイト列を添付として登録し、その識別子を返す(要件 7.1, 7.2, 7.5)。
+    ///
+    /// バイト列は解釈・変換・再圧縮せずそのまま保持する。識別子は content-addressed
+    /// (内容の BLAKE3)なので再登録は冪等であり、同一バイト列ではエントリが増えず
+    /// 同一の識別子が返る。未知のシート指定のような失敗経路は無い。
+    #[inline]
+    pub fn add_attachment(&mut self, bytes: Vec<u8>) -> AttachmentId {
+        self.attachments.add(bytes)
+    }
+
+    /// 識別子で添付を引く。未登録なら `None`(panic しない)。
+    #[inline]
+    pub fn attachment(&self, id: AttachmentId) -> Option<&Attachment> {
+        self.attachments.get(id)
+    }
+
+    /// 添付レジストリの共有参照(昇順反復・件数・参照集計)。
+    #[inline]
+    pub fn attachments(&self) -> &AttachmentRegistry {
+        &self.attachments
+    }
+
+    /// どの行のどのセル値からも参照されていない添付の識別子を昇順で返す(要件 7.6)。
+    ///
+    /// 全シート・全行のセル値を集計し、[`CellValue::Attachment`] の参照を
+    /// [`NestedValue`](crate::value::NestedValue) の内側まで再帰的にたどる。**削除も
+    /// 書き換えもしない**: 参照が無くなった添付は登録済みのまま残り、
+    /// [`Document::attachment`] で取得できる(削除の API は存在しない)。読むだけで
+    /// あるため、結果はシート順・行順・登録順に依存せず識別子の昇順に決まる。
+    ///
+    /// 実在しない識別子への参照は本集計の対象外である(報告は要件 7.4 の
+    /// `DanglingAttachmentRef` = 読み込み経路 `StructuralValidator` の責務)。
+    pub fn unreferenced_attachments(&self) -> Vec<AttachmentId> {
+        let values = self
+            .sheets
+            .iter()
+            .flat_map(|sheet| sheet.rows().iter())
+            .flat_map(Row::values);
+        self.attachments.unreferenced_attachments(values)
+    }
+
+    /// 指定行のセル値を列順の値で**置き換える**(要件 7.3 の参照を作る公開経路)。
+    ///
+    /// 行データの復号(タスク 4.5)が行 1 件分の値列をそのまま復元するための入口であり、
+    /// 追加ではなく置換である(行の識別子は変わらない)。指定シートに属さない行は
+    /// [`UnknownRow`] を返し、どの行の値も変更しない。
+    pub fn set_row_values(
+        &mut self,
+        sheet: SheetId,
+        row: RowId,
+        values: Vec<CellValue>,
+    ) -> Result<(), UnknownRow> {
+        self.sheets
+            .iter_mut()
+            .find(|s| s.id() == sheet)
+            .ok_or(UnknownRow { row })?
+            .set_row_values(row, values)
+    }
 }
 
 impl Default for Document {
@@ -229,8 +329,9 @@ impl Default for Document {
 
 #[cfg(test)]
 mod tests {
-    use super::{Document, ReorderError, Row, SchemaPart, Sheet, UnknownSheet};
-    use crate::ids::{RowId, SheetId};
+    use super::{Document, ReorderError, Row, SchemaPart, Sheet, UnknownRow, UnknownSheet};
+    use crate::ids::{AttachmentId, RowId, SheetId};
+    use crate::value::{CellValue, NestedValue};
 
     #[test]
     fn empty_document_is_valid() {
@@ -524,4 +625,137 @@ mod tests {
         }
     }
 
+    #[test]
+    fn attachment_registry_is_reachable_through_the_document() {
+        // 要件 7.1 / 7.5: Document 経由で任意のバイト列を保持し、そのまま取り出せる。
+        let mut doc = Document::new();
+        assert!(doc.attachments().is_empty());
+        assert!(doc.unreferenced_attachments().is_empty());
+
+        let payload: Vec<u8> = vec![0xff, 0x00, 0xfe, 0x80];
+        let id = doc.add_attachment(payload.clone());
+        let stored = doc.attachment(id).expect("登録直後の添付は取得できる");
+        assert_eq!(payload, stored.bytes(), "1 バイトも変わらない");
+        assert_eq!(AttachmentId::from_bytes(&payload), id, "識別子は内容の BLAKE3");
+        assert_eq!(id, stored.id());
+        assert_eq!(1, doc.attachments().len());
+
+        // 同一バイト列の再登録は冪等(エントリは増えない)。
+        assert_eq!(id, doc.add_attachment(payload.clone()));
+        assert_eq!(1, doc.attachments().len());
+
+        // 未登録の識別子は `None`(panic しない)。
+        assert!(doc.attachment(AttachmentId::from_bytes(b"unknown")).is_none());
+
+        // どの行からも参照されていないため未参照として一覧できる(削除はしない)。
+        assert_eq!(vec![id], doc.unreferenced_attachments());
+        assert_eq!(payload, doc.attachment(id).unwrap().bytes());
+    }
+
+    #[test]
+    fn set_row_values_replaces_the_row_values() {
+        // parts 復路(タスク 4.5)が行 1 件分の値列を復元するための入口。
+        let mut doc = Document::new();
+        let sheet = doc.add_sheet("rows");
+        let row = doc.add_row(sheet).unwrap();
+        assert!(doc.sheet_by_id(sheet).unwrap().rows()[0].values().is_empty());
+
+        let first = vec![CellValue::Int(1), CellValue::Text("x".to_string())];
+        doc.set_row_values(sheet, row, first.clone()).unwrap();
+        let observed: Vec<CellValue> = doc.sheet_by_id(sheet).unwrap().rows()[0].values().to_vec();
+        assert_eq!(first, observed);
+
+        // 追加ではなく置換: 2 回目の設定で値列は置き換わり、行は増えず識別子も不変。
+        doc.set_row_values(sheet, row, vec![CellValue::Null]).unwrap();
+        let sheet_ref = doc.sheet_by_id(sheet).unwrap();
+        assert_eq!(1, sheet_ref.rows().len(), "行は増えない");
+        assert_eq!(row, sheet_ref.rows()[0].id(), "行識別子は設定で変わらない");
+        assert_eq!(vec![CellValue::Null], sheet_ref.rows()[0].values().to_vec());
+    }
+
+    #[test]
+    fn set_row_values_reports_unknown_targets_without_mutation() {
+        let mut doc = Document::new();
+        let sheet = doc.add_sheet("rows");
+        let row = doc.add_row(sheet).unwrap();
+        let other_sheet = doc.add_sheet("other");
+        let stranger_row = doc.add_row(other_sheet).unwrap();
+        let stranger_sheet = {
+            let mut scratch = Document::new();
+            scratch.add_sheet("ghost")
+        };
+        let attachment = doc.add_attachment(b"kept".to_vec());
+
+        // 未知の行(このシートに属さない行)は `UnknownRow` で報告する。
+        assert_eq!(
+            Err(UnknownRow { row: stranger_row }),
+            doc.set_row_values(sheet, stranger_row, vec![CellValue::Attachment(attachment)])
+        );
+        // 未知のシートも同じ失敗である: 存在しないシートに行は無いため、診断は
+        // 「その行が無い」に一本化する(シート専用のエラー型は増やさない)。
+        assert_eq!(
+            Err(UnknownRow { row }),
+            doc.set_row_values(stranger_sheet, row, vec![CellValue::Attachment(attachment)])
+        );
+
+        // どちらの失敗でも既存の行は無変更で、添付も削除されない。
+        assert!(doc.sheet_by_id(sheet).unwrap().rows()[0].values().is_empty());
+        assert_eq!(b"kept".to_vec(), doc.attachment(attachment).unwrap().bytes());
+    }
+
+    #[test]
+    fn references_are_aggregated_across_sheets_and_rows_deterministically() {
+        // 要件 7.6: 全シート・全行のセル値を集計し、未参照だけを昇順で返す。
+        let mut doc = Document::new();
+        let first = doc.add_sheet("first");
+        let second = doc.add_sheet("second");
+        let row_a = doc.add_row(first).unwrap();
+        let row_b = doc.add_row(first).unwrap();
+        let row_c = doc.add_row(second).unwrap();
+        let row_d = doc.add_row(second).unwrap();
+
+        let shared = doc.add_attachment(b"shared".to_vec());
+        let only_b = doc.add_attachment(b"only-b".to_vec());
+        let only_c = doc.add_attachment(b"only-c".to_vec());
+        let orphan = doc.add_attachment(b"orphan".to_vec());
+
+        // 参照なしの時点では 4 件すべてが未参照(昇順)。
+        let mut all = vec![shared, only_b, only_c, orphan];
+        all.sort();
+        assert_eq!(all, doc.unreferenced_attachments());
+
+        doc.set_row_values(first, row_a, vec![CellValue::Attachment(shared)]).unwrap();
+        doc.set_row_values(
+            first,
+            row_b,
+            vec![CellValue::Nested(NestedValue::Array(vec![CellValue::Attachment(only_b)]))],
+        )
+        .unwrap();
+        doc.set_row_values(second, row_c, vec![CellValue::Attachment(shared)]).unwrap();
+        // `only_c` は 2 枚目のシートからのみ参照される: 全シートを走査しなければ
+        // 未参照に見えてしまう添付であり、この集計の回帰検出点である。
+        doc.set_row_values(second, row_d, vec![CellValue::Attachment(only_c)]).unwrap();
+
+        // 別シートからの参照も参照済みとして集計される: 1 枚目からのみ参照される
+        // `only_b` と 2 枚目からのみ参照される `only_c` はいずれも一覧に現れない。
+        let mut expected_after = vec![orphan];
+        expected_after.sort();
+        assert_eq!(expected_after, doc.unreferenced_attachments());
+
+        // 行順を入れ替えても、シート名を変えても結果は同一(順序は識別子で決まる)。
+        let reversed: Vec<RowId> =
+            doc.sheet_by_id(first).unwrap().rows().iter().map(Row::id).rev().collect();
+        doc.reorder_rows(first, &reversed).unwrap();
+        doc.rename_sheet(first, "renamed").unwrap();
+        assert_eq!(expected_after, doc.unreferenced_attachments());
+
+        // `second` を除去すると `only_c` の参照が消えて未参照に戻るが、エントリは削除されない。
+        // `shared` は 1 枚目から参照され続けるため未参照にはならない。
+        doc.remove_sheet(second).unwrap();
+        let mut expected_removed = vec![only_c, orphan];
+        expected_removed.sort();
+        assert_eq!(expected_removed, doc.unreferenced_attachments());
+        assert_eq!(b"only-c".to_vec(), doc.attachment(only_c).unwrap().bytes());
+        assert_eq!(b"shared".to_vec(), doc.attachment(shared).unwrap().bytes());
+    }
 }

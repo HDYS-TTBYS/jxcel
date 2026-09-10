@@ -41,7 +41,7 @@ use crate::ids::{RowId, SheetId};
 use crate::value::CellValue;
 
 use super::schema_part::SchemaPart;
-use super::ReorderError;
+use super::{ReorderError, UnknownRow};
 
 /// シート内の行。列順の [`CellValue`] を保持する(design「Domain Model」の
 /// `Row ||--o{ CellValue : holds`)。
@@ -68,13 +68,22 @@ impl Row {
         &self.values
     }
 
-    /// クレート内構築口。タスク 2.1 で値を持つ行の公開経路は無い
-    /// ([`Document::add_row`](super::Document::add_row) が空の値の行を作る。
-    /// 値の入った行の構築は parts 層からのモデル構築(タスク 3.x / 4.x)で、
-    /// その入口はこの関数に `pub(crate)` のコンストラクタを追加する)。
+    /// クレート内構築口。空の値の行を作る([`Document::add_row`](super::Document::add_row))。
+    /// 値の設定は [`Row::set_values`] が担い、その公開経路は
+    /// [`Document::set_row_values`](super::Document::set_row_values) だけである
+    /// (行データの復号 = タスク 4.5 が消費する)。
     #[inline]
     pub(crate) fn new(id: RowId) -> Self {
         Self { id, values: Vec::new() }
+    }
+
+    /// 列順のセル値を置き換える経路(`Document::set_row_values` が呼ぶ)。
+    ///
+    /// 追加ではなく置換である(行 1 件分の値列をそのまま復元するため)。行の識別子には
+    /// 触れない。
+    #[inline]
+    pub(crate) fn set_values(&mut self, values: Vec<CellValue>) {
+        self.values = values;
     }
 }
 
@@ -149,6 +158,24 @@ impl Sheet {
     #[inline]
     pub(crate) fn push_row(&mut self, row: Row) {
         self.rows.push(row);
+    }
+
+    /// 指定行のセル値を置き換える(`Document::set_row_values` が呼ぶ)。
+    ///
+    /// 対象の行がこのシートに無ければ [`UnknownRow`](super::UnknownRow) を返し、どの行の
+    /// 値も変更しない(部分適用なし)。行の識別子と行順序は変わらない。
+    pub(crate) fn set_row_values(
+        &mut self,
+        row: RowId,
+        values: Vec<CellValue>,
+    ) -> Result<(), UnknownRow> {
+        match self.rows.iter_mut().find(|r| r.id() == row) {
+            Some(target) => {
+                target.set_values(values);
+                Ok(())
+            }
+            None => Err(UnknownRow { row }),
+        }
     }
 
     /// 行順序を与えられた順列で置き換える。識別子は一切変更しない(要件 1.5)。

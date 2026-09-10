@@ -64,7 +64,7 @@
   - _Boundary: SchemaPart_
   - _Depends: 1.3_
 
-- [ ] 2.3 (P) 添付レジストリと参照集計を実装する
+- [x] 2.3 (P) 添付レジストリと参照集計を実装する
   - 任意のバイト列を添付として保持し、解釈・変換・再圧縮を行わない
   - 添付のバイト列が保持と取り出しで 1 バイトも変わらないことをテストで示す
   - どの行からも参照されていない添付を削除せず、未参照として一覧できる
@@ -288,3 +288,8 @@
 - task 2.2 が `schemas/<sheet-ulid>.json` のエンベロープ形 `{"root": <opaque>, "types": [{"id": <ULID-26>, "definition": <opaque>}]}` を確定させた（design は形状未規定）。task 4.4 の SchemaCodec はこの定義を引き継ぎ、最終的な決定的符号化とバイト再構成を担当する
 - `SchemaPart::type_ref_targets()` は参照**先**の生テキストのみを返し参照元情報を持たない。task 4.7 で `DanglingTypeRef { from, to }`（design エラー表）を組むには、`root()` / `TypeDef::definition()` の `RawJson` を再走査して参照元を復元する必要がある
 - スキーマ層で解析失敗を表現する既定規約（task 1.5 の `value.rs` と同一）: 型付き変種を持たないコンテンツ解析失敗は `DocumentError::InvalidContainer` の `entry` に「失敗箇所のラベル + 理由」を文字列で載せる。診断は `schemas entry: root` / `schemas entry: type <ULID>` の形
+- task 2.3 でモデルに**セル値の設定経路**が入った: `Document::set_row_values(sheet, row, Vec<CellValue>) -> Result<(), UnknownRow>`（`Sheet::set_row_values` / `Row::set_values` は `pub(crate)`）。要件 7.6「未参照添付の一覧」を公開 API 経由で観測可能にするために親が承認した越境で、task 4.5（行データの復号）はこの経路で行を組み立てる。**未知シートも `UnknownRow { row }` として報告される**（戻り型を単一化した帰結。呼び出し元はシート誤りと行誤りを区別できない）
+- 添付レジストリの反復順は `AttachmentId` の昇順（`BTreeMap` による構造保証）。登録順・行順に依存しないため、task 4.8 の `attachments/<hex64>.bin` エントリ順（エントリ名昇順）と自然に一致する
+- **添付の削除・prune・gc 経路は存在しない**（要件 7.5 / 7.6 の「自動的に削除しない」を API 不在で表現）。後続タスクで添付の整理機能を足す場合は本要件との衝突を先に解消すること
+- `Attachment::bytes()` は `&[u8]` を返す（`Vec<u8>` のコピーを作らない）。添付は非 UTF-8・NUL 込み・既圧縮バイト列をそのまま保持し、内容を検査・変換・再圧縮するコードを一切持たない
+- レビュー教訓（task 2.3 で実際に検出された欠陥）: 「全シート走査」のような横断集計のテストは、**後続要素のみが参照するデータ**を含めないと `take(1)` 変異を検出できない（初回提出は 87 テスト全緑のまま変異が通過し REJECTED）。同種の検証（task 8.1〜8.8）では、対象を 2 つ以上に分散させたうえで**変異を入れて落ちることを実測**してから完了とすること
