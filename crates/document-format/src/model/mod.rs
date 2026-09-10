@@ -82,7 +82,7 @@ use crate::ids::{AttachmentId, IdFactory, RowId, SheetId};
 use crate::value::CellValue;
 
 pub use attachment::{Attachment, AttachmentRegistry};
-pub use schema_part::{RawJson, SchemaPart, TypeDef};
+pub use schema_part::{RawJson, SchemaPart, TypeDef, TypeRef};
 // エンベロープ文法のキーは parse(本モジュール)と符号化(タスク 4.4 の `SchemaCodec`)が
 // 共有する。文字列リテラルを両実装へ散在させないため、`parts` 層へ同じ定数を渡す。
 pub(crate) use schema_part::{KEY_DEFINITION, KEY_ID, KEY_ROOT, KEY_TYPES};

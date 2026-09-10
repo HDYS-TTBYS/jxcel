@@ -15,7 +15,7 @@
 //! | [`document_part`] | `document.json` | ドキュメント識別子、シート順序、シートのメタデータ（安定メタデータ） |
 //! | [`schema_codec`] | `schemas/<sheet-ulid>.json` | シートごとのスキーマ（ルートスキーマ + ネスト型定義）の符号化・復号 |
 //! | [`rows_codec`] | `sheets/<sheet-ulid>.jsonl` | シートごとの行データ（1 行 1 オブジェクトの NDJSON）の符号化・復号 |
-//! | [`validate`] | — | 復号済みパート群の目録に対する構造検証（識別子の一意性とスキーマの存在） |
+//! | [`validate`] | — | 復号済みパート群の目録に対する構造検証（識別子の一意性、スキーマの存在、参照の実在性） |
 //!
 //! 論理エントリ集合そのものの型 `DocumentParts`（エントリ名 → バイト列 + ダイジェストの
 //! 決定的な集合）と、残るパート（`attachments/*.bin`）の符号化は後続タスク（4.8）で
@@ -55,4 +55,7 @@ pub use document_part::{DocumentPart, SheetMeta};
 pub use manifest::{resolve_manifest, ManifestEntry, ManifestPart};
 pub use rows_codec::{RowsCodec, RowsEncodeError, SheetRows};
 pub use schema_codec::SchemaCodec;
-pub use validate::{IdDeclaration, PartInventory, StructuralValidator};
+pub use validate::{
+    AttachmentRefDeclaration, IdDeclaration, PartInventory, SheetRefDeclaration,
+    StructuralValidator, TypeRefDeclaration,
+};

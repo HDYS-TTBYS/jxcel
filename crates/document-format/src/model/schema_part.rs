@@ -76,7 +76,9 @@
 //!   (コンテナ水準。文書化済み決定)。
 //!
 //! 走査順は `root`、次に型定義を保持順。1 ペイロード内はドキュメント順で、**重複を
-//! 保持**して返す(呼び出し側が重複排除する。テストで文書化)。
+//! 保持**して返す(呼び出し側が重複排除する。テストで文書化)。抽出した参照は 2 つの
+//! ビューで取り出せる: 生テキストのみの [`SchemaPart::type_ref_targets`] と、参照元つきの
+//! [`SchemaPart::type_refs`](要素は [`TypeRef`]。タスク 4.7。同一の走査が双方を埋める)。
 //!
 //! # 構築 API と Sheet 結線
 //!
@@ -114,8 +116,8 @@ pub(crate) const KEY_DEFINITION: &str = "definition";
 const REF_KEY: &str = "$ref";
 /// `SchemaPart::parse` 失敗時の診断接頭辞(エントリ種別)。
 const ENTRY_CONTEXT: &str = "schemas entry";
-/// ルート・ペイロード走査の診断接頭辞。
-const ROOT_CONTEXT: &str = "schemas entry: root";
+/// ルート・ペイロードの参照位置ラベル(参照元の診断と、走査失敗の診断接頭辞の双方を作る)。
+const ROOT_LABEL: &str = "root";
 /// [`SchemaPart::empty`] が持つ空のルート・ペイロード。
 const EMPTY_ROOT: &str = "null";
 
@@ -225,13 +227,43 @@ impl TypeDef {
     }
 }
 
+/// 型定義参照 1 件(参照元ラベルと参照先の生テキスト。タスク 4.7。要件 1.7 / 4.2)。
+///
+/// [`SchemaPart::type_refs`] が返すビューであり、[`DocumentError::DanglingTypeRef`] の
+/// `from` / `to` の両側を組み立てるための型である(どちらがどちらかが型から読める)。
+///
+/// * [`TypeRef::from`] は参照が現れた位置のラベルである: ルート・ペイロードなら `root`、
+///   型定義の中なら `type <ULID-26>`。エントリ名(`schemas/<ulid>.json`)を前置して診断用の
+///   参照元テキストにするのは呼び出し元の `parts` 層の責務である。
+/// * [`TypeRef::to`] は `$ref` の値の**生テキスト**である。本クレートは参照構造だけを見る
+///   ため、ULID とは限らない(存在検証は `parts` 層。design「スキーマペイロードの不透明性」)。
+///
+/// `PartialEq` は提供しない([`SchemaPart`] / [`TypeDef`] と同じ方針。タスク 2.2 / 4.1〜4.4)。
+#[derive(Debug, Clone)]
+pub struct TypeRef {
+    from: String,
+    to: String,
+}
+
+impl TypeRef {
+    /// 参照元ラベル(`root` または `type <ULID-26>`)。
+    pub fn from(&self) -> &str {
+        &self.from
+    }
+
+    /// 参照先の生テキスト(`$ref` の値。ULID とは限らない)。
+    pub fn to(&self) -> &str {
+        &self.to
+    }
+}
+
 /// 不透明スキーマ・ペイロード: ルートスキーマ 1 つとネスト型定義 N 件(要件 1.2, 1.3)。
 ///
 /// 構造は保持のみで、ペイロード内部を解釈しない。抽出するのは型定義の識別子
-/// ([`SchemaPart::type_def_ids`])と参照ターゲットの生テキスト
-/// ([`SchemaPart::type_ref_targets`])だけである。構築は [`SchemaPart::parse`] と
-/// [`SchemaPart::empty`] のみで、部分変更の API は持たない(モジュール docs の
-/// 「構築 API と Sheet 結線」参照)。
+/// ([`SchemaPart::type_def_ids`])と参照の出現
+/// ([`SchemaPart::type_refs`] / [`SchemaPart::type_ref_targets`])だけである。構築は
+/// [`SchemaPart::parse`] と [`SchemaPart::empty`] のみで、部分変更の API は持たない
+/// (モジュール docs の「構築 API と Sheet 結線」参照)。
 ///
 /// `PartialEq` は提供しない: 保持している未知フィールドの比較には読み込みカーソル
 /// ([`PreservedFields`] の内部状態)が混じり、内容の等値を素直に表せないためである。
@@ -246,7 +278,14 @@ pub struct SchemaPart {
     type_defs: Vec<TypeDef>,
     /// 解釈しないトップレベルのフィールド(前方互換。要件 6.2 / 6.3)。
     preserved: PreservedFields,
+    /// 参照ターゲットの生テキスト(走査順。重複保持)。[`SchemaPart::type_ref_targets`] が
+    /// そのまま返す、タスク 2.2 からの互換ビューである。
     ref_targets: Vec<String>,
+    /// 参照元つきの出現列(タスク 4.7)。[`SchemaPart::type_refs`] がそのまま返す。
+    /// `ref_targets` と同じ 1 回の走査が双方を埋める(走査器は 1 つ)。ターゲットの
+    /// テキストを両ビューが別々に持つのは、互換ビューが `[String]`、こちらが [`TypeRef`] の
+    /// 出現列という別々の型だからである(参照は希少で、解析時に 1 回だけ複製する)。
+    refs: Vec<TypeRef>,
 }
 
 impl SchemaPart {
@@ -268,10 +307,14 @@ impl SchemaPart {
 
         // 参照抽出: ルートを先に、続いて型定義を保持順に走査する。抽出は構造の走査
         // のみで、型の意味論は一切解釈しない(失敗は該当パスのラベル付きで報告)。
-        let mut ref_targets = scan_refs(&envelope.root, &ROOT_CONTEXT)?;
+        // 走査は 1 回だけで、参照元つきの出現列(タスク 4.7)とターゲット列(タスク 2.2
+        // からの互換ビュー)を同時に埋める。
+        let mut ref_targets = Vec::new();
+        let mut refs = Vec::new();
+        scan_payload(&envelope.root, &ROOT_LABEL, &mut refs, &mut ref_targets)?;
         for def in &envelope.types {
-            let context = format!("{}: type {}", ENTRY_CONTEXT, def.id);
-            ref_targets.extend(scan_refs(&def.definition, &context)?);
+            let label = format!("type {}", def.id);
+            scan_payload(&def.definition, &label, &mut refs, &mut ref_targets)?;
         }
 
         Ok(Self {
@@ -279,6 +322,7 @@ impl SchemaPart {
             type_defs: envelope.types,
             preserved: envelope.preserved,
             ref_targets,
+            refs,
         })
     }
 
@@ -296,6 +340,7 @@ impl SchemaPart {
             type_defs: Vec::new(),
             preserved: PreservedFields::new(),
             ref_targets: Vec::new(),
+            refs: Vec::new(),
         }
     }
 
@@ -321,6 +366,20 @@ impl SchemaPart {
     /// ULID 妥当性・存在の有無は検証しない — 検証はタスク 4.7 の担当)。
     pub fn type_ref_targets(&self) -> &[String] {
         &self.ref_targets
+    }
+
+    /// 参照を**参照元つき**で列挙する(タスク 4.7。要件 1.7 / 4.2)。
+    ///
+    /// 各要素は [`TypeRef`] である: [`TypeRef::from`] は参照元ラベル(`root` または
+    /// `type <ULID-26>`。エントリ名を前置して診断用の参照元テキストを組むのは呼び出し元の
+    /// `parts` 層)、[`TypeRef::to`] は `$ref` の値の**生テキスト**(ULID とは限らない)である。
+    /// 順序と重複の保持は [`SchemaPart::type_ref_targets`] と同一であり、同じ 1 回の走査が
+    /// 双方を埋める(`type_ref_targets` はターゲットのみの互換ビュー)。
+    ///
+    /// 参照の実在検証(同一シートの型定義集合にあるか)は本クレートの `parts` 層
+    /// ([`crate::parts::StructuralValidator`])の責務であり、ここでは区分もしない。
+    pub fn type_refs(&self) -> &[TypeRef] {
+        &self.refs
     }
 
     /// エンベロープのトップレベルで保持した未知キー(原文の位置ごと。要件 6.2 / 6.3)。
@@ -565,13 +624,32 @@ impl<'de> DeserializeSeed<'de> for RefTarget {
     }
 }
 
-/// 不透明ペイロード 1 本分の参照走査。`context` は診断の接頭辞(失敗箇所のラベル)。
-fn scan_refs(raw: &RawJson, context: &dyn fmt::Display) -> Result<Vec<String>, DocumentError> {
-    let mut targets = Vec::new();
+/// 不透明ペイロード 1 本を走査し、参照元つきの出現列と互換ビュー(ターゲット列)を
+/// **同じ 1 回の走査**で埋める(タスク 4.7。走査器を二重に持たない)。
+///
+/// `label` は参照元ラベルであり、同時に走査失敗の診断接頭辞(`schemas entry: <label>`)を
+/// 作る。走査が失敗した場合、このペイロードの参照は 1 件も採用されない(呼び出し元は
+/// 全体を中止するため、部分的な列は捨てられる)。
+fn scan_payload(
+    raw: &RawJson,
+    label: &dyn fmt::Display,
+    refs: &mut Vec<TypeRef>,
+    targets: &mut Vec<String>,
+) -> Result<(), DocumentError> {
+    let start = targets.len();
     serde_json::Deserializer::from_str(raw.as_str())
-        .deserialize_any(RefScan { targets: &mut targets })
-        .map_err(|e| container_error(context, &e))?;
-    Ok(targets)
+        .deserialize_any(RefScan { targets: &mut *targets })
+        .map_err(|e| container_error(&format_args!("{}: {}", ENTRY_CONTEXT, label), &e))?;
+    // 出現列はターゲット列の同じ範囲から作る(順序も重複もそのまま)。
+    if targets.len() > start {
+        let from = label.to_string();
+        refs.extend(
+            targets[start..]
+                .iter()
+                .map(|target| TypeRef { from: from.clone(), to: target.clone() }),
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
