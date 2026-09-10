@@ -98,7 +98,7 @@
   - ダイジェストが一致しない場合に該当エントリ名を含むエラーを返すことをテストで示す
   - _Requirements: 5.1, 5.2, 5.3_
 
-- [ ] 4.2 マニフェストパートを実装する
+- [x] 4.2 マニフェストパートを実装する
   - 形式バージョン、パート索引、パートごとのダイジェストを保持する唯一の権威ある索引とする
   - マニフェストが存在しない場合に不足パート名を含むエラーで中止することをテストで示す
   - _Requirements: 4.5, 6.1_
@@ -309,3 +309,7 @@
   - 行ファイル末尾に**自前の `\n` を足さない**（`write_ndjson` が LF 終端済み。二重改行は空行 = 読みで `InvalidContainer`）
   - `location` に `sheets/<sheet-id>.jsonl` を渡し、行番号付き `InvalidContainer` を保つ
   - 全 `null` 行・空列を間引かない（1 行変更 → 1 行差分が崩れる）
+- task 4.2 で `parts/` 層が新設され、`ManifestPart`（`manifest.json` の唯一の権威ある索引 = 形式バージョン + エントリ名→BLAKE3 ダイジェスト）が入った。`entry_name.rs` に `pub const MANIFEST_ENTRY` を追加済み（**"manifest.json" の文字列リテラルを実装経路に散在させないこと**。索引はエントリ名昇順、`manifest.json` 自身の索引掲載と索引内の重複エントリ名は拒否、`ManifestPart` 自身のダイジェストは自己記録しない）
+- **未知フィールドの保持範囲（task 4.2 の裁定）**: design の `DeterministicJson` の責務にスコープ限定が無いため、**トップレベルだけでなく索引要素（`{"name":..., "blake3":...}`）の中の未知キーも位置ごと保持し書き戻す**。新しく「バージョン付きの JSON オブジェクト構造」を作るタスク（4.3 / 4.4 / 6.1 / 6.2）も、**その構造の全階層**で同じ保持を適用すること（要素ごとに `PreservedFields` を 1 つ持たせる）。対象外は (a) 未知キーの `\uXXXX` 等のエスケープ**表記**、(b) 値・区切りの外側の空白、の 2 点のみ
+- **`PreservedFields` を保持する型に `#[derive(PartialEq)]` を後付けしないこと**（task 4.2 の申し送り）: `PreservedFields` は内部カーソル `known_seen` 込みで `PartialEq` を導出しているため、保持フィールドが空同士でも `record_known_field` の呼び出し回数が違うと**不等**になる（`src/json/determinism.rs`）。task 4.8（モデル ⇄ パート集合）と task 8.1（往復同一性）でパート集合の等価比較が必要になったら、`entries()` の写像か符号化バイト列で比較すること
+- task 4.2 の `ManifestPart` / `ManifestEntry` は `PartialEq` を実装しない（上記カーソル事情。`ManifestEntry` は `Vec` を保持するため `Copy` も無い）。比較は `version()` / `entries()` / 符号化バイト列で行う

@@ -125,6 +125,14 @@ pub enum EntryName {
     },
 }
 
+/// 権威あるパート索引 `manifest.json` のエントリ名。
+///
+/// パート欠落の報告（要件 4.5 の [`crate::error::DocumentError::MissingPart`]）や
+/// マニフェストの符号化は、この定数だけを供給元にする（エントリ名の文字列リテラルを
+/// 他所へ散在させない）。[`EntryName::parse`] の文法・許可リストは本定数の追加で
+/// 一切変わらない（[`LAYOUT_FORMS`] の 1 形に名前を付けただけである）。
+pub const MANIFEST_ENTRY: EntryName = EntryName::Manifest;
+
 impl EntryName {
     /// エントリ名を許可リスト文法で解析する。受理は完全一致、それ以外は
     /// [`DocumentError::InvalidContainer`] として**拒否**（サニタイズ不可、要件 2.5）。

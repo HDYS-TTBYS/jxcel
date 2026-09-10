@@ -8,6 +8,7 @@ pub mod ids;
 pub mod integrity;
 pub mod json;
 pub mod model;
+pub mod parts;
 pub mod value;
 
 pub use entry_name::EntryName;
