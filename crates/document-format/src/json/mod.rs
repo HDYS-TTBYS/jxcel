@@ -41,6 +41,15 @@
 //! 「動的な列集合の順序をスキーマ側に依存する」を、モジュール境界として明示した
 //! ものである）。
 //!
+//! # 未知フィールドの保持（前方互換。要件 6.2 / 6.3）
+//!
+//! バージョン付きのパート構造体は、自分のバージョンが解釈しないフィールドを破棄せず、
+//! **原文の位置**へ差し戻して書き戻す。この機構は本モジュールの 1 か所
+//! （[`determinism`]）にあり、[`PreservedField`] / [`PreservedFields`]（読み込み時の
+//! 保持）と [`PreservingObjectWriter`]（書き出し時の差し戻し）が公開面である。
+//! 値は `serde_json::value::RawValue` が捕捉した原文のバイト列であり、汎用 JSON 値型を
+//! 経由しない（規則 3 の例外ではなく、規則 3 を満たすための仕組みである）。
+//!
 //! # 依存方向
 //!
 //! `Ids / Value / EntryName → Model → Json → Parts → Container → Api` の一方向
@@ -49,4 +58,7 @@
 
 pub mod determinism;
 
-pub use determinism::{write_cell, write_json, write_ordered_object};
+pub use determinism::{
+    write_cell, write_json, write_ordered_object, PreservedField, PreservedFields,
+    PreservingObjectWriter,
+};
