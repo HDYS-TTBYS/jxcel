@@ -4,11 +4,13 @@
 
 pub mod error;
 pub mod ids;
+pub mod value;
 
 pub use error::{DocumentError, FormatVersion, IdKind};
 pub use ids::{
     AttachmentId, Blake3Digest, IdFactory, IdParseError, RowId, SheetId, TypeDefId,
 };
+pub use value::{CellValue, NestedValue, from_json_bytes, to_json_bytes};
 
 #[cfg(test)]
 mod scaffold_tests {

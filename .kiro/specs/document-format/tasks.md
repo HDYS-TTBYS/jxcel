@@ -32,7 +32,7 @@
   - すべての変種が生成・照合できることをテストで示す
   - _Requirements: 4.5, 5.3, 6.5_
 
-- [ ] 1.5 セル値の wire 表現を実装する
+- [x] 1.5 セル値の wire 表現を実装する
   - Null / Bool / Int / Float / Decimal / Text / Nested / Attachment の閉じた列挙型を定義する
   - 汎用 JSON 値型を内部表現に使わず、整数と浮動小数点の型ドリフトが起きないことをテストで示す
   - NaN と Infinity が型付きエラーとして拒否され、無効な JSON が書かれないことをテストで示す
@@ -281,4 +281,6 @@
 - zip 8.6.0 の素の `deflate` feature は `[deflate-zopfli, deflate-flate2-zlib-rs]` のバンドルで zlib-rs を誘発する。`deflate-flate2` のみを使うこと（`deflate-zopfli` / `deflate-flate2-zlib-rs` を有効化する feature 変更は miniz_oxide 固定とゴールデンテストを壊す）
 - criterion 0.8: `criterion_main!` は群名必須、`criterion::black_box` は非推奨で `std::hint::black_box` を使う
 - ulid は 3.0 に解決済み（design は major 未固定）。ulid 3 の API で実装すること
+- CellValue wire 規約（task 1.5、value.rs）: 文字列の判定制御は 64 文字英小文字 hex → Attachment、十進文法 → Decimal、その他 Text。誤解釈される Text と十進文法外 Decimal は `{"$t":"text"|"decimal","v":...}` エスケープ。Nested の `$` 始まりキーは `$$...` にエスケープ（書き手が生の `$` キーを出力しないことが全エスケープの前提）。i64 範囲外整数リテラルは prescan で `InvalidContainer`（serde_json が範囲外整数を黙って f64 に落とすため）
+- `serde_json` は `float_roundtrip` feature が必須（既定のパーサは約 30% の f64 で 1 ULP ドリフト。レビューの probe で確認）。外すと読み込み時に値が壊れる
 - `[lib] bench = false` が必須（crates/document-format/Cargo.toml）: libtest 自動ベンチが `cargo bench --workspace -- --save-baseline=...` のファンアウトで criterion フラグを弾き、ベンチ経路がexit 101 になる（task 1.2 で発覚）。決定的ベンチは `[[bench]]` ターゲットのみで運用する

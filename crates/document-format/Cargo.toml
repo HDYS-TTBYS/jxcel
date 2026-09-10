@@ -32,7 +32,11 @@ zip = { version = "8.6", default-features = false, features = ["deflate-flate2"]
 # zlib / zlib-ng feature 無効）。zip の deflate パスと同一ノードに統一される。
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# float_roundtrip: f64 リテラルの読みをビット単位で一致させる(既定のパースは
+# ランダムな f64 の約 3 割が 1 ULP 漂う)。書き出し側は zmij の最短位表記が
+# feature 有無と無関係に同じバイト列を出すため、wire 形式は変わらない
+# (`5.0` は `5.0`、`-0.0` は正規化後の `0.0` のまま)。
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 tempfile = "3.27"
 blake3 = "1.8"
 ulid = "3.0"
