@@ -21,16 +21,47 @@
 //! 多段の適用そのものはクレート内部の合成表（`migration::steps::synthetic`）を使う単体テストが
 //! 担う（統合テストは公開面だけを使うため、ステップ表を注入できない）。ここは公開経路と
 //! コンテナ経路の端から端までを確かめる。
+//!
+//! # タスク 8.7 で足したこと（ゴールデン fixture。要件 6.2, 6.3, 6.4）
+//!
+//! 移行チェーンの中間ステップが未保守のまま腐る失敗形態は先行事例（nbformat）で実際に起きて
+//! おり、**過去版ごとのゴールデン fixture が唯一の防御**である（design「Migration Strategy /
+//! 検証チェックポイント」）。本ファイルは次を固定する:
+//!
+//! - [`the_current_version_golden_fixture_round_trips_byte_for_byte`]: 現行版の fixture
+//!   （`tests/fixtures/golden/v1/anchored.jxcel`）が現行として読め、往復で**同一のコンテナ**に
+//!   戻ること（期待値は fixture のバイト列そのもの）。
+//! - [`every_version_in_the_migration_chain_has_a_golden_fixture`]: `STEPS` の各段の `from` と
+//!   `CURRENT_FORMAT_VERSION` から**必要な fixture の集合を導出**し、その全てに実在する fixture
+//!   が記録バージョンまで一致して置かれていること。新しい版を足して fixture を忘れると落ちる。
+//!
+//! **変換が発生した場合に初回保存で退避が残ること**（要件 6.4）は、ディスク上の古い版 fixture を
+//! 入力にする必要があるため、`src/lib.rs` のクレート内部テスト
+//! `save_after_migrating_a_disk_fixture_keeps_the_pre_conversion_file` が担う（`from_parts_with`
+//! と合成ステップ表がクレート内部のため。統合テストは公開面だけを使う）。
 
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use document_format::container::ContainerCodec;
 use document_format::entry_name::MANIFEST_ENTRY;
+use document_format::migration::steps::STEPS;
 use document_format::parts::{from_parts, to_parts, DocumentParts, ManifestEntry, ManifestPart};
-use document_format::{Document, DocumentError, EntryName, FormatVersion};
+use document_format::{
+    Document, DocumentError, DocumentFormat, DocumentFormatApi, EntryName, FormatVersion,
+    CURRENT_FORMAT_VERSION,
+};
 
-/// 本実装の現行バージョン（design「Container Entry Layout」の 1.0）。
-const CURRENT: FormatVersion = FormatVersion::new(1, 0);
+/// 本実装の現行バージョン。
+///
+/// クレートの**単一定義**から導出する（テスト内に `1.0` を直書きしない。「現行が 1.0 である」
+/// ことの固定は `src/migration/mod.rs` の `the_current_version_is_one_zero` が担う）。
+const CURRENT: FormatVersion = CURRENT_FORMAT_VERSION;
+
+/// 公開経路を起動する実装（design はトレイトのみを指定するため、無状態の具象型を使う）。
+fn api() -> DocumentFormat {
+    DocumentFormat::new()
+}
 
 /// 標本の文書。ゲートの判定は内容に依存しないため 0 シートの最小の文書で足りる。
 fn sample() -> Document {
@@ -176,16 +207,29 @@ fn an_older_major_without_a_migration_target_is_rejected() {
 /// # 配置・命名・生成・更新の規約
 ///
 /// - **配置**: 形式バージョンごとに `tests/fixtures/golden/v<major>/` を置く（初版は `v1/`）。
-///   空のディレクトリは git に載らないため、`.gitkeep` を置いて追跡される形にする。
+///   ディレクトリが空になる場合は `.gitkeep` を置いて追跡される形にする（`v1/` は
+///   `anchored.jxcel` を持つため `.gitkeep` を置かない）。
 /// - **命名**: その版の代表的なドキュメントを `<名前>.jxcel` として置く（複数可）。名前は内容が
 ///   分かる英小文字の語（例 `minimal.jxcel` / `two_sheets.jxcel`）。
 /// - **生成**: 期待値は**その版を書いた実装の出力**をそのまま固定する（手書きでも外部ツールでも
 ///   ない。`tests/fixtures/bytes/golden_container.zip` と同じ方針）。生成コードは残さない。
+///   `v1/anchored.jxcel` は `tests/container_writer.rs` の `fixed_parts`（識別子まで固定した
+///   1 シート 40 行 + 添付の標本）を `ContainerCodec::encode` へ通した出力であり、
+///   `tests/fixtures/bytes/golden_container.zip` と同一のバイト列である（git のブロブは
+///   内容アドレスで共有されるため、バイト列を二重に保持しない）。
 /// - **更新**: 形式バージョンを上げたときは**新バージョンの fixture を追加**し、過去バージョンの
-///   fixture は「移行チェーンが現行版へ運べること」の入力として保つ（比較そのものはタスク 8.7 が
-///   追加する）。移行チェーンの中間ステップが未保守のまま腐る失敗形態は先行事例（nbformat）で
+///   fixture は「移行チェーンが現行版へ運べること」の入力として保つ（比較は
+///   [`the_current_version_golden_fixture_round_trips_byte_for_byte`] と
+///   [`every_version_in_the_migration_chain_has_a_golden_fixture`] が担う。タスク 8.7）。
+///   移行チェーンの中間ステップが未保守のまま腐る失敗形態は先行事例（nbformat）で
 ///   実際に起きており、fixture が唯一の防御である（design「Migration Strategy /
 ///   検証チェックポイント」）。
+///
+/// **初版の注記（実在する過去版は無い）**: 現時点でコミットされているのは `v1/`（現行版）
+/// だけである。古い版を移行の入力にするテストは、コミット済みの現行版 fixture の
+/// **記録バージョンだけを差し替えて合成**する（`src/lib.rs` の
+/// `save_after_migrating_a_disk_fixture_keeps_the_pre_conversion_file`）。**v0 という形式は
+/// 歴史上存在せず**、合成の入力は「過去版が実在した」ことを意味しない。
 #[test]
 fn the_golden_fixture_directory_for_the_current_version_exists() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -234,5 +278,175 @@ fn a_newer_major_survives_the_container_until_the_read_gate() {
         }
         Ok(document) => panic!("拒否されずモデルが返った（{} シート）", document.sheets().len()),
         Err(other) => panic!("コンテナ経路の変種が違う: {other}"),
+    }
+}
+
+/// 形式バージョン `version` のゴールデン fixture の置き場（`tests/fixtures/golden/v<major>/`）。
+///
+/// ディレクトリ名が表すのは **major** だけである（minor の fixture も同じディレクトリへ置き、
+/// 記録バージョンで区別する。`the_golden_fixture_directory_for_the_current_version_exists`
+/// の doc「配置・命名」）。
+fn golden_directory(version: FormatVersion) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("tests/fixtures/golden/v{}", version.major))
+}
+
+/// ディレクトリ直下の `.jxcel` fixture を名前順で返す（列挙順に依存しない）。
+///
+/// `.gitkeep` 等の fixture でないファイルは除く。
+fn golden_fixtures(directory: &Path) -> Vec<PathBuf> {
+    let mut fixtures: Vec<PathBuf> = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("{} が読めない: {error}", directory.display()))
+        .map(|entry| entry.expect("ディレクトリ要素が読める").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "jxcel"))
+        .collect();
+    fixtures.sort();
+    fixtures
+}
+
+/// 現行版のゴールデン fixture の絶対パス（`golden/v<現行 major>/` のうち、**記録バージョンが
+/// [`CURRENT`] と一致する**コンテナ）。
+///
+/// 選択は「ディレクトリにある唯一の `.jxcel`」ではなく**記録バージョンの一致**で行う。規約
+/// （[`the_golden_fixture_directory_for_the_current_version_exists`] の doc）は「同じ major の
+/// 複数 minor は同じディレクトリへ置き、**記録バージョンで区別する**」と定めているため、
+/// 例えば minor の fixture（記録 1.1）を同じ `v1/` へ足しても本ヘルパは壊れない。
+fn current_golden_fixture() -> PathBuf {
+    let directory = golden_directory(CURRENT);
+    let mut matches: Vec<PathBuf> = Vec::new();
+    for path in golden_fixtures(&directory) {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("{} が読めない: {error}", path.display()));
+        let recorded = ContainerCodec::decode(&bytes)
+            .unwrap_or_else(|error| {
+                panic!("{} がコンテナとして復号できない: {error}", path.display())
+            })
+            .format_version();
+        if recorded == CURRENT {
+            matches.push(path);
+        }
+    }
+    assert_eq!(
+        1,
+        matches.len(),
+        "{} に記録バージョン {CURRENT} の fixture が 1 つでない: {matches:?}",
+        directory.display()
+    );
+    matches.into_iter().next().expect("1 つある")
+}
+
+/// 現行版（v1）のゴールデン fixture は現行として読め、往復で**同一のコンテナ**に戻る
+/// （要件 4.1, 6.2, 3.1）。
+///
+/// 期待値は **fixture のバイト列そのもの**である（実装の出力から期待値を組み立てる自己参照を
+/// しない。`tests/container_writer.rs` の `encode_matches_the_committed_golden_bytes` と同じ
+/// 方針）。確かめるのは 4 点:
+///
+/// 1. `open` が成功すること（現行版として読める）。
+/// 2. 変換が発生しないこと（`OpenOutcome::migrated_from` が `None`）。
+/// 3. `to_parts` → 符号化が fixture のバイト列と同一であること（往復決定性）。
+/// 4. 公開の `from_parts` / `to_parts` 経由でも同じ文書が得られること（ZIP を経由しない経路）。
+#[test]
+fn the_current_version_golden_fixture_round_trips_byte_for_byte() {
+    let path = current_golden_fixture();
+    let expected =
+        fs::read(&path).unwrap_or_else(|error| panic!("{} が読めない: {error}", path.display()));
+
+    let outcome = api().open(&path).expect("現行版の fixture は現行として読める");
+    assert_eq!(None, outcome.migrated_from, "現行版の fixture で移行が起きた");
+
+    let parts = api().to_parts(&outcome.document).expect("読み込んだ文書は保存できる");
+    assert_eq!(CURRENT, parts.format_version(), "fixture が現行版として読まれていない");
+    let encoded = ContainerCodec::encode(&parts).expect("符号化");
+    assert_eq!(
+        expected,
+        encoded,
+        "現行版の fixture の往復がバイト単位で一致しない（要件 3.1, 6.2）"
+    );
+
+    // ファイルを経由しない公開契約（`version-control` との唯一の接点）でも同じ文書になる。
+    let restored = api().from_parts(&parts).expect("集合からモデルへ戻せる");
+    let reencoded = ContainerCodec::encode(&api().to_parts(&restored).expect("保存経路"))
+        .expect("符号化");
+    assert_eq!(expected, reencoded, "from_parts / to_parts 経由の往復が一致しない");
+}
+
+/// 移行チェーンと現行バージョンが要求する全ての版に、ゴールデン fixture が実在する
+/// （design「Migration Strategy / 検証チェックポイント」。要件 6.2, 6.3）。
+///
+/// # 何を導出しているか
+///
+/// `STEPS` の各段の `from`（＝移行の**入力**になる版）と `CURRENT_FORMAT_VERSION` が、
+/// ゴールデン fixture を持つべき版の集合そのものである。実装の表 [`STEPS`] を読み取り、
+/// 表と fixture の食い違いをテストの構造で検出する（新しい版を足して fixture を忘れた瞬間に
+/// ここが落ちる）。
+///
+/// # 新しい形式バージョンを足すときの手順
+///
+/// 1. `migration::steps::STEPS` に隣接版の変換（`from` → `to`）を足し、
+///    `CURRENT_FORMAT_VERSION` を新しい版へ上げる。
+/// 2. **その版を書いた実装の出力**を `tests/fixtures/golden/v<新しい major>/<名前>.jxcel`
+///    として置く（手書きでも外部ツールでもない。生成コードは残さない。配置・命名の規約は
+///    [`the_golden_fixture_directory_for_the_current_version_exists`] の doc）。同じ major の
+///    複数 minor は同じディレクトリに置き、**記録バージョンで区別する**（ディレクトリ名が
+///    表すのは major だけである）。
+/// 3. 過去版の fixture は**移行の入力として残す**（消さない）。過去版を消すと、移行チェーンの
+///    中間ステップが未保守のまま腐る失敗形態を検出できなくなる（先行事例 nbformat）。
+///
+/// 1 だけを行って 2 を忘れると本テストが「fixture が無い」で落ちる。
+///
+/// # 検査の内容
+///
+/// 要求された版 `version` について、(a) `golden/v<major>/` が存在し、(b) `.jxcel` fixture を
+/// 少なくとも 1 つ持ち、(c) そこにある fixture は全てコンテナとして復号できて記録 major が
+/// ディレクトリ名と一致し、(d) `version` と**記録バージョンまで一致する** fixture が 1 つ以上
+/// あること（`from` と記録値は minor も含めて完全一致で引かれるため）を確かめる。
+#[test]
+fn every_version_in_the_migration_chain_has_a_golden_fixture() {
+    let mut versions: Vec<FormatVersion> = STEPS.iter().map(|step| step.from()).collect();
+    versions.push(CURRENT_FORMAT_VERSION);
+    versions.sort();
+    versions.dedup();
+    assert!(!versions.is_empty(), "現行版が fixture の要求集合へ入っていない");
+
+    for version in versions {
+        let directory = golden_directory(version);
+        assert!(
+            directory.is_dir(),
+            "要求された版 {version} の置き場が無い: {}",
+            directory.display()
+        );
+
+        let fixtures = golden_fixtures(&directory);
+        assert!(
+            !fixtures.is_empty(),
+            "要求された版 {version} の fixture が {} に無い（新しい版を足したら、\
+             その版を書いた実装の出力を置くこと）",
+            directory.display()
+        );
+
+        let mut exact = false;
+        for path in &fixtures {
+            let bytes =
+                fs::read(path).unwrap_or_else(|error| panic!("{} が読めない: {error}", path.display()));
+            let decoded = ContainerCodec::decode(&bytes).unwrap_or_else(|error| {
+                panic!("{} がコンテナとして復号できない: {error}", path.display())
+            });
+            let recorded = decoded.format_version();
+            assert_eq!(
+                version.major,
+                recorded.major,
+                "{} の記録 major がディレクトリ名 v{} と違う: {recorded}",
+                path.display(),
+                version.major
+            );
+            exact |= recorded == version;
+        }
+        assert!(
+            exact,
+            "golden/v{}/ に記録バージョン {version} の fixture が無い（過去版は移行の入力として\
+             保持すること）",
+            version.major
+        );
     }
 }

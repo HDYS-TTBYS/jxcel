@@ -760,4 +760,86 @@ mod tests {
             "退避の失敗が一時ファイルの残骸を残した"
         );
     }
+
+    /// 現行版のコミット済みゴールデン fixture（`tests/fixtures/golden/v<major>/anchored.jxcel`）
+    /// の絶対パス。
+    ///
+    /// 形式バージョンごとの置き場の規約は統合テスト `tests/migration.rs` の
+    /// `the_golden_fixture_directory_for_the_current_version_exists` の doc にある。本テストは
+    /// クレート内（`from_parts_with` と合成ステップ表が要る）ため、その fixture をここから
+    /// 読む。
+    fn golden_fixture_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "tests/fixtures/golden/v{}/anchored.jxcel",
+            CURRENT_FORMAT_VERSION.major
+        ))
+    }
+
+    /// **ディスク上の**古い版 fixture を移行の入力にした保存でも、初回保存で変換前のファイルが
+    /// `<ファイル名>.bak` へ退避される（要件 6.4）。
+    ///
+    /// # task 7.4 のテストとの差
+    ///
+    /// [`save_after_conversion_keeps_the_pre_conversion_file_as_a_backup`] は**メモリ上**で
+    /// 組み立てた古い版の集合を `from_parts_with` へ直接渡す。本テストは入力が違う: コミット
+    /// 済みの v1 ゴールデン fixture を読み、記録バージョンだけを合成の古い値へ書き換えた
+    /// コンテナを**ディスクへ置き、読み直してから**移行する（実ファイルが移行の入力になる
+    /// 経路を固定する）。退避の作成・非上書きそのものは 7.4 と同じ実装を通る。
+    ///
+    /// **v0 という形式は歴史上存在しない。** 古い版は記録バージョンだけを差し替えた**合成の
+    /// 入力**であり（[`synthetic::OLDEST`]）、移行の適用は実表ではなくテスト専用の合成表
+    /// （[`synthetic::MULTI_STEP`]）で行う（design「初版は v1 のみのため移行ステップの実装は
+    /// 存在しない」）。
+    #[test]
+    fn save_after_migrating_a_disk_fixture_keeps_the_pre_conversion_file() {
+        let scratch = Scratch::new("golden_migration_backup");
+        let path = scratch.file("anchored.jxcel");
+
+        // 現行版のゴールデン fixture を読み、記録バージョンだけを合成の古い値へ書き換えた
+        // 「古い版のコンテナ」をディスクへ置く（索引のダイジェストは実体に一致したまま）。
+        let current_bytes = fs::read(golden_fixture_path()).expect("ゴールデン fixture が読める");
+        let current = ContainerCodec::decode(&current_bytes).expect("ゴールデンは復号できる");
+        let old_bytes =
+            ContainerCodec::encode(&synthetic::recorded_at(synthetic::OLDEST, &current))
+                .expect("符号化");
+        fs::write(&path, &old_bytes).expect("古い版の fixture を置ける");
+        #[cfg(unix)]
+        let inode_before = inode(&path);
+
+        // **ディスク上のファイルを移行の入力にする**（読み直して復号してから移行する）。
+        let from_disk =
+            ContainerCodec::decode(&fs::read(&path).expect("古い版が読める")).expect("復号できる");
+        let migrated =
+            from_parts_with(synthetic::MULTI_STEP, &from_disk).expect("古い版は移行して読める");
+        assert!(
+            migrated.was_converted_from_an_older_format(),
+            "移行が適用されたのに変換済みが立たない"
+        );
+
+        api().save(&migrated, &path).expect("保存できる");
+
+        // (a) 退避は保存前のファイル（古い版の fixture）とバイト単位で一致する。
+        let backup = scratch.file("anchored.jxcel.bak");
+        assert_eq!(
+            old_bytes,
+            fs::read(&backup).expect("退避が読める"),
+            "退避が古い版 fixture のバイト列と一致しない"
+        );
+        // (b) 対象は新しい内容（現行版）になっている。
+        let new_bytes = fs::read(&path).expect("対象が読める");
+        assert_ne!(old_bytes, new_bytes, "対象が古い版のままである");
+        // (c) 対象は原子的置換されている（inode の変化を代理観測）。
+        #[cfg(unix)]
+        assert_ne!(inode_before, inode(&path), "対象が原子的置換されていない");
+        // 保存された対象は現行版として読める（移行後の内容が書かれている）。
+        let reopened = api().open(&path).expect("保存された対象は現行版として読める");
+        assert_eq!(None, reopened.migrated_from, "保存された対象が現行版として読めない");
+        // (d) 2 回目の保存は退避（変換前の原本）を上書きしない。
+        api().save(&migrated, &path).expect("2 回目も保存できる");
+        assert_eq!(
+            old_bytes,
+            fs::read(&backup).expect("読める"),
+            "2 回目の保存が退避（変換前の原本）を上書きした"
+        );
+    }
 }

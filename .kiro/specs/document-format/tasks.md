@@ -252,7 +252,7 @@
   - _Requirements: 5.6_
   - _Boundary: AtomicWriter_
 
-- [ ] 8.7 (P) 移行のゴールデン fixture を追加する
+- [x] 8.7 (P) 移行のゴールデン fixture を追加する
   - 形式バージョン v1 のゴールデン fixture を追加し、現行として読めることを検証する
   - 変換が発生した場合に初回保存で退避が残ることを検証する
   - 以降のバージョン追加時に fixture の追加が必要であることを、テストの構造で強制する
@@ -409,3 +409,7 @@
 - **8.6 の検証限界（5.1 の申し送りと一致）**: `sync_all` の耐久性と置換後の親ディレクトリ fsync は**このテストでも埋まらない**（`sync_all` 除去変異は位相要件で確率的に RED になるだけで、耐久性の検出ではない。親 fsync 除去は生存）。固定できるのは構造（同一ディレクトリ性・rename 差し替え・中断時の対象不変・残骸の有無）まで
 - **【既知の穴（8.6 レビューの判定 = 非阻害）】`tests/atomic_save.rs` は `#![cfg(unix)]`** のため **Windows では 0 テスト**になる（macOS は `unix` なので実行される）。判定理由: `Child::kill()` は Windows でも `TerminateProcess` で機構は移植可能 / 「rename まで対象に触れない」保証は OS 非依存の共有経路にあり、Windows 固有差分（共有違反リトライの分類）は Windows CI 上の**単体**テストで検証済み / タスク受入と design は全 OS を要求していない。**拡張するなら「inode 比較を `#[cfg(unix)]` 化し、Windows はバイト列 + 長さ + mtime で代替、`signal()` を `code()` へ分岐」**。ただし **Windows 実機での検証手段が手元に無い状態で cfg 分岐を足すと未検証コードが増える**ため、実機で走らせられる人が行うのが安全
 - **8.6 のフレーキー耐性の条件**: 位相の成立は「4 MiB の `sync_all` が親のポーリングで観測できる長さ」に依存する。fsync が実質ゼロ時間の FS（tmpfs 等）や高負荷な runner では「書き切り後」を捕捉できない可能性がある（緩和はペイロード拡大）
+- task 8.7 で移行のゴールデン fixture が入った: **`tests/fixtures/golden/v1/anchored.jxcel`（コミット済み。`bytes/golden_container.zip` と同一バイト列 = 識別子まで固定した現行版コンテナ。真偽の源は `tests/container_writer.rs` の `fixed_parts` 生成手順）**。`golden/v1/.gitkeep` は fixture 実体が入ったため削除。統合テスト 2 本（`tests/migration.rs` が計 10 本）+ crate 内部 1 本（`src/lib.rs` の `#[cfg(test)]` のみ、**プロダクション差分 0**）
+- **【移行 fixture の作法】** 古い版の入力は**テスト時に合成**する: コミット済み v1 fixture を `decode` → **記録バージョンだけ**を古い値へ書き換え（`manifest.json` は自身を索引しないのでダイジェスト整合は壊れない）→ `encode` → **ディスクへ書いて読み直してから**移行に渡す。**「v0 という形式は歴史上存在しない」＝合成入力であることを doc に明記**し、新しい移行ステップを `src/` に足さないこと（design「初版は v1 のみ」）。移行の適用は `#[cfg(test)]` の合成表 + `parts::from_parts_with`（`pub(crate)`）で行う
+- **【構造による強制（8.7 の中核）】** テストが **`STEPS` の各 `from` と `CURRENT_FORMAT_VERSION` から「必要な fixture の集合」を導出**し、各版の `golden/v<major>/` の存在・**fixture の記録バージョンがディレクトリ名と一致**・コンテナとして復号可能であることを検証する。**新しい版を足してステップを書くと、fixture を足すまでテストが落ちる**（`STEPS` にダミー段を足す変異で実測済み）。**fixture の選択は「記録バージョン一致」で行う**（「現行 major ディレクトリの唯一の `.jxcel`」という形は **同じ major の新しい minor の fixture を足した瞬間に panic する**ため避ける）
+- **8.7 の検証限界**: 現行版 fixture は**バイト往復**まで検証しているが、将来版の fixture は構造テストが**存在・復号・記録バージョン一致**までしか見ない（バイト往復は現行版のみ）。将来版を足すときは**その版の往復検証も足す**ことが望ましい（規約 doc に手順を書くこと）
