@@ -193,7 +193,7 @@
   - _Depends: 4.1, 4.6, 4.7, 4.8, 5.3, 6.2_
   - _Requirements: 4.1, 5.2, 5.4, 5.5, 8.5_
 
-- [ ] 7.2 ドキュメントを保存する経路を結線する
+- [x] 7.2 ドキュメントを保存する経路を結線する
   - 不変条件の検証、パート構築、ダイジェスト算出、決定的符号化、原子的書き込みをこの順に接続する
   - いずれかの段階で失敗した場合、既存ファイルが一切変更されないことをテストで示す
   - _Depends: 4.1, 4.2, 4.8, 5.1, 5.2_
@@ -370,3 +370,8 @@
 - task 7.1 で公開 API 層が `src/lib.rs` に入った: `SUPPORTED_ROW_LIMIT`（= 100_000。要件 8.4 / 8.5）、`OpenOutcome { document, migrated_from, beyond_supported_scale }`、**トレイト `DocumentFormatApi`**（本タスクは `open` のみ。`save` / `to_parts` / `from_parts` は 7.2 / 7.3 が**同じトレイトへ加点**する。スタブは置かない）、具象型 `DocumentFormat`（`const fn new()`）。`open` の順序は ① `std::fs::read`（失敗は `Io { retried: false }`）→ ② `ContainerCodec::decode` → ③ `MigrationChain::gate`（`migrated_from` の事前判定）→ ④ `parts::from_parts`（ゲート・移行・ダイジェスト照合・構造検証・モデル構築の 1 経路）→ ⑤ 規模の通知。**検証ロジックをこの層に再実装しない**（各層の 1 経路を呼ぶだけ）
 - **`migrated_from` は `MigrationChain::gate` の判定から導く**（`from_parts` のシグネチャを変えないため。`gate` は純粋なので 2 回呼んでよい）。写像は**クレート内部の純粋関数 `migrated_from_verdict`** に切り出し、3 分岐（`NeedsMigration → Some` / `Openable`・`Unsupported → None`）を単体テストで固定している（**初版は移行チェーンが空で `Ok` になる古い版が存在しないため、`migrated_from = Some` の成功経路は統合テストから観測不能**。これが理由でこの写像だけは単体テストで守る）。**task 7.4 / 8.7 への申し送り**: 段付きチェーン（または過去版 fixture）が入った時点で `Some` の成功経路の統合テストを必須にすること
 - task 7.1 の公開 API テストは `tests/api.rs`（design のテストファイル一覧に Api 層の項目が無いための新設）。**非書き込み（要件 5.5）の検証は「対象ファイルのバイト列 + 作業ディレクトリのエントリ一覧」の両方を前後で比較**する形にすること（一時ファイルを作って消す実装でもディレクトリ mtime が変わるため、一覧だけでなく mtime まで見るのが望ましい）。規模境界（要件 8.5）は 1 シート 100_000 行 → `false` / 100_001 行 → `true` を**リテラルで**固定し、`SUPPORTED_ROW_LIMIT == 100_000` は別テストで固定する（**しきい値を期待値に使う自己参照テストにしない**）。行は O(1) の `Sheet::push_row` 系で積むこと（`set_row_values` は O(n²)）
+- task 7.2 で公開 `DocumentFormatApi::save(document, path)` が入った。順序は design の保存フローどおり **① `parts::validate_document(document)?` → ② `parts::to_parts(document)?` → ③ `ContainerCodec::encode(&parts)?` → ④ `AtomicWriter::commit(path, &bytes)`**。**書き込みは ④ の 1 箇所だけ**で、①〜③ の失敗は書き込み前に起きる（＝既存ファイルはバイト列・inode・mtime とも不変）。`save` は `parts` / `container` の 1 経路を呼ぶだけで、検証・構築・符号化を Api 層に再実装しない
+- **【事実の訂正。重要】モデルの不変条件は構築 API では強制されない**（当初「構築で強制されるので保存時に再検証しない」と裁定したが誤りだった。レビューで公開 API から違反状態を作れることを実測）: `SchemaPart::parse` は `$ref` の**実在を見ない**、`CellValue::Attachment` は**レジストリ登録を強制しない**、`SchemaPart` のペイロードは**同一 `TypeDefId` の重複宣言を排除しない**。したがって **`save` の第 1 段の不変条件検証は必須**であり、外すと「自分自身の `open` が拒否するファイルを正常終了で書き出す」状態に戻る（変異で検出できる）。構築で強制されるのは「各シートちょうど 1 つのルートスキーマ」「改名・並べ替えで識別子が不変」「`SheetId` / `RowId` の発行経路」程度である
+- `parts::validate_document(document)` は **`from_parts` と同一の `inventory_of`（借用ベースの共通関数）でモデルから目録を組み、`StructuralValidator::validate` を 1 回呼ぶだけ**の薄い経路である（**規則の実装は 4.7 の 1 箇所のまま**。規則を書き写さないこと）。出現箇所テキストも `inventory_of` の 1 箇所で組み立てるため、**同じ違反は読み込み経路と同一の文言で報告される**（`save` と `from_parts(&to_parts(..))` のエラーが一致するパリティテストで固定）。ワイヤ形の整合（行の値の個数と列数の一致、列名の重複）は `to_parts` 側の検査のまま
+- **`AtomicWriter` を使っていることの代理観測**: `tests/api.rs` に `#[cfg(unix)]` のテストを置き、**上書き保存で対象の inode が変わる**ことを確認している（rename による置換の代理観測。`commit` を `std::fs::write` に差し替える変異をこれが殺す。クラッシュ耐性そのものは観測不能）。inode の再利用は「一時ファイルが対象 inode を保持したまま生成される」ため起きず、偽陽性/偽陰性は生じない
+- **task 7.3 への申し送り**: 公開 `to_parts` は（`save` と違い）`validate_document` を呼ばない。公開契約として `to_parts` が構造検証を担うのか、`from_parts` 側の検証に委ねるのかを明示して決めること。**task 8.x への申し送り**: ゴールデン fixture の schema は型参照を持たないため、**型参照の誤検出防止の主たる防衛線は往復テスト**である（8.x で補強する余地）

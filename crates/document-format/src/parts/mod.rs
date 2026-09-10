@@ -55,7 +55,7 @@ pub mod schema_codec;
 pub mod validate;
 
 pub use document_part::{DocumentPart, SheetMeta};
-pub use document_parts::{from_parts, to_parts, DocumentParts, Part};
+pub use document_parts::{from_parts, to_parts, validate_document, DocumentParts, Part};
 pub use manifest::{resolve_manifest, ManifestEntry, ManifestPart};
 pub use rows_codec::{RowsCodec, RowsEncodeError, SheetRows};
 pub use schema_codec::SchemaCodec;

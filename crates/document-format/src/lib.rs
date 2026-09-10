@@ -7,13 +7,13 @@
 //! 本クレートの対外的な入口が [`DocumentFormatApi`] とその具象実装 [`DocumentFormat`] である
 //! （`Ids / Value / EntryName → Model → Json → Parts → Container → Api` の最右。
 //! design「Architecture Integration」）。タスク 7.1 は**読み込み**（[`DocumentFormatApi::open`]）
-//! を結線する: ファイル I/O はここだけが担い、下位層（[`crate::container`] /
-//! [`crate::parts`] / [`crate::migration`]）の 1 経路を順に呼ぶ。検証ロジックをこの層へ
-//! 持ち込まない（design「Validation: `open` と `from_parts` は同一の検証経路を通る。
-//! 検証ロジックを 2 箇所に持たない」）。
+//! を、タスク 7.2 は**保存**（[`DocumentFormatApi::save`]）を結線する: ファイル I/O は
+//! ここだけが担い、下位層（[`crate::container`] / [`crate::parts`] / [`crate::migration`]）の
+//! 1 経路を順に呼ぶ。検証ロジックをこの層へ持ち込まない（design「Validation: `open` と
+//! `from_parts` は同一の検証経路を通る。検証ロジックを 2 箇所に持たない」）。
 //!
-//! `save` / `to_parts` / `from_parts` の公開結線は後続タスク（7.2 / 7.3）が**同じトレイトへ
-//! 加点的に**足す。本クレートに未実装メソッドのスタブは置かない。
+//! `to_parts` / `from_parts` の公開結線は後続タスク（7.3）が**同じトレイトへ加点的に**
+//! 足す。本クレートに未実装メソッドのスタブは置かない。
 //!
 //! ## 読み込みの順序（design「読み込みフロー」。要件 4.1, 5.2, 5.4, 5.5）
 //!
@@ -34,6 +34,45 @@
 //! 5. **規模の通知**: 全シートの行数の合計が [`SUPPORTED_ROW_LIMIT`] を超えたときだけ
 //!    [`OpenOutcome::beyond_supported_scale`] を `true` にする（要件 8.5）。
 //!
+//! ## 保存の順序（design「System Flows / 保存フロー」。要件 8.2、5.6）
+//!
+//! [`DocumentFormatApi::save`] は次の順に既存の層を接続する（タスク 7.2）。**検証・パート
+//! 構築・符号化・書き込みのロジックをこの層に再実装しない**（各層の 1 経路を呼ぶ）:
+//!
+//! 1. **不変条件の検証**: [`crate::parts::validate_document`] が、モデルから
+//!    組み立てた目録に [`crate::parts::StructuralValidator`] を 1 回掛ける（design の保存
+//!    フローが最初の段に置く「構造的不変条件を検証」。`Model-->>Api: ok または
+//!    StructuralError`）。読み込み経路（`from_parts`）と**同じ検証器・同じ出現箇所テキスト**
+//!    である（検証ロジックを 2 箇所に持たない）。
+//!    - **構築で強制される不変条件**（この段では検査しない）: 各シートがちょうど 1 つの
+//!      ルートスキーマを持つこと（[`Document::set_root_schema`] の置換だけが変える）、
+//!      改名（[`Document::rename_sheet`]）・並べ替え（[`Document::reorder_rows`]）で
+//!      識別子が変わらないこと、`SheetId` / `RowId` が [`IdFactory`] の発行経路だけから
+//!      得られること。
+//!    - **構築では強制されない不変条件**（この段が遮断する）: 同一種別の識別子の一意性
+//!      （とくにスキーマのペイロード内の `TypeDefId` の重複宣言）、型定義参照の実在
+//!      （[`crate::model::SchemaPart::parse`] は `$ref` の実在を見ない）、添付参照の実在
+//!      （[`CellValue::Attachment`] はレジストリ登録を強制しない）。したがって保存は
+//!      **自分自身の `open` が拒否するファイルを書き出さない**。
+//! 2. **パート構築とダイジェスト算出**: [`crate::parts::to_parts`]（タスク 4.8）。索引
+//!    （`manifest.json`）のダイジェスト算出もこの 1 経路が運ぶ。**ワイヤ形に必要な整合**
+//!    （行の値の個数と列数の一致、列名の重複）はここが遮断する。非有限値（NaN / Infinity）の
+//!    遮断もここで起きる（行エントリの符号化が [`crate::value::to_json_bytes`] の事前走査を
+//!    通る）。
+//! 3. **決定的符号化**: [`ContainerCodec::encode`]（タスク 5.2。決定性パラメータは
+//!    固定済み。要件 3.1, 3.2, 3.6）。
+//! 4. **原子的書き込み**: [`AtomicWriter::commit`]（タスク 5.1）。**書き込みはこの 1 箇所
+//!    だけ**であり、`std::fs::write` などを直接使わない。
+//!
+//! 1〜3 のいずれかで失敗した場合、4 に到達しないため `path` のファイルは一切変更されない。
+//! 4 が `Err` を返す場合も対象は保存前のままである（[`AtomicWriter::commit`] の不変条件。
+//! タスク 5.1 の裁定）。成功した場合だけ `path` が新しい内容になる。したがって `save` の
+//! `Err` は常に「`path` は保存前の内容のまま」を意味する（要件 5.6。design の `save`
+//! 事後条件）。
+//!
+//! **変換後の初回保存の退避（要件 6.4）は後続タスク 7.4 が足す**: 本経路は退避の分岐を
+//! 持たず、design の Service Interface のシグネチャも変えない。
+//!
 //! ## `migrated_from` を `gate` の事前判定から得る理由
 //!
 //! [`MigrationChain::gate`] は**純粋な判定**（`const fn`・状態を持たず・集合に触れない）で
@@ -47,9 +86,10 @@
 //! ## 読み込み経路は書き込みを行わない（要件 5.5）
 //!
 //! 本層の読み込み経路が使うのは [`std::fs::read`] だけである: `std::fs::write` /
-//! `File::create` / `OpenOptions` / `tempfile` を持たない（保存はタスク 7.2 が
-//! [`crate::container::atomic_save`] 経由で足す）。破損を検出しても自動修復・上書きを
-//! しない。`Err` のとき `path` のファイルは変更されない（要件 5.6 の前提）。
+//! `File::create` / `OpenOptions` / `tempfile` を持たない。書き込みは保存経路
+//! （[`DocumentFormatApi::save`]）だけが [`AtomicWriter`] 経由で行う。破損を検出しても
+//! 自動修復・上書きをしない。`Err` のとき `path` のファイルは変更されない
+//! （要件 5.6 の前提）。
 //!
 //! ## 部分的なモデルを返さない（要件 5.4）
 //!
@@ -83,8 +123,8 @@ pub use value::{CellValue, NestedValue, from_json_bytes, to_json_bytes};
 
 use std::path::Path;
 
-use crate::container::ContainerCodec;
-use crate::parts::from_parts;
+use crate::container::{AtomicWriter, ContainerCodec};
+use crate::parts::{from_parts, to_parts, validate_document};
 
 /// 性能保証の対象となる 1 ドキュメントあたりの行数（要件 8.4）。
 ///
@@ -115,9 +155,9 @@ pub struct OpenOutcome {
 
 /// ドキュメントの公開面（design「Public API Layer / DocumentFormatApi」）。
 ///
-/// 本トレイトは後続タスクが**加点的に**育てる: タスク 7.1 は [`Self::open`] を定義し、
-/// 7.2 が `save`、7.3 が `to_parts` / `from_parts` を加える（未実装メソッドのスタブは
-/// 置かない）。
+/// 本トレイトは後続タスクが**加点的に**育てる: タスク 7.1 が [`Self::open`] を、7.2 が
+/// [`Self::save`] を定義し、7.3 が `to_parts` / `from_parts` を加える（未実装メソッドの
+/// スタブは置かない）。
 pub trait DocumentFormatApi {
     /// ZIP コンテナを読み、検証し、ドキュメントモデルを構築する。
     ///
@@ -129,6 +169,23 @@ pub trait DocumentFormatApi {
     /// コンテナの復号・バージョンゲート・移行・ダイジェスト照合・構造検証・モデル構築は
     /// 下位層の 1 経路を呼ぶ。
     fn open(&self, path: &Path) -> Result<OpenOutcome, DocumentError>;
+
+    /// ドキュメントを決定的な ZIP コンテナとして `path` へ原子的に書き出す。
+    ///
+    /// 事前条件: `document` がモデル API で構築されていること。
+    /// 事後条件: `Ok` の場合、`path` は新しい内容を持つ。`Err` の場合、`path` は保存前の
+    /// 内容のまま残る（要件 5.6）。
+    /// 不変条件: 同一内容の `document` は、書き込み先のパスによらず常に同一のバイト列になる
+    /// （要件 3.1, 3.2, 3.6）。
+    ///
+    /// 構造的不変条件（同一種別の識別子の一意性、型定義参照・添付参照の実在、
+    /// スキーマの存在）は書き込みの前に検証され、違反は診断文脈つきの `Err` で返る
+    /// （読み込み経路と同じ検証器。モジュール docs「保存の順序」）。
+    ///
+    /// 処理順はモジュール docs「保存の順序」にある。ファイル I/O は本メソッドだけが担い、
+    /// 不変条件の検証・パート構築・ダイジェスト算出・決定的符号化・原子的書き込みは
+    /// 下位層の 1 経路を呼ぶ。変換後の初回保存の退避（要件 6.4）は後続タスク 7.4 が足す。
+    fn save(&self, document: &Document, path: &Path) -> Result<(), DocumentError>;
 }
 
 /// 公開面の無状態の具象実装（design はトレイトのみを指定するため、利用側が値を持てるように
@@ -177,6 +234,25 @@ impl DocumentFormatApi for DocumentFormat {
             migrated_from,
             document,
         })
+    }
+
+    fn save(&self, document: &Document, path: &Path) -> Result<(), DocumentError> {
+        // 1. 不変条件の検証（design「保存フロー」の最初の段）。読み込み経路と同じ検証器を
+        //    モデルから組み立てた目録へ 1 回掛けるだけであり、規則をこの層に再実装しない。
+        //    構築では強制されない違反（TypeDefId の重複宣言・型定義参照の実在・
+        //    添付参照の実在）はここで遮断され、書き込みは 1 度も走らない。
+        validate_document(document)?;
+
+        // 2. パート構築と索引のダイジェスト算出（タスク 4.8 の 1 経路）。行の値の個数と
+        //    列数の不一致・列名の重複・非有限値（NaN / Infinity）の遮断はここで `Err` になる。
+        let parts = to_parts(document)?;
+
+        // 3. 決定的符号化（タスク 5.2）。同じパート集合からは常に同じバイト列になる。
+        let bytes = ContainerCodec::encode(&parts)?;
+
+        // 4. 原子的書き込み（タスク 5.1 の 1 箇所）。`Err` は「対象が置換されていない」
+        //    ことを意味する（`commit` の不変条件）。
+        AtomicWriter::commit(path, &bytes)
     }
 }
 

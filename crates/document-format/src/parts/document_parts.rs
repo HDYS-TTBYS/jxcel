@@ -134,6 +134,17 @@
 //! 移行は**メモリ上**で完結する: 本モジュールは `std::fs` に触れず、書き込みも読み込みも
 //! しない（ファイル I/O はタスク 7.1 / 7.2 の責務）。
 //!
+//! ## 保存側の不変条件検証（[`validate_document`]）
+//!
+//! 保存経路（[`crate::DocumentFormatApi::save`]）は書き込みの前に [`validate_document`] を
+//! 呼ぶ。これは **`from_parts` の処理順 5 と同じ検証器（[`StructuralValidator`]）を、モデル
+//! から組み立てた目録へ 1 回掛けるだけ**であり、規則も報告文面も二重化しない
+//! （design「`open` と `from_parts` は同一の検証経路を通る」）。モデル API が構築で強制する
+//! 不変条件（各シートのルートスキーマ、改名・並べ替えでの識別子の安定）はここで検査せず、
+//! **構築では強制されない**不変条件（スキーマのペイロード内の `TypeDefId` の重複宣言、
+//! 型定義参照の実在、添付参照の実在）を遮断する。これにより `save` は自分自身の `open` が
+//! 拒否するファイルを書き出さない。
+//!
 //! ## 索引の向きと、検査しないこと
 //!
 //! 照合の向きは**索引 → 実体**である（索引に載った各パートが実在し、内容が記録どおりか）。
@@ -487,8 +498,17 @@ fn from_parts_with(
         name: EntryName::Document.to_string(),
     })?;
 
-    // 5. 構造検証（要件 4.2, 4.3, 4.4, 1.7, 7.4）。目録は復号済みパート群から組み立てる。
-    let inventory = inventory_of(&document_part, &schemas, &row_sets, &attachments);
+    // 5. 構造検証（要件 4.2, 4.3, 4.4, 1.7, 7.4）。目録は復号済みパート群から組み立てる
+    //    （保存経路 `validate_document` と同じ 1 経路。検証ロジックも報告文面も二重化しない）。
+    let inventory = inventory_of(
+        document_part.sheets().iter().map(|meta| meta.sheet_id()),
+        schemas.iter().map(|(_, sheet, schema)| (*sheet, schema)),
+        row_sets.iter().map(|(_, rows)| (rows.sheet(), rows.rows())),
+        attachments.iter().filter_map(|(entry, _)| match entry {
+            EntryName::Attachment { attachment } => Some(*attachment),
+            _ => None,
+        }),
+    );
     StructuralValidator::validate(&inventory)?;
 
     // 6. 行エントリの列順序が `document.json` の列名一覧と一致すること（要件 2.3）。
@@ -564,26 +584,33 @@ fn read_format_version(parts: &[Part]) -> Result<FormatVersion, DocumentError> {
     Ok(ManifestPart::from_json_bytes(&manifest.bytes)?.version())
 }
 
-/// 復号済みパート群から構造検証の目録（[`PartInventory`]）を組み立てる。
+/// 復号済みパート群またはモデルから構造検証の目録（[`PartInventory`]）を組み立てる。
 ///
 /// 出現箇所テキストの綴りは [`StructuralValidator`] の推奨慣例に合わせる
 /// （`document.json sheets[i]` / `schemas/<ulid>.json types[i]` /
-/// `sheets/<ulid>.jsonl line n` / `attachments/<hex>.bin`）。
+/// `sheets/<ulid>.jsonl line n` / `attachments/<hex>.bin`）。エントリ名はシート識別子から
+/// 正準形（[`EntryName`] の表示テキスト）を組み直すため、読み込み経路（復号済みパート）と
+/// 保存経路（モデル）で**同じ違反が同じ文言になる**（検証ロジックも報告文面も 2 箇所に
+/// 持たない。design「`open` と `from_parts` は同一の検証経路を通る」）。
+///
+/// 入力は**借用**で受ける: 行は `&[Row]` のまま渡し、複製しない（10 万行の保存経路で
+/// 行の複製を作らない）。読み込み経路は復号済みの `SheetRows` から、保存経路は
+/// [`Document`] から直接、同じ目録を組み立てる。
 ///
 /// **型定義の宣言には所属シートを与える**（`IdDeclaration::with_sheet`）。与え忘れると
 /// 同一シート規則（要件 1.7）がどのシートの参照も満たせず、妥当な文書を宙吊りとして
 /// 誤報する（タスク 4.7 の申し送り）。
-fn inventory_of(
-    document_part: &DocumentPart,
-    schemas: &[(EntryName, SheetId, SchemaPart)],
-    row_sets: &[(EntryName, SheetRows)],
-    attachments: &[(EntryName, Vec<u8>)],
+fn inventory_of<'a>(
+    sheets: impl Iterator<Item = SheetId>,
+    schemas: impl Iterator<Item = (SheetId, &'a SchemaPart)>,
+    row_sets: impl Iterator<Item = (SheetId, &'a [Row])>,
+    attachments: impl Iterator<Item = AttachmentId>,
 ) -> PartInventory {
     let mut inventory = PartInventory::new();
 
     // document.json: シート識別子の宣言と、スキーマの要求（全シート。要件 1.2, 4.4）。
-    for (index, meta) in document_part.sheets().iter().enumerate() {
-        let sheet = meta.sheet_id().to_string();
+    for (index, sheet) in sheets.enumerate() {
+        let sheet = sheet.to_string();
         inventory.declare(IdDeclaration::new(
             IdKind::Sheet,
             sheet.clone(),
@@ -593,7 +620,8 @@ fn inventory_of(
     }
 
     // schemas/*: スキーマの提供、型定義の宣言（所属シートつき）、型定義参照の出現。
-    for (entry, sheet, schema) in schemas {
+    for (sheet, schema) in schemas {
+        let entry = EntryName::Schema { sheet };
         let sheet_text = sheet.to_string();
         inventory.provide_schema(sheet_text.clone());
         inventory.declare_sheet_ref(SheetRefDeclaration::new(
@@ -620,12 +648,10 @@ fn inventory_of(
     }
 
     // sheets/*: 行識別子の宣言、セル値からの添付参照、エントリ名が指すシートの参照。
-    for (entry, rows) in row_sets {
-        inventory.declare_sheet_ref(SheetRefDeclaration::new(
-            entry.to_string(),
-            rows.sheet().to_string(),
-        ));
-        for (index, row) in rows.rows().iter().enumerate() {
+    for (sheet, rows) in row_sets {
+        let entry = EntryName::Rows { sheet };
+        inventory.declare_sheet_ref(SheetRefDeclaration::new(entry.to_string(), sheet.to_string()));
+        for (index, row) in rows.iter().enumerate() {
             let from = format!("{entry} line {}", index + 1);
             inventory.declare(IdDeclaration::new(IdKind::Row, row.id().to_string(), from.clone()));
             for value in row.values() {
@@ -636,17 +662,45 @@ fn inventory_of(
 
     // attachments/*: エントリ名そのものが content-addressed の宣言である。
     // 出現箇所はエントリ名を使う（推奨慣例）。
-    for (entry, _) in attachments {
-        if let EntryName::Attachment { attachment } = entry {
-            inventory.declare(IdDeclaration::new(
-                IdKind::Attachment,
-                attachment.to_string(),
-                entry.to_string(),
-            ));
-        }
+    for attachment in attachments {
+        inventory.declare(IdDeclaration::new(
+            IdKind::Attachment,
+            attachment.to_string(),
+            EntryName::Attachment { attachment }.to_string(),
+        ));
     }
 
     inventory
+}
+
+/// モデルが構造的不変条件を満たすか検証する（design「保存フロー」の最初の段。タスク 7.2）。
+///
+/// 保存経路が**書き込みの前に**呼ぶ公開経路である（`save` 以外の後続タスク 7.3 / 7.4 からも
+/// 同じ 1 経路を使える）。実装は「[`inventory_of`] でモデルから目録を組み立て、
+/// [`StructuralValidator::validate`] を 1 回呼ぶ」だけであり、**規則を再実装しない**:
+///
+/// - 同一種別の識別子の一意性（とくに `TypeDefId` の重複宣言）は要件 4.3
+/// - 型定義参照の実在（要件 1.7。`SchemaPart::parse` は `$ref` の実在を見ない）
+/// - 添付参照の実在（要件 7.4。`CellValue::Attachment` は登録を強制しない）
+/// - スキーマの存在（要件 4.4）
+///
+/// モデル API が**構築で強制しない**のはこの 4 つである（識別子の発行は `SheetId` /
+/// `RowId` / 文書識別子については `IdFactory` が担うが、`TypeDefId` はスキーマの
+/// ペイロードの中にあり、参照と添付の実在はモデルが解釈しない）。構築が強制する不変条件
+/// （各シートちょうど 1 つのルートスキーマ、改名・並べ替えで識別子が変わらない）は
+/// ここでは検査しない。
+///
+/// 行の値の個数と列数の一致・列名の重複は**ワイヤ形**の問題であり、この関数ではなく
+/// [`to_parts`] が遮断する（呼び出し元の programming error として
+/// [`DocumentError::InvalidContainer`]）。
+pub fn validate_document(document: &Document) -> Result<(), DocumentError> {
+    let inventory = inventory_of(
+        document.sheets().iter().map(Sheet::id),
+        document.sheets().iter().map(|sheet| (sheet.id(), sheet.root_schema())),
+        document.sheets().iter().map(|sheet| (sheet.id(), sheet.rows())),
+        document.attachments().iter().map(|attachment| attachment.id()),
+    );
+    StructuralValidator::validate(&inventory)
 }
 
 /// 行エントリの列順序が `document.json` の列名一覧と一致することを検証する（要件 2.3）。

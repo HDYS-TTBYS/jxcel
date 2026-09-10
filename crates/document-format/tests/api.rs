@@ -1,11 +1,12 @@
-//! クレート外から見た公開 API の読み込み経路（タスク 7.1。要件 4.1, 5.2, 5.4, 5.5, 8.5）。
+//! クレート外から見た公開 API の経路（タスク 7.1 / 7.2。要件 4.1, 5.2, 5.4, 5.5, 5.6, 8.2, 8.5）。
 //!
 //! このファイルは統合テストであり、クレートの**公開面だけ**を使う。design
-//! 「Public API Layer / DocumentFormatApi」の `open` が実ファイルを読み、ZIP 復号
-//! （タスク 5.3）・パート層の 1 経路（タスク 4.8 / 6.1 / 6.2）を通して
-//! [`OpenOutcome`] を返すことを確かめる。
+//! 「Public API Layer / DocumentFormatApi」の `open`（7.1）が実ファイルを読み、ZIP 復号
+//! （タスク 5.3）・パート層の 1 経路（タスク 4.8 / 6.1 / 6.2）を通して [`OpenOutcome`] を
+//! 返すこと、`save`（7.2）がパート構築（4.8）・決定的符号化（5.2）・原子的書き込み（5.1）を
+//! この順に接続すること（要件 8.2）を確かめる。
 //!
-//! 検証する横断的な性質は次の 4 つである（レビュー教訓に従い対象を分散させる）:
+//! 読み込み経路で検証する横断的な性質は次の 4 つである（レビュー教訓に従い対象を分散させる）:
 //!
 //! 1. **往復**: モデル → パート集合 → ZIP → ファイル → `open` で同一のモデルが戻る。
 //! 2. **非書き込み**（要件 5.5）: `open` の前後で対象ファイルのバイト列と
@@ -15,6 +16,17 @@
 //!    失敗する入力を `open` が `Err` として観測する。
 //! 4. **規模の通知**（要件 8.4, 8.5）: 保証対象の境界（100,000 / 100,001 行）で
 //!    `beyond_supported_scale` が切り替わり、超過しても `Ok` である。
+//!
+//! 保存経路（要件 8.2, 5.6）では次の 4 つを観測する:
+//!
+//! 1. **往復**: モデル → `save` → `open` で同一のモデルが戻る。
+//! 2. **決定性**（要件 3.1, 3.2, 3.6）: 同一の文書は書き込み先パスによらず同一の
+//!    バイト列になり、パス名・保存時刻が混入しない。
+//! 3. **失敗時の非変更**（要件 5.6。本タスクの中核）: 段のどこかで失敗した保存は
+//!    `Err` を返し、既存ファイルを 1 バイトも変更しない。失敗は実際に到達する経路
+//!    （[`document_with_non_finite_value`] の NaN 遮断 = `to_parts` の段）で作る。
+//! 4. **非残留と非干渉**: 成功・失敗のどちらでも一時ファイル（`.jxcel-tmp-`）を
+//!    残さず、対象パス以外のエントリを作らない。
 //!
 //! 一時ファイルはリポジトリ内のテスト専用ディレクトリ（`tests/api_tmp_*`）に作り、
 //! 各テストの終了時に [`Scratch`] の `Drop` が削除する（コンテナ内とホストで
@@ -26,11 +38,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use document_format::container::ContainerCodec;
 use document_format::parts::{
-    to_parts, DocumentParts, ManifestEntry, ManifestPart, SchemaCodec,
+    from_parts, to_parts, DocumentParts, ManifestEntry, ManifestPart, SchemaCodec,
 };
 use document_format::{
-    CellValue, Document, DocumentError, DocumentFormat, DocumentFormatApi, EntryName,
-    FormatVersion, SchemaPart, SheetId, SUPPORTED_ROW_LIMIT,
+    AttachmentId, CellValue, Document, DocumentError, DocumentFormat, DocumentFormatApi, EntryName,
+    FormatVersion, IdKind, SchemaPart, SheetId, SUPPORTED_ROW_LIMIT,
 };
 
 /// 標本のルートスキーマ（型定義への参照を含む）。
@@ -46,6 +58,29 @@ const SCHEMA_WITH_REF: &str = concat!(
 
 /// 型定義を 1 つも持たないルートスキーマ（0 行のシートの初期値）。
 const SCHEMA_EMPTY: &str = r#"{"root":null}"#;
+
+/// 実在しない型定義を参照するルートスキーマ（保存時に遮断すべき宙吊り参照）。
+///
+/// `SchemaPart::parse` は `$ref` の実在を見ない（スキーマは不透明ペイロードであり、
+/// 参照整合性は構造検証の責務）。
+const SCHEMA_DANGLING_REF: &str = concat!(
+    r#"{"root":{"$ref":""#,
+    "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    r#""},"types":[]}"#
+);
+
+/// 同一の型定義識別子を 2 回宣言するルートスキーマ（保存時に遮断すべき一意性違反）。
+const SCHEMA_DUPLICATE_TYPE_DEF: &str = concat!(
+    r#"{"root":null,"types":[{"id":""#,
+    "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    r#"","definition":{"kind":"string"}},{"id":""#,
+    "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    r#"","definition":{"kind":"number"}}]}"#
+);
+
+/// レジストリに登録されていない添付識別子（正準 64 文字小文字 hex）。
+const UNREGISTERED_ATTACHMENT_HEX: &str =
+    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
 /// 読み込み経路を起動する実装（design はトレイトのみを指定するため、無状態の具象型を使う）。
 fn api() -> DocumentFormat {
@@ -111,10 +146,20 @@ fn snapshot(directory: &Path) -> Vec<(String, Vec<u8>)> {
     entries
 }
 
-/// 標本の文書をパート集合へ符号化し、ファイルとして書き出す。
+/// ディレクトリ直下の名前を昇順で返す（保存が対象パス以外へ書かないことの観測）。
+fn entry_names(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(directory)
+        .expect("作業ディレクトリが読める")
+        .map(|entry| entry.expect("ディレクトリ要素が読める").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// 読み込みテスト用の入力ファイルを、保存経路（`save`）に依存せず用意する。
 ///
-/// `save`（タスク 7.2）は未実装であるため、テストが公開経路
-/// （`to_parts` → `ContainerCodec::encode`）でファイルを用意する。
+/// `save` を使わず `to_parts` → `ContainerCodec::encode` で直接書き出すのは、読み込みの
+/// テストが保存経路の実装へ結合しないためである（`save` 自体の検証は保存のテストが担う）。
 fn write_document(scratch: &Scratch, name: &str, document: &Document) -> PathBuf {
     let parts = to_parts(document).expect("保存経路");
     let bytes = ContainerCodec::encode(&parts).expect("符号化");
@@ -260,6 +305,79 @@ fn document_with_rows(count: usize) -> Document {
         document.add_row(sheet).expect("標本のシートは実在する");
     }
     document
+}
+
+/// 保存の失敗を作る文書: 列 `score` に非有限値（NaN）を持つ 1 シート 1 行。
+///
+/// 失敗は [`to_parts`]（パート構築）の段で起きる。`to_parts` は行エントリの符号化
+/// （`RowsCodec::encode`）を通し、そこが `value::to_json_bytes` の事前走査で NaN を
+/// 遮断して [`DocumentError::NonRepresentableNumber`] を返すためである。決定的符号化
+/// （`ContainerCodec::encode`）は `to_parts` が成功した後なので到達せず、原子的書き込み
+/// （`AtomicWriter::commit`）はさらに後であるから、`path` には一切触れない。
+fn document_with_non_finite_value() -> Document {
+    let mut document = Document::new();
+    let sheet = document.add_sheet("壊れた");
+    document
+        .set_sheet_columns(sheet, vec!["score".to_owned()])
+        .expect("標本のシートは実在する");
+    document
+        .set_root_schema(sheet, SchemaPart::parse(SCHEMA_EMPTY).expect("標本は妥当"))
+        .expect("標本のシートは実在する");
+    let row = document.add_row(sheet).expect("標本のシートは実在する");
+    document
+        .set_row_values(sheet, row, vec![CellValue::Float(f64::NAN)])
+        .expect("標本の行は実在する");
+    document
+}
+
+/// NaN 遮断のエラーに載る位置（`RowsCodec::encode` が組み立てる診断形）。
+fn non_finite_location(document: &Document) -> String {
+    format!("sheets/{}.jsonl line 1: column score", document.sheets()[0].id())
+}
+
+/// 1 シート・指定のルートスキーマ・指定の列と行を持つ文書を組み立てる。
+///
+/// 保存時に遮断すべき構造違反（宙吊り参照・未登録添付・型定義の重複宣言）の標本を
+/// 同じ骨格で作るための補助である。
+fn document_with_sheet(
+    schema: &str,
+    columns: &[&str],
+    rows: Vec<Vec<CellValue>>,
+) -> Document {
+    let mut document = Document::new();
+    let sheet = document.add_sheet("標本");
+    document
+        .set_sheet_columns(sheet, columns.iter().map(|name| (*name).to_owned()).collect())
+        .expect("標本のシートは実在する");
+    document
+        .set_root_schema(sheet, SchemaPart::parse(schema).expect("標本のスキーマは解析できる"))
+        .expect("標本のシートは実在する");
+    for values in rows {
+        let row = document.add_row(sheet).expect("標本のシートは実在する");
+        document.set_row_values(sheet, row, values).expect("標本の行は実在する");
+    }
+    document
+}
+
+/// 実在しない型定義を参照する 1 シートの文書。
+fn document_with_dangling_type_ref() -> Document {
+    document_with_sheet(SCHEMA_DANGLING_REF, &[], Vec::new())
+}
+
+/// 同一の型定義識別子を 2 回宣言する 1 シートの文書。
+fn document_with_duplicate_type_def() -> Document {
+    document_with_sheet(SCHEMA_DUPLICATE_TYPE_DEF, &[], Vec::new())
+}
+
+/// レジストリに登録されていない添付を参照する 1 シート 1 行の文書。
+fn document_with_unregistered_attachment() -> Document {
+    let attachment = AttachmentId::from_hex(UNREGISTERED_ATTACHMENT_HEX)
+        .expect("標本の添付識別子は正準形");
+    document_with_sheet(
+        SCHEMA_EMPTY,
+        &["blob"],
+        vec![vec![CellValue::Attachment(attachment)]],
+    )
 }
 
 /// モデル → ファイル → `open` で同一のモデルが戻る（要件 4.1, 5.2）。
@@ -509,4 +627,301 @@ fn open_flags_documents_beyond_the_supported_row_limit_without_rejecting_them() 
         "行数が往復で変わった"
     );
     assert!(outcome.beyond_supported_scale, "100,001 行が保証対象内とされた");
+}
+
+// --- 保存経路（タスク 7.2。要件 8.2、5.6 の維持） -----------------------------------
+
+/// モデル → `save` → `open` で同一のモデルが戻る（要件 8.2 の往復前提）。
+///
+/// 比較は読み込み経路の往復テストと同じ流儀で、識別子・シート・行・スキーマ・添付を
+/// 実比較する（保存の 3 段が合わせて 1 つの往復を成すことの観測）。
+#[test]
+fn save_round_trips_the_model_through_a_real_file() {
+    let scratch = Scratch::new("save_roundtrip");
+    let before = sample();
+    let path = scratch.file("sample.jxcel");
+
+    api().save(&before, &path).expect("標本は保存できる");
+
+    let outcome = api().open(&path).expect("保存したファイルは開ける");
+    assert_eq!(before.document_id(), outcome.document.document_id(), "識別子が変わった");
+    assert_eq!(sheet_metadata(&before), sheet_metadata(&outcome.document), "シートが変わった");
+    assert_eq!(rows(&before), rows(&outcome.document), "行が変わった");
+    assert_eq!(schemas(&before), schemas(&outcome.document), "スキーマが変わった");
+    assert_eq!(attachments(&before), attachments(&outcome.document), "添付が変わった");
+}
+
+/// 同一の `Document` は、書き込み先のパスが違ってもバイト単位で同一に保存される
+/// （要件 3.1, 3.2, 3.6。design の `save` 不変条件）。
+///
+/// パス名（長さの違う 2 つの名前）・保存時刻・ホスト環境に由来する値がバイト列へ
+/// 混入していないことを、実ファイルのバイト比較で観測する。
+#[test]
+fn save_is_deterministic_across_target_paths() {
+    let scratch = Scratch::new("save_determinism");
+    let document = sample();
+    let first = scratch.file("a.jxcel");
+    let second = scratch.file("a-much-longer-file-name.jxcel");
+
+    api().save(&document, &first).expect("1 度目は保存できる");
+    api().save(&document, &second).expect("2 度目は保存できる");
+
+    let first_bytes = fs::read(&first).expect("読める");
+    let second_bytes = fs::read(&second).expect("読める");
+    assert!(!first_bytes.is_empty(), "保存されたファイルが空である");
+    assert_eq!(first_bytes, second_bytes, "書き込み先でバイト列が変わった");
+}
+
+/// 保存の途中で失敗した場合、既存ファイルは 1 バイトも変更されない（要件 5.6。
+/// design の `save` 事後条件「`Err` のとき `path` は保存前の内容のまま」）。
+///
+/// 先行する成功保存でファイルを置き、その同じパスへ非有限値を含む文書を保存する。
+/// 失敗は `to_parts`（パート構築）の NaN 遮断で起きるため、書き込みは 1 度も走らない。
+/// `Err` の変種と位置、対象ファイルのバイト列の不変の両方を実測する。
+#[test]
+fn save_leaves_the_existing_file_untouched_when_a_stage_fails() {
+    let scratch = Scratch::new("save_failure");
+    let path = scratch.file("target.jxcel");
+
+    api().save(&sample(), &path).expect("標本は保存できる");
+    let before = fs::read(&path).expect("読める");
+    assert!(!before.is_empty(), "保存されたファイルが空である");
+
+    let broken = document_with_non_finite_value();
+    let error = api().save(&broken, &path).expect_err("非有限値は保存できない");
+    assert!(
+        matches!(&error, DocumentError::NonRepresentableNumber { location }
+            if *location == non_finite_location(&broken)),
+        "NaN の拒否が NonRepresentableNumber(正しい位置)でない: {error:?}"
+    );
+
+    assert_eq!(before, fs::read(&path).expect("読める"), "失敗した保存が対象ファイルを変更した");
+}
+
+/// 保存は成功・失敗のどちらでも一時ファイルの残骸を残さない
+/// （`atomic_save.rs` の prefix `.jxcel-tmp-` を実読して確認する）。
+#[test]
+fn save_leaves_no_temporary_files_behind() {
+    let scratch = Scratch::new("save_residue");
+    let path = scratch.file("target.jxcel");
+
+    api().save(&sample(), &path).expect("標本は保存できる");
+    api().save(&document_with_non_finite_value(), &path).expect_err("非有限値は保存できない");
+
+    let leftovers: Vec<String> = fs::read_dir(scratch.path())
+        .expect("作業ディレクトリが読める")
+        .map(|entry| {
+            entry.expect("ディレクトリ要素が読める").file_name().to_string_lossy().into_owned()
+        })
+        .filter(|name| name.starts_with(".jxcel-tmp-"))
+        .collect();
+    assert!(leftovers.is_empty(), "一時ファイルが残った: {leftovers:?}");
+}
+
+/// 存在しないパスへの保存はファイルを作り、既存ファイルへの保存は内容を置き換える。
+///
+/// 置き換えは既存内容より大幅に大きい場合（延長）と小さい場合（切り詰め）の両方で
+/// 確かめる。期待値は「新しいパスへ保存したバイト列」そのものであり、保存が決定的で
+/// あること（要件 3.1）と切り詰め・延長が正しいこと（要件 5.6 の成功側）を同時に示す。
+#[test]
+fn save_creates_missing_files_and_replaces_existing_contents() {
+    let scratch = Scratch::new("save_overwrite");
+    let document = sample();
+
+    let fresh = scratch.file("fresh.jxcel");
+    api().save(&document, &fresh).expect("存在しないパスへ保存できる");
+    let expected = fs::read(&fresh).expect("読める");
+    assert!(!expected.is_empty(), "新規作成されたファイルが空である");
+    api().open(&fresh).expect("新規作成されたファイルは開ける");
+
+    // 小さな既存内容を大きな内容で置き換える（延長）。
+    let grown = scratch.file("grown.jxcel");
+    fs::write(&grown, b"x").expect("書き出し");
+    api().save(&document, &grown).expect("上書きできる");
+    assert_eq!(expected, fs::read(&grown).expect("読める"), "延長の内容が違う");
+
+    // 大きな既存内容を小さな内容で置き換える（切り詰め）。
+    let shrunk = scratch.file("shrunk.jxcel");
+    let large = vec![0x41u8; 1 << 17];
+    fs::write(&shrunk, &large).expect("書き出し");
+    api().save(&document, &shrunk).expect("上書きできる");
+    let written = fs::read(&shrunk).expect("読める");
+    assert_eq!(expected, written, "切り詰めの内容が違う");
+    assert!(written.len() < large.len(), "大きな既存内容が切り詰められていない");
+}
+
+/// 親ディレクトリが無いパスへの保存は `Err`（`Io { retried: false }`）になり、
+/// どこにも書かれない。
+///
+/// `retried = true` は rename の再試行予算を使い切った場合だけを指す（`atomic_save.rs`）
+/// ため、親ディレクトリの欠落は `false` でなければならない。作業ディレクトリの内容が
+/// 呼び出しの前後で完全に一致することも確かめる（ディレクトリを勝手に作らない）。
+#[test]
+fn save_reports_a_missing_parent_directory_without_writing_anywhere() {
+    let scratch = Scratch::new("save_nodir");
+    let path = scratch.path().join("missing").join("target.jxcel");
+
+    let before = snapshot(scratch.path());
+    let error = api().save(&sample(), &path).expect_err("親ディレクトリが無ければ保存できない");
+    assert!(
+        matches!(error, DocumentError::Io { retried: false, .. }),
+        "親ディレクトリ欠落が Io(retried=false) でない: {error:?}"
+    );
+    assert!(!path.exists(), "保存に失敗したパスが作られた");
+    assert!(!scratch.path().join("missing").exists(), "親ディレクトリが作られた");
+    assert_eq!(before, snapshot(scratch.path()), "失敗した保存が作業ディレクトリを変えた");
+}
+
+/// 保存が書き込むのは対象パスだけである（成功時に現れるエントリは対象ファイルのみ）。
+///
+/// 作業用の宣言ファイルや一時ファイルをディレクトリへ置き去りにしないことの観測。
+#[test]
+fn save_writes_only_the_target_entry() {
+    let scratch = Scratch::new("save_only_target");
+    let path = scratch.file("only.jxcel");
+    assert!(entry_names(scratch.path()).is_empty(), "作業ディレクトリが最初から空でない");
+
+    api().save(&sample(), &path).expect("標本は保存できる");
+
+    assert_eq!(
+        vec!["only.jxcel".to_owned()],
+        entry_names(scratch.path()),
+        "対象以外のエントリが現れた"
+    );
+}
+
+/// 実在しない型定義を参照する文書は保存できない（design「保存フロー」の不変条件検証の段。
+/// 要件 1.7）。
+///
+/// `SchemaPart::parse` は `$ref` の実在を見ないため、モデルは構築できてしまう。保存は
+/// 書き込みの前に構造検証で遮断し、`Err(DanglingTypeRef)` を返し、既存ファイルを
+/// 1 バイトも変更しない。
+#[test]
+fn save_rejects_a_dangling_type_ref_before_writing() {
+    let scratch = Scratch::new("save_dangling_type");
+    let path = scratch.file("target.jxcel");
+    api().save(&sample(), &path).expect("標本は保存できる");
+    let before = fs::read(&path).expect("読める");
+
+    let error = api()
+        .save(&document_with_dangling_type_ref(), &path)
+        .expect_err("宙吊り参照は保存できない");
+    assert!(
+        matches!(error, DocumentError::DanglingTypeRef { .. }),
+        "宙吊り参照が DanglingTypeRef でない: {error:?}"
+    );
+    assert_eq!(before, fs::read(&path).expect("読める"), "失敗した保存が対象ファイルを変更した");
+}
+
+/// レジストリに登録されていない添付を参照する文書は保存できない（要件 7.4）。
+///
+/// `CellValue::Attachment` は識別子を保持するだけであり、実在の登録はモデルが強制しない。
+/// 保存は書き込みの前に構造検証で遮断し、`Err(DanglingAttachmentRef)` を返し、既存ファイルを
+/// 変更しない。
+#[test]
+fn save_rejects_an_unregistered_attachment_ref_before_writing() {
+    let scratch = Scratch::new("save_dangling_attachment");
+    let path = scratch.file("target.jxcel");
+    api().save(&sample(), &path).expect("標本は保存できる");
+    let before = fs::read(&path).expect("読める");
+
+    let error = api()
+        .save(&document_with_unregistered_attachment(), &path)
+        .expect_err("未登録の添付参照は保存できない");
+    assert!(
+        matches!(&error, DocumentError::DanglingAttachmentRef { id, .. }
+            if id == UNREGISTERED_ATTACHMENT_HEX),
+        "未登録添付が DanglingAttachmentRef(正しい id)でない: {error:?}"
+    );
+    assert_eq!(before, fs::read(&path).expect("読める"), "失敗した保存が対象ファイルを変更した");
+}
+
+/// 同一の型定義識別子を 2 回宣言する文書は保存できない（要件 4.3）。
+///
+/// 保存は書き込みの前に構造検証で遮断し、`Err(DuplicateId { kind: TypeDef, .. })` を返し、
+/// 既存ファイルを変更しない。
+#[test]
+fn save_rejects_duplicate_type_def_ids_before_writing() {
+    let scratch = Scratch::new("save_duplicate_type");
+    let path = scratch.file("target.jxcel");
+    api().save(&sample(), &path).expect("標本は保存できる");
+    let before = fs::read(&path).expect("読める");
+
+    let error = api()
+        .save(&document_with_duplicate_type_def(), &path)
+        .expect_err("型定義の重複宣言は保存できない");
+    assert!(
+        matches!(error, DocumentError::DuplicateId { kind: IdKind::TypeDef, .. }),
+        "重複宣言が DuplicateId(TypeDef) でない: {error:?}"
+    );
+    assert_eq!(before, fs::read(&path).expect("読める"), "失敗した保存が対象ファイルを変更した");
+}
+
+/// 保存が拒否する違反文書は、パート経路（`to_parts` → `from_parts`）でも同じ違反として
+/// 拒否される（「書けるが読めない」ファイルを作らないことの実測）。
+///
+/// 両経路のエラーを `Debug` 表記で比較する（変種と、保持する診断文脈＝出現箇所テキストの
+/// 全体が一致することを見る）。構造検証は parts 層の 1 経路（`StructuralValidator`）が
+/// 唯一の権威であり、この一致は保存が同じ検証器を通っていることの観測である。
+#[test]
+fn save_and_the_parts_path_report_the_same_structural_violations() {
+    let scratch = Scratch::new("save_parity");
+    let path = scratch.file("target.jxcel");
+
+    let violations = [
+        document_with_dangling_type_ref(),
+        document_with_unregistered_attachment(),
+        document_with_duplicate_type_def(),
+    ];
+    for document in &violations {
+        let save_error = api().save(document, &path).expect_err("違反文書は保存できない");
+        let parts = to_parts(document).expect("パート構築までは成功する");
+        let read_error = from_parts(&parts).expect_err("読み込み経路も違反を拒否する");
+        assert_eq!(
+            format!("{save_error:?}"),
+            format!("{read_error:?}"),
+            "保存と読み込みの違反報告が一致しない"
+        );
+    }
+    assert!(!path.exists(), "違反文書の保存がファイルを作った");
+}
+
+/// ゴールデン fixture を開いて保存し直すと、バイト単位で同一のコンテナになる。
+///
+/// 2 つの性質を同時に固定する: (1) 妥当な実文書が `validate_document` の誤検出を受けない
+/// こと（`open` → `save` が成功する）、(2) 読み込み → 保存の往復が決定性を保つこと
+/// （要件 3.1 / 3.2。ゴールデンは決定性の最終防衛線）。
+#[test]
+fn save_reproduces_the_committed_golden_fixture_bytes() {
+    let scratch = Scratch::new("save_golden");
+    let golden = fs::read(fixture_path()).expect("ゴールデンが読める");
+    let outcome = api().open(&fixture_path()).expect("ゴールデンは開ける");
+
+    let path = scratch.file("reencoded.jxcel");
+    api().save(&outcome.document, &path).expect("ゴールデンの文書は保存できる");
+
+    assert_eq!(golden, fs::read(&path).expect("読める"), "再符号化がゴールデンと一致しない");
+}
+
+/// 既存ファイルへの保存はディレクトリエントリを差し替える（`AtomicWriter::commit` の
+/// `rename`）。inode の変化を代理観測として固定する。
+///
+/// これは**原子的置換の機構の代理観測**であり、クラッシュ耐性そのものは観測できない
+/// （電源断を模擬しない限り耐久性は観測不能。`atomic_save.rs` の検証限界の記載と同じ）。
+/// `std::fs::write` による直接書き込みへ差し替えると inode が変わらないためこのテストが
+/// 落ちる。
+#[cfg(unix)]
+#[test]
+fn save_replaces_the_directory_entry_instead_of_rewriting_in_place() {
+    use std::os::unix::fs::MetadataExt;
+
+    let scratch = Scratch::new("save_inode");
+    let path = scratch.file("target.jxcel");
+    api().save(&sample(), &path).expect("標本は保存できる");
+    let first = fs::metadata(&path).expect("メタデータが読める").ino();
+
+    api().save(&sample(), &path).expect("上書きできる");
+    let second = fs::metadata(&path).expect("メタデータが読める").ino();
+
+    assert_ne!(first, second, "上書きが inode を差し替えていない（原子的置換でない）");
 }
