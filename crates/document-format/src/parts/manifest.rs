@@ -178,6 +178,17 @@ impl ManifestEntry {
         self.digest
     }
 
+    /// ダイジェストだけを差し替えた写しを返す（移行の記帳。タスク 6.2）。
+    ///
+    /// 名前と、要素で保持した未知フィールドはそのまま引き継ぐ（[`ManifestPart::reindexed`]）。
+    fn with_digest(&self, digest: Blake3Digest) -> Self {
+        Self {
+            name: self.name,
+            digest,
+            preserved: self.preserved.clone(),
+        }
+    }
+
     /// 要素 1 件を確定形の JSON オブジェクトとして書き出す。
     ///
     /// キー順序は宣言順（`name` → `blake3`）で、未知キーは
@@ -242,10 +253,48 @@ impl ManifestPart {
     ///
     /// 索引はエントリ名の昇順（構築時の不変条件）なので二分探索で引く。
     pub fn digest_of(&self, name: &EntryName) -> Option<Blake3Digest> {
+        self.entry_of(name).map(|entry| entry.digest)
+    }
+
+    /// エントリ名に対応する索引要素を引く（索引に無ければ `None`）。
+    ///
+    /// 索引はエントリ名の昇順（構築時の不変条件）なので二分探索で引く。
+    fn entry_of(&self, name: &EntryName) -> Option<&ManifestEntry> {
         self.parts
             .binary_search_by(|entry| entry.name.cmp(name))
             .ok()
-            .map(|index| self.parts[index].digest)
+            .map(|index| &self.parts[index])
+    }
+
+    /// 版と索引を差し替えた写しを返す（移行の記帳。タスク 6.2）。
+    ///
+    /// `digests` は集合の実内容から得た（エントリ名, ダイジェスト）の列である。名前が一致する
+    /// 索引要素は**未知フィールドを引き継いで**ダイジェストだけを差し替え、一致しない名前
+    /// （移行がパートを足した場合）は新しい要素になる。索引に載らない名前（移行がパートを
+    /// 消した場合）は落ちる。トップレベルの未知フィールドも引き継ぎ、索引の並びは構築時の
+    /// 正準化（エントリ名の昇順・重複なし・自己参照なし）を通す。
+    ///
+    /// 保持の継承がこの関数の存在理由である: 素の再構築（[`ManifestPart::new`]）は
+    /// [`PreservedFields`] を空から始めるため、未知フィールドが黙って落ちる（要件 6.2 / 6.3）。
+    /// クレート可視である（呼び出し元は移行チェーンの記帳だけであり、外部に任意の索引を
+    /// 組み立てる経路を作らない）。
+    pub(crate) fn reindexed(
+        &self,
+        version: FormatVersion,
+        digests: impl IntoIterator<Item = (EntryName, Blake3Digest)>,
+    ) -> Result<Self, DocumentError> {
+        let entries = digests
+            .into_iter()
+            .map(|(name, digest)| match self.entry_of(&name) {
+                Some(previous) => previous.with_digest(digest),
+                None => ManifestEntry::new(name, digest),
+            })
+            .collect();
+        Ok(Self {
+            version,
+            parts: Self::canonicalize(entries)?,
+            preserved: self.preserved.clone(),
+        })
     }
 
     /// 確定形の JSON バイト列へ符号化する（コンパクトな UTF-8・末尾改行なし）。

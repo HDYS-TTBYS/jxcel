@@ -10,13 +10,19 @@
 //! 照合より先であること）は `src/parts/document_parts.rs` と `src/migration/mod.rs` の
 //! 単体テストが担う。ここは**公開経路とコンテナ経路の端から端まで**を確かめる。
 //!
-//! # タスク 6.2 への申し送り
+//! # タスク 6.2 で置き換えたこと
 //!
-//! 現行より**古い** major は design 上「移行チェーンの適用が必要」だが、適用先の実チェーンは
-//! タスク 6.2 が実装する。本タスクの読み込み経路は移行先が無い版を開けないため、
-//! [`an_older_major_is_rejected_until_the_migration_chain_lands`] が固定しているとおり
-//! 同じ `UnsupportedVersion` として中止する。6.2 はこの分岐を実チェーン適用へ置き換え、
-//! このテストの期待も更新する。
+//! 現行より**古い** major は design 上「移行チェーンの適用が必要」であり、タスク 6.1 は
+//! 移行先が無い版として `UnsupportedVersion` で中止していた。**タスク 6.2 はその分岐を実
+//! チェーン適用へ置き換えた**: 読み込み経路は記録値から現行 major まで段を 1 段ずつ適用し、
+//! 実表が空である初版では「移行を試みたが移行先が無い」として**同じ `UnsupportedVersion`** で
+//! 中止する（[`an_older_major_without_a_migration_target_is_rejected`]）。
+//!
+//! 多段の適用そのものはクレート内部の合成表（`migration::steps::synthetic`）を使う単体テストが
+//! 担う（統合テストは公開面だけを使うため、ステップ表を注入できない）。ここは公開経路と
+//! コンテナ経路の端から端までを確かめる。
+
+use std::path::Path;
 
 use document_format::container::ContainerCodec;
 use document_format::entry_name::MANIFEST_ENTRY;
@@ -74,7 +80,11 @@ fn the_versioning_surface_is_reachable_from_outside_the_crate() {
         "クレート根の現行版が違う"
     );
     assert_eq!(CURRENT, document_format::migration::CURRENT_FORMAT_VERSION);
-    assert!(Chain::admit(CURRENT).is_ok(), "現行版がゲートを通らない");
+    // 現行版は移行されない（集合を複製しない）。
+    assert!(
+        Chain::apply(&parts_at(CURRENT)).expect("現行版は中止しない").is_none(),
+        "現行版が移行された"
+    );
     assert_eq!(Verdict::Openable, Chain::gate(CURRENT));
     assert_eq!(
         Verdict::Unsupported { found: FormatVersion::new(2, 7), supported: CURRENT },
@@ -138,11 +148,13 @@ fn a_same_major_is_accepted_even_with_a_newer_minor() {
     }
 }
 
-/// 現行より古い major は「移行チェーンの適用が必要」である。**適用先の実チェーンはタスク 6.2**
-/// が実装するため、本タスクでは移行先が無い版として同じ中止（`UnsupportedVersion`）で報告する
-/// （6.2 がこの期待を実チェーン適用へ置き換える）。
+/// 現行より古い major は、実表（v1 のみ・空）に移行先が無いため `UnsupportedVersion` で中止する
+/// （要件 6.2 の「移行したうえで構築する」は、段が現行 major へ届く場合の応答である）。
+///
+/// タスク 6.1 は「ゲートで即拒否」していた。**タスク 6.2 は移行チェーンを試みる経路に置き換え、
+/// 移行先が無い場合の観測結果は同じ**である（`found` は記録値 = 移行前の版、`supported` は現行）。
 #[test]
-fn an_older_major_is_rejected_until_the_migration_chain_lands() {
+fn an_older_major_without_a_migration_target_is_rejected() {
     for recorded in [FormatVersion::new(0, 9), FormatVersion::new(0, 0)] {
         match from_parts(&parts_at(recorded)) {
             Err(DocumentError::UnsupportedVersion { found, supported }) => {
@@ -156,6 +168,33 @@ fn an_older_major_is_rejected_until_the_migration_chain_lands() {
             Err(other) => panic!("{recorded} の変種が違う: {other}"),
         }
     }
+}
+
+/// 過去バージョンごとのゴールデン fixture の置き場が存在する（design「File Structure Plan」の
+/// `tests/fixtures/golden/vN/`）。
+///
+/// # 配置・命名・生成・更新の規約
+///
+/// - **配置**: 形式バージョンごとに `tests/fixtures/golden/v<major>/` を置く（初版は `v1/`）。
+///   空のディレクトリは git に載らないため、`.gitkeep` を置いて追跡される形にする。
+/// - **命名**: その版の代表的なドキュメントを `<名前>.jxcel` として置く（複数可）。名前は内容が
+///   分かる英小文字の語（例 `minimal.jxcel` / `two_sheets.jxcel`）。
+/// - **生成**: 期待値は**その版を書いた実装の出力**をそのまま固定する（手書きでも外部ツールでも
+///   ない。`tests/fixtures/bytes/golden_container.zip` と同じ方針）。生成コードは残さない。
+/// - **更新**: 形式バージョンを上げたときは**新バージョンの fixture を追加**し、過去バージョンの
+///   fixture は「移行チェーンが現行版へ運べること」の入力として保つ（比較そのものはタスク 8.7 が
+///   追加する）。移行チェーンの中間ステップが未保守のまま腐る失敗形態は先行事例（nbformat）で
+///   実際に起きており、fixture が唯一の防御である（design「Migration Strategy /
+///   検証チェックポイント」）。
+#[test]
+fn the_golden_fixture_directory_for_the_current_version_exists() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("tests/fixtures/golden/v{}", CURRENT.major));
+    assert!(
+        directory.is_dir(),
+        "過去バージョンのゴールデン fixture の置き場が無い: {}",
+        directory.display()
+    );
 }
 
 /// ゲートはダイジェスト照合（design 読み込みフローの「形式バージョン」→「ダイジェスト照合」）

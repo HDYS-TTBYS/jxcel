@@ -101,13 +101,16 @@
 //! 前に完了させる**:
 //!
 //! 1. 索引の解決（[`resolve_manifest`]。不在は [`DocumentError::MissingPart`]）
-//! 2. 形式バージョンのゲート（要件 6.5。design 読み込みフローの「形式バージョン」）:
-//!    索引が記録した版を [`MigrationChain::admit`] に掛け、読めない版（新しすぎる major、
-//!    および移行先がまだ無い古い major）は [`DocumentError::UnsupportedVersion`] で中止する。
-//!    位置は**ダイジェスト照合より前**である（design の順序）
+//! 2. 形式バージョンのゲートと、古い形式への段階的移行（要件 6.2, 6.3, 6.5）:
+//!    索引が記録した版を [`MigrationChain::gate`] で判定し、新しすぎる major は
+//!    [`DocumentError::UnsupportedVersion`] で中止する。古い major は移行チェーン
+//!    （[`MigrationChain::apply`]）を適用する。**移行する場合だけ**集合を所有して組み立て直し、
+//!    移行先が無ければ同じ [`DocumentError::UnsupportedVersion`] で中止する
 //! 3. 完全性の照合（要件 5.2 / 5.3）: 索引の全エントリについて、実体の存在
 //!    （無ければ [`DocumentError::MissingPart`]）とダイジェストの一致
-//!    （不一致は [`DocumentError::IntegrityMismatch`]）を確かめる
+//!    （不一致は [`DocumentError::IntegrityMismatch`]）を確かめる。**移行する場合は、移行の
+//!    前に記録されたままの集合を照合し、移行後にもう一度この照合を通す**（下記
+//!    「移行とダイジェスト照合の順序」）
 //! 4. 各パートの復号（[`DocumentPart`] / [`SchemaCodec`] / [`RowsCodec`]。添付は
 //!    バイト列のまま。content-addressed の再計算照合もここで行う）
 //! 5. 構造検証（[`StructuralValidator`]。識別子の一意性・スキーマの存在・参照の実在性）
@@ -116,6 +119,20 @@
 //!
 //! 1〜6 のいずれかで失敗した場合、モデルは 1 つも構築されず [`Err`] が返る。7 の構築は
 //! 検証済みの内容だけを移す（行は行ごとの探索をしない一括経路で入れる。要件 8.1）。
+//!
+//! ## 移行とダイジェスト照合の順序（タスク 6.2 の親の裁定）
+//!
+//! design「読み込みフロー」は「バージョンゲート → 移行 → ダイジェスト照合」と書いているが、
+//! **この順序のままでは古い形式のファイルの破損を検出できない**: 移行が索引を無条件に
+//! 作り直すため、壊れた古いファイルが黙って「修復」されて読まれてしまう（要件 5.2 は古い
+//! 形式のファイルにも適用される）。したがって本経路は
+//! **「ゲート →（移行する場合だけ）記録どおりの照合 → 移行 → 移行後の照合・構造検証」**
+//! の順で運ぶ。移行後の集合は 3 以降の既存の 1 経路で検証される（検証ロジックを 2 箇所に
+//! 持たない）。同じ裁定と理由は [`crate::migration`] のモジュール docs
+//! 「移行とダイジェスト照合の順序」にも書いてある。
+//!
+//! 移行は**メモリ上**で完結する: 本モジュールは `std::fs` に触れず、書き込みも読み込みも
+//! しない（ファイル I/O はタスク 7.1 / 7.2 の責務）。
 //!
 //! ## 索引の向きと、検査しないこと
 //!
@@ -131,9 +148,9 @@
 //! [`crate::migration`]）を `manifest.json` へ記録する（要件 6.1）。
 //! [`DocumentParts::format_version`] はパート集合が記録しているバージョンを**そのまま**返す
 //! （ゲートを掛けない。報告と読み込みの可否は別の関心事であり、コンテナ層の型マーカーは
-//! この値を写す）。`from_parts` は読む前段でこの値を [`MigrationChain::admit`] に掛け、
-//! 読めない版を中止する（要件 6.5。処理順 2）。**古い版を現行へ変換する実チェーンの適用**は
-//! タスク 6.2 が実装し、本モジュールは [`crate::migration`] の判定に従うだけである。
+//! この値を写す）。`from_parts` は読む前段でこの値を [`MigrationChain::gate`] に掛け、
+//! 読めない版を中止し、古い版は移行チェーン（[`MigrationChain::apply`]）で現行版へ運ぶ
+//! （要件 6.2, 6.3, 6.5。処理順 2）。
 //!
 //! # 依存方向
 //!
@@ -154,7 +171,8 @@
 //! |------|----------------|
 //! | 索引（`manifest.json`）が無い | [`DocumentError::MissingPart`]（`name` = `manifest.json`） |
 //! | 索引が復号できない | [`DocumentError::InvalidContainer`]（`entry` = `manifest.json: <理由>`） |
-//! | 記録された形式バージョンが読めない | [`DocumentError::UnsupportedVersion`]（`found` / `supported`。要件 6.5） |
+//! | 記録された形式バージョンが読めない | [`DocumentError::UnsupportedVersion`]（`found` / `supported`。新しすぎる major と、移行先が無い古い major。要件 6.2, 6.3, 6.5） |
+//! | 移行のステップ表が欠陥を持つ（同じ版から 2 段 / 前進しない段 / 現行 major を飛び越す段） | [`DocumentError::InvalidContainer`]（`entry` = `migration: <理由>`。呼び出し元の programming error） |
 //! | 索引に載ったパートが実在しない | [`DocumentError::MissingPart`]（`name` = そのエントリ名） |
 //! | 実体のダイジェストが索引の記録と一致しない | [`DocumentError::IntegrityMismatch`]（`entry` = そのエントリ名） |
 //! | メタデータ（`document.json`）が無い | [`DocumentError::MissingPart`]（`name` = `document.json`） |
@@ -171,7 +189,8 @@ use crate::entry_name::{EntryName, MANIFEST_ENTRY};
 use crate::error::{DocumentError, IdKind};
 use crate::ids::{AttachmentId, Blake3Digest, SheetId};
 use crate::integrity::{digest_part, verify_part};
-use crate::migration::{FormatVersion, MigrationChain, CURRENT_FORMAT_VERSION};
+use crate::migration::steps::{MigrationStep, STEPS};
+use crate::migration::{FormatVersion, MigrationChain, VersionVerdict, CURRENT_FORMAT_VERSION};
 use crate::model::{Document, Row, SchemaPart, Sheet};
 use crate::parts::document_part::{DocumentPart, SheetMeta};
 use crate::parts::manifest::{resolve_manifest, ManifestEntry, ManifestPart};
@@ -262,10 +281,39 @@ impl DocumentParts {
     ///
     /// 値は索引（`manifest.json`）が持つバージョンであり、構築時に解決されるため失敗しない。
     /// **報告するだけでゲートは掛けない**: 読み込みの可否は [`from_parts`] が
-    /// [`MigrationChain::admit`] で判定する（値そのものを観測したい呼び出し元と、読めるか
+    /// [`MigrationChain::gate`] で判定する（値そのものを観測したい呼び出し元と、読めるか
     /// 否かを知りたい呼び出し元は別である。モジュール docs「形式バージョン」）。
     pub const fn format_version(&self) -> FormatVersion {
         self.version
+    }
+
+    /// 形式バージョンと索引を、この集合の実際の内容に合わせて組み直す（移行の記帳。タスク 6.2）。
+    ///
+    /// 移行チェーンが各段を適用した後に呼ぶ。段は**表現**だけを書き換えればよく、版の記帳と
+    /// 索引の整合（索引に載る全パートのダイジェストを実体に一致させること）はここが担う
+    /// （[`crate::migration`] のモジュール docs「段階的移行チェーン」の 4）。索引要素と索引
+    /// トップレベルで保持した未知フィールドは引き継ぐ（要件 6.2 / 6.3）。
+    ///
+    /// 集合を**消費する**（所有権を取る）: 移行は稀な経路であり、段が組み立て直した集合を
+    /// そのまま使うため、複製も再ハッシュもしない（各パートのダイジェストは構築時に実体から
+    /// 算出済みである。書き換わるのは索引の記録値だけである）。クレート可視である
+    /// （読み込み経路の外に任意の集合の記帳を許す経路を作らない）。
+    pub(crate) fn reindex(mut self, version: FormatVersion) -> Result<Self, DocumentError> {
+        let index = self
+            .parts
+            .binary_search_by(|part| part.name.cmp(&MANIFEST_ENTRY))
+            .map_err(|_| DocumentError::MissingPart { name: MANIFEST_ENTRY.to_string() })?;
+        let recorded = ManifestPart::from_json_bytes(&self.parts[index].bytes)?;
+        let digests = self
+            .parts
+            .iter()
+            .filter(|part| part.name != MANIFEST_ENTRY)
+            .map(|part| (part.name, part.digest));
+        let bytes = recorded.reindexed(version, digests)?.to_json_bytes()?;
+        let digest = digest_part(&bytes);
+        self.parts[index] = Part { name: MANIFEST_ENTRY, bytes, digest };
+        self.version = version;
+        Ok(self)
     }
 
     /// 集合の正準化（昇順への整列・重複拒否・形式マーカーの拒否）。両構築経路の共通の門。
@@ -358,26 +406,43 @@ pub fn to_parts(document: &Document) -> Result<DocumentParts, DocumentError> {
 ///
 /// 処理順と検証の範囲はモジュール docs「読み込みの処理順」にある。検証はすべてモデル構築の
 /// 前に完了し、失敗した場合は部分的なモデルを返さない（要件 5.4）。`open`（タスク 7.1）も
-/// この経路と同じ検証を通る（検証ロジックを 2 箇所に持たない）。
+/// この経路と同じ検証を通る（検証ロジックを 2 箇所に持たない）。実表 [`STEPS`] を使う。
 pub fn from_parts(parts: &DocumentParts) -> Result<Document, DocumentError> {
-    // 1. 索引の解決（design 読み込みフローの「manifest が存在」）。
-    let manifest_part = manifest_part_of(parts)?;
-    let manifest = ManifestPart::from_json_bytes(&manifest_part.bytes)?;
+    from_parts_with(STEPS, parts)
+}
 
-    // 2. 形式バージョンのゲート（要件 6.5。design 読み込みフローの「形式バージョン」）。
-    //    索引が記録した版を判定し、読めない版（新しすぎる major、および移行先がまだ無い
-    //    古い major）は**ダイジェスト照合より前**に中止する。移行チェーンの適用はタスク 6.2
-    //    の実装であり、6.2 は `MigrationChain::admit` の古い版の分岐を実チェーン適用へ
-    //    置き換える（本経路の挿入点はここ 1 箇所だけである）。
-    MigrationChain::admit(parts.format_version())?;
+/// 移行のステップ表を明示して [`from_parts`] と同じ経路を運ぶ（モジュール内の入口）。
+///
+/// 表を差し替えて段階適用の経路を試すための入口である。**公開面には出さない**（読み込みの
+/// 経路は [`STEPS`] を使い、モジュールのテストだけが合成表を渡す）。
+fn from_parts_with(
+    steps: &[MigrationStep],
+    parts: &DocumentParts,
+) -> Result<Document, DocumentError> {
+    // 1. 索引の解決（design 読み込みフローの「manifest が存在」）。
+    let recorded_manifest = decode_manifest(parts)?;
+
+    // 2. 形式バージョンのゲートと、古い形式への段階的移行（要件 6.2, 6.3, 6.5）。
+    //
+    //    移行する場合は、**移行の前に**記録されたままの集合を索引と照合する（要件 5.2）:
+    //    移行が索引を無条件に作り直すと、破損した古いファイルが黙って「修復」されてしまう
+    //    （モジュール docs「移行とダイジェスト照合の順序」）。移行が不要な集合では照合を
+    //    増やさない（通常経路の照合は下の 3 の 1 回だけである）。
+    if let VersionVerdict::NeedsMigration { .. } = MigrationChain::gate(parts.format_version()) {
+        verify_indexed_parts(parts, &recorded_manifest)?;
+    }
+    // 移行が必要な場合だけ集合を所有して組み立て直す（現行版の集合は複製しない。要件 8.1）。
+    let migrated = MigrationChain::apply_with(steps, parts)?;
+    let parts = migrated.as_ref().unwrap_or(parts);
+    // 移行した場合は索引を組み直してから照合する（移行後の集合も同じ 1 経路で検証される）。
+    let refreshed = match &migrated {
+        Some(migrated) => Some(decode_manifest(migrated)?),
+        None => None,
+    };
+    let manifest = refreshed.as_ref().unwrap_or(&recorded_manifest);
 
     // 3. 完全性の照合（要件 5.2 / 5.3）: 索引に載った各パートが実在し、内容が記録どおりか。
-    for entry in manifest.entries() {
-        let part = parts.get(&entry.name()).ok_or_else(|| DocumentError::MissingPart {
-            name: entry.name().to_string(),
-        })?;
-        verify_part(&entry.name(), &part.bytes, entry.digest())?;
-    }
+    verify_indexed_parts(parts, manifest)?;
 
     // 4. 各パートの復号（検証はまだ行わない: すべての復号結果が揃ってから検証する）。
     let mut document_part: Option<DocumentPart> = None;
@@ -460,6 +525,33 @@ fn manifest_part_of(parts: &DocumentParts) -> Result<&Part, DocumentError> {
     parts.get(&MANIFEST_ENTRY).ok_or_else(|| DocumentError::MissingPart {
         name: MANIFEST_ENTRY.to_string(),
     })
+}
+
+/// 集合の索引（`manifest.json`）を復号する。
+///
+/// 索引は信頼の根であり（design「Container Entry Layout」）、復号できない索引を持つ集合は
+/// 読み込めない（[`DocumentError::InvalidContainer`]）。
+fn decode_manifest(parts: &DocumentParts) -> Result<ManifestPart, DocumentError> {
+    let part = manifest_part_of(parts)?;
+    ManifestPart::from_json_bytes(&part.bytes)
+}
+
+/// 索引に載った各パートが実在し、内容が記録どおりかを照合する（要件 5.2 / 5.3）。
+///
+/// 向きは**索引 → 実体**である（索引に載った各パートが実在し、内容が記録どおりか）。
+/// 移行の前後で同じ照合を使う（移行が必要な集合でも、記録されたままの集合を先に照合し、
+/// 移行後の集合をもう一度通す。モジュール docs「移行とダイジェスト照合の順序」）。
+fn verify_indexed_parts(
+    parts: &DocumentParts,
+    manifest: &ManifestPart,
+) -> Result<(), DocumentError> {
+    for entry in manifest.entries() {
+        let part = parts.get(&entry.name()).ok_or_else(|| DocumentError::MissingPart {
+            name: entry.name().to_string(),
+        })?;
+        verify_part(&entry.name(), &part.bytes, entry.digest())?;
+    }
+    Ok(())
 }
 
 /// 索引からパート集合の形式バージョンを読む（構築時に 1 回だけ通る）。
@@ -631,6 +723,7 @@ fn invalid(entry: &EntryName, reason: impl fmt::Display) -> DocumentError {
 mod tests {
     use super::*;
     use crate::ids::IdFactory;
+    use crate::migration::steps::synthetic;
     use crate::value::{CellValue, NestedValue};
 
     /// 標本の型定義識別子（正準 Crockford base32 大文字 26 文字）。
@@ -841,9 +934,9 @@ mod tests {
 
     /// ゲートの major 境界: 同一 major は minor の新旧を問わず受理し、より新しい major は拒否する。
     ///
-    /// **古い major も本タスクでは同じ拒否である**（移行チェーンの適用機構はタスク 6.2 の
-    /// 実装であり、移行先が無い版は開けない）。6.2 はこの分岐を実チェーン適用へ置き換え、
-    /// ここに古い major が載っている期待を更新する。
+    /// **古い major は移行チェーンを試みるが、実表（v1 のみ・空）に移行先が無いため同じ中止に
+    /// なる**。タスク 6.2 が 6.1 の「ゲートで即拒否」の分岐を実チェーン適用へ置き換えた
+    /// （観測結果は同じ。モジュール docs「移行とダイジェスト照合の順序」）。
     #[test]
     fn from_parts_gates_on_the_major_boundary() {
         let document = sample_document();
@@ -877,7 +970,8 @@ mod tests {
     /// 「ダイジェスト照合」）: 索引が実体の無いパートを載せていても、版が読めなければ
     /// [`DocumentError::UnsupportedVersion`] が返る（[`DocumentError::MissingPart`] ではない）。
     ///
-    /// **この順序はタスク 6.2 が移行を挿す位置の前提である**（移行は照合の前段で行う）。
+    /// **この順序はタスク 6.2 が移行を挿した位置の前提である**: 移行する集合は、まず記録
+    /// されたままの照合を通る（モジュール docs「移行とダイジェスト照合の順序」）。
     #[test]
     fn the_version_gate_runs_before_the_integrity_check() {
         let document = sample_document();
@@ -1026,5 +1120,129 @@ mod tests {
             }
             other => panic!("content-addressed の不一致が報告されない: {other:?}"),
         }
+    }
+
+    /// 端から端まで: 古い版の集合が合成の多段表を通って**モデルまで到達**し、移行後の
+    /// `manifest.json` の版が現行版になる（要件 6.2, 6.3）。
+    ///
+    /// 合成表（[`synthetic`]）は多段の経路を実表（v1 のみ・空）と独立に試すための
+    /// クレート内部の道具である（`migration::tests::the_step_table_is_empty_at_v1` が実表の
+    /// 空を固定する）。
+    #[test]
+    fn from_parts_migrates_an_older_version_through_the_step_table() {
+        let document = sample_document();
+        let parts = to_parts(&document).expect("保存経路");
+        let recorded = synthetic::recorded_at(synthetic::OLDEST, &parts);
+        assert_eq!(
+            FormatVersion::new(0, 0),
+            recorded.format_version(),
+            "標本の記録値が古い版になっていない"
+        );
+
+        let restored = from_parts_with(synthetic::MULTI_STEP, &recorded).expect("移行して読める");
+        // 段の適用順序は、段がシート名へ積む印で観測する（逆順・一段のみでは最終形にならない）。
+        let names: Vec<&str> = restored.sheets().iter().map(|sheet| sheet.name()).collect();
+        assert_eq!(vec!["在庫|v0.1|v1.0", "空|v0.1|v1.0"], names, "段の適用順序が違う");
+        // 移行が書き換えるのは `document.json` だけである: 識別子・列名・行・添付はそのまま復元される。
+        assert_eq!(document.document_id(), restored.document_id(), "移行で識別子が変わった");
+        assert_eq!(
+            vec![columns(&["name", "$id", "量"]), columns(&["x"])],
+            restored.sheets().iter().map(|sheet| sheet.columns().to_vec()).collect::<Vec<_>>(),
+            "移行で列名が変わった"
+        );
+        assert_eq!(
+            vec![2, 0],
+            restored.sheets().iter().map(|sheet| sheet.rows().len()).collect::<Vec<_>>(),
+            "移行で行が変わった"
+        );
+        assert_eq!(
+            document.attachments().iter().count(),
+            restored.attachments().iter().count(),
+            "移行で添付が変わった"
+        );
+
+        // 移行後の `manifest.json` の版は現行版である（移行の記帳）。
+        let migrated = MigrationChain::apply_with(synthetic::MULTI_STEP, &recorded)
+            .expect("合成表は妥当")
+            .expect("古い版は移行される");
+        assert_eq!(CURRENT_FORMAT_VERSION, migrated.format_version(), "移行後の版が現行版でない");
+    }
+
+    /// 現行版の集合は移行されない: 合成の多段表を渡しても段は 1 つも走らず（印が付かず）、
+    /// 集合も複製されない（[`MigrationChain::apply`] は `None` を返す。要件 8.1 の予算に
+    /// 移行の複製と再ハッシュを持ち込まない）。
+    #[test]
+    fn the_current_version_is_neither_migrated_nor_copied() {
+        let document = sample_document();
+        let parts = to_parts(&document).expect("保存経路");
+        assert_eq!(CURRENT_FORMAT_VERSION, parts.format_version(), "標本が現行版でない");
+
+        let restored = from_parts_with(synthetic::MULTI_STEP, &parts).expect("現行版は読める");
+        let names: Vec<&str> = restored.sheets().iter().map(|sheet| sheet.name()).collect();
+        assert_eq!(vec!["在庫", "空"], names, "現行版の集合に段が適用された");
+        assert!(
+            MigrationChain::apply_with(synthetic::MULTI_STEP, &parts)
+                .expect("現行版は中止しない")
+                .is_none(),
+            "現行版の集合が移行（複製）された"
+        );
+    }
+
+    /// 移行が必要な版の集合でも、**移行の前に**記録されたままの照合を行う（要件 5.2 は古い
+    /// 形式のファイルにも適用される）。移行が索引を無条件に作り直すと、壊れた古いファイルが
+    /// 黙って「修復」されて読まれてしまう（タスク 6.2 の親の裁定。モジュール docs
+    /// 「移行とダイジェスト照合の順序」）。
+    #[test]
+    fn a_corrupt_older_version_is_rejected_before_the_migration_runs() {
+        let document = sample_document();
+        let parts = to_parts(&document).expect("保存経路");
+        // 記録値だけを古い版へ差し替える（索引のダイジェストは元の実体のまま）。
+        let recorded = rebuilt(FormatVersion::new(0, 0), entries(&parts));
+        // 索引が指す実体（`document.json`）を 1 箇所だけ書き換える。**復号できる**壊し方に
+        // するのが要点である: 移行が先に走れば、新しい索引で上書きされて「修復」されてしまう。
+        let mut forward = entries(&recorded);
+        let original = forward
+            .iter()
+            .find(|(name, _)| *name == EntryName::Document)
+            .expect("標本はメタデータを持つ")
+            .1
+            .clone();
+        let text = String::from_utf8(original).expect("メタデータは UTF-8");
+        let tampered = text.replacen('{', r#"{"unrecorded":1,"#, 1).into_bytes();
+        replace(&mut forward, EntryName::Document, tampered);
+        let broken = DocumentParts::from_entries(forward).expect("標本の集合は妥当");
+
+        match from_parts_with(synthetic::MULTI_STEP, &broken) {
+            Err(DocumentError::IntegrityMismatch { entry }) => {
+                assert_eq!(EntryName::Document.to_string(), entry, "不一致のエントリが違う");
+            }
+            Ok(restored) => panic!(
+                "壊れた旧版が移行で「修復」されて読まれた（{} シート）",
+                restored.sheets().len()
+            ),
+            Err(other) => panic!("移行が照合より先に走っている: {other}"),
+        }
+    }
+
+    /// 未知フィールドは**移行の経路でも**保持される: 段が `document.json` を書き換えても
+    /// （トップレベルとシート要素の）未知キーは残り、モデルを経由して書き戻しても失われない
+    /// （要件 6.2, 6.3）。
+    #[test]
+    fn unknown_fields_survive_migration_and_reach_the_model() {
+        let parts = to_parts(&sample_document()).expect("保存経路");
+        let recorded = synthetic::with_unknown_fields(FormatVersion::new(0, 0), &parts);
+
+        let restored = from_parts_with(synthetic::MULTI_STEP, &recorded).expect("移行して読める");
+        let rewritten = to_parts(&restored).expect("再保存経路");
+        let document = rewritten.get(&EntryName::Document).expect("メタデータは常に存在する");
+        let text = String::from_utf8(document.bytes.clone()).expect("メタデータは UTF-8");
+        assert!(
+            text.contains(r#""future_top":{"unit":"mm"}"#),
+            "トップレベルの未知フィールドが移行とモデル経由で消えた: {text}"
+        );
+        assert!(
+            text.contains(r#""element_note":7"#),
+            "シート要素の未知フィールドが移行とモデル経由で消えた: {text}"
+        );
     }
 }
