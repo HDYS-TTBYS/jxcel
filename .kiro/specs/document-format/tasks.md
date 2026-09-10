@@ -111,7 +111,7 @@
   - _Boundary: DocumentPart_
   - _Depends: 1.6, 3.1_
 
-- [ ] 4.4 (P) スキーマパートの符号化を実装する
+- [x] 4.4 (P) スキーマパートの符号化を実装する
   - シートごとに独立したエントリとしてスキーマを符号化・復号する
   - 不透明ペイロードが往復で完全に同一であることをテストで示す
   - _Requirements: 1.3, 2.2_
@@ -300,7 +300,7 @@
 - task 3.2 で未知フィールド保持のプリミティブが `src/json/determinism.rs` に入った（`PreservedFields` / `PreservedField` / `PreservingObjectWriter`。値は `RawValue` の verbatim バイト列、位置は**既知キー前方カウント** `preceding_known_fields`。`json` 経由で公開、doctest 付き）
 - **パート構造体（4.2 / 4.3 / 4.4 / 6.2）がこのプリミティブを使うときの必須条件**（task 3.2 レビュー由来。`determinism.rs` の doc にも記載）: (1) `record_known_field` を呼ぶキー列と `write_known` を呼ぶキー列を 1 対 1・同順に保つ（件数がずれると差し戻し位置がずれる。フィールド自体は失われない）、(2) 条件付きで省略する既知フィールドは読み書きで扱いを揃える、(3) `PreservedFields` は 1 読み込みにつき 1 個（読み込みをまたいで再利用しない）、(4) `write_known` は宣言順に呼ぶ（順序を変えると要件 3.3 に反する）、(5) 失敗時に 1 バイトも書かない規律を継承（一時バッファ + `finish` 一括書き出し）
 - バイト単位往復の成立条件は「**コンパクト入力 + 既知フィールドが宣言順**」。キーと値の間の空白は値の一部ではないため消え、キーはデコード済みテキストとして保持されるためキー側の `\uXXXX` 表記は正規化され得る（**値だけが表記まで verbatim**）。ゴールデン fixture は必ず本クレートの書き出し形式で作ること
-- 未知フィールド保持の機構が 2 つ併存する: `SchemaPart` の `RawField` / `unknown_fields` は**エンベロープ・トップレベル限定**の特殊化（位置情報なし、task 2.2）、`src/json/determinism.rs` のプリミティブは位置付きの一般形（task 3.2）。**統合責任は task 4.4（SchemaCodec）が負う** — `schemas/<sheet-ulid>.json` の最終バイト再構成を本プリミティブで行い、二重実装を残さないこと
+- 未知フィールド保持の機構は **task 4.4 で一本化済み**: 旧 `SchemaPart` の `RawField` / `unknown_fields`（エンベロープ・トップレベル限定・位置情報なし。task 2.2）は削除され、`src/json/determinism.rs` の `PreservedFields` / `PreservingObjectWriter`（位置付き）が唯一の機構である。**スキーマ・エンベロープも全階層（トップレベル + 各型定義要素）で未知キーを位置ごと保持し書き戻す**（型定義要素の未知キーを拒否していた 2.2 の挙動は要件 6.2 / 6.3 に忠実な側へ変更済み）。新しいバージョン付き構造を作るタスク（6.1 / 6.2）も同じ機構だけを使うこと
 - task 3.3 で NDJSON コーデックが `src/json/ndjson.rs` に入った（`json::write_ndjson` / `json::read_ndjson`。行末は常に LF で**最終行も終端**、順序を並べ替えない、失敗時は 1 バイトも書かない、行番号 1 始まり付き `InvalidContainer`）。`\r` は正規化しない（出力に `\r` は出さず、読みは行内 `\r` を JSON 空白として通す。doc とテストで固定）
 - **task 4.5（行データパートの符号化）が満たすべき必須条件**（task 3.3 レビュー由来）:
   - **i64 範囲外整数の門が必須**: `json::read_ndjson` は汎用コーデックなので整数リテラルの範囲検査をせず、`{"label":-9223372036854775809}` → `Float(-9.223372036854776e18)`、`99999999999999999999999999` → `Float(1e26)` と**黙って f64 に落ちる**（`9223372036854775808` だけは `visit_u64` が拒否する）。task 1.5 の `value::from_json_bytes` は 3 例とも `InvalidContainer` で拒否する。4.5 はセルの原文を `value::from_json_bytes` に通す門を必ず設けること（`check_integer_literals` は `value.rs` 非公開のため `RawValue` 等で原文を捕捉する必要がある）
@@ -321,3 +321,7 @@
   - `Document::sheets()` の反復順を 1 対 1 で `SheetMeta` 列へ写すこと（`add_sheet` の末尾追加・`remove_sheet` の順序保存と整合）。`Sheet::name()` は無変換で写せる
   - `DocumentPart::new` / `from_json_bytes` は `Result` を返す（重複シート識別子で `InvalidContainer`）ため、**4.8 の `to_parts` は infallible にできない**
   - `document.json` 内の重複検出は同一ファイル内の自己矛盾に限る。行・型定義・添付をまたぐ全体一意性は task 4.6 の担当
+- task 4.4 で `parts/schema_codec.rs` の `SchemaCodec`（`SheetId` + `SchemaPart` ⇄ `schemas/<sheet-ulid>.json` エンベロープ）が入った。`EntryName::Schema` は既存だったため `entry_name.rs` は無変更。エンベロープの確定形は `{"root": <opaque>, "types": [{"id": <ULID-26>, "definition": <opaque>}]}` のまま
+- **パート層の公開面は `parts::` 配下に統一する**（`parts::ManifestPart` / `parts::DocumentPart` / `parts::SchemaCodec`）。クレート根には出さない（モデル層とエラーは根、パート層は `parts` 配下）。新しいパート（task 4.5 の `RowsCodec`）も `parts::` 経由で公開すること
+- **`SchemaPart` / `TypeDef` は `PartialEq` を持たない**（保持カーソルが等値比較に混じるため。task 4.1〜4.4 の一貫した方針）。等価比較は「`root()` のバイト列 + 各型定義の `id()` / `definition()` の個別比較」または「符号化したバイト列の比較」で行う。**`type_defs()` 同士を直接 `==` では比較できない**（コンパイルエラーになる）
+- 往復バイト一致の成立範囲は task 3.2 / 4.2 / 4.3 と同じ（コンパクト入力 + 既知キーが宣言順）。スキーマ・エンベロープの既知キー宣言順は `root` → `types`、型定義要素は `id` → `definition`。`id` は正準大文字 ULID で書くため、小文字表記の入力は表記のみ正規化される（受理規則は不変）

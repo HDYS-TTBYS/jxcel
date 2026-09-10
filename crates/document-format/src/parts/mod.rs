@@ -5,16 +5,17 @@
 //! 圧縮にも触れない（コンテナ層 = タスク 5.x の責務）。
 //!
 //! 現在あるのは **manifest パート**（`manifest.json`）と **document パート**
-//! （`document.json`）である:
+//! （`document.json`）、**シート別スキーマパート**（`schemas/<sheet-ulid>.json`）である:
 //!
 //! | モジュール | エントリ | 責務 |
 //! |------------|----------|------|
 //! | [`manifest`] | `manifest.json` | 形式バージョン、パート索引、パートごとのダイジェスト（唯一の権威ある索引） |
 //! | [`document_part`] | `document.json` | ドキュメント識別子、シート順序、シートのメタデータ（安定メタデータ） |
+//! | [`schema_codec`] | `schemas/<sheet-ulid>.json` | シートごとのスキーマ（ルートスキーマ + ネスト型定義）の符号化・復号 |
 //!
 //! 論理エントリ集合そのものの型 `DocumentParts`（エントリ名 → バイト列 + ダイジェストの
-//! 決定的な集合）と、他のパート（`schemas/*.json` / `sheets/*.jsonl` /
-//! `attachments/*.bin`）の符号化は後続タスク（4.4〜4.8）で本層に加わる。
+//! 決定的な集合）と、残るパート（`sheets/*.jsonl` / `attachments/*.bin`）の符号化は
+//! 後続タスク（4.5, 4.8）で本層に加わる。
 //!
 //! # パートごとの順序規則
 //!
@@ -23,18 +24,25 @@
 //! `document.json` のシート順序は**それ自体がデータ**であり（要件 1.1 のモデル順）、
 //! 与えられた順序をそのまま保持して並べ替えない（[`document_part`]）。**逆の規則**で
 //! あるため、どちらの規則かを迷わないよう両モジュールの docs に理由を書いてある。
+//! `schemas/<sheet-ulid>.json` の型定義の並びも同じ側であり、エンベロープ内の出現順を
+//! そのまま書く（[`schema_codec`]）。
 //!
 //! # 依存方向
 //!
 //! `Ids / Value / EntryName → Model → Json → Parts → Container → Api` の一方向
 //! （design「Architecture Integration」）。本層は [`crate::json`] /
 //! [`crate::integrity`] / [`crate::entry_name`] / [`crate::error`] に依存し、
-//! `container` / `model` に依存しない。とくに **ZIP を知らない**ことは本層の契約であり、
-//! パートのバイト列は圧縮前（展開後）の内容として扱う（design「IntegrityVerifier」:
-//! ダイジェストは各エントリの内容から算出する）。
+//! パートの対象がモデルの型である場合は [`crate::model`] にも依存する
+//! （[`schema_codec`] は [`crate::model::SchemaPart`] を符号化する。この向きは上の
+//! 鎖の `Model → … → Parts` と同じである）。`container` には依存しない。とくに
+//! **ZIP を知らない**ことは本層の契約であり、パートのバイト列は圧縮前（展開後）の
+//! 内容として扱う（design「IntegrityVerifier」: ダイジェストは各エントリの内容から
+//! 算出する）。
 
 pub mod document_part;
 pub mod manifest;
+pub mod schema_codec;
 
 pub use document_part::{DocumentPart, SheetMeta};
 pub use manifest::{resolve_manifest, ManifestEntry, ManifestPart};
+pub use schema_codec::SchemaCodec;

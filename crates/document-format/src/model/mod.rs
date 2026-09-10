@@ -82,7 +82,10 @@ use crate::ids::{AttachmentId, IdFactory, RowId, SheetId};
 use crate::value::CellValue;
 
 pub use attachment::{Attachment, AttachmentRegistry};
-pub use schema_part::{RawField, RawJson, SchemaPart, TypeDef};
+pub use schema_part::{RawJson, SchemaPart, TypeDef};
+// エンベロープ文法のキーは parse(本モジュール)と符号化(タスク 4.4 の `SchemaCodec`)が
+// 共有する。文字列リテラルを両実装へ散在させないため、`parts` 層へ同じ定数を渡す。
+pub(crate) use schema_part::{KEY_DEFINITION, KEY_ID, KEY_ROOT, KEY_TYPES};
 pub use sheet::{Row, Sheet};
 
 /// [`Document::reorder_rows`] の失敗。
@@ -523,7 +526,7 @@ mod tests {
         let initial: &SchemaPart = doc.sheet_by_id(sheet).unwrap().root_schema();
         assert_eq!("null", initial.root().as_str());
         assert!(initial.type_defs().is_empty());
-        assert!(initial.unknown_fields().is_empty());
+        assert!(initial.preserved_fields().is_empty());
 
         // 差し替えは置換: 2 個目を足すのではなく 1 つを入れ替える。
         let first = SchemaPart::parse(r#"{"root":{"v":1},"types":[]}"#).unwrap();

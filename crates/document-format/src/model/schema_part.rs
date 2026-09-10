@@ -1,4 +1,5 @@
-//! 不透明スキーマ・ペイロードとネスト型定義(タスク 2.2。要件 1.2, 1.3)。
+//! 不透明スキーマ・ペイロードとネスト型定義(タスク 2.2。要件 1.2, 1.3。未知フィールド
+//! 保持の一般形への一本化はタスク 4.4)。
 //!
 //! # 不透明性(デザイン「スキーマ・ペイロードの不透明性」)
 //!
@@ -33,13 +34,33 @@
 //!   last-wins ではなく、エンベロープ水準で明示的に検出して拒否する。
 //! * `types` は 0 個以上の型定義のリスト(要件 1.3)。`types` キー自体の欠落は 0 個と
 //!   解釈する(文書化済み決定)。
-//! * 未知のトップレベル・キーは [`RawField`] としてキーと値をverbatim に、原文の
-//!   順序で保持する(前方互換。将来互換ルール 6.2 / 6.3)。未知キー同士の重複も
-//!   そのまま保持する(本スペックは解釈しない)。前方互換の保持はエンベロープ
-//!   トップレベルのみであり、型定義オブジェクトは `id` / `definition` のみを受け取る
-//!   (文書化済み決定)。
-//! * エンベロープの最終的な符号化と決定的出力(バイト再構成)はタスク 4.4 の担当。
-//!   本モジュールは parse と保持だけを所有する。
+//! * エンベロープの最終的な符号化と決定的出力(バイト再構成)はタスク 4.4 の
+//!   [`SchemaCodec`](crate::parts::schema_codec::SchemaCodec) が担う。本モジュールは
+//!   parse と保持だけを所有する。
+//!
+//! # 未知フィールドの保持(前方互換。要件 6.2 / 6.3)
+//!
+//! 未知キーは [`PreservedFields`](crate::json::PreservedFields)(タスク 3.2 の一般形)が
+//! **原文の位置ごと**保持する。タスク 2.2 はエンベロープのトップレベルに限定した独自の
+//! 保持(`RawField` / `SchemaPart::unknown_fields`。本タスクで削除)を持っていたが、
+//! タスク 4.4 で一般形へ一本化した(二重実装を残さない)。保持の範囲は**エンベロープの
+//! 全階層**である:
+//!
+//! * トップレベル: `root` / `types` 以外のキー([`SchemaPart::preserved_fields`])。
+//! * 型定義要素の内部: `id` / `definition` 以外のキー([`TypeDef::preserved_fields`])。
+//!
+//! 型定義要素の未知キーはタスク 2.2 では [`DocumentError::InvalidContainer`] として
+//! **拒否**していた(前方互換はトップレベルのみという文書化済み決定)。しかし design の
+//! `DeterministicJson` の責務は「未知フィールドは破棄せず保持し書き戻す」でスコープの
+//! 限定が無く、拒否すると**将来の minor が型定義へ省略可能フィールドを足したときに
+//! 読めなくなる**ため、タスク 4.4 で**保持へ変更**した(要素ごとに `PreservedFields` を
+//! 1 つ持たせる)。意味は要件 6.2 / 6.3 に忠実な側であり、既知キーの重複拒否
+//! (差し戻し位置の基準を守るため)は変わらない。
+//!
+//! 保持の値は原文のバイト列のままで、キーの表記(`\uXXXX` エスケープ)と値の外側の空白は
+//! 保たれない(タスク 3.2 の規則。`PreservedFields` の docs)。書き戻しは
+//! [`SchemaCodec`](crate::parts::schema_codec::SchemaCodec) が
+//! [`PreservingObjectWriter`](crate::json::PreservingObjectWriter) で行う。
 //!
 //! # 解釈するもの
 //!
@@ -78,15 +99,17 @@ use serde_json::value::RawValue;
 
 use crate::error::DocumentError;
 use crate::ids::TypeDefId;
+use crate::json::PreservedFields;
 
-/// エンベロープ・キー: ルートスキーマ(要件 1.2)。
-const KEY_ROOT: &str = "root";
+/// エンベロープ・キー: ルートスキーマ(要件 1.2)。符号化(タスク 4.4 の `SchemaCodec`)と
+/// クレート内で共有するため `pub(crate)`(エンベロープ文法の単一の源)。
+pub(crate) const KEY_ROOT: &str = "root";
 /// エンベロープ・キー: ネスト型定義の配列(要件 1.3)。
-const KEY_TYPES: &str = "types";
+pub(crate) const KEY_TYPES: &str = "types";
 /// 型定義オブジェクトのキー: 識別子。
-const KEY_ID: &str = "id";
+pub(crate) const KEY_ID: &str = "id";
 /// 型定義オブジェクトのキー: 不透明な型定義本文。
-const KEY_DEFINITION: &str = "definition";
+pub(crate) const KEY_DEFINITION: &str = "definition";
 /// 予約済み参照マーカー・キー(ペイロード内部専用。エンベロープ水準では無効)。
 const REF_KEY: &str = "$ref";
 /// `SchemaPart::parse` 失敗時の診断接頭辞(エントリ種別)。
@@ -163,34 +186,23 @@ impl RawJson {
     }
 }
 
-/// エンベロープのトップレベルで保持された未知キーと不透明な値のペア(将来互換。
-/// ルール 6.2 / 6.3)。値はエンベロープの元テキストから verbatim に保持される。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RawField {
-    name: String,
-    value: RawJson,
-}
-
-impl RawField {
-    /// キー(デコード済みテキスト)。
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// 元のバイト列のまま保持された不透明な値。
-    pub fn value(&self) -> &RawJson {
-        &self.value
-    }
-}
-
 /// ネスト型定義 1 件: 識別子と不透明な定義ペイロード(要件 1.3)。
 ///
 /// 定義ペイロードは解釈しない(意味論は `schema-engine`)。`id` の一意性はここでは
 /// 検証しない(重複検証はタスク 4.6 の担当)。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `id` / `definition` 以外のキーは [`PreservedFields`] が原文の位置ごと保持する
+/// (前方互換。要件 6.2 / 6.3。モジュール docs「未知フィールドの保持」)。`PartialEq` は
+/// 提供しない: 保持している集合の比較には読み込みカーソルが混じるためである
+/// ([`PreservedFields`] の docs)。したがって [`SchemaPart::type_defs`] の要素も直接 `==`
+/// では比べられず、内容は [`TypeDef::id`] と [`TypeDef::definition`] を個別に比べる
+/// ([`SchemaPart`] の docs 参照)。
+#[derive(Debug, Clone)]
 pub struct TypeDef {
     id: TypeDefId,
     definition: RawJson,
+    /// 解釈しない要素内のフィールド(前方互換。要件 6.2 / 6.3)。
+    preserved: PreservedFields,
 }
 
 impl TypeDef {
@@ -203,6 +215,14 @@ impl TypeDef {
     pub fn definition(&self) -> &RawJson {
         &self.definition
     }
+
+    /// この型定義要素で保持した未知キー(原文の位置ごと。要件 6.2 / 6.3)。
+    ///
+    /// クレート内の符号化経路(タスク 4.4 の
+    /// [`SchemaCodec`](crate::parts::schema_codec::SchemaCodec))が差し戻しに使う。
+    pub(crate) fn preserved_fields(&self) -> &PreservedFields {
+        &self.preserved
+    }
 }
 
 /// 不透明スキーマ・ペイロード: ルートスキーマ 1 つとネスト型定義 N 件(要件 1.2, 1.3)。
@@ -212,11 +232,20 @@ impl TypeDef {
 /// ([`SchemaPart::type_ref_targets`])だけである。構築は [`SchemaPart::parse`] と
 /// [`SchemaPart::empty`] のみで、部分変更の API は持たない(モジュール docs の
 /// 「構築 API と Sheet 結線」参照)。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` は提供しない: 保持している未知フィールドの比較には読み込みカーソル
+/// ([`PreservedFields`] の内部状態)が混じり、内容の等値を素直に表せないためである。
+/// 2 つのスキーマが同じ内容かどうかは、[`SchemaPart::root`] のバイト列と各型定義の
+/// [`TypeDef::id`] / [`TypeDef::definition`] を個別に比べるか、符号化したバイト列を
+/// 比べて判定する(後者が本形式の契約: 同一内容は常に同一バイト列。要件 3.1)。
+/// [`SchemaPart::type_defs`] を直接 `==` では比べられない — [`TypeDef`] も `PartialEq` を
+/// 持たないためである。
+#[derive(Debug, Clone)]
 pub struct SchemaPart {
     root: RawJson,
     type_defs: Vec<TypeDef>,
-    unknown_fields: Vec<RawField>,
+    /// 解釈しないトップレベルのフィールド(前方互換。要件 6.2 / 6.3)。
+    preserved: PreservedFields,
     ref_targets: Vec<String>,
 }
 
@@ -248,7 +277,7 @@ impl SchemaPart {
         Ok(Self {
             root: envelope.root,
             type_defs: envelope.types,
-            unknown_fields: envelope.unknown_fields,
+            preserved: envelope.preserved,
             ref_targets,
         })
     }
@@ -262,7 +291,12 @@ impl SchemaPart {
         // 明文化である(失敗し得ない経路に panic を置かない設計は `value` モジュールと同様)。
         let root = RawJson::from_str(EMPTY_ROOT, ENTRY_CONTEXT)
             .expect("不変条件: 定数 `null` は常に妥当な JSON");
-        Self { root, type_defs: Vec::new(), unknown_fields: Vec::new(), ref_targets: Vec::new() }
+        Self {
+            root,
+            type_defs: Vec::new(),
+            preserved: PreservedFields::new(),
+            ref_targets: Vec::new(),
+        }
     }
 
     /// ルートスキーマ(厳密に 1 つ。要件 1.2 の強制地点)。
@@ -289,9 +323,12 @@ impl SchemaPart {
         &self.ref_targets
     }
 
-    /// エンベロープの未知トップレベル・キー(原文の順序。値は verbatim)。
-    pub fn unknown_fields(&self) -> &[RawField] {
-        &self.unknown_fields
+    /// エンベロープのトップレベルで保持した未知キー(原文の位置ごと。要件 6.2 / 6.3)。
+    ///
+    /// クレート内の符号化経路(タスク 4.4 の
+    /// [`SchemaCodec`](crate::parts::schema_codec::SchemaCodec))が差し戻しに使う。
+    pub(crate) fn preserved_fields(&self) -> &PreservedFields {
+        &self.preserved
     }
 }
 
@@ -303,7 +340,7 @@ impl SchemaPart {
 struct Envelope {
     root: RawJson,
     types: Vec<TypeDef>,
-    unknown_fields: Vec<RawField>,
+    preserved: PreservedFields,
 }
 
 impl<'de> Deserialize<'de> for Envelope {
@@ -317,8 +354,8 @@ impl<'de> Deserialize<'de> for Envelope {
 /// serde_json はマップの重複キーをデフォルトでは黙って last-wins にする。`root` /
 /// `types` はこのスペックが解釈するキーなので、キー出現回数を visitor 側で数えて
 /// **明示的に重複を拒否する**(要件 1.2 の「ちょうど 1 つ」)。未知キーは
-/// [`RawField`] として原文の順序で保持し(将来互換)、値は `RawValue` で構文検証済み
-/// バイトのみを受け取る。
+/// [`PreservedFields`] が原文の位置ごと保持し(将来互換。要件 6.2 / 6.3)、値は
+/// `RawValue` で構文検証済みバイトのみを受け取る。
 struct EnvelopeVisitor;
 
 impl<'de> Visitor<'de> for EnvelopeVisitor {
@@ -331,7 +368,7 @@ impl<'de> Visitor<'de> for EnvelopeVisitor {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Envelope, A::Error> {
         let mut root: Option<RawJson> = None;
         let mut types: Option<Vec<TypeDef>> = None;
-        let mut unknown_fields: Vec<RawField> = Vec::new();
+        let mut preserved = PreservedFields::new();
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 KEY_ROOT => {
@@ -339,25 +376,28 @@ impl<'de> Visitor<'de> for EnvelopeVisitor {
                         return Err(de::Error::custom("duplicate `root` key in schema envelope"));
                     }
                     root = Some(RawJson::captured(map.next_value::<Box<RawValue>>()?.get()));
+                    // 書き出し側の `write_known` と同じ順序で既知フィールドの件数を
+                    // 進める(未知フィールドの差し戻し位置の基準。タスク 3.2 の必須条件)。
+                    preserved.record_known_field();
                 }
                 KEY_TYPES => {
                     if types.is_some() {
                         return Err(de::Error::custom("duplicate `types` key in schema envelope"));
                     }
                     types = Some(map.next_value::<Vec<TypeDef>>()?);
+                    preserved.record_known_field();
                 }
                 _ => {
                     // 未知のトップレベル・キー: 値を参照として走査しない(走査対象は
                     // ルートと型定義のみ。文書化済み決定)。重複キーも保持する。
-                    let value = RawJson::captured(map.next_value::<Box<RawValue>>()?.get());
-                    unknown_fields.push(RawField { name: key, value });
+                    preserved.capture(&key, &mut map)?;
                 }
             }
         }
         let Some(root) = root else {
             return Err(de::Error::custom("schema envelope is missing the `root` key"));
         };
-        Ok(Envelope { root, types: types.unwrap_or_default(), unknown_fields })
+        Ok(Envelope { root, types: types.unwrap_or_default(), preserved })
     }
 }
 
@@ -367,8 +407,10 @@ impl<'de> Deserialize<'de> for TypeDef {
     }
 }
 
-/// 型定義オブジェクトの visitor。`id` と `definition` をちょうど 1 回ずつ要求し、
-/// 未知キーは拒否する(前方互換の保持はエンベロープ・トップレベルのみ。文書化済み決定)。
+/// 型定義オブジェクトの visitor。`id` と `definition` をちょうど 1 回ずつ要求し、未知キーは
+/// [`PreservedFields`] が原文の位置ごと保持する(前方互換。要件 6.2 / 6.3。タスク 2.2 の
+/// 「未知キーは拒否」からタスク 4.4 で保持へ変更した。モジュール docs
+/// 「未知フィールドの保持」)。
 struct TypeDefVisitor;
 
 impl<'de> Visitor<'de> for TypeDefVisitor {
@@ -381,6 +423,7 @@ impl<'de> Visitor<'de> for TypeDefVisitor {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<TypeDef, A::Error> {
         let mut id: Option<String> = None;
         let mut definition: Option<RawJson> = None;
+        let mut preserved = PreservedFields::new();
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 KEY_ID => {
@@ -388,6 +431,8 @@ impl<'de> Visitor<'de> for TypeDefVisitor {
                         return Err(de::Error::custom("duplicate `id` key in type definition"));
                     }
                     id = Some(map.next_value::<String>()?);
+                    // 書き出し側の `write_known` と同じ順序で件数を進める(必須条件)。
+                    preserved.record_known_field();
                 }
                 KEY_DEFINITION => {
                     if definition.is_some() {
@@ -397,12 +442,9 @@ impl<'de> Visitor<'de> for TypeDefVisitor {
                     }
                     definition =
                         Some(RawJson::captured(map.next_value::<Box<RawValue>>()?.get()));
+                    preserved.record_known_field();
                 }
-                _ => {
-                    return Err(de::Error::custom(format_args!(
-                        "unknown key `{key}` in type definition"
-                    )));
-                }
+                _ => preserved.capture(&key, &mut map)?,
             }
         }
         let Some(id_text) = id else {
@@ -416,7 +458,7 @@ impl<'de> Visitor<'de> for TypeDefVisitor {
         // `id` は ULID-26 テキストとして解決する(型の解釈ではない: 識別子解決は本
         // スペックの所有。エラー入力は診断文言へ写す)。
         let id = TypeDefId::from_str(&id_text).map_err(de::Error::custom)?;
-        Ok(TypeDef { id, definition })
+        Ok(TypeDef { id, definition, preserved })
     }
 }
 
@@ -611,20 +653,25 @@ mod tests {
         let part = SchemaPart::parse(r#"{"root":null}"#).unwrap();
         assert_eq!("null", part.root().as_str());
         assert!(part.type_defs().is_empty());
-        assert!(part.unknown_fields().is_empty());
+        assert!(part.preserved_fields().is_empty());
     }
 
     #[test]
     fn empty_is_a_null_root_with_no_definitions() {
         // 新規シートの初期化に使う空スキーマ: root = null、型定義 0 件、
         // 未知フィールド 0 件、参照 0 件。構築は RawJson::from_str を経由するため
-        // parse 経由の `{"root":null}` と同一の値になる。
+        // parse 経由の `{"root":null}` と同一の内容になる(SchemaPart は保持している
+        // 未知フィールドの読み込みカーソルを等値比較へ持ち込まないため PartialEq を
+        // 持たない。内容は各アクセサで比べる)。
         let part = SchemaPart::empty();
         assert_eq!("null", part.root().as_str());
         assert!(part.type_defs().is_empty());
-        assert!(part.unknown_fields().is_empty());
+        assert!(part.preserved_fields().is_empty());
         assert!(part.type_ref_targets().is_empty());
-        assert_eq!(part, SchemaPart::parse(r#"{"root":null}"#).unwrap());
+        let parsed = SchemaPart::parse(r#"{"root":null}"#).unwrap();
+        assert_eq!(part.root().as_bytes(), parsed.root().as_bytes());
+        assert_eq!(part.type_defs().len(), parsed.type_defs().len());
+        assert_eq!(part.preserved_fields().len(), parsed.preserved_fields().len());
     }
 
     #[test]
@@ -687,19 +734,53 @@ mod tests {
 
     #[test]
     fn type_definition_shape_is_enforced() {
-        // `id` / `definition` をちょうど 1 ずつ。未知キーは拒否(前方互換はエンベロープ
-        // トップレベルのみ。文書化済み決定)。id は ULID-26 テキスト。
+        // `id` / `definition` をちょうど 1 ずつ(重複は差し戻し位置の基準を壊すため拒否。
+        // 未知キーは保持するのでここでは拒否しない。`unknown_keys_inside_type_definitions_
+        // are_preserved` 参照)。id は ULID-26 テキスト。
         let cases = [
             r#"{"root":0,"types":[{"definition":{}}]}"#.to_owned(),
             format!(r#"{{"root":0,"types":[{{"id":"{ID_A}"}}]}}"#),
             format!(r#"{{"root":0,"types":[{{"id":"{ID_A}","id":"{ID_B}","definition":{{}}}}]}}"#),
             format!(r#"{{"root":0,"types":[{{"id":"{ID_A}","definition":1,"definition":2}}]}}"#),
-            format!(r#"{{"root":0,"types":[{{"id":"{ID_A}","definition":{{}},"extra":1}}]}}"#),
             format!(r#"{{"root":0,"types":[{{"id":"not-a-ulid","definition":{{}}}}]}}"#),
         ];
         for text in &cases {
             invalid_container(text);
         }
+    }
+
+    #[test]
+    fn unknown_keys_inside_type_definitions_are_preserved() {
+        // 前方互換(要件 6.2 / 6.3): 型定義要素の未知キーはタスク 2.2 では
+        // `InvalidContainer` で拒否していたが、タスク 4.4 で**保持**へ変更した
+        // (将来の minor が型定義へ省略可能フィールドを足しても読めなくなるため)。
+        // 位置は [`PreservedFields`](crate::json::PreservedFields) が原文のまま持ち、
+        // 書き戻しは `SchemaCodec` が行う(バイト単位の往復は parts 層のテスト)。
+        // 要素 1 件だけでは保持が壊れても検出できないため 2 件で分散させる。
+        let text = format!(
+            "{{\"root\":{{}},\"types\":[\
+             {{\"past\":1,\"id\":\"{ID_A}\",\"mid\":2,\"definition\":{{}},\"tail\":3}},\
+             {{\"id\":\"{ID_B}\",\"definition\":[null],\"only\":true}}]}}"
+        );
+        let part = SchemaPart::parse(&text).unwrap();
+        assert_eq!(2, part.type_defs().len());
+        assert_eq!(ids(&[ID_A, ID_B]), part.type_def_ids());
+
+        let first: Vec<(&str, usize)> = part.type_defs()[0]
+            .preserved_fields()
+            .iter()
+            .map(|field| (field.key(), field.preceding_known_fields()))
+            .collect();
+        let second: Vec<(&str, usize)> = part.type_defs()[1]
+            .preserved_fields()
+            .iter()
+            .map(|field| (field.key(), field.preceding_known_fields()))
+            .collect();
+        assert_eq!(vec![("past", 0), ("mid", 1), ("tail", 2)], first);
+        assert_eq!(vec![("only", 2)], second);
+        // 値は原文のバイト列のまま。
+        let tail = &part.type_defs()[0].preserved_fields().iter().nth(2).unwrap();
+        assert_eq!(b"3", tail.value_bytes());
     }
 
     // --- 参照抽出 -----------------------------------------------------------
@@ -773,27 +854,38 @@ mod tests {
         // (前方互換の決定。走査対象は root / 型定義のみ)。
         let part = SchemaPart::parse(r#"{"$ref":"01ARZ3NDEKTSV4RRFFQ69G5FAV","root":{}}"#).unwrap();
         assert!(part.type_ref_targets().is_empty());
-        assert_eq!("$ref", part.unknown_fields()[0].name());
-        assert_eq!(r#""01ARZ3NDEKTSV4RRFFQ69G5FAV""#, part.unknown_fields()[0].value().as_str());
+        let preserved: Vec<&str> =
+            part.preserved_fields().iter().map(|field| field.key()).collect();
+        assert_eq!(vec!["$ref"], preserved);
+        assert_eq!(
+            br#""01ARZ3NDEKTSV4RRFFQ69G5FAV""#.as_slice(),
+            part.preserved_fields().iter().next().unwrap().value_bytes()
+        );
     }
 
     // --- 未知キーの保持 -----------------------------------------------------
 
     #[test]
     fn unknown_top_level_fields_are_preserved_verbatim() {
-        // 前方互換(ルール 6.2 / 6.3): 未知キーは原文の順序とバイト列そのままで
-        // 露出する。未知キー同士の重複もそのまま保持する。最終的な byte 再構成は
-        // タスク 4.4 の担当(ここでは露出まで)。
+        // 前方互換(ルール 6.2 / 6.3): 未知キーは原文の順序とバイト列そのままで保持し、
+        // 位置は「その未知キーより前に現れた既知フィールドの件数」で表す
+        // (PreservedFields の方式。タスク 3.2)。未知キー同士の重複もそのまま保持する。
+        // 最終的なバイト再構成はタスク 4.4 の `SchemaCodec` が担う(ここでは保持まで)。
         let text = r#"{"future":{"deep": [1, "é"]},"root":{},"beta":"b","beta":2}"#;
         let part = SchemaPart::parse(text).unwrap();
-        let unknown = part.unknown_fields();
-        assert_eq!(3, unknown.len());
-        assert_eq!("future", unknown[0].name());
-        assert_eq!(r#"{"deep": [1, "é"]}"#, unknown[0].value().as_str());
-        assert_eq!("beta", unknown[1].name());
-        assert_eq!(r#""b""#, unknown[1].value().as_str());
-        assert_eq!("beta", unknown[2].name());
-        assert_eq!("2", unknown[2].value().as_str());
+        let preserved: Vec<(&str, &[u8], usize)> = part
+            .preserved_fields()
+            .iter()
+            .map(|field| (field.key(), field.value_bytes(), field.preceding_known_fields()))
+            .collect();
+        assert_eq!(
+            vec![
+                ("future", r#"{"deep": [1, "é"]}"#.as_bytes(), 0),
+                ("beta", br#""b""#.as_slice(), 1),
+                ("beta", b"2".as_slice(), 1),
+            ],
+            preserved
+        );
     }
 
     #[test]

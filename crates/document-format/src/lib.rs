@@ -17,8 +17,8 @@ pub use ids::{
     AttachmentId, Blake3Digest, DocumentId, IdFactory, IdParseError, RowId, SheetId, TypeDefId,
 };
 pub use model::{
-    Attachment, AttachmentRegistry, Document, RawField, RawJson, ReorderError, Row, SchemaPart,
-    Sheet, TypeDef, UnknownRow, UnknownSheet,
+    Attachment, AttachmentRegistry, Document, RawJson, ReorderError, Row, SchemaPart, Sheet,
+    TypeDef, UnknownRow, UnknownSheet,
 };
 pub use value::{CellValue, NestedValue, from_json_bytes, to_json_bytes};
 
