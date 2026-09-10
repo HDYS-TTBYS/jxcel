@@ -2,6 +2,7 @@
 //! ZIP コンテナに格納された JSON テキストとメモリ上のドキュメントモデルを
 //! 双方向に変換する。同一内容は常に同一バイト列になる（決定的出力）。
 
+pub mod container;
 pub mod entry_name;
 pub mod error;
 pub mod ids;
