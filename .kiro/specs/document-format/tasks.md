@@ -232,7 +232,7 @@
   - _Requirements: 3.5_
   - _Boundary: RowsCodec_
 
-- [ ] 8.4 (P) 破損の検出を検証する
+- [x] 8.4 (P) 破損の検出を検証する
   - ダイジェスト改竄、識別子重複、宙吊りの型定義参照と添付参照、スキーマ欠落、マニフェスト欠落の各シナリオを検証する
   - すべてのシナリオで対応するエラー変種が返り、モデルが返らないことを検証する
   - _Depends: 7.1_
@@ -394,3 +394,9 @@
 - 要件 3.4 の実測（8.3）: 値に LF / CRLF / 単独 CR / タブ / `"` / 日本語 / 絵文字 / U+2028 を含んでも**テキスト行数 == 行数**で、生の LF は区切り以外に現れない（`\n` / `\r\n` / `\r` はエスケープされる）。**行数が増える値は無い**
 - **検証タスクの規模と時間の裁定（task 8.3）**: 10 万行 × 30 列のフル経路は debug で `save` が約 7.7 秒かかる（CI は 3 OS で debug 実行）。したがって **10 万行では 1 位置（中間行）**、**位置追従の 3 位置ループは 1000 行の小標本**（比較口は共通）で検証する。`tests/row_granular_diff.rs` は約 23 秒。**CI の実行時間への影響を意識すること**（`cargo test --workspace` 全体は現在 1 分強）
 - **`Row::new` / `Row::set_values` / `Sheet::push_row` / `Sheet::extend_rows` は `pub(crate)`** で統合テストからは到達できない。統合テストで大量の行を持つ文書を作るときは、**`DocumentParts::from_entries` + `from_parts`（内部で `extend_rows` の一括経路を使う）** を使うこと（`set_row_values` の反復は O(n²)）。変更は `set_row_values` を**1 回だけ**呼ぶ（1 回なら O(n) の走査で済む）
+- **【重要な事実】`zip` は統合テストからも名前で参照できる**（`[dependencies]` の crate は `tests/` のターゲットからも使える。`tests/corruption.rs` が `zip::write::ZipWriter` を実際に使ってコンパイル・実行できている）。5.2 が `tests/container_writer.rs` に書いた「統合テストからは参照できない」というコメントは**事実に反していた**ため、タスク 8.4 で修正した。**したがって ZIP の生組み立て（索引の無いコンテナ等）も統合テストでできる**
+- task 8.4 で `tests/corruption.rs`（8 本）が入った。**`open`（実ファイル経路）で変種と「`Err` でありモデルが返らないこと」（要件 5.4）とファイル不変（要件 5.5）をシナリオごとに固定**している: ダイジェスト改竄 → `IntegrityMismatch { entry }` / `TypeDefId` 重複 → `DuplicateId { kind: TypeDef, id, occurrences }` / `RowId` 重複 → `DuplicateId { kind: Row, … }` / 宙吊り型定義参照 → `DanglingTypeRef` / 宙吊り添付参照 → `DanglingAttachmentRef` / スキーマ欠落 → `MissingSchema { sheet }` / `document.json` 欠落・`manifest.json` 欠落 → `MissingPart { name }`。`tests/validate.rs`（規則の単体）の写しは作らず、**実ファイル経路の観測**に絞っている
+- **【検証タスクの作法】** 壊し方は「**パート集合のレベルで対象エントリを書き換えてから `ContainerCodec::encode` で組み直す**」こと（**ZIP の生バイトをパッチしない**。CRC で `zip` が先に落ちて検証したい層のエラーにならない）。例外は `manifest.json` 欠落で、これは `DocumentParts::from_entries` が索引を必須にするため**公開 API では索引なし集合を組めない** → `zip` の `ZipWriter` で直接組み立てる（**索引を残した対照**を併置して、失敗原因が索引の欠落だけであることを示すこと）
+- **`RowId` の重複は同一エントリ内では到達不能**: `RowsCodec::decode` が `$id` の重複を `InvalidContainer`（`duplicate row identifier`）で先に拒否するため、`DuplicateId { kind: Row }` に到達する経路は**シートをまたぐ重複**だけである（テストは 2 シート 1 行ずつの標本で構成）
+- 生存変異（8.4）: `validate_schema_presence` が `MissingSchema` を報告しなくても、後段の `take_schema` が**同じ変種・同じシート**を返すため等価 / `read_format_version` の索引要求を緩めても `manifest_part_of` → `resolve_manifest` が同じ `MissingPart { name: "manifest.json" }` を返すため等価（**冗長な二重防衛**であり欠陥ではない）
+- **宿題（8.5 で実施。親の裁定）**: `zip` が統合テストから使える以上、`tests/container_writer.rs` と `tests/determinism.rs` に重複している**生ヘッダ解析（`local_headers` / `central_headers`、約 90 行）は `tests/common/mod.rs` へ寄せる**（バイト列だけを解析するヘルパなので `common` が `container` を import しない方針を守れる）。**第二の重複を作らないこと**
