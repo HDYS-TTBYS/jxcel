@@ -8,15 +8,17 @@ pub mod error;
 pub mod ids;
 pub mod integrity;
 pub mod json;
+pub mod migration;
 pub mod model;
 pub mod parts;
 pub mod value;
 
 pub use entry_name::EntryName;
-pub use error::{DocumentError, FormatVersion, IdKind};
+pub use error::{DocumentError, IdKind};
 pub use ids::{
     AttachmentId, Blake3Digest, DocumentId, IdFactory, IdParseError, RowId, SheetId, TypeDefId,
 };
+pub use migration::{CURRENT_FORMAT_VERSION, FormatVersion, MigrationChain, VersionVerdict};
 pub use model::{
     Attachment, AttachmentRegistry, Document, RawJson, ReorderError, Row, SchemaPart, Sheet,
     TypeDef, UnknownRow, UnknownSheet,

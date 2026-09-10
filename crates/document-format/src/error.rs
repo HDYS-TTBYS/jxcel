@@ -31,43 +31,22 @@
 //!   `From<std::io::Error>` を定義しない。呼び出し元がリトライ状態を明示的に
 //!   渡して構築する。フィールド名 `source` により `Error::source()` は結線される。
 //!
-//! # [`FormatVersion`] の暫定所有
+//! # バージョン型は `migration` が所有する
 //!
-//! design の File Structure では `FormatVersion` は `migration` 側の型だが、
-//! 移行の実装（タスク 6.1）より先にエラー表の `UnsupportedVersion { found,
-//! supported }` が必要になる。重複定義を避け単一定義とするため暫く本ファイルの
-//! 唯一の定義として置き、タスク 6.1 で `migration` へ移管する（移管時は本ファイルが
-//! `use` を追従させ、本節の暫定注記を消す）。
+//! [`DocumentError::UnsupportedVersion`] の文脈型 [`FormatVersion`] の定義は
+//! [`crate::migration`] にある（design の File Structure。タスク 6.1 で本ファイルから
+//! 移管した）。本ファイルはエラー表の一部として `use` するだけであり、比較や表示の
+//! 意味は移管先が所有する。`migration` はゲートの失敗として [`DocumentError`] を
+//! 参照し、本ファイルは文脈型として [`FormatVersion`] を参照する（同一クレート内の
+//! 相互参照は合法である）。**コンポーネント間の依存方向は増えない**: 本ファイルは
+//! design の依存グラフに現れない共有の葉であり、どちらの参照もクレート内の型参照に
+//! すぎない（タスク 6.1 の親の裁定）。
 
 use core::fmt;
+
 use thiserror::Error;
 
-/// ドキュメント形式のバージョン（**暫定定義** — 所有権はモジュール docs の
-/// 「[`FormatVersion`] の暫定所有」参照。タスク 6.1 で `migration` へ移管予定）。
-///
-/// `UnsupportedVersion { found, supported }` の文脈型。比較は辞書順
-/// （major 優先）であり、「現行より新しい形式」判定（`found > supported` の
-/// major 比較、要件 6.5）に使える。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FormatVersion {
-    /// major バージョン（非後方互換の上がり方）。
-    pub major: u32,
-    /// minor バージョン（後方互換のある追加）。
-    pub minor: u32,
-}
-
-impl FormatVersion {
-    /// 組み立てる。
-    pub const fn new(major: u32, minor: u32) -> Self {
-        Self { major, minor }
-    }
-}
-
-impl fmt::Display for FormatVersion {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}", self.major, self.minor)
-    }
-}
+use crate::migration::FormatVersion;
 
 /// [`DocumentError::DuplicateId`] が指す識別子の種別。
 ///

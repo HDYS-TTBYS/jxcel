@@ -87,7 +87,9 @@
 //! マーカーが運ぶバージョンと索引の記録値が食い違う場合は**破損として中止する**
 //! （タスク 5.2 の裁定: マーカーは固定オフセットでの早期判定のための**写し**であり、
 //! 権威は常に索引。写しと索引の不一致はどちらかが壊れている）。恒久的なバージョンゲートは
-//! 索引側に置く（タスク 6.1。本モジュールは現行形式以外を拒否しない）。
+//! 索引側、すなわち [`crate::migration::MigrationChain`] にあり、読み込み経路
+//! （[`crate::parts::from_parts`]）が掛ける。本モジュールは版の可否を判定せず、
+//! マーカーと索引の一致だけを見る。
 //!
 //! # エラー
 //!
@@ -122,7 +124,8 @@ use zip::result::ZipError;
 use zip::ZipArchive;
 
 use crate::entry_name::EntryName;
-use crate::error::{DocumentError, FormatVersion};
+use crate::error::DocumentError;
+use crate::migration::FormatVersion;
 use crate::parts::DocumentParts;
 
 use super::layout;
@@ -372,7 +375,7 @@ mod tests {
 
     use super::*;
     use crate::container::writer::marker_bytes;
-    use crate::error::FormatVersion;
+    use crate::migration::FormatVersion;
     use crate::parts::{ManifestEntry, ManifestPart};
 
     /// 標本のシート識別子（正準 Crockford base32 大文字 26 文字）。

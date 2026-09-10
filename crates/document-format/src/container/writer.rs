@@ -43,7 +43,8 @@
 //! **バージョンは `manifest.json` が記録している値そのもの**（[`DocumentParts::format_version`]）
 //! を使い、本モジュールは第二のリテラルを持たない。design は `manifest.json` を
 //! 「唯一の権威ある索引」と定めており（マーカーは固定オフセットでの**早期判定のための
-//! 写し**にすぎない）、正式なバージョン判定は索引を読んで行う（ゲートはタスク 6.1）。
+//! 写し**にすぎない**）、正式なバージョン判定は索引を読んで行う
+//! （[`crate::migration::MigrationChain`]。本モジュールは版を判定しない）。
 //! 写しと索引が食い違っても**権威は常に索引**である。両者が一致することは単体テスト
 //! `the_type_marker_carries_the_manifest_format_version` が固定し、形式バージョンを
 //! 上げたときに片方だけ更新される事故を落とす。
@@ -82,7 +83,8 @@ use zip::write::FileOptions;
 use zip::{CompressionMethod, DateTime, System, ZipWriter};
 
 use crate::entry_name::EntryName;
-use crate::error::{DocumentError, FormatVersion};
+use crate::error::DocumentError;
+use crate::migration::FormatVersion;
 use crate::parts::DocumentParts;
 
 /// 型マーカーの骨格（先頭側）: 形式名 `jxcel` と LF。
@@ -227,7 +229,7 @@ mod tests {
     use zip::ZipArchive;
 
     use super::*;
-    use crate::error::FormatVersion;
+    use crate::migration::FormatVersion;
     use crate::ids::{AttachmentId, SheetId};
     use crate::parts::{DocumentParts, ManifestEntry, ManifestPart};
 

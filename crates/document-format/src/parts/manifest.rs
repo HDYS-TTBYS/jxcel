@@ -4,10 +4,9 @@
 //! rels のような二重帳簿は採らない（design 同節）。本モジュールが所有するのは、
 //! その 1 パートが持つ 3 つである:
 //!
-//! - **形式バージョン** [`FormatVersion`]（要件 6.1）。design の File Structure では
-//!   `migration` 側の型だが、移行の実装（タスク 6.1）より先に必要になるため当面
-//!   [`crate::error`] が所有する（タスク 6.1 で `migration` へ移管予定。所有権の注記は
-//!   error.rs のモジュール docs）。
+//! - **形式バージョン** [`FormatVersion`]（要件 6.1）。design の File Structure に従い
+//!   [`crate::migration`] が所有する（タスク 6.1 で `error.rs` から移管した）。本モジュールは
+//!   その wire 形 `{"major":..,"minor":..}` と、索引への記録・読み出しだけを受け持つ。
 //! - **パート索引**: エントリ名（[`EntryName`]）→ BLAKE3 ダイジェスト
 //!   （[`Blake3Digest`]）の対応。**どのパートが存在するか**と**各パートの完全性検証値**
 //!   （要件 5.1）の唯一の権威であり、別の索引を並置しない。
@@ -34,7 +33,7 @@
 //!   宣言順。要件 3.3）。`parts` の要素はエントリ名の昇順。
 //! - 形式バージョンは **2 フィールドのオブジェクト** `{"major":..,"minor":..}` として
 //!   書く。文字列表現（`"1.0"`）は採らない。[`FormatVersion`] 自身に `Serialize` を
-//!   後付けしない（型の所有元 = error.rs は本タスクの非ゴール）ための wire 専用の写しを
+//!   後付けしない（`migration` の型に JSON の都合を持ち込まない）ための wire 専用の写しを
 //!   本モジュールが持つ。
 //! - 索引要素は `{"name": <エントリ名>, "blake3": <64 桁小文字 hex>}` である。
 //!   ダイジェストのテキスト形は [`Blake3Digest`] の正準形（小文字 hex）に限り、大文字 hex は
@@ -116,9 +115,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 
 use crate::entry_name::{EntryName, MANIFEST_ENTRY};
-use crate::error::{DocumentError, FormatVersion};
+use crate::error::DocumentError;
 use crate::ids::Blake3Digest;
 use crate::json::{PreservedFields, PreservingObjectWriter};
+use crate::migration::FormatVersion;
 
 /// トップレベルの既知キー: 形式バージョン（宣言順の 1 番目）。
 const VERSION_KEY: &str = "version";
@@ -392,8 +392,8 @@ where
 
 /// 形式バージョンの wire 形（`{"major":..,"minor":..}`）。
 ///
-/// [`FormatVersion`] 自身に `Serialize` / `Deserialize` を後付けしない（型の所有元 =
-/// `error.rs` は本タスクの非ゴール）ための写しである。キー順序はフィールド宣言順
+/// [`FormatVersion`] 自身に `Serialize` / `Deserialize` を後付けしない（`migration` の型に
+/// JSON の都合を持ち込まない）ための写しである。キー順序はフィールド宣言順
 /// （`major` → `minor`）。
 #[derive(Serialize, Deserialize)]
 struct VersionWire {

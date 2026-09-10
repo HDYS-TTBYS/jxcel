@@ -101,16 +101,20 @@
 //! 前に完了させる**:
 //!
 //! 1. 索引の解決（[`resolve_manifest`]。不在は [`DocumentError::MissingPart`]）
-//! 2. 完全性の照合（要件 5.2 / 5.3）: 索引の全エントリについて、実体の存在
+//! 2. 形式バージョンのゲート（要件 6.5。design 読み込みフローの「形式バージョン」）:
+//!    索引が記録した版を [`MigrationChain::admit`] に掛け、読めない版（新しすぎる major、
+//!    および移行先がまだ無い古い major）は [`DocumentError::UnsupportedVersion`] で中止する。
+//!    位置は**ダイジェスト照合より前**である（design の順序）
+//! 3. 完全性の照合（要件 5.2 / 5.3）: 索引の全エントリについて、実体の存在
 //!    （無ければ [`DocumentError::MissingPart`]）とダイジェストの一致
 //!    （不一致は [`DocumentError::IntegrityMismatch`]）を確かめる
-//! 3. 各パートの復号（[`DocumentPart`] / [`SchemaCodec`] / [`RowsCodec`]。添付は
+//! 4. 各パートの復号（[`DocumentPart`] / [`SchemaCodec`] / [`RowsCodec`]。添付は
 //!    バイト列のまま。content-addressed の再計算照合もここで行う）
-//! 4. 構造検証（[`StructuralValidator`]。識別子の一意性・スキーマの存在・参照の実在性）
-//! 5. 行エントリの列順序が `document.json` の列名一覧と一致することの検証
-//! 6. モデル構築（[`Document`] の識別子・シート順序・名前・列名・ルートスキーマ・行・添付）
+//! 5. 構造検証（[`StructuralValidator`]。識別子の一意性・スキーマの存在・参照の実在性）
+//! 6. 行エントリの列順序が `document.json` の列名一覧と一致することの検証
+//! 7. モデル構築（[`Document`] の識別子・シート順序・名前・列名・ルートスキーマ・行・添付）
 //!
-//! 1〜5 のいずれかで失敗した場合、モデルは 1 つも構築されず [`Err`] が返る。6 の構築は
+//! 1〜6 のいずれかで失敗した場合、モデルは 1 つも構築されず [`Err`] が返る。7 の構築は
 //! 検証済みの内容だけを移す（行は行ごとの探索をしない一括経路で入れる。要件 8.1）。
 //!
 //! ## 索引の向きと、検査しないこと
@@ -123,11 +127,13 @@
 //!
 //! # 形式バージョン
 //!
-//! `to_parts` は**現行バージョン 1.0**を書く（design の現行形式）。[`DocumentParts::format_version`]
-//! はパート集合が記録しているバージョンをそのまま返す。**新しい major の拒否（バージョンゲート）
-//! と移行は本タスクの範囲外**であり、タスク 6.1（ゲート）/ 6.2（移行チェーン）が担当する
-//! （**申し送り**: 本モジュールは与えられたバージョンを拒否も変換もしない。`from_parts` は
-//! 現行形式の構造として読める限り読む）。
+//! `to_parts` は [`CURRENT_FORMAT_VERSION`]（現行 1.0。定義の唯一の所有者は
+//! [`crate::migration`]）を `manifest.json` へ記録する（要件 6.1）。
+//! [`DocumentParts::format_version`] はパート集合が記録しているバージョンを**そのまま**返す
+//! （ゲートを掛けない。報告と読み込みの可否は別の関心事であり、コンテナ層の型マーカーは
+//! この値を写す）。`from_parts` は読む前段でこの値を [`MigrationChain::admit`] に掛け、
+//! 読めない版を中止する（要件 6.5。処理順 2）。**古い版を現行へ変換する実チェーンの適用**は
+//! タスク 6.2 が実装し、本モジュールは [`crate::migration`] の判定に従うだけである。
 //!
 //! # 依存方向
 //!
@@ -148,6 +154,7 @@
 //! |------|----------------|
 //! | 索引（`manifest.json`）が無い | [`DocumentError::MissingPart`]（`name` = `manifest.json`） |
 //! | 索引が復号できない | [`DocumentError::InvalidContainer`]（`entry` = `manifest.json: <理由>`） |
+//! | 記録された形式バージョンが読めない | [`DocumentError::UnsupportedVersion`]（`found` / `supported`。要件 6.5） |
 //! | 索引に載ったパートが実在しない | [`DocumentError::MissingPart`]（`name` = そのエントリ名） |
 //! | 実体のダイジェストが索引の記録と一致しない | [`DocumentError::IntegrityMismatch`]（`entry` = そのエントリ名） |
 //! | メタデータ（`document.json`）が無い | [`DocumentError::MissingPart`]（`name` = `document.json`） |
@@ -161,9 +168,10 @@
 use std::fmt;
 
 use crate::entry_name::{EntryName, MANIFEST_ENTRY};
-use crate::error::{DocumentError, FormatVersion, IdKind};
+use crate::error::{DocumentError, IdKind};
 use crate::ids::{AttachmentId, Blake3Digest, SheetId};
 use crate::integrity::{digest_part, verify_part};
+use crate::migration::{FormatVersion, MigrationChain, CURRENT_FORMAT_VERSION};
 use crate::model::{Document, Row, SchemaPart, Sheet};
 use crate::parts::document_part::{DocumentPart, SheetMeta};
 use crate::parts::manifest::{resolve_manifest, ManifestEntry, ManifestPart};
@@ -172,12 +180,6 @@ use crate::parts::schema_codec::SchemaCodec;
 use crate::parts::validate::{
     IdDeclaration, PartInventory, SheetRefDeclaration, StructuralValidator, TypeRefDeclaration,
 };
-
-/// 本実装が書き出す現行の形式バージョン（design「Container Entry Layout」の 1.0）。
-///
-/// バージョンゲートと移行はタスク 6.1 / 6.2 の担当であり、本モジュールは現行の値を
-/// **書くだけ**である（モジュール docs「形式バージョン」）。
-const CURRENT_FORMAT_VERSION: FormatVersion = FormatVersion::new(1, 0);
 
 /// 論理エントリ 1 件（design「DocumentParts」の Service Interface）。
 ///
@@ -259,7 +261,9 @@ impl DocumentParts {
     /// パート集合が記録している形式バージョン（要件 6.1。design の Service Interface）。
     ///
     /// 値は索引（`manifest.json`）が持つバージョンであり、構築時に解決されるため失敗しない。
-    /// **ゲート（新しい major の拒否）は本値を使うタスク 6.1 の責務**である。
+    /// **報告するだけでゲートは掛けない**: 読み込みの可否は [`from_parts`] が
+    /// [`MigrationChain::admit`] で判定する（値そのものを観測したい呼び出し元と、読めるか
+    /// 否かを知りたい呼び出し元は別である。モジュール docs「形式バージョン」）。
     pub const fn format_version(&self) -> FormatVersion {
         self.version
     }
@@ -360,7 +364,14 @@ pub fn from_parts(parts: &DocumentParts) -> Result<Document, DocumentError> {
     let manifest_part = manifest_part_of(parts)?;
     let manifest = ManifestPart::from_json_bytes(&manifest_part.bytes)?;
 
-    // 2. 完全性の照合（要件 5.2 / 5.3）: 索引に載った各パートが実在し、内容が記録どおりか。
+    // 2. 形式バージョンのゲート（要件 6.5。design 読み込みフローの「形式バージョン」）。
+    //    索引が記録した版を判定し、読めない版（新しすぎる major、および移行先がまだ無い
+    //    古い major）は**ダイジェスト照合より前**に中止する。移行チェーンの適用はタスク 6.2
+    //    の実装であり、6.2 は `MigrationChain::admit` の古い版の分岐を実チェーン適用へ
+    //    置き換える（本経路の挿入点はここ 1 箇所だけである）。
+    MigrationChain::admit(parts.format_version())?;
+
+    // 3. 完全性の照合（要件 5.2 / 5.3）: 索引に載った各パートが実在し、内容が記録どおりか。
     for entry in manifest.entries() {
         let part = parts.get(&entry.name()).ok_or_else(|| DocumentError::MissingPart {
             name: entry.name().to_string(),
@@ -368,7 +379,7 @@ pub fn from_parts(parts: &DocumentParts) -> Result<Document, DocumentError> {
         verify_part(&entry.name(), &part.bytes, entry.digest())?;
     }
 
-    // 3. 各パートの復号（検証はまだ行わない: すべての復号結果が揃ってから検証する）。
+    // 4. 各パートの復号（検証はまだ行わない: すべての復号結果が揃ってから検証する）。
     let mut document_part: Option<DocumentPart> = None;
     let mut schemas: Vec<(EntryName, SheetId, SchemaPart)> = Vec::new();
     let mut row_sets: Vec<(EntryName, SheetRows)> = Vec::new();
@@ -411,14 +422,14 @@ pub fn from_parts(parts: &DocumentParts) -> Result<Document, DocumentError> {
         name: EntryName::Document.to_string(),
     })?;
 
-    // 4. 構造検証（要件 4.2, 4.3, 4.4, 1.7, 7.4）。目録は復号済みパート群から組み立てる。
+    // 5. 構造検証（要件 4.2, 4.3, 4.4, 1.7, 7.4）。目録は復号済みパート群から組み立てる。
     let inventory = inventory_of(&document_part, &schemas, &row_sets, &attachments);
     StructuralValidator::validate(&inventory)?;
 
-    // 5. 行エントリの列順序が `document.json` の列名一覧と一致すること（要件 2.3）。
+    // 6. 行エントリの列順序が `document.json` の列名一覧と一致すること（要件 2.3）。
     verify_row_columns(&document_part, &row_sets)?;
 
-    // 6. モデル構築（検証済みの内容だけを移す）。
+    // 7. モデル構築（検証済みの内容だけを移す）。
     let mut document = Document::with_document_id(document_part.document_id());
     let mut sheets = Vec::with_capacity(document_part.sheets().len());
     for meta in document_part.sheets() {
@@ -693,6 +704,22 @@ mod tests {
         slot.1 = bytes;
     }
 
+    /// 集合を指定バージョンの索引で組み直す（各パートのダイジェストは実体に一致させたまま、
+    /// 記録値だけを差し替える。ゲートの入力を作る唯一の補助）。
+    fn rebuilt(version: FormatVersion, mut entries: Vec<(EntryName, Vec<u8>)>) -> DocumentParts {
+        entries.retain(|(name, _)| *name != MANIFEST_ENTRY);
+        let index: Vec<ManifestEntry> = entries
+            .iter()
+            .map(|(name, bytes)| ManifestEntry::of_bytes(*name, bytes))
+            .collect();
+        let manifest = ManifestPart::new(version, index)
+            .expect("標本の索引は妥当")
+            .to_json_bytes()
+            .expect("符号化");
+        entries.push((MANIFEST_ENTRY, manifest));
+        DocumentParts::from_entries(entries).expect("標本の集合は妥当")
+    }
+
     /// 構築の正準化: 入力順に関わらずエントリ名の昇順になり、重複は拒否される
     /// （要件 2.2。ファイルシステムの列挙順に依存しないことの構造的な根拠）。
     #[test]
@@ -774,8 +801,8 @@ mod tests {
             other => panic!("壊れた索引が拒否されない: {:?}", other.map(|parts| names(&parts))),
         }
 
-        // 索引が記録したバージョンはそのまま報告される（ゲートはタスク 6.1 の担当であり、
-        // 本モジュールは拒否も変換もしない）。
+        // 索引が記録したバージョンはそのまま報告される（構築経路 `from_entries` はゲートを
+        // 掛けない。読めるか否かは読み込み経路 `from_parts` が判定する）。
         let index: Vec<ManifestEntry> = forward
             .iter()
             .filter(|(name, _)| *name != MANIFEST_ENTRY)
@@ -789,6 +816,97 @@ mod tests {
         replace(&mut with_future, MANIFEST_ENTRY, future);
         let rebuilt = DocumentParts::from_entries(with_future).expect("標本の集合は妥当");
         assert_eq!(FormatVersion::new(2, 7), rebuilt.format_version(), "索引のバージョンが読めない");
+    }
+
+    /// 読み込み経路の形式バージョンゲート（要件 6.5。design 読み込みフロー「形式バージョン」）:
+    /// 現行より新しい major の集合は、**要求バージョンと対応バージョンを持つ**
+    /// [`DocumentError::UnsupportedVersion`] として拒否され、部分的なモデルを返さない（要件 5.4）。
+    #[test]
+    fn from_parts_rejects_a_major_newer_than_the_current_one() {
+        let document = sample_document();
+        let parts = to_parts(&document).expect("保存経路");
+        let forked = rebuilt(FormatVersion::new(2, 7), entries(&parts));
+
+        match from_parts(&forked) {
+            Err(DocumentError::UnsupportedVersion { found, supported }) => {
+                assert_eq!(FormatVersion::new(2, 7), found, "要求バージョンが報告されていない");
+                assert_eq!(CURRENT_FORMAT_VERSION, supported, "対応バージョンが報告されていない");
+            }
+            Ok(restored) => {
+                panic!("拒否されずモデルが返った（{} シート）", restored.sheets().len())
+            }
+            Err(other) => panic!("変種が違う: {other}"),
+        }
+    }
+
+    /// ゲートの major 境界: 同一 major は minor の新旧を問わず受理し、より新しい major は拒否する。
+    ///
+    /// **古い major も本タスクでは同じ拒否である**（移行チェーンの適用機構はタスク 6.2 の
+    /// 実装であり、移行先が無い版は開けない）。6.2 はこの分岐を実チェーン適用へ置き換え、
+    /// ここに古い major が載っている期待を更新する。
+    #[test]
+    fn from_parts_gates_on_the_major_boundary() {
+        let document = sample_document();
+        let parts = to_parts(&document).expect("保存経路");
+
+        for accepted in [FormatVersion::new(1, 0), FormatVersion::new(1, 1), FormatVersion::new(1, 99)]
+        {
+            let same_major = rebuilt(accepted, entries(&parts));
+            let restored = from_parts(&same_major)
+                .unwrap_or_else(|error| panic!("同一 major の {accepted} が拒否された: {error}"));
+            assert_eq!(document.document_id(), restored.document_id(), "{accepted} で内容が変わった");
+        }
+
+        for rejected in [FormatVersion::new(2, 0), FormatVersion::new(0, 9)] {
+            let other_major = rebuilt(rejected, entries(&parts));
+            match from_parts(&other_major) {
+                Err(DocumentError::UnsupportedVersion { found, supported }) => {
+                    assert_eq!(rejected, found, "{rejected} の要求バージョンが報告されていない");
+                    assert_eq!(CURRENT_FORMAT_VERSION, supported);
+                }
+                Ok(restored) => panic!(
+                    "{rejected} が拒否されずモデルが返った（{} シート）",
+                    restored.sheets().len()
+                ),
+                Err(other) => panic!("{rejected} の変種が違う: {other}"),
+            }
+        }
+    }
+
+    /// ゲートは完全性の照合より前に走る（design 読み込みフローの「形式バージョン」→
+    /// 「ダイジェスト照合」）: 索引が実体の無いパートを載せていても、版が読めなければ
+    /// [`DocumentError::UnsupportedVersion`] が返る（[`DocumentError::MissingPart`] ではない）。
+    ///
+    /// **この順序はタスク 6.2 が移行を挿す位置の前提である**（移行は照合の前段で行う）。
+    #[test]
+    fn the_version_gate_runs_before_the_integrity_check() {
+        let document = sample_document();
+        let parts = to_parts(&document).expect("保存経路");
+        let absent = EntryName::Rows { sheet: IdFactory::new().new_sheet_id() };
+
+        let mut forward = entries(&parts);
+        forward.retain(|(name, _)| *name != MANIFEST_ENTRY);
+        let mut index: Vec<ManifestEntry> = forward
+            .iter()
+            .map(|(name, bytes)| ManifestEntry::of_bytes(*name, bytes))
+            .collect();
+        index.push(ManifestEntry::of_bytes(absent, b"no such part in the set"));
+        let manifest = ManifestPart::new(FormatVersion::new(2, 7), index)
+            .expect("標本の索引は妥当")
+            .to_json_bytes()
+            .expect("符号化");
+        forward.push((MANIFEST_ENTRY, manifest));
+        let broken = DocumentParts::from_entries(forward).expect("標本の集合は妥当");
+
+        match from_parts(&broken) {
+            Err(DocumentError::UnsupportedVersion { found, .. }) => {
+                assert_eq!(FormatVersion::new(2, 7), found);
+            }
+            Ok(restored) => {
+                panic!("拒否されずモデルが返った（{} シート）", restored.sheets().len())
+            }
+            Err(other) => panic!("ゲートが完全性照合より後にある: {other}"),
+        }
     }
 
     /// `get` はエントリ名で引き（無ければ `None`）、`Part` のダイジェストは実バイト列と

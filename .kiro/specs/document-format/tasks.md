@@ -170,7 +170,7 @@
   - _Depends: 1.6_
 
 - [ ] 6. Core: バージョニングと移行
-- [ ] 6.1 形式バージョンの表現と読み込み時ゲートを実装する
+- [x] 6.1 形式バージョンの表現と読み込み時ゲートを実装する
   - major.minor を表現し、マニフェストに記録する
   - 現行より新しい major のドキュメントを、要求バージョンを含むエラーで拒否することをテストで示す
   - _Requirements: 6.1, 6.5_
@@ -361,3 +361,6 @@
 - 既知の制限（task 5.3 レビューの実測。**task 8.5 への申し送り**）: 生バイト走査は EOCD が宣言する `cd_size` / `cd_count` で有界化していない（`zip` 8.6 が両者を公開しないため）。中央ディレクトリと EOCD の間のアーカイブコメント等に `PK\x01\x02` の並びが現れると、**存在しないエントリを読んで過剰に拒否する**（可用性のみの劣化で、不正な受理にはつながらない）。8.5 で扱うこと
 - **宣言サイズの出所は ZIP ヘッダの非圧縮サイズ**（task 5.3 の裁定）: `ManifestEntry` は `name` / `digest` / `preserved` のみでサイズを持たず、マニフェストにサイズ欄を足すのはワイヤ形式の変更でゴールデンを無効化するため行わない。**絶対的なサイズ上限は設けない**（要件 8.5 が「10 万行を超えても拒否せず、性能保証の対象外である旨を通知」と定めるため。DEFLATE の理論圧縮比上限により比判定も実効性がない）。「極端に膨張するアーカイブ」への防御は (a) 許可リスト・重複の判定が展開に先行、(b) `take(宣言 + 1)` の有界読み、(c) 宣言と実展開量の一致要求、(d) 後段のダイジェスト照合（4.1）の多層防御である。この判断は `reader.rs` の module doc に記録済み
 - サイズ不一致の拒否は**自分の照合が発火する**（宣言を実より小さく書いた場合は `zip` の CRC 検証まで到達せず、報告される展開長が **宣言 + 1** で止まる。宣言を実より大きく書いた場合は CRC を通過してから自分の照合が拒否する）。`zip` の CRC 不一致が拒否するのは**無圧縮エントリを破壊した場合**のみで、その I/O エラーは `InvalidContainer { entry: "<名前>: <理由>" }` に写像される。破損エントリのテストは Deflated の破損だと自分のサイズ照合を叩いてしまうため、**`Stored` の CRC 経路**で書くこと
+- task 6.1 で `FormatVersion` の定義を `error.rs` から `migration/mod.rs` へ移管し、`CURRENT_FORMAT_VERSION`（= 1.0）も `migration` の**1 箇所**に集約した（`parts/document_parts.rs` の非公開定数は廃止）。クレート根の `document_format::FormatVersion` は維持（既存テストがこれを使う）。`error.rs` ⇄ `migration` は相互参照になる（`error` は `UnsupportedVersion` の文脈型として `FormatVersion` を、`migration` は中止値として `DocumentError` を参照する）が、**design の依存グラフに `error.rs` は現れない共有の葉**でありコンポーネント間の依存方向は増えない。両モジュールの docs に明記済み
+- task 6.1 のゲートは `migration::MigrationChain::{gate, admit}` と `VersionVerdict { Openable, NeedsMigration { from }, Unsupported { found, supported } }`。**major のみで判定**（同一 major は minor の新旧を問わず受理 = 省略可能フィールドの追加のみ）。呼び出しは `parts/document_parts.rs::from_parts` の**索引解決直後・ダイジェスト照合の前**に `MigrationChain::admit(parts.format_version())?;` の **1 回だけ**（design の読み込みフロー順。7.3 の「検証を 2 箇所に持たない」を満たす）。`from_entries`（構築側）はゲートせず、**`format_version()` は記録値をそのまま返す契約**（5.2 の型マーカーがこれに依存）
+- **task 6.2 への申し送り（task 6.1 レビューで校正済み）**: 差し替えるのは `MigrationChain::admit` の `NeedsMigration` 分岐 **1 箇所**（`from_parts` の挿入行はそのまま）。ただし変換の適用は**ダイジェスト照合より前**（移行後のバイト列と索引のダイジェストの整合をどう取るかは 6.2 が決める。design の読み込みフローは「バージョンゲート → 移行 → ダイジェスト照合」）。古い major の**拒否**を固定していて更新が必要なテストは 3 本: `migration::tests::admit_opens_only_the_current_major`（0.9 行）/ `parts::document_parts::tests::from_parts_gates_on_the_major_boundary`（0.9 行）/ `tests/migration.rs::an_older_major_is_rejected_until_the_migration_chain_lands`（`migration::tests::an_older_major_needs_migration` は `NeedsMigration` の verdict のみを固定するので 6.2 でも妥当）
