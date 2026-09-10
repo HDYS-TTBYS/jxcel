@@ -3,7 +3,8 @@
 //!
 //! 本モジュールの責務は、論理エントリ集合（[`DocumentParts`]）を**標準的な ZIP
 //! アーカイブのバイト列**へ変換することだけである（要件 2.1）。逆方向（ZIP の読み込みと
-//! 許可リストの適用）はタスク 5.3 が同じ型 [`ContainerCodec`] へ足す。
+//! 許可リストの適用）は同じ型 [`ContainerCodec`] の [`ContainerCodec::decode`] が担う
+//! （実装は [`crate::container::reader`]）。
 //!
 //! # 確定形
 //!
@@ -151,10 +152,11 @@ const PART_OPTIONS: FileOptions<'static, ()> = FileOptions::DEFAULT
 /// 状態を持たない（対象は呼び出しごとに引数で渡す）ため、値ではなく名前空間としての型で
 /// ある。型名 `ContainerCodec` は design が指定する名前である。
 ///
-/// 本タスク（5.2）が実装するのは**符号化**（[`ContainerCodec::encode`]）だけである。
-/// 復号（`decode(&[u8]) -> Result<DocumentParts, DocumentError>`。design の Service
-/// Interface）はタスク 5.3 が**同じ型の associated function** として足す（型を分けない。
-/// 許可リストの適用とマーカーの除去は復号側の責務であり、符号化側と 1 対 1 に対応する）。
+/// 本型が提供するのは**符号化**（[`ContainerCodec::encode`]）と**復号**
+/// （[`ContainerCodec::decode`]）の 2 つである（design の Service Interface と同じ
+/// associated function。型は分けない）。**許可リストの適用とマーカーの除去は復号側の
+/// 責務**であり、符号化側と 1 対 1 に対応する（符号化はマーカーを先頭に書き、復号は
+/// マーカーを集合から外す）。
 pub struct ContainerCodec;
 
 impl ContainerCodec {
