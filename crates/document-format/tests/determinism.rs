@@ -66,8 +66,8 @@ use document_format::container::ContainerCodec;
 use document_format::{Document, DocumentFormatApi};
 
 use common::{
-    api, fixture_path, sample, sample_minimal, sample_with_unknown_fields,
-    sample_with_unreferenced_attachment, sample_with_values, Scratch,
+    api, central_headers, fixture_path, local_headers, sample, sample_minimal,
+    sample_with_unknown_fields, sample_with_unreferenced_attachment, sample_with_values, Scratch,
 };
 
 /// 決定性を確かめる標本の一覧。
@@ -310,113 +310,4 @@ fn saved_bytes_fix_every_determinism_relevant_zip_parameter() {
     }
 }
 
-/// ローカルファイルヘッダ（`PK\x03\x04`）の決定性に関わるフィールド。
-struct LocalHeader {
-    name: String,
-    compression_method: u16,
-    flags: u16,
-    modified_time: u16,
-    modified_date: u16,
-    /// エントリ本体の開始位置。
-    data_start: usize,
-    /// 圧縮後の本体長（ローカルヘッダに記録された値）。
-    data_len: usize,
-}
 
-/// ローカルヘッダを書き込み順に走査する。
-///
-/// データディスクリプタを使わない実装（本実装の契約）ではローカルヘッダにサイズが載るため、
-/// 本体長だけ進めれば次のヘッダへ到達できる。逆にディスクリプタを使う実装ではサイズが 0 に
-/// なり、走査がここで途切れる（呼び出し元の順序の検査が落ちる）。
-fn local_headers(bytes: &[u8]) -> Vec<LocalHeader> {
-    let mut headers = Vec::new();
-    let mut offset = 0usize;
-    while bytes[offset..].starts_with(b"PK\x03\x04") {
-        let flags = u16::from_le_bytes(bytes[offset + 6..offset + 8].try_into().expect("ヘッダ"));
-        let compression_method =
-            u16::from_le_bytes(bytes[offset + 8..offset + 10].try_into().expect("ヘッダ"));
-        let modified_time =
-            u16::from_le_bytes(bytes[offset + 10..offset + 12].try_into().expect("ヘッダ"));
-        let modified_date =
-            u16::from_le_bytes(bytes[offset + 12..offset + 14].try_into().expect("ヘッダ"));
-        let data_len = u32::from_le_bytes(bytes[offset + 18..offset + 22].try_into().expect("ヘッダ"))
-            as usize;
-        let name_len =
-            u16::from_le_bytes(bytes[offset + 26..offset + 28].try_into().expect("ヘッダ")) as usize;
-        let extra_len =
-            u16::from_le_bytes(bytes[offset + 28..offset + 30].try_into().expect("ヘッダ")) as usize;
-        let name = String::from_utf8(bytes[offset + 30..offset + 30 + name_len].to_vec())
-            .expect("エントリ名は UTF-8");
-        let data_start = offset + 30 + name_len + extra_len;
-        headers.push(LocalHeader {
-            name,
-            compression_method,
-            flags,
-            modified_time,
-            modified_date,
-            data_start,
-            data_len,
-        });
-        offset = data_start + data_len;
-    }
-    assert!(!headers.is_empty(), "ローカルヘッダが 1 つも見つからない（標準的な ZIP でない）");
-    headers
-}
-
-/// 中央ディレクトリヘッダ（`PK\x01\x02`）の決定性に関わるフィールド。
-struct CentralHeader {
-    name: String,
-    version_made_by: u16,
-    compression_method: u16,
-    modified_time: u16,
-    modified_date: u16,
-    external_attributes: u32,
-}
-
-/// 終端レコード（EOCD）から中央ディレクトリを走査する。
-fn central_headers(bytes: &[u8]) -> Vec<CentralHeader> {
-    let eocd = bytes
-        .windows(4)
-        .rposition(|window| window == b"PK\x05\x06")
-        .expect("EOCD が無い（標準的な ZIP として読めない）");
-    let count = u16::from_le_bytes(bytes[eocd + 10..eocd + 12].try_into().expect("EOCD")) as usize;
-    let mut offset =
-        u32::from_le_bytes(bytes[eocd + 16..eocd + 20].try_into().expect("EOCD")) as usize;
-
-    let mut headers = Vec::with_capacity(count);
-    for _ in 0..count {
-        assert_eq!(
-            b"PK\x01\x02",
-            &bytes[offset..offset + 4],
-            "中央ディレクトリの署名が違う（標準的な ZIP として読めない）"
-        );
-        let version_made_by =
-            u16::from_le_bytes(bytes[offset + 4..offset + 6].try_into().expect("ヘッダ"));
-        let compression_method =
-            u16::from_le_bytes(bytes[offset + 10..offset + 12].try_into().expect("ヘッダ"));
-        let modified_time =
-            u16::from_le_bytes(bytes[offset + 12..offset + 14].try_into().expect("ヘッダ"));
-        let modified_date =
-            u16::from_le_bytes(bytes[offset + 14..offset + 16].try_into().expect("ヘッダ"));
-        let name_len =
-            u16::from_le_bytes(bytes[offset + 28..offset + 30].try_into().expect("ヘッダ")) as usize;
-        let extra_len =
-            u16::from_le_bytes(bytes[offset + 30..offset + 32].try_into().expect("ヘッダ")) as usize;
-        let comment_len =
-            u16::from_le_bytes(bytes[offset + 32..offset + 34].try_into().expect("ヘッダ")) as usize;
-        let external_attributes =
-            u32::from_le_bytes(bytes[offset + 38..offset + 42].try_into().expect("ヘッダ"));
-        let name = String::from_utf8(bytes[offset + 46..offset + 46 + name_len].to_vec())
-            .expect("エントリ名は UTF-8");
-        headers.push(CentralHeader {
-            name,
-            version_made_by,
-            compression_method,
-            modified_time,
-            modified_date,
-            external_attributes,
-        });
-        offset += 46 + name_len + extra_len + comment_len;
-    }
-    headers
-}

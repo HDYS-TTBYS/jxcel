@@ -239,7 +239,7 @@
   - _Requirements: 1.7, 4.2, 4.3, 4.4, 4.5, 5.3, 5.4, 7.4_
   - _Boundary: StructuralValidator, IntegrityVerifier_
 
-- [ ] 8.5 (P) 不正アーカイブの拒否を検証する
+- [x] 8.5 (P) 不正アーカイブの拒否を検証する
   - 許可リスト外のエントリ名、ルート外を指すパス、同一パスの重複エントリを持つ ZIP が拒否されることを検証する
   - 極端に膨張するアーカイブが拒否されることを検証する
   - _Depends: 7.1_
@@ -400,3 +400,7 @@
 - **`RowId` の重複は同一エントリ内では到達不能**: `RowsCodec::decode` が `$id` の重複を `InvalidContainer`（`duplicate row identifier`）で先に拒否するため、`DuplicateId { kind: Row }` に到達する経路は**シートをまたぐ重複**だけである（テストは 2 シート 1 行ずつの標本で構成）
 - 生存変異（8.4）: `validate_schema_presence` が `MissingSchema` を報告しなくても、後段の `take_schema` が**同じ変種・同じシート**を返すため等価 / `read_format_version` の索引要求を緩めても `manifest_part_of` → `resolve_manifest` が同じ `MissingPart { name: "manifest.json" }` を返すため等価（**冗長な二重防衛**であり欠陥ではない）
 - **宿題（8.5 で実施。親の裁定）**: `zip` が統合テストから使える以上、`tests/container_writer.rs` と `tests/determinism.rs` に重複している**生ヘッダ解析（`local_headers` / `central_headers`、約 90 行）は `tests/common/mod.rs` へ寄せる**（バイト列だけを解析するヘルパなので `common` が `container` を import しない方針を守れる）。**第二の重複を作らないこと**
+- **【8.5 で実施済み】** 生ヘッダ解析（`local_headers` / `central_headers`）は `tests/common/mod.rs` の**1 箇所**に移設した（`container_writer.rs` / `determinism.rs` は機械的に移行。テスト本数 5 / 4 は不変）。`CentralHeader.header_start` を追加。**新しいヘッダ解析を書く前に `common` を見ること**
+- task 8.5 で `tests/malicious_archive.rs`（9 本）が入った。**許可リスト外の名前は原文のまま `InvalidContainer { entry }` で拒否**され、`entry` は入力文字列と**バイト単位で完全一致**する（サニタイズ・正規化なし。20 ケースで実測）。同一パス重複は `InvalidContainer`（`entry` に該当パスを含む）。**`./manifest.json` は `manifest.json` と畳み込まれず、許可リスト違反（要件 2.5）として報告される**（design が「重複 = バイト単位完全一致・正規化なし」と定めているため妥当）。**判定順**（許可リスト照合と重複検出が展開に先行）も許可リスト違反 + サイズ偽装の同時持ちで実測し、コンテナ経路でも固定するテストを置いた
+- **「極端に膨張するアーカイブ」の検証内容（8.5 の裁定の実測）**: **絶対サイズ上限は実装しない**（要件 8.5 が 10 万行超の拒否を禁じるため意図的な非実装。module doc に明記）。防御は **有界読み（`take(宣言 + 1)`）と展開長の一致要求**で、実 64 KiB に 100 宣言 → **報告展開長 101 = 宣言 + 1**（無制限読みなら 65536）、1 MiB 宣言 → `expanded size 65536` として**両方向で拒否**されることを実測。**対照（同じ組み立て方の正しいアーカイブは成功）**も併置
+- **既知の制限の現挙動を固定（8.5）**: 中央ディレクトリと EOCD の間の `PK\x01\x02` 並びを存在しないエントリとして読むため**過剰拒否**する（可用性のみの劣化で不正の受理にはならない）。テストで現挙動を固定し、doc に「将来 `cd_size` で有界化されたらこの期待を更新してよい」と記載した

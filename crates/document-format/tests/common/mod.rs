@@ -15,7 +15,13 @@
 //!    （[`document_view`] の docs 参照）。
 //! 3. **テスト用の小さな道具**（[`Scratch`]（一時ディレクトリ）・[`snapshot`] /
 //!    [`entry_names`]・[`api`] / [`fixture_path`]・[`entries_of`] /
-//!    [`with_rebuilt_manifest`]）。
+//!    [`with_rebuilt_manifest`]・[`local_headers`] / [`central_headers`]）。
+//!
+//! [`local_headers`] / [`central_headers`] は ZIP の**生バイト列だけ**を解析する
+//! （[`LocalHeader`] / [`CentralHeader`] 参照）。`tests/container_writer.rs`
+//! と `tests/determinism.rs` が同じ解析を別々に持っていたため、タスク 8.5 でここへ寄せた
+//! （第二の重複を作らない）。バイト列しか見ないので、本ファイルが `container` を import
+//! しない方針（上の段落）を保てる。
 //!
 //! **このファイルは `document_format::container` を import しない。** これにより、
 //! ZIP を一切経由しない公開契約を import だけで実証している `tests/parts_contract.rs`
@@ -568,4 +574,128 @@ pub fn document_with_unregistered_attachment() -> Document {
         &["blob"],
         vec![vec![CellValue::Attachment(attachment)]],
     )
+}
+
+/// ローカルファイルヘッダ（`PK\x03\x04`）の決定性に関わるフィールド。
+///
+/// フィールドは両方の利用元（`tests/container_writer.rs` と `tests/determinism.rs`）の
+/// 和集合である（どちらのテストも意味を変えずに移行できるようにするため）。
+pub struct LocalHeader {
+    pub name: String,
+    pub compression_method: u16,
+    pub flags: u16,
+    pub modified_time: u16,
+    pub modified_date: u16,
+    /// エントリ本体の開始位置。
+    pub data_start: usize,
+    /// 圧縮後の本体長（ローカルヘッダに記録された値）。
+    pub data_len: usize,
+}
+
+/// ローカルヘッダを書き込み順に走査する。
+///
+/// データディスクリプタを使わない実装（本実装の契約）ではローカルヘッダにサイズが
+/// 載るため、本体長だけ進めれば次のヘッダへ到達できる。逆にディスクリプタを使う実装
+/// ではサイズが 0 になり、走査がここで途切れる（呼び出し元の順序の検査が落ちる）。
+pub fn local_headers(bytes: &[u8]) -> Vec<LocalHeader> {
+    let mut headers = Vec::new();
+    let mut offset = 0usize;
+    while bytes[offset..].starts_with(b"PK\x03\x04") {
+        let flags = u16::from_le_bytes(bytes[offset + 6..offset + 8].try_into().expect("ヘッダ"));
+        let compression_method =
+            u16::from_le_bytes(bytes[offset + 8..offset + 10].try_into().expect("ヘッダ"));
+        let modified_time =
+            u16::from_le_bytes(bytes[offset + 10..offset + 12].try_into().expect("ヘッダ"));
+        let modified_date =
+            u16::from_le_bytes(bytes[offset + 12..offset + 14].try_into().expect("ヘッダ"));
+        let data_len = u32::from_le_bytes(bytes[offset + 18..offset + 22].try_into().expect("ヘッダ"))
+            as usize;
+        let name_len =
+            u16::from_le_bytes(bytes[offset + 26..offset + 28].try_into().expect("ヘッダ")) as usize;
+        let extra_len =
+            u16::from_le_bytes(bytes[offset + 28..offset + 30].try_into().expect("ヘッダ")) as usize;
+        let name = String::from_utf8(bytes[offset + 30..offset + 30 + name_len].to_vec())
+            .expect("エントリ名は UTF-8");
+        let data_start = offset + 30 + name_len + extra_len;
+        headers.push(LocalHeader {
+            name,
+            compression_method,
+            flags,
+            modified_time,
+            modified_date,
+            data_start,
+            data_len,
+        });
+        offset = data_start + data_len;
+    }
+    assert!(!headers.is_empty(), "ローカルヘッダが 1 つも見つからない（標準的な ZIP でない）");
+    headers
+}
+
+/// 中央ディレクトリヘッダ（`PK\x01\x02`）の決定性に関わるフィールド。
+pub struct CentralHeader {
+    pub name: String,
+    pub version_made_by: u16,
+    pub compression_method: u16,
+    pub flags: u16,
+    pub modified_time: u16,
+    pub modified_date: u16,
+    pub external_attributes: u32,
+    /// このヘッダ（固定長 46 バイト + 可変長）の先頭位置。
+    ///
+    /// タスク 8.5 が宣言サイズを偽るアーカイブを組むために使う（中央ディレクトリの
+    /// 非圧縮サイズ欄は先頭 + 24 バイトにある）。それ以外の利用元は参照しない。
+    pub header_start: usize,
+}
+
+/// 終端レコード（EOCD）から中央ディレクトリを走査する。
+pub fn central_headers(bytes: &[u8]) -> Vec<CentralHeader> {
+    let eocd = bytes
+        .windows(4)
+        .rposition(|window| window == b"PK\x05\x06")
+        .expect("EOCD が無い（標準的な ZIP として読めない）");
+    let count = u16::from_le_bytes(bytes[eocd + 10..eocd + 12].try_into().expect("EOCD")) as usize;
+    let mut offset =
+        u32::from_le_bytes(bytes[eocd + 16..eocd + 20].try_into().expect("EOCD")) as usize;
+
+    let mut headers = Vec::with_capacity(count);
+    for _ in 0..count {
+        assert_eq!(
+            b"PK\x01\x02",
+            &bytes[offset..offset + 4],
+            "中央ディレクトリの署名が違う（標準的な ZIP として読めない）"
+        );
+        let header_start = offset;
+        let version_made_by =
+            u16::from_le_bytes(bytes[offset + 4..offset + 6].try_into().expect("ヘッダ"));
+        let flags = u16::from_le_bytes(bytes[offset + 8..offset + 10].try_into().expect("ヘッダ"));
+        let compression_method =
+            u16::from_le_bytes(bytes[offset + 10..offset + 12].try_into().expect("ヘッダ"));
+        let modified_time =
+            u16::from_le_bytes(bytes[offset + 12..offset + 14].try_into().expect("ヘッダ"));
+        let modified_date =
+            u16::from_le_bytes(bytes[offset + 14..offset + 16].try_into().expect("ヘッダ"));
+        let name_len =
+            u16::from_le_bytes(bytes[offset + 28..offset + 30].try_into().expect("ヘッダ")) as usize;
+        let extra_len =
+            u16::from_le_bytes(bytes[offset + 30..offset + 32].try_into().expect("ヘッダ")) as usize;
+        let comment_len =
+            u16::from_le_bytes(bytes[offset + 32..offset + 34].try_into().expect("ヘッダ")) as usize;
+        let external_attributes =
+            u32::from_le_bytes(bytes[offset + 38..offset + 42].try_into().expect("ヘッダ"));
+        let name = String::from_utf8(bytes[offset + 46..offset + 46 + name_len].to_vec())
+            .expect("エントリ名は UTF-8");
+        headers.push(CentralHeader {
+            name,
+            version_made_by,
+            compression_method,
+            flags,
+            modified_time,
+            modified_date,
+            external_attributes,
+            header_start,
+        });
+        offset += 46 + name_len + extra_len + comment_len;
+    }
+    headers
 }
