@@ -104,7 +104,7 @@
   - _Requirements: 4.5, 6.1_
   - _Depends: 4.1_
 
-- [ ] 4.3 (P) ドキュメントパートを実装する
+- [x] 4.3 (P) ドキュメントパートを実装する
   - ドキュメント識別子、シート順序、シートのメタデータを保持する
   - 保存時刻のような揮発値を一切含まないことをテストで示す
   - _Requirements: 2.2, 3.6_
@@ -313,3 +313,11 @@
 - **未知フィールドの保持範囲（task 4.2 の裁定）**: design の `DeterministicJson` の責務にスコープ限定が無いため、**トップレベルだけでなく索引要素（`{"name":..., "blake3":...}`）の中の未知キーも位置ごと保持し書き戻す**。新しく「バージョン付きの JSON オブジェクト構造」を作るタスク（4.3 / 4.4 / 6.1 / 6.2）も、**その構造の全階層**で同じ保持を適用すること（要素ごとに `PreservedFields` を 1 つ持たせる）。対象外は (a) 未知キーの `\uXXXX` 等のエスケープ**表記**、(b) 値・区切りの外側の空白、の 2 点のみ
 - **`PreservedFields` を保持する型に `#[derive(PartialEq)]` を後付けしないこと**（task 4.2 の申し送り）: `PreservedFields` は内部カーソル `known_seen` 込みで `PartialEq` を導出しているため、保持フィールドが空同士でも `record_known_field` の呼び出し回数が違うと**不等**になる（`src/json/determinism.rs`）。task 4.8（モデル ⇄ パート集合）と task 8.1（往復同一性）でパート集合の等価比較が必要になったら、`entries()` の写像か符号化バイト列で比較すること
 - task 4.2 の `ManifestPart` / `ManifestEntry` は `PartialEq` を実装しない（上記カーソル事情。`ManifestEntry` は `Vec` を保持するため `Copy` も無い）。比較は `version()` / `entries()` / 符号化バイト列で行う
+- task 4.3 で `parts/document_part.rs` と `DocumentId`（`ids.rs`。`IdFactory::new_document_id()` は既存 3 種と同じ単調カウンタを共有）が入った。`document.json` の確定形は **`{"document_id":"<26 文字 ULID>","sheets":[{"sheet_id":"<ULID>","name":"<文字列>"}]}`（compact・末尾改行なし）**（空 `sheets` 配列形も許容）
+- **順序規則は 2 つで逆なので混同しないこと**: `document.json` は**与えられたシート順序をそのまま**保持（ソートしない。シート順序がそれ自体データ = 要件 1.1）、`manifest.json` は**エントリ名昇順**にソート（索引だから）。この区別は両ファイルの doc と `parts/mod.rs` に明記済み
+- **task 4.8（モデル ⇄ パート集合）が着手前に解消すべき制約**（task 4.3 レビュー由来。実測に基づく）:
+  - `model::Document` は**ドキュメント識別子を持たない**（`ids: IdFactory` と `sheets` のみでアクセサも無い）。`DocumentPart::new` は `DocumentId` 必須なので、4.8 は (a) model に識別子フィールドと `document_id()` を足す、(b) `IdFactory` を公開する、(c) parts 層で発行する、のいずれかを選ぶ必要がある。**(a) 以外は `Document → Parts → Document → Parts` の往復で識別子が再発行され、要件 3.1（同一内容 → 同一バイト）を壊すため (a) が唯一整合する**
+  - `model::Document` / `Sheet` に**未知フィールド保持の領域が無い**（`unknown_fields` を持つのは `SchemaPart` のみ）。`document.json` はトップレベルとシート要素の両方で未知フィールドを保持する契約なので、4.8 は Model を経由する往復で前方互換データが落ちないよう保持領域を model 側に用意する必要がある
+  - `Document::sheets()` の反復順を 1 対 1 で `SheetMeta` 列へ写すこと（`add_sheet` の末尾追加・`remove_sheet` の順序保存と整合）。`Sheet::name()` は無変換で写せる
+  - `DocumentPart::new` / `from_json_bytes` は `Result` を返す（重複シート識別子で `InvalidContainer`）ため、**4.8 の `to_parts` は infallible にできない**
+  - `document.json` 内の重複検出は同一ファイル内の自己矛盾に限る。行・型定義・添付をまたぐ全体一意性は task 4.6 の担当

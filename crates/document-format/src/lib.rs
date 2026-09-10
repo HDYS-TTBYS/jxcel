@@ -14,7 +14,7 @@ pub mod value;
 pub use entry_name::EntryName;
 pub use error::{DocumentError, FormatVersion, IdKind};
 pub use ids::{
-    AttachmentId, Blake3Digest, IdFactory, IdParseError, RowId, SheetId, TypeDefId,
+    AttachmentId, Blake3Digest, DocumentId, IdFactory, IdParseError, RowId, SheetId, TypeDefId,
 };
 pub use model::{
     Attachment, AttachmentRegistry, Document, RawField, RawJson, ReorderError, Row, SchemaPart,

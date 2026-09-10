@@ -2,10 +2,15 @@
 //!
 //! # 識別子の体系
 //!
-//! - [`SheetId`] / [`RowId`] / [`TypeDefId`]: ULID ベース。26 文字の Crockford base32
-//!   テキスト形は辞書順 = 時系列順でソート可能。3 つは別個の新型（型エイリアスではない）
-//!   であり、シート識別子を行識別子が求められる箇所へ渡すことは型エラーになる
-//!   （design「各 ID は別個の新型として定義し、取り違えを型で防ぐ」）。
+//! - [`SheetId`] / [`RowId`] / [`TypeDefId`] / [`DocumentId`]: ULID ベース。26 文字の
+//!   Crockford base32 テキスト形は辞書順 = 時系列順でソート可能。4 つは別個の新型
+//!   （型エイリアスではない）であり、シート識別子を行識別子が求められる箇所へ渡すことは
+//!   型エラーになる（design「各 ID は別個の新型として定義し、取り違えを型で防ぐ」）。
+//! - [`DocumentId`]: ドキュメントそのものの識別子（design「Container Entry Layout」の
+//!   「ドキュメント ID」であり、タスク 4.3 の `document.json` が永続化する）。
+//!   **識別子体系の単一の源は本モジュールである**ため、発行・正準テキスト形・解析を
+//!   ここへ集約する。[`SheetId`] とは別個の新型であり、シートの識別子をドキュメントの
+//!   識別子が求められる箇所へ渡すことは型エラーになる（取り違えを型で防ぐ）。
 //! - [`AttachmentId`]: BLAKE3 ダイジェストによる content-addressed 識別子（要件 7.2）。
 //!   識別子は内容を指す: 同一バイト列は常に同一識別子、異なるバイト列は常に異なる識別子。
 //!
@@ -123,9 +128,16 @@ ulid_id_newtype! {
 }
 
 ulid_id_newtype! {
-    /// ネスト型定義識別子（ULID）。[`SheetId`] / [`RowId`] とは別個の新型であり、
-    /// 相互に取り違えられない。
+    /// ネスト型定義識別子（ULID）。[`SheetId`] / [`RowId`] / [`DocumentId`] とは別個の
+    /// 新型であり、相互に取り違えられない。
     TypeDefId
+}
+
+ulid_id_newtype! {
+    /// ドキュメント識別子（ULID）。`document.json` が永続化する（タスク 4.3。design
+    /// 「Container Entry Layout」の「ドキュメント ID」）。[`SheetId`] とは別個の新型で
+    /// あり、シートの識別子と相互に取り違えられない。
+    DocumentId
 }
 
 /// 16 進 1 桁の ASCII を数値に戻す。
@@ -298,7 +310,7 @@ impl<'de> Deserialize<'de> for AttachmentId {
     }
 }
 
-/// シート / 行 / ネスト型定義の ULID 識別子を発行する（要件 1.4）。
+/// シート / 行 / ネスト型定義 / ドキュメントの ULID 識別子を発行する（要件 1.4）。
 ///
 /// * **連続発行は厳密昇順**: 同一ミリ秒内の再発行は下位 80 bit のランダム値を
 ///   再生成せずインクリメントで進める（`ulid::Generator` の単調増加方針）。
@@ -310,7 +322,7 @@ impl<'de> Deserialize<'de> for AttachmentId {
 ///   ULID 自身の 48 bit ミリ秒時刻 + 80 bit ランダムが担保する
 ///   （前提: ドキュメントは一度に 1 プロセスが編集する）。
 ///
-/// 3 つの発行口は 1 つの単調カウンタを共有する（実装上の選択）: 種別をまたいで
+/// 4 つの発行口は 1 つの単調カウンタを共有する（実装上の選択）: 種別をまたいで
 /// 発行が交互になっても全体で厳密昇順であり、種別内の一意性はそこから従って
 /// 保証される。
 #[derive(Debug, Clone)]
@@ -343,6 +355,12 @@ impl IdFactory {
         SheetId::from_ulid(self.next_ulid())
     }
 
+    /// 新しいドキュメント識別子を発行する。
+    #[inline]
+    pub fn new_document_id(&mut self) -> DocumentId {
+        DocumentId::from_ulid(self.next_ulid())
+    }
+
     /// 行識別子を発行する。
     #[inline]
     pub fn new_row_id(&mut self) -> RowId {
@@ -363,7 +381,7 @@ impl Default for IdFactory {
 }
 
 // 型による取り違え防止（受け入れ基準 d）は構造的な保証である: `SheetId` / `RowId` /
-// `TypeDefId` はマクロが生成する別個のユニット構造体であり、型别名ではない。
+// `TypeDefId` / `DocumentId` はマクロが生成する別個のユニット構造体であり、型别名ではない。
 // `SheetId` を `RowId` が要求される箇所へ渡すとコンパイルエラーになるため、
 // 実行時テストではなく型体系そのものが保証する（compile-fail テストは意図的に置かない）。
 
@@ -431,6 +449,50 @@ mod tests {
         for pair in issued.windows(2) {
             assert!(pair[0] < pair[1], "種別交差の連続発行が厳密昇順でない");
         }
+    }
+
+    /// ドキュメント識別子（タスク 4.3。design「Container Entry Layout」の
+    /// 「ドキュメント ID」）も、他の ULID 系識別子と同じ 1 つの単調列から発行される
+    /// （要件 1.4）。連続発行の昇順性・種別交差での昇順性・正準テキスト形の往復を、
+    /// 既存 3 種と同じ水準で確かめる。
+    #[test]
+    fn document_ids_are_issued_from_the_shared_monotonic_sequence() {
+        let mut factory = IdFactory::new();
+        let ids: Vec<DocumentId> = (0..1000).map(|_| factory.new_document_id()).collect();
+
+        for pair in ids.windows(2) {
+            assert!(pair[0] < pair[1], "連続発行が厳密昇順でない: {pair:?}");
+        }
+        // 同一ミリ秒内の発行（単調増加インクリメント）が実際に発生していること
+        assert!(
+            ids.windows(2)
+                .any(|pair| pair[0].ulid().timestamp_ms() == pair[1].ulid().timestamp_ms()),
+            "1000 個の連続発行で同一ミリ秒内の発行が発生せず、単調増加経路を検証できていない"
+        );
+
+        // シート識別子と交差して発行しても全体が厳密昇順（1 つのカウンタの共有）
+        let mut factory = IdFactory::new();
+        let mut issued: Vec<ulid::Ulid> = Vec::new();
+        for _ in 0..300 {
+            issued.push(factory.new_document_id().ulid());
+            issued.push(factory.new_sheet_id().ulid());
+        }
+        for pair in issued.windows(2) {
+            assert!(pair[0] < pair[1], "種別交差の連続発行が厳密昇順でない");
+        }
+
+        // 正準テキスト形（26 文字 Crockford base32 大文字）の往復
+        let id = IdFactory::new().new_document_id();
+        let text = id.to_string();
+        assert_eq!(ulid::ULID_LEN, text.len());
+        assert!(
+            text.chars().all(|c| CROCKFORD.contains(c)),
+            "正準 text 形が Crockford base32 大文字でない: {text}"
+        );
+        assert_eq!(id, text.parse::<DocumentId>().unwrap(), "text 形往復が一致しない");
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(format!("\"{text}\""), json);
+        assert_eq!(id, serde_json::from_str::<DocumentId>(&json).unwrap());
     }
 
     /// ULID 26 文字 Crockford base32 大テキスト形の往復と、serde の素の文字列表現。
