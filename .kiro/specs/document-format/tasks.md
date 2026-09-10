@@ -213,7 +213,7 @@
   - _Requirements: 6.4_
 
 - [ ] 8. Validation: 横断的な検証
-- [ ] 8.1 全経路の往復同一性を検証する
+- [x] 8.1 全経路の往復同一性を検証する
   - モデルからパート集合、コンテナ、再びパート集合、モデルへと一巡して完全に同一のモデルが復元されることを検証する
   - 保存したドキュメントを開き直すと元のモデルと一致することを検証する
   - ZIP を経由する経路と経由しない経路が同じモデルを与えることを検証する
@@ -384,3 +384,6 @@
 - **退避の失敗は保存の中止**（`Io { retried: false }`）で、対象は保存前のまま（要件 6.4 を守れない状態で上書きしない）。退避は `fs::copy` ではなく `AtomicWriter::commit` を使うため**内容のコピー**であり、**ファイルモード/メタデータは引き継がない**（`atomic_save.rs` の規約。lib.rs の退避節に明記済み）。**保持期間の方針**は「作るだけで削除も上書きもしない」（design の Risks「保持期間の方針は実装時に決める」への回答。削除は呼び出し元の責務）
 - **検証限界（task 7.4 の実測）**: 実 `STEPS` が空のため、**実経路で「変換が適用された文書」はまだ存在しない**。退避分岐の観測は `src/lib.rs` の crate 内部テストが合成ステップ表（`migration::steps::synthetic` の 0.0→0.1→1.0 の実段）と `from_parts_with` で行っている。**非変換時の否定側は `tests/api.rs`**（実経路）。**task 8.7 への申し送り**: 実経路で退避を観測するには「過去版のゴールデン fixture + 実 `MigrationStep`（例 v0→v1）」を追加し、fixture を `open` → `save` して `<名前>.bak` が fixture のバイト列と一致することを統合テストで固定する必要がある
 - **task 8.7 への申し送り（増分）**: 移行のゴールデン fixture を足すときは、**「fixture を開いて保存したときの退避」と「移行後のバイト列が決定的（同一 fixture から同一バイト列）」**の 2 点も固定すること（退避・決定性は 6.4 / 3.1 の実経路の証明になる）
+- task 8.1 で検証用の共通ヘルパ **`tests/common/mod.rs`** ができた（`Scratch`（リポジトリ内・`Drop` で削除）/ `snapshot` / `entry_names` / **`document_view` と `assert_same_document`（完全比較）** / 標本 5 種（最小・複数シート＋0 行・値の網羅・未参照添付・未知フィールド）/ 違反文書ビルダ）。`tests/api.rs` / `tests/parts_contract.rs` / `tests/roundtrip.rs` が `mod common;` で共有する。**`tests/common/mod.rs` は `document_format::container` を import しない**（ZIP 非経由の契約を import 一覧で示すため、コンテナ依存のヘルパは `tests/api.rs` 側に置く）。`dead_code` は複数バイナリが部分集合を使うため理由コメント付きで許容
+- **8.x の比較は `common::document_view` / `assert_same_document` を再利用すること**（第二の比較規約を作らない）。比較は ① `document_id` ② シート（**文書順**・ID・名前・**列順**・保持フィールド）③ 行（**行順**・`RowId`・`CellValue`）④ スキーマ（`root` と型定義 `definition` の**verbatim バイト列**・型参照）⑤ 添付（ID＋バイト列）⑥ 未参照添付 ⑦ **wire 射影（`to_parts` のエントリ名とバイト列）** の 7 観測点。7 は保持フィールドの公開アクセサが `pub(crate)` のため（`src/` 無変更で済ませるための射影）であり、`to_parts` は決定性があるので有効
+- 8.1 の往復は 3 経路（フルサーキット / `save`→`open` / ZIP 経由と非経由の 3 者一致）を**それぞれ独立テスト**で、**標本をループして**検証し、コミット済みゴールデン fixture を実ファイル経路でも通す。**未参照添付が往復で落ちないこと**も押さえている（要件 7.6 の前提。本格検証は 8.8）。`roundtrip.rs` の `the_comparison_view_separates_every_observable_aspect` が「比較の強度」の自己検査（各観測点を 1 箇所ずつ変えて検出）を担う。**`assert_same_document` の個別アサートを 1 つ抜く変異は `parts` 射影の比較に隠れて生存する**（冗長観測のため能力欠落ではないが、`parts` 比較を外す変更を入れるときは注意）

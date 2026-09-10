@@ -33,133 +33,29 @@
 //! 4. **非残留と非干渉**: 成功・失敗のどちらでも一時ファイル（`.jxcel-tmp-`）を
 //!    残さず、対象パス以外のエントリを作らない。
 //!
-//! 一時ファイルはリポジトリ内のテスト専用ディレクトリ（`tests/api_tmp_*`）に作り、
-//! 各テストの終了時に [`Scratch`] の `Drop` が削除する（コンテナ内とホストで
-//! `std::env::temp_dir()` の見え方が違うため、リポジトリ内に閉じる）。
+//! 標本・比較ヘルパ・一時ディレクトリは `tests/common/mod.rs` が持つ（`tests/roundtrip.rs`
+//! と共有するため。あちらの docs 参照）。一時ディレクトリはリポジトリ内の
+//! `tests/scratch_*` に作り、各テストの終了時に [`Scratch`] の `Drop` が削除する
+//! （コンテナ内とホストで `std::env::temp_dir()` の見え方が違うため、リポジトリ内に閉じる）。
+
+mod common;
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::path::PathBuf;
 
 use document_format::container::ContainerCodec;
-use document_format::parts::{
-    from_parts, to_parts, DocumentParts, ManifestEntry, ManifestPart, SchemaCodec,
-};
+use document_format::parts::{from_parts, to_parts, DocumentParts, SchemaCodec};
 use document_format::{
-    AttachmentId, CellValue, Document, DocumentError, DocumentFormat, DocumentFormatApi, EntryName,
-    FormatVersion, IdKind, SchemaPart, SheetId, SUPPORTED_ROW_LIMIT,
+    CellValue, Document, DocumentError, DocumentFormatApi, EntryName, FormatVersion, IdKind,
+    SchemaPart, SUPPORTED_ROW_LIMIT,
 };
 
-/// 標本のルートスキーマ（型定義への参照を含む）。
-///
-/// 型定義識別子は `concat!` がリテラルを要求するため、各断片に直接埋め込む。
-const SCHEMA_WITH_REF: &str = concat!(
-    r#"{"root":{"$ref":""#,
-    "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    r#""},"types":[{"id":""#,
-    "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    r#"","definition":{"kind":"string"}}]}"#
-);
-
-/// 型定義を 1 つも持たないルートスキーマ（0 行のシートの初期値）。
-const SCHEMA_EMPTY: &str = r#"{"root":null}"#;
-
-/// 実在しない型定義を参照するルートスキーマ（保存時に遮断すべき宙吊り参照）。
-///
-/// `SchemaPart::parse` は `$ref` の実在を見ない（スキーマは不透明ペイロードであり、
-/// 参照整合性は構造検証の責務）。
-const SCHEMA_DANGLING_REF: &str = concat!(
-    r#"{"root":{"$ref":""#,
-    "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    r#""},"types":[]}"#
-);
-
-/// 同一の型定義識別子を 2 回宣言するルートスキーマ（保存時に遮断すべき一意性違反）。
-const SCHEMA_DUPLICATE_TYPE_DEF: &str = concat!(
-    r#"{"root":null,"types":[{"id":""#,
-    "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    r#"","definition":{"kind":"string"}},{"id":""#,
-    "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    r#"","definition":{"kind":"number"}}]}"#
-);
-
-/// レジストリに登録されていない添付識別子（正準 64 文字小文字 hex）。
-const UNREGISTERED_ATTACHMENT_HEX: &str =
-    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-
-/// 読み込み経路を起動する実装（design はトレイトのみを指定するため、無状態の具象型を使う）。
-fn api() -> DocumentFormat {
-    DocumentFormat::new()
-}
-
-/// ゴールデン fixture（決定性の基準として固定されたコンテナ）の絶対パス。
-///
-/// テストの作業ディレクトリに依存しないよう、マニフェストの位置から組み立てる。
-fn fixture_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bytes/golden_container.zip")
-}
-
-/// テスト専用の作業ディレクトリ（終了時に必ず削除する）。
-///
-/// テストは並行に走るため、プロセス ID と単調カウンタで一意にする。`Drop` は
-/// panic による巻き戻しでも走るので、失敗したテストの一時ファイルも残らない。
-struct Scratch {
-    path: PathBuf,
-}
-
-impl Scratch {
-    fn new(tag: &str) -> Self {
-        static SEQUENCE: AtomicU32 = AtomicU32::new(0);
-        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join(format!("api_tmp_{tag}_{}_{sequence}", std::process::id()));
-        fs::create_dir_all(&path).expect("一時ディレクトリを作れる");
-        Self { path }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn file(&self, name: &str) -> PathBuf {
-        self.path.join(name)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        // 既に消えていても失敗しない（多重削除・異常終了の後始末）。
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-/// ディレクトリ直下の（名前, バイト列）を名前順で写す。
-///
-/// ファイルの改変（バイト列の変化）と一時ファイルの残留（名前の追加）を同時に捉える。
-fn snapshot(directory: &Path) -> Vec<(String, Vec<u8>)> {
-    let mut entries: Vec<(String, Vec<u8>)> = fs::read_dir(directory)
-        .expect("作業ディレクトリが読める")
-        .map(|entry| {
-            let entry = entry.expect("ディレクトリ要素が読める");
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let bytes = fs::read(entry.path()).expect("要素が読める");
-            (name, bytes)
-        })
-        .collect();
-    entries.sort_by(|left, right| left.0.cmp(&right.0));
-    entries
-}
-
-/// ディレクトリ直下の名前を昇順で返す（保存が対象パス以外へ書かないことの観測）。
-fn entry_names(directory: &Path) -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(directory)
-        .expect("作業ディレクトリが読める")
-        .map(|entry| entry.expect("ディレクトリ要素が読める").file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    names
-}
+use common::{
+    api, attachments, document_with_dangling_type_ref, document_with_duplicate_type_def,
+    document_with_unregistered_attachment, entries_of, entry_names, fixture_path, rows, sample,
+    schemas, sheet_metadata, snapshot, with_rebuilt_manifest, Scratch, SCHEMA_DANGLING_REF,
+    SCHEMA_EMPTY, UNREGISTERED_ATTACHMENT_HEX,
+};
 
 /// 読み込みテスト用の入力ファイルを、保存経路（`save`）に依存せず用意する。
 ///
@@ -180,33 +76,6 @@ fn write_document(scratch: &Scratch, name: &str, document: &Document) -> PathBuf
 fn encode_entries(entries: Vec<(EntryName, Vec<u8>)>) -> Vec<u8> {
     let parts = DocumentParts::from_entries(entries).expect("標本の集合は妥当");
     ContainerCodec::encode(&parts).expect("符号化")
-}
-
-/// 標本のエントリ集合を（エントリ名, バイト列）の列へ写す。
-fn entries_of(parts: &DocumentParts) -> Vec<(EntryName, Vec<u8>)> {
-    parts.iter().map(|part| (part.name, part.bytes.clone())).collect()
-}
-
-/// 索引（`manifest.json`）を実体から組み直したエントリ集合を返す。
-///
-/// ダイジェスト照合を通過させたまま後段（構造検証・バージョンゲート）だけを壊す入力を作る
-/// のに使う。`open`（ファイル経由）と `from_parts`（パーツ経由）の両方へ同じ集合を渡せる
-/// よう、コンテナのバイト列ではなくエントリ列を返す。
-fn with_rebuilt_manifest(
-    version: FormatVersion,
-    mut entries: Vec<(EntryName, Vec<u8>)>,
-) -> Vec<(EntryName, Vec<u8>)> {
-    entries.retain(|(name, _)| *name != EntryName::Manifest);
-    let index: Vec<ManifestEntry> = entries
-        .iter()
-        .map(|(name, bytes)| ManifestEntry::of_bytes(*name, bytes))
-        .collect();
-    let manifest = ManifestPart::new(version, index)
-        .expect("標本の索引は妥当")
-        .to_json_bytes()
-        .expect("符号化");
-    entries.push((EntryName::Manifest, manifest));
-    entries
 }
 
 /// 索引（`manifest.json`）を実体から組み直したコンテナのバイト列を返す。
@@ -235,98 +104,6 @@ fn assert_open_and_from_parts_agree(
         format!("{from_memory:?}"),
         "open と from_parts の違反報告が一致しない ({tag})"
     );
-}
-
-/// シートの（識別子, 名前, 列名）を文書順に写す。
-fn sheet_metadata(document: &Document) -> Vec<(SheetId, String, Vec<String>)> {
-    document
-        .sheets()
-        .iter()
-        .map(|sheet| (sheet.id(), sheet.name().to_owned(), sheet.columns().to_vec()))
-        .collect()
-}
-
-/// 行の（識別子, セル値）をシート順・行順に写す。
-fn rows(document: &Document) -> Vec<Vec<(String, Vec<CellValue>)>> {
-    document
-        .sheets()
-        .iter()
-        .map(|sheet| {
-            sheet
-                .rows()
-                .iter()
-                .map(|row| (row.id().to_string(), row.values().to_vec()))
-                .collect()
-        })
-        .collect()
-}
-
-/// ルートスキーマの（ルートバイト列, 型定義識別子, 参照）をシート順に写す。
-fn schemas(document: &Document) -> Vec<(Vec<u8>, Vec<String>, Vec<(String, String)>)> {
-    document
-        .sheets()
-        .iter()
-        .map(|sheet| {
-            let schema = sheet.root_schema();
-            let defs: Vec<String> = schema.type_def_ids().iter().map(|id| id.to_string()).collect();
-            let refs: Vec<(String, String)> = schema
-                .type_refs()
-                .iter()
-                .map(|reference| (reference.from().to_owned(), reference.to().to_owned()))
-                .collect();
-            (schema.root().as_bytes().to_vec(), defs, refs)
-        })
-        .collect()
-}
-
-/// 添付の（識別子, バイト列）を昇順に写す。
-fn attachments(document: &Document) -> Vec<(String, Vec<u8>)> {
-    document
-        .attachments()
-        .iter()
-        .map(|attachment| (attachment.id().to_string(), attachment.bytes().to_vec()))
-        .collect()
-}
-
-/// 標本の文書: 行と添付参照を持つシートと、0 行のシート。
-fn sample() -> Document {
-    let mut document = Document::new();
-
-    let stocked = document.add_sheet("在庫");
-    document
-        .set_sheet_columns(
-            stocked,
-            ["name", "count", "blob"].iter().map(|name| (*name).to_owned()).collect(),
-        )
-        .expect("標本のシートは実在する");
-    document
-        .set_root_schema(stocked, SchemaPart::parse(SCHEMA_WITH_REF).expect("標本は妥当"))
-        .expect("標本のシートは実在する");
-
-    // 非 UTF-8 を含む添付（要件 7.5 の不透明性）。
-    let attachment = document.add_attachment(vec![0xff, 0x00, 0x80, b'j', 0xfe]);
-    let row = document.add_row(stocked).expect("標本のシートは実在する");
-    document
-        .set_row_values(
-            stocked,
-            row,
-            vec![
-                CellValue::Text("りんご 🍎".to_owned()),
-                CellValue::Int(3),
-                CellValue::Attachment(attachment),
-            ],
-        )
-        .expect("標本の行は実在する");
-
-    let empty = document.add_sheet("空のシート");
-    document
-        .set_sheet_columns(empty, vec!["a".to_owned(), "b".to_owned()])
-        .expect("標本のシートは実在する");
-    document
-        .set_root_schema(empty, SchemaPart::parse(SCHEMA_EMPTY).expect("標本は妥当"))
-        .expect("標本のシートは実在する");
-
-    document
 }
 
 /// 1 シート `count` 行（列 0 個）の文書を作る。
@@ -368,51 +145,6 @@ fn document_with_non_finite_value() -> Document {
 /// NaN 遮断のエラーに載る位置（`RowsCodec::encode` が組み立てる診断形）。
 fn non_finite_location(document: &Document) -> String {
     format!("sheets/{}.jsonl line 1: column score", document.sheets()[0].id())
-}
-
-/// 1 シート・指定のルートスキーマ・指定の列と行を持つ文書を組み立てる。
-///
-/// 保存時に遮断すべき構造違反（宙吊り参照・未登録添付・型定義の重複宣言）の標本を
-/// 同じ骨格で作るための補助である。
-fn document_with_sheet(
-    schema: &str,
-    columns: &[&str],
-    rows: Vec<Vec<CellValue>>,
-) -> Document {
-    let mut document = Document::new();
-    let sheet = document.add_sheet("標本");
-    document
-        .set_sheet_columns(sheet, columns.iter().map(|name| (*name).to_owned()).collect())
-        .expect("標本のシートは実在する");
-    document
-        .set_root_schema(sheet, SchemaPart::parse(schema).expect("標本のスキーマは解析できる"))
-        .expect("標本のシートは実在する");
-    for values in rows {
-        let row = document.add_row(sheet).expect("標本のシートは実在する");
-        document.set_row_values(sheet, row, values).expect("標本の行は実在する");
-    }
-    document
-}
-
-/// 実在しない型定義を参照する 1 シートの文書。
-fn document_with_dangling_type_ref() -> Document {
-    document_with_sheet(SCHEMA_DANGLING_REF, &[], Vec::new())
-}
-
-/// 同一の型定義識別子を 2 回宣言する 1 シートの文書。
-fn document_with_duplicate_type_def() -> Document {
-    document_with_sheet(SCHEMA_DUPLICATE_TYPE_DEF, &[], Vec::new())
-}
-
-/// レジストリに登録されていない添付を参照する 1 シート 1 行の文書。
-fn document_with_unregistered_attachment() -> Document {
-    let attachment = AttachmentId::from_hex(UNREGISTERED_ATTACHMENT_HEX)
-        .expect("標本の添付識別子は正準形");
-    document_with_sheet(
-        SCHEMA_EMPTY,
-        &["blob"],
-        vec![vec![CellValue::Attachment(attachment)]],
-    )
 }
 
 /// モデル → ファイル → `open` で同一のモデルが戻る（要件 4.1, 5.2）。
