@@ -5,6 +5,7 @@
 pub mod entry_name;
 pub mod error;
 pub mod ids;
+pub mod integrity;
 pub mod json;
 pub mod model;
 pub mod value;
