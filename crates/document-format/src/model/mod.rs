@@ -46,20 +46,23 @@
 //!
 //! # 後続タスクとの境界
 //!
-//! * 各シートがちょうど 1 つ持つルートスキーマ(要件 1.2)は `SchemaPart` の所有であり、
-//!   タスク 2.2 で `Sheet` に `root_schema` として追加される。本タスク(2.1)はフィールドを
-//!   持たない(検証も 2.2 の担当)。
+//! * 各シートがちょうど 1 つ持つルートスキーマ(要件 1.2)は [`SchemaPart`] の所有であり、
+//!   タスク 2.2 で [`Sheet::root_schema`] として結線済みである(新規シートは
+//!   [`SchemaPart::empty`] で初期化し、差し替えは [`Document::set_root_schema`] の置換
+//!   のみ = 0 個・2 個を作る口は無い)。
 //! * 添付レジストリ(タスク 2.3)、永続化(4.x)、行に値を設定する経路(parts 復路 3.x)は
 //!   本タスクの範囲外。
 //! * [`Document`] / [`Sheet`] / [`Row`] は `Clone` を実装しない(識別子発行状態の clone
 //!   方針が未定。model/sheet.rs の「Clone を実装しない理由」参照)。
 
+mod schema_part;
 mod sheet;
 
 use thiserror::Error;
 
 use crate::ids::{IdFactory, RowId, SheetId};
 
+pub use schema_part::{RawField, RawJson, SchemaPart, TypeDef};
 pub use sheet::{Row, Sheet};
 
 /// [`Document::reorder_rows`] の失敗。
@@ -166,6 +169,25 @@ impl Document {
         }
     }
 
+    /// 指定シートのルートスキーマを差し替える(要件 1.2)。
+    ///
+    /// 置換であり追加ではない: 対象シートは交換後もちょうど 1 つのルートスキーマを持つ
+    /// (2 個目を足す口は無い)。未知のシートは実行時エラーとして報告し、既存の
+    /// ルートスキーマは無変更のまま残る。
+    pub fn set_root_schema(
+        &mut self,
+        sheet: SheetId,
+        schema: SchemaPart,
+    ) -> Result<(), UnknownSheet> {
+        match self.sheets.iter_mut().find(|s| s.id() == sheet) {
+            Some(target) => {
+                target.set_root_schema(schema);
+                Ok(())
+            }
+            None => Err(UnknownSheet { sheet }),
+        }
+    }
+
     /// 指定シートの末尾に空値の行を追加し、発行識別子を返す(要件 1.4, 1.5)。
     ///
     /// 先に発行してから対象シートを選ぶ: シートが存在しない場合、発行済みの識別子は
@@ -207,7 +229,7 @@ impl Default for Document {
 
 #[cfg(test)]
 mod tests {
-    use super::{Document, ReorderError, Row, Sheet, UnknownSheet};
+    use super::{Document, ReorderError, Row, SchemaPart, Sheet, UnknownSheet};
     use crate::ids::{RowId, SheetId};
 
     #[test]
@@ -388,6 +410,71 @@ mod tests {
         assert!(doc.sheet_by_id(sheet).unwrap().rows().is_empty());
         doc.reorder_rows(sheet, &[]).unwrap();
         assert!(doc.sheet_by_id(sheet).unwrap().rows().is_empty());
+    }
+
+    #[test]
+    fn sheet_always_has_exactly_one_root_schema() {
+        // 要件 1.2 / design ER 図 `Sheet ||--|| SchemaPart : has_root`。
+        // `Sheet::root_schema()` は `&SchemaPart` を返す(0 個 = `Option` でも
+        // 2 個 = スライスでもない)。新規シートは空のルートスキーマで始まる。
+        let mut doc = Document::new();
+        let sheet = doc.add_sheet("schema");
+        let initial: &SchemaPart = doc.sheet_by_id(sheet).unwrap().root_schema();
+        assert_eq!("null", initial.root().as_str());
+        assert!(initial.type_defs().is_empty());
+        assert!(initial.unknown_fields().is_empty());
+
+        // 差し替えは置換: 2 個目を足すのではなく 1 つを入れ替える。
+        let first = SchemaPart::parse(r#"{"root":{"v":1},"types":[]}"#).unwrap();
+        doc.set_root_schema(sheet, first).unwrap();
+        assert_eq!(
+            r#"{"v":1}"#,
+            doc.sheet_by_id(sheet).unwrap().root_schema().root().as_str()
+        );
+        let second = SchemaPart::parse(r#"{"root":true}"#).unwrap();
+        doc.set_root_schema(sheet, second).unwrap();
+        assert_eq!(
+            "true",
+            doc.sheet_by_id(sheet).unwrap().root_schema().root().as_str(),
+            "2 回目の差し替えでもルートはちょうど 1 つ(置換)"
+        );
+
+        // 存在しないシートへの設定は panic せずエラーで、既存のルートは無変更。
+        let stranger = {
+            let mut scratch = Document::new();
+            scratch.add_sheet("stranger")
+        };
+        match doc.set_root_schema(stranger, SchemaPart::empty()) {
+            Err(UnknownSheet { sheet: reported }) => assert_eq!(stranger, reported),
+            Ok(()) => panic!("未知シートへの設定は失敗しなければならない"),
+        }
+        assert_eq!("true", doc.sheet_by_id(sheet).unwrap().root_schema().root().as_str());
+    }
+
+    #[test]
+    fn sheet_root_schema_keeps_type_ids_and_refs_only() {
+        // 要件 1.2 / 1.3: シートへ結線した後も、本クレートが扱うのは型定義の識別子と
+        // 参照構造だけで、定義の意味論は解釈しない(不透明ペイロードはバイト一致)。
+        let text = concat!(
+            r#"{"root":{"a":{"$ref":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}},"#,
+            r#""types":[{"id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","definition":{"足し算":{"x":1},"note":"{ }"}}]}"#,
+        );
+        let mut doc = Document::new();
+        let sheet = doc.add_sheet("schema");
+        doc.set_root_schema(sheet, SchemaPart::parse(text).unwrap()).unwrap();
+
+        let stored = doc.sheet_by_id(sheet).unwrap().root_schema();
+        // 解釈するのは識別子(ULID へ解決)と参照ターゲット(生テキスト)のみ。
+        assert_eq!(1, stored.type_defs().len());
+        assert_eq!("01ARZ3NDEKTSV4RRFFQ69G5FAV", stored.type_defs()[0].id().to_string());
+        let targets: Vec<&str> =
+            stored.type_ref_targets().iter().map(String::as_str).collect();
+        assert_eq!(targets, ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]);
+        // 型の意味論に見えるキー(未知の型演算子)も解釈せず、バイトのまま保持する。
+        assert_eq!(
+            r#"{"足し算":{"x":1},"note":"{ }"}"#,
+            stored.type_defs()[0].definition().as_str()
+        );
     }
 
     #[test]

@@ -56,7 +56,7 @@
   - 10 万行を保持できることを確認する
   - _Requirements: 1.1, 1.2, 1.5, 1.6, 8.4_
 
-- [ ] 2.2 (P) スキーマパートを不透明ペイロードとして保持する
+- [x] 2.2 (P) スキーマパートを不透明ペイロードとして保持する
   - ルートスキーマとネスト型定義を、内部を解釈せずに保持する構造を定義する
   - 型定義の識別子と参照構造のみを本クレートが扱い、型の意味論には触れないことをテストで示す
   - 1 シートがルートスキーマをちょうど 1 つ持つ不変条件を検証する
@@ -284,3 +284,7 @@
 - CellValue wire 規約（task 1.5、value.rs）: 文字列の判定制御は 64 文字英小文字 hex → Attachment、十進文法 → Decimal、その他 Text。誤解釈される Text と十進文法外 Decimal は `{"$t":"text"|"decimal","v":...}` エスケープ。Nested の `$` 始まりキーは `$$...` にエスケープ（書き手が生の `$` キーを出力しないことが全エスケープの前提）。i64 範囲外整数リテラルは prescan で `InvalidContainer`（serde_json が範囲外整数を黙って f64 に落とすため）
 - `serde_json` は `float_roundtrip` feature が必須（既定のパーサは約 30% の f64 で 1 ULP ドリフト。レビューの probe で確認）。外すと読み込み時に値が壊れる
 - `[lib] bench = false` が必須（crates/document-format/Cargo.toml）: libtest 自動ベンチが `cargo bench --workspace -- --save-baseline=...` のファンアウトで criterion フラグを弾き、ベンチ経路がexit 101 になる（task 1.2 で発覚）。決定的ベンチは `[[bench]]` ターゲットのみで運用する
+- `serde_json` に `raw_value` feature を追加済み（task 2.2）: `serde_json::value::RawValue` は非既定 feature であり、不透明なスキーマ・ペイロードのバイト verbatim 保持に必須。**`preserve_order` は絶対に有効化しない**（キー順序の決定性 = 要件 3.3 が壊れる）。`Value` は引き続き禁止
+- task 2.2 が `schemas/<sheet-ulid>.json` のエンベロープ形 `{"root": <opaque>, "types": [{"id": <ULID-26>, "definition": <opaque>}]}` を確定させた（design は形状未規定）。task 4.4 の SchemaCodec はこの定義を引き継ぎ、最終的な決定的符号化とバイト再構成を担当する
+- `SchemaPart::type_ref_targets()` は参照**先**の生テキストのみを返し参照元情報を持たない。task 4.7 で `DanglingTypeRef { from, to }`（design エラー表）を組むには、`root()` / `TypeDef::definition()` の `RawJson` を再走査して参照元を復元する必要がある
+- スキーマ層で解析失敗を表現する既定規約（task 1.5 の `value.rs` と同一）: 型付き変種を持たないコンテンツ解析失敗は `DocumentError::InvalidContainer` の `entry` に「失敗箇所のラベル + 理由」を文字列で載せる。診断は `schemas entry: root` / `schemas entry: type <ULID>` の形

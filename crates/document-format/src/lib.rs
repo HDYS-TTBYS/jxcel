@@ -13,7 +13,9 @@ pub use error::{DocumentError, FormatVersion, IdKind};
 pub use ids::{
     AttachmentId, Blake3Digest, IdFactory, IdParseError, RowId, SheetId, TypeDefId,
 };
-pub use model::{Document, ReorderError, Row, Sheet, UnknownSheet};
+pub use model::{
+    Document, RawField, RawJson, ReorderError, Row, SchemaPart, Sheet, TypeDef, UnknownSheet,
+};
 pub use value::{CellValue, NestedValue, from_json_bytes, to_json_bytes};
 
 #[cfg(test)]

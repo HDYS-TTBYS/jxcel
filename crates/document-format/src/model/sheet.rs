@@ -7,6 +7,15 @@
 //! 並び替えは位置の順列置換だけを行う(要件 1.5。[`Sheet::reorder_rows`])。
 //! シート順(`Vec<Sheet>` 側)の不変条件は [`super::Document`] のモジュール docs 参照。
 //!
+//! # ルートスキーマをちょうど 1 つ持つ(要件 1.2)
+//!
+//! 各シートは [`SchemaPart`] を `root_schema` として厳密に 1 つ持つ(design ER 図
+//! `Sheet ||--|| SchemaPart : has_root`)。フィールドは `Option` でもリストでもないため
+//! 0 個・2 個の状態は表現できず、差し替えは集約ルート経由の
+//! [`Document::set_root_schema`](super::Document::set_root_schema) による置換のみである
+//! (個数は増えない)。新規シートは空のルートスキーマ([`SchemaPart::empty`])で始まり、
+//! その内容は不透明である(型定義の識別子と参照構造のみを本クレートが扱う)。
+//!
 //! # 行の同一性
 //!
 //! [`Row`] はこのモジュール外では-opaque(構築も変更もクレート可視のみ)であり、
@@ -31,6 +40,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ids::{RowId, SheetId};
 use crate::value::CellValue;
 
+use super::schema_part::SchemaPart;
 use super::ReorderError;
 
 /// シート内の行。列順の [`CellValue`] を保持する(design「Domain Model」の
@@ -68,7 +78,13 @@ impl Row {
     }
 }
 
-/// シート: 識別子・名前・順序づけられた 0 個以上の行(design「Domain Model」の ER 図)。
+/// シート: 識別子・名前・ルートスキーマ・順序づけられた 0 個以上の行(design
+///「Domain Model」の ER 図)。
+///
+/// ルートスキーマは [`SchemaPart`] を**ちょうど 1 つ**持つ(要件 1.2 / design ER 図
+/// `Sheet ||--|| SchemaPart : has_root`)。`Option` でもリストでもないため、0 個・
+/// 2 個の状態は型として表現できない。差し替えは集約ルート経由の
+/// [`super::Document::set_root_schema`] のみで、常に置換である(個数は増えない)。
 ///
 /// 変更は集約ルート [`super::Document`] を経由する。この型の公開メソッドは読み取り
 /// アクセッサのみで、変更メソッドは [`super::Document`] が経路として使うための
@@ -77,12 +93,13 @@ impl Row {
 pub struct Sheet {
     id: SheetId,
     name: String,
+    root_schema: SchemaPart,
     rows: Vec<Row>,
 }
 
 impl Sheet {
     pub(crate) fn new(id: SheetId, name: String) -> Self {
-        Self { id, name, rows: Vec::new() }
+        Self { id, name, root_schema: SchemaPart::empty(), rows: Vec::new() }
     }
 
     /// シート識別子(発行後に不変。改名でも変わらない — 要件 1.6)。
@@ -95,6 +112,23 @@ impl Sheet {
     #[inline]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// このシートのルートスキーマ(厳密に 1 つ。要件 1.2)。
+    ///
+    /// 内容は不透明である: 本クレートが扱うのは型定義の識別子と参照構造のみで、
+    /// 型の意味論は `schema-engine` の所有である([`SchemaPart`] の docs 参照)。
+    #[inline]
+    pub fn root_schema(&self) -> &SchemaPart {
+        &self.root_schema
+    }
+
+    /// ルートスキーマを差し替える経路(`Document::set_root_schema` が呼ぶ)。
+    ///
+    /// 置換であり追加ではないため、シートは常にちょうど 1 つを持つ(要件 1.2)。
+    #[inline]
+    pub(crate) fn set_root_schema(&mut self, schema: SchemaPart) {
+        self.root_schema = schema;
     }
 
     /// 行順序そのものの添字順で反復する 0 個以上の行(要件 1.1)。

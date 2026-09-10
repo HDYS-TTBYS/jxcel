@@ -36,7 +36,9 @@ serde = { version = "1.0", features = ["derive"] }
 # ランダムな f64 の約 3 割が 1 ULP 漂う)。書き出し側は zmij の最短位表記が
 # feature 有無と無関係に同じバイト列を出すため、wire 形式は変わらない
 # (`5.0` は `5.0`、`-0.0` は正規化後の `0.0` のまま)。
-serde_json = { version = "1.0", features = ["float_roundtrip"] }
+# raw_value: 不透明スキーマ・ペイロードの verbatim 保持に `serde_json::value::RawValue` を使う
+# (JSON 値のソーステキストをそのまま捕捉する公認機構。`serde_json::Value` は引き続き不使用)。
+serde_json = { version = "1.0", features = ["float_roundtrip", "raw_value"] }
 tempfile = "3.27"
 blake3 = "1.8"
 ulid = "3.0"
