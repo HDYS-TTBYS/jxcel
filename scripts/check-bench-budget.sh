@@ -13,9 +13,11 @@
 #   予算は 3 秒 = 3_000_000_000 ns / 2 秒 = 2_000_000_000 ns。
 #
 # 計測環境（要件 8.3）: 予算判定は CI の GitHub-hosted ランナー（ubuntu-latest /
-#   macos-latest / windows-latest。SSD 搭載・4 コア以上）で計測した release の値に対して
-#   行う。ローカルでも同じコマンドで同じ判定を再現できる
-#   （`cargo bench -p document-format --bench large_document` の後に本スクリプト）。
+#   macos-latest / windows-latest）で計測した release の値に対して行う。private
+#   リポジトリのランナーは 2 vCPU（macOS は 3 コア M1）で要件 8.3 の「4 コア以上」より
+#   弱いが、閾値は要件値のまま使う（弱い環境で通れば要件の環境でも通るとみなす
+#   保守的な代理。bench.yml 冒頭の「計測環境」）。ローカルでも同じコマンドで同じ判定を
+#   再現できる（`cargo bench -p document-format --bench large_document` の後に本スクリプト）。
 #
 # POSIX sh 互換: `bash scripts/check-bench-budget.sh` が Linux / macOS /
 # Windows (Git Bash) のいずれでも動作すること（3 OS マトリクス共用）。

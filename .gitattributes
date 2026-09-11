@@ -1,0 +1,16 @@
+# 改行コードを LF に固定する（Windows のチェックアウトでも CRLF に変換しない）。
+#
+# 本リポジトリの CI は 3 OS で「バイト単位の一致」を検査する。生成物
+# （src/ipc/bindings.ts など）は生成器の出力とバイト単位で比較され、シェルスクリプトは
+# Windows の Git Bash でも LF のまま実行されなければならない。Windows のランナーは
+# core.autocrlf=true でチェックアウトするため、この指定が無いと追跡済みの LF が CRLF に
+# 化け、生成物のドリフト検査が落ちる（実際に落ちた）。
+* text=auto eol=lf
+
+# バイナリ。自動判定に任せず明示する（ゴールデンはバイト単位で比較するため、
+# 改行変換の対象に誤って入ると期待値が壊れる）。
+*.jxcel binary
+*.zip binary
+*.png binary
+*.ico binary
+*.icns binary

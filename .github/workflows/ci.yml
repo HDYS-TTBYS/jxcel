@@ -120,8 +120,14 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # キャッシュキーにランナーのイメージ名を加える。rust-cache の自動キーは
+      # `Linux-x64` までしか区別しないため、ubuntu-22.04 のジョブが ubuntu-latest
+      # （24.04）で作られたキャッシュを復元し、その中のビルドスクリプトが
+      # `GLIBC_2.39 not found` で起動できずに落ちたことがある。
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
 
       # サイドカーの同梱原本を配置する（tasks.md 1.7）。**唯一の文書化された手順**は
       # `scripts/stage-sidecars.sh` である（クローン直後からこの 1 手順で原本が揃う）。
@@ -141,8 +147,12 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
+      # `--no-fail-fast`: 既定の `cargo test` は最初に落ちたテストターゲットで止まり、
+      # 残りの統合テストと doctest を走らせない。OS 固有の失敗は 1 回の実行ですべて
+      # 見えている必要がある（Windows で lib の 1 件が落ちた結果、統合テストが
+      # 一度も走らなかったことがある）。
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
       # 設計意図: 決定性（要件 3.1, 3.2）は「同一文書の 2 回保存のバイト一致」と
       # 「Linux / macOS / Windows の 3 OS の出力バイト一致」で検証する。後者は

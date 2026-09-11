@@ -1,9 +1,12 @@
 # ベンチマーク実行経路（tasks.md 1.2 / 8.9 / Requirement 8.3）
 #
 # 計測環境（要件 8.3「SSD を搭載した 4 コア以上の一般的なデスクトップ環境」）:
-#   GitHub-hosted ランナー（ubuntu-latest / macos-latest / windows-latest）は
-#   SSD ストレージ搭載・4 コア以上であることが GitHub 公式に明記されており、
-#   この要件の計測環境条件を満たす。この前提の下で open/save の所要時間を計測する。
+#   本リポジトリは private であり、GitHub-hosted ランナーは ubuntu-latest /
+#   windows-latest が 2 vCPU、macos-latest が 3 コア（M1）である（4 コア以上は public
+#   リポジトリだけ）。つまりランナーは要件 8.3 の環境より**弱い**。
+#   本ワークフローはこの弱い環境で要件値そのもの（開く 3 秒 / 保存 2 秒）を判定する。
+#   ここで通れば要件の環境でも通るとみなす保守的な代理であり、ランナーが弱いことを
+#   理由に閾値を緩めない。
 #
 # 対象の限定（tasks.md 1.1）: 計測対象は `document-format` の criterion ベンチだけである
 #   （10 万行 × 30 列の open / save。要件 8.1, 8.2）。Tauri アプリ（`src-tauri/`）を
@@ -34,7 +37,7 @@ on:
 jobs:
   bench:
     name: criterion (${{ matrix.os }})
-    # 計測環境 = GitHub-hosted ランナー（SSD・4 コア以上）— 要件 8.3
+    # 計測環境 = GitHub-hosted ランナー（SSD。要件 8.3 の環境より弱い保守的な代理）
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -54,19 +57,26 @@ jobs:
       - name: Bench (criterion, baseline=main)
         run: cargo bench -p document-format -- --save-baseline=main
 
+      # 予算アサーション（開く 3 秒 / 保存 2 秒。要件 8.1 / 8.2。tasks.md 8.9）。
+      # criterion の計測値（target/criterion/**/new/estimates.json）の平均が予算を
+      # 超えていれば非 0 で終了し、このステップでジョブを失敗させる（予算超過を機能追加と
+      # 同時に検出する）。判定は POSIX sh の scripts/check-bench-budget.sh
+      # （Linux / macOS / Windows Git Bash 共用）。計測環境はこのワークフローの runs-on が
+      # 与える（冒頭の「計測環境」: 要件の環境より弱い保守的な代理）。
+      #
+      # 予算判定はレポートの保存より**前**に置く。保存が一時的に失敗しても（artifact の
+      # 403 など）判定が飛ばされないようにするため。
+      - name: Performance budget (open 3s / save 2s)
+        shell: bash
+        run: bash scripts/check-bench-budget.sh
+
+      # レポートは補助である。予算超過で落ちたときこそ内訳を見たいので `always()` で
+      # 保存し、保存自体の失敗はジョブの判定に混ぜない（判定は上のステップが担う）。
       - name: Upload criterion report
+        if: ${{ always() }}
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: criterion-${{ matrix.os }}
           path: target/criterion
           if-no-files-found: error
-
-      # 予算アサーション（開く 3 秒 / 保存 2 秒。要件 8.1 / 8.2。tasks.md 8.9）。
-      # criterion の計測値（target/criterion/**/new/estimates.json）の平均が予算を
-      # 超えていれば非 0 で終了し、このステップでジョブを失敗させる（予算超過を機能追加と
-      # 同時に検出する）。判定は POSIX sh の scripts/check-bench-budget.sh
-      # （Linux / macOS / Windows Git Bash 共用）。計測環境（SSD・4 コア以上）は
-      # このワークフローの runs-on が与える。
-      - name: Performance budget (open 3s / save 2s)
-        shell: bash
-        run: bash scripts/check-bench-budget.sh
