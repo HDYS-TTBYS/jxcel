@@ -21,18 +21,19 @@ description = "jxcel デスクトップアプリケーション（Tauri v2 ア�
 #    `scripts/check-capabilities.sh` が第二の制御である。
 #    宣言だけを行い、登録は各依存のコメントに記した所有タスクが行う（1.3 は登録を持たない）。
 #
-# 3. **`tauri-plugin-dialog` は宣言しない（タスク 1.3 の実測に基づく意図的な判断）。**
-#    同プラグインは 2.0.0〜2.7.3 のすべての版で `tauri-plugin-fs` を非オプションの
-#    通常依存に持つ（crates.io の依存データで確認）。宣言した時点で
-#    `cargo tree -p jxcel` に `tauri-plugin-fs` が現れ、上記 2 と両立しない。
-#    ネイティブファイル選択（要件 2.4）を担当するタスク 7.7 は、次のどちらかを選ぶこと:
-#      (a) `tauri-plugin-dialog` を宣言し、`tauri-plugin-fs` の推移的依存を受け入れる。
-#          この場合も fs プラグインは登録せず権限も与えないため、要件 4.7 の実効的な制御
-#          （capability の機械検査）は保たれる。design.md 決定 3 の「トレードオフ」は
-#          この選択を前提に書かれている。
-#      (b) プラグインが内部で使っている `rfd` を直接宣言し、
-#          `AsyncFileDialog::set_parent` で親ウィンドウを指定する。依存ツリーは fs 無しの
-#          まま保たれる。
+# 3. **ネイティブファイル選択（要件 2.4）の依存はタスク 7.7 が実測して決めた。**
+#    実測の内容と理由は `src-tauri/src/dialog.rs` の module doc「依存の選択」にある。要約:
+#      (a) `tauri-plugin-dialog` 2.7.3 は `tauri-plugin-fs` 2.5.2 を**非 optional の通常依存**に
+#          持ち（プラグインの Cargo.toml で確認）、上の 2 を破る。加えてその Linux 実装は
+#          `rfd` 0.16 の GTK3 経路へ委譲し、**その経路は親ウィンドウを無視する**
+#          （`gtk_file_chooser_native_new` に NULL を渡す。0.16.0 と 0.17.2 で確認）。
+#          両方の理由で宣言しない。
+#      (b) `rfd` 直接の GTK3 経路も同じ理由で親を捨てる。XDG ポータル経路は親を渡すが、
+#          ダイアログを描くのは別プロセスであり、この環境ではプロセスの外（Wayland）に出る。
+#      (c) 採用: **Linux は `gtk`（Tauri が既に解決している 0.18.2 と同じ版。`Cargo.lock` に
+#          新しいパッケージは増えない）**の `FileChooserNative` を親付きで提示する。
+#          **Windows と macOS は `rfd` 0.17**（`set_parent` が実際に効くのはこの 2 つ）。
+#          `tauri-plugin-fs` は依存ツリーに入らず、`tauri-plugin-dialog` も入らない。
 # ---------------------------------------------------------------------------
 [dependencies]
 # Tauri 本体。下限は 2.11.3（tech.md「Dependency Floors」）。2.11.1 の security fix 2 件
@@ -61,6 +62,23 @@ tauri-plugin-single-instance = "2.4.3"
 # 記録機構（要件 8.1、8.5）。登録と保持方針の上書き（既定の 40 KB / KeepOne を捨てて
 # 50 MB / 複数世代にする）はタスク 5.2 が行う。
 tauri-plugin-log = "2.9.1"
+
+# ---------------------------------------------------------------------------
+# ネイティブファイル選択のバックエンド（要件 2.4。タスク 7.7 の判断。上の依存方針 3 を参照）
+# ---------------------------------------------------------------------------
+
+# **Linux**: GTK の選択器を親ウィンドウ付きで提示する。`gtk` は tauri（Linux のときのみ）が
+# 既に 0.18.2 を解決しているので、本クレートから直接参照しても **`Cargo.lock` に新しい
+# パッケージは増えない**（`features = ["v3_24"]` も tauri と同じ指定）。
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { version = "0.18", features = ["v3_24"] }
+
+# **Windows / macOS**: `rfd` のネイティブ選択器を親ウィンドウ付きで提示する。この 2 つの
+# バックエンドは `set_parent` を実際に使う。既定 feature（Linux 向けのポータル/GTK3）は
+# 不要なので切る。**Linux では宣言しない** — Linux は上の `gtk` を使うので、配布物（Linux）の
+# 依存ツリーにも `cargo tree -p jxcel` にも `rfd` は現れない。
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+rfd = { version = "0.17", default-features = false }
 
 [build-dependencies]
 # `tauri_build::build()` の実体。ウィンドウ設定の検証・capability スキーマの生成・

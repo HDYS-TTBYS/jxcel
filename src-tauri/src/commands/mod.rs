@@ -45,6 +45,8 @@
 //!   `can_close_window` を持ち、委譲点の判定を境界へ写す。**この機能の実体はウィンドウの
 //!   ライフサイクル（`window/`）側にある**ため、コマンド関数もそこに置く（design.md の
 //!   ディレクトリ構成に従う）。根はここで列挙するだけである。
+//! - [`crate::dialog`]: 親ウィンドウを指定したファイル選択（タスク 7.7）。9.6 の画面から
+//!   呼ばれる `pick_document_file` を持ち、**メニューの項目と同じ 1 本の実装**を通る。
 
 mod bulk;
 mod shell_cmds;
@@ -93,6 +95,7 @@ command_root! {
     command_names::SETTINGS_SET => shell_cmds::settings_set,
     command_names::BULK_ECHO => bulk::bulk_echo,
     command_names::CAN_CLOSE_WINDOW => crate::window::close::can_close_window,
+    command_names::PICK_DOCUMENT_FILE => crate::dialog::pick_document_file,
 }
 
 #[cfg(test)]

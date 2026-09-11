@@ -130,9 +130,15 @@ pub const PLACEMENT: MenuPlacement = if cfg!(target_os = "macos") {
 /// 名前を持つのは、モデル・記録・テストで部分メニューを特定できるようにするためである。
 const APPLICATION_MENU_LABEL: &str = "jxcel";
 
-/// ファイルメニューの部分メニュー名（macOS 以外）。
-#[cfg_attr(target_os = "macos", allow(dead_code))] // macOS はアプリケーションメニューを使う。
-const FILE_MENU_LABEL: &str = "ファイル";
+/// ファイルメニューの部分メニュー名。**全プラットフォームで使う。**
+///
+/// 非 macOS では組み込みの「終了」がここに入り、ファイル選択（タスク 7.7 の「開く」）もここに
+/// 入る。macOS でもトップレベルは部分メニューでなければならないため、同じ名前で 1 つ作る
+/// （アプリケーションメニューへ畳み込まれるのは先頭の部分メニューだけである）。
+///
+/// **他のモジュールが位置を書き写さないよう公開する** — 並びの規則（[`TOP_LEVEL_ORDER`]）と
+/// 名前の定義を 2 箇所に持たない。
+pub(crate) const FILE_MENU_LABEL: &str = "ファイル";
 
 /// トップレベルの部分メニューの慣習的な並び（要件 3.6）。
 ///

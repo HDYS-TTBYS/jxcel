@@ -53,6 +53,28 @@ verdict: WindowCloseVerdict, };
 // 名指ししないため、境界が名指しできる具体形を明示的に置く。
 export type CanCloseWindowResult = IpcResult<CanCloseWindowResponse, IpcError>;
 /**
+ * ファイル選択の結果（タスク 7.7。要件 2.4）。
+ *
+ * 選択手段（`src-tauri/src/dialog.rs` の DialogGate）が得た結果と、その位置をドキュメント
+ * 所有者へ引き渡した結果を、**1 つの判別可能な合併型**にまとめてフロントエンドへ返す。
+ * `outcome` を判別子とするため、利用側は網羅的に分岐できる。
+ *
+ * **`Cancelled` と `Rejected` は失敗ではない。**「利用者が取り消した」ことも「所有者が
+ * 受け取らなかった」ことも、コマンドが正常に答えた結果である。したがって封筒
+ * （[`IpcResult`]）の `status: "error"` の腕には載せない — 載せると「通信が失敗した」ことと
+ * 区別できなくなる（tasks.md 7.6 が終了拒否で同じ判断をしている）。`Rejected` は利用者へ
+ * 伝えるための材料（`reason`）を運び、**見せ方を決めるのは呼び出し元である**。
+ *
+ * **選択された位置そのものは境界を越えない。** 位置は `DocumentHost::attach` へ引き渡す
+ * だけであり（要件 2.4）、アプリケーションシェルもフロントエンドもその中身に触れない。
+ * したがってパスを表す型はここに現れない。
+ */
+export type DocumentPickOutcome = { "outcome": "Cancelled" } | { "outcome": "Attached" } | { "outcome": "Rejected", 
+/**
+ * 拒否の理由。
+ */
+reason: string, };
+/**
  * 失敗の原因を区別できる列挙（要件 4.4）。文字列だけのエラーにしない。
  *
  * `kind` を判別子とし、原因ごとの詳細を `detail` に持つ判別可能な合併型として TypeScript へ
@@ -69,6 +91,28 @@ export type IpcError = { "kind": "Settings", "detail": { message: string, } } | 
  * （research.md 決定 1 が `tauri-specta` を却下した理由のひとつ）。
  */
 export type IpcResult<T, E> = { "status": "ok", data: T, } | { "status": "error", error: E, };
+/**
+ * ファイル選択の応答（タスク 7.7。要件 2.4、4.6）。
+ *
+ * **呼び出し元ウィンドウの文脈を必ず含む。**呼び出し元は Tauri が注入する `WebviewWindow`
+ * から得るので、**フロントエンドがウィンドウの識別子を payload で申告する経路は存在しない**
+ * （偽装できない。要件 4.6、tasks.md 7.1）。`outcome` が選択と引き渡しの結果である。
+ *
+ * **要求の型は無い。** この機能に必要な入力は操作対象のウィンドウだけであり、それは基盤が
+ * 注入する（[`CanCloseWindowResponse`] と同じ形）。
+ */
+export type PickDocumentFileResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈（要件 4.6）。
+ */
+context: WindowContext, 
+/**
+ * 選択と引き渡しの結果（要件 2.4）。
+ */
+outcome: DocumentPickOutcome, };
+// ファイル選択の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を名指し
+// しないため、境界が名指しできる具体形を明示的に置く。
+export type PickDocumentFileResult = IpcResult<PickDocumentFileResponse, IpcError>;
 /**
  * 設定変更の通知（タスク 7.1。要件 7.4）。
  *

@@ -64,6 +64,12 @@ use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+// 検証専用の委譲先（`verification-triggers` の下でのみ存在する）が使う。
+#[cfg(feature = "verification-triggers")]
+use std::path::PathBuf;
+#[cfg(feature = "verification-triggers")]
+use std::sync::Mutex;
+
 use app_shell::ipc::WindowLabel;
 
 /// ウィンドウを閉じてよいかの判定（要件 2.6）。
@@ -262,68 +268,101 @@ impl DocumentHostPort {
 #[cfg(feature = "verification-triggers")]
 pub const VERIFY_DENY_CLOSE_ENV: &str = "JXCEL_VERIFICATION_DENY_CLOSE";
 
-/// 検証専用: 名指しされたラベルのウィンドウだけを拒否する委譲先。
+/// 検証専用: 名指しされたラベルのウィンドウの終了を拒否し、**引き渡された位置を記録する**
+/// 委譲先。
 ///
-/// **本番の実装ではない。** 完了状態「委譲先が拒否を返すとウィンドウが閉じず、許可を返すと
-/// 閉じる」を実測するには拒否を返す委譲先が要るが、既定実装（[`DefaultDocumentHost`]）は常に
-/// 許可する。そこで**拒否の対象を環境変数で外から選べる**委譲先を検証ビルドにだけ同梱する。
+/// **本番の実装ではない。** 次の 2 つの完了状態を実測するために検証ビルドにだけ同梱する。
 ///
-/// 判定のたびに記録へ 1 行残す。**この行が「ハードコードされた判断ではなく委譲点を通った
-/// 往復である」ことの実測根拠になる**（`strings -a` の不在確認と対で使う）。
+/// 1. 「委譲先が拒否を返すとウィンドウが閉じず、許可を返すと閉じる」（タスク 7.6）。
+///    既定実装（[`DefaultDocumentHost`]）は常に許可するので、拒否を返す実装が要る。
+///    **拒否の対象は環境変数で外から選べる**（[`VERIFY_DENY_CLOSE_ENV`]）。
+/// 2. 「選ばれた位置が委譲先へ届いた」（タスク 7.7。要件 2.4）。[`attach`](DocumentHost::attach)
+///    が受け取った**（ウィンドウ, 位置）の組**を記録に 1 行残す。**既定実装は沈黙する**ので、
+///    この記録が「引き渡しが実際に起きた」ことの唯一の実測根拠になる。
+///
+/// 判定と引き渡しのたびに記録へ 1 行残す。**この行が「ハードコードされた判断ではなく委譲点を
+/// 通った往復である」ことの実測根拠になる**（`strings -a` の不在確認と対で使う）。
 #[cfg(feature = "verification-triggers")]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct VerificationDocumentHost {
-    /// このラベルのウィンドウだけを拒否する。
-    deny_label: String,
+    /// このラベルのウィンドウだけを拒否する。`None` なら常に許可する（引き渡しの記録だけを
+    /// 行う）。
+    deny_label: Option<String>,
+    /// `attach` が受け取った（ウィンドウ, 位置）。**検証の実測とテストが読む。**
+    attachments: Mutex<Vec<(String, PathBuf)>>,
 }
 
 #[cfg(feature = "verification-triggers")]
 impl VerificationDocumentHost {
-    /// 拒否するラベルを指定して作る。
-    pub fn new(deny_label: impl Into<String>) -> Self {
+    /// 拒否するラベル（無ければ `None`）を指定して作る。
+    pub fn new(deny_label: Option<String>) -> Self {
         Self {
-            deny_label: deny_label.into(),
+            deny_label,
+            attachments: Mutex::new(Vec::new()),
         }
+    }
+
+    /// これまでに引き渡された（ウィンドウ, 位置）の一覧（記録の複製）。
+    ///
+    /// **検証の実測（テスト）が読む seam。** 実画面での観測は記録行
+    /// （`[検証] 引き渡しを受けた: …`）で行うため、バイナリではこの入口は使われない。
+    #[allow(dead_code)] // 検証ビルドのテストだけが読む。
+    pub fn attachments(&self) -> Vec<(String, PathBuf)> {
+        self.attachments
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 
 #[cfg(feature = "verification-triggers")]
 impl DocumentHost for VerificationDocumentHost {
     fn may_close(&self, window: &WindowLabel) -> CloseVerdict {
-        if window.as_str() == self.deny_label {
+        if self.deny_label.as_deref() == Some(window.as_str()) {
             tauri_plugin_log::log::info!("検証用の委譲先: {} の終了を拒否した", window.as_str());
             return CloseVerdict::Deny {
                 reason: format!(
                     "検証用の委譲先が {} の終了を拒否した（{}）",
-                    self.deny_label, VERIFY_DENY_CLOSE_ENV
+                    window.as_str(),
+                    VERIFY_DENY_CLOSE_ENV
                 ),
             };
         }
         tauri_plugin_log::log::info!(
             "検証用の委譲先: {} の終了を許可した（拒否の対象は {}）",
             window.as_str(),
-            self.deny_label
+            self.deny_label.as_deref().unwrap_or("(なし)"),
         );
         CloseVerdict::Allow
     }
 
-    fn attach(&self, _window: &WindowLabel, _path: &Path) -> Result<(), AttachError> {
-        // 既定実装と同じくパスに触れない（本番の実装ではない）。
+    fn attach(&self, window: &WindowLabel, path: &Path) -> Result<(), AttachError> {
+        // **本番の実装ではない。パスに触れず、受け取った組を記録するだけである**（記録は
+        // 検証ビルドにしか存在しない）。
+        self.attachments
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((window.as_str().to_owned(), path.to_path_buf()));
+        tauri_plugin_log::log::info!(
+            "[検証] 引き渡しを受けた: ウィンドウ = {} 位置 = {}",
+            window.as_str(),
+            path.display(),
+        );
         Ok(())
     }
 }
 
-/// 検証専用: 環境変数 [`VERIFY_DENY_CLOSE_ENV`] がラベルを名指ししていれば、そのラベルだけを
-/// 拒否する委譲先を入れたポートを返す。未設定・空なら `None`（呼び出し側が既定実装へ落ちる）。
+/// 検証専用: 記録を行う委譲先を入れたポートを返す（`verification-triggers` の下でのみ
+/// コンパイルされる）。
+///
+/// **拒否は環境変数 [`VERIFY_DENY_CLOSE_ENV`] がラベルを名指ししたときだけ**起きる。未設定・
+/// 空なら常に許可し、**引き渡しの記録だけを行う**（タスク 7.7 の実測はこの形で行う）。
 #[cfg(feature = "verification-triggers")]
-pub fn verification_port_from_env() -> Option<DocumentHostPort> {
-    let label = std::env::var(VERIFY_DENY_CLOSE_ENV).ok()?;
-    if label.is_empty() {
-        return None;
-    }
-    Some(DocumentHostPort::new(Arc::new(
-        VerificationDocumentHost::new(label),
-    )))
+pub fn verification_port() -> DocumentHostPort {
+    let deny_label = std::env::var(VERIFY_DENY_CLOSE_ENV)
+        .ok()
+        .filter(|label| !label.is_empty());
+    DocumentHostPort::new(Arc::new(VerificationDocumentHost::new(deny_label)))
 }
 
 /// 既定のビルドの委譲点が [`DefaultDocumentHost`] だけで組まれることをコンパイル時に表明する。
@@ -538,19 +577,28 @@ fn the_default_build_cannot_deny() {
 
 /// 検証専用の委譲先の単体テスト（`verification-triggers` の下でのみコンパイルされる）。
 ///
-/// **拒否は名指しされたラベルだけ**であることを固定する。これが崩れると、許可の腕の実測
-/// （`JXCEL_VERIFICATION_DENY_CLOSE` に一致しないラベルを指定して閉じる）が成立しなくなる。
+/// **拒否は名指しされたラベルだけ**であることと、**引き渡された（ウィンドウ, 位置）が
+/// 記録される**ことを固定する。前者が崩れると許可の腕の実測
+/// （`JXCEL_VERIFICATION_DENY_CLOSE` に一致しないラベルを指定して閉じる）が成立せず、後者が
+/// 崩れると「選ばれた位置が委譲先へ届いた」ことの実測根拠が消える（タスク 7.7。要件 2.4）。
 #[cfg(all(test, feature = "verification-triggers"))]
 mod verification_tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use app_shell::ipc::WindowLabel;
 
     use super::{CloseVerdict, DocumentHostPort, VerificationDocumentHost};
 
+    fn port_with(deny_label: Option<&str>) -> DocumentHostPort {
+        DocumentHostPort::new(Arc::new(VerificationDocumentHost::new(
+            deny_label.map(str::to_owned),
+        )))
+    }
+
     #[test]
     fn the_verification_host_denies_only_the_named_label() {
-        let port = DocumentHostPort::new(Arc::new(VerificationDocumentHost::new("empty-1")));
+        let port = port_with(Some("empty-1"));
         assert!(matches!(
             port.may_close(&WindowLabel::new("empty-1")),
             CloseVerdict::Deny { .. }
@@ -562,8 +610,21 @@ mod verification_tests {
     }
 
     #[test]
+    fn an_unnamed_host_allows_every_window() {
+        // 終了拒否の対象が名指しされていなくても、引き渡しの記録のためにこの委譲先は入る
+        // （タスク 7.7）。そのときは 7.6 の拒否の腕が 1 つも生じない。
+        let port = port_with(None);
+        for label in ["empty-1", "doc-1"] {
+            assert_eq!(
+                port.may_close(&WindowLabel::new(label)),
+                CloseVerdict::Allow
+            );
+        }
+    }
+
+    #[test]
     fn the_denial_carries_the_named_label_and_the_environment_variable() {
-        let port = DocumentHostPort::new(Arc::new(VerificationDocumentHost::new("doc-1")));
+        let port = port_with(Some("doc-1"));
         let verdict = port.may_close(&WindowLabel::new("doc-1"));
         let reason = verdict.reason().expect("拒否には理由が付く");
         assert!(reason.contains("doc-1"), "理由にラベルが無い: {reason}");
@@ -571,5 +632,36 @@ mod verification_tests {
             reason.contains(crate::ports::VERIFY_DENY_CLOSE_ENV),
             "理由に環境変数の名前が無い: {reason}"
         );
+    }
+
+    /// **引き渡しが（ウィンドウ, 位置）の組として記録される。** 7.7 の完了状態
+    /// 「選ばれた位置が正しいウィンドウの委譲先へ届いた」はこの記録と記録行で実測する。
+    #[test]
+    fn the_verification_host_records_each_attachment_with_its_window() {
+        let host = Arc::new(VerificationDocumentHost::new(None));
+        let port = DocumentHostPort::new(host.clone());
+        let first = PathBuf::from("/tmp/jxcel-verification-one.csv");
+        let second = PathBuf::from("/tmp/jxcel-verification-two.csv");
+        assert_eq!(port.attach(&WindowLabel::new("doc-1"), &first), Ok(()));
+        assert_eq!(port.attach(&WindowLabel::new("empty-2"), &second), Ok(()));
+        assert_eq!(
+            host.attachments(),
+            vec![("doc-1".to_owned(), first), ("empty-2".to_owned(), second),],
+            "ウィンドウと位置の組が受け取った順に残る"
+        );
+    }
+
+    /// 記録はパスに触れない（記録するだけで、存在確認も読み取りもしない）。
+    #[test]
+    fn recording_an_attachment_does_not_read_the_path() {
+        let host = Arc::new(VerificationDocumentHost::new(None));
+        let port = DocumentHostPort::new(host.clone());
+        let missing =
+            std::env::temp_dir().join(format!("jxcel-verification-missing-{}", std::process::id()));
+        let _ = std::fs::remove_file(&missing);
+        assert!(!missing.exists(), "前提: 存在しないパス");
+        assert_eq!(port.attach(&WindowLabel::new("doc-1"), &missing), Ok(()));
+        assert_eq!(host.attachments().len(), 1);
+        assert!(!missing.exists(), "記録がパスを作った");
     }
 }

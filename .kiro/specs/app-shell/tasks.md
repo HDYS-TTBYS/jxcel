@@ -317,7 +317,7 @@
   - _Requirements: 2.6_
   - _Depends: 2.4, 6.1, 6.2, 7.1_
 
-- [ ] 7.7 親ウィンドウを指定したファイル選択を実装する
+- [x] 7.7 親ウィンドウを指定したファイル選択を実装する
   - OS 標準のファイル選択手段を提示し、選択された位置を委譲先へ渡す。**本機能はパスを読まない**
   - **親ウィンドウを必ず指定する**。指定しないと複数ウィンドウのとき誤ったウィンドウに乗る
   - **完了状態**: 2 つのウィンドウを開いた状態でそれぞれからファイル選択を開くと、操作したウィンドウの上に表示される
@@ -479,6 +479,15 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **7.7（依存の決定・重要）**: `tauri-plugin-dialog` は **2.0.0〜2.7.3 のすべてで `tauri-plugin-fs` を非オプション依存に持つ**ため採用しない（要件 4.7 の第一の制御＝「fs が依存木に無い」を守る）。`rfd` の GTK 経路は **0.16 / 0.17 とも親ウィンドウを NULL で固定**しているため Linux では使えない。**採用: Linux は `gtk` 0.18 を直接**（既に解決済み・単一リンケージ・新しいパッケージは増えない）、**Windows / macOS は `rfd` 0.17 をターゲット別に宣言**（`set_parent` が Win32 の owner HWND / macOS の sheet に効く）。`Cargo.lock` の増加は `rfd 0.17.2` の 1 件のみ。`cargo tree -p jxcel` に fs / dialog / shell のプラグインは 0 件。
+- **7.7**: 実装は `src-tauri/src/dialog.rs`。**親は必ず操作対象ウィンドウ**（コマンド経路は注入された `WebviewWindow`、メニュー経路は 7.5 の活性化対象。**payload からは受け取らない**）。**親が消えている場合（対象なし・`gtk_window()` 失敗・未 realize）は親なしで出すのではなく「利用できない」として報告する。**
+- **7.7**: スレッド模型。`pick_document_file` は **`async`** なのでイベントループでは走らず、待機は `tauri::async_runtime::spawn_blocking`。**Linux では GTK ダイアログを `AppHandle::run_on_main_thread` で「表示するだけ」**（`show()` ＋ `response` シグナルで非ブロッキング）。メニューのハンドラも同じ関数へ入る（**経路は 1 本の実装**）。macOS / Windows の実挙動は 10.4 が確認する。
+- **7.7**: 受け渡しは `app.state::<DocumentHostPort>()` を実行時に引いて `attach`。**この機能はパスを一切読まない**（`exists` / `metadata` / `fs::read` / `canonicalize` / 拡張子判定 / 複製のいずれもしない。パスを本番ログにも出さない）。**取り消しは成功側**（何も attach しない）。**拒否された attach は `Ok(Rejected { reason })`** として IPC 失敗と区別できる（7.6 の Deny と同じ流儀）。
+- **7.7**: トリガは 7.4 の登録口に「ドキュメントを開く」項目を登録し、7.5 の振り向けを通す（ライブ検証はこの経路）。ACL は `permissions/app.toml` の `allow-pick-document-file` を集合 `app-shell` に含める（既存の capability 許可で足りる）。**pruning 後も `allowed-commands.json` に `pick_document_file` が残ることを実測**（5 コマンドすべて）。
+- **7.7（ライブ実測）**: 2 ウィンドウ（`empty-1` = X クライアント `0x1000003`、受け渡しで開いた `doc-1` = `0x1000033`）から `Ctrl+O` → ダイアログの X ウィンドウ（題名「ドキュメントを開く」）の **`WM_TRANSIENT_FOR` が操作したウィンドウ**（それぞれ `0x1000003` / `0x1000033`）で、`_NET_WM_STATE_MODAL` と `_NET_WM_WINDOW_TYPE_DIALOG` が付く。メニューのログも同じ対象ウィンドウを名指しする。
+- **7.7（テスト基盤の制約・7.6 と同じ）**: RED 相当の自動試験は書けない（Tauri のテストハーネスが無く `WebviewWindow` / `AppHandle` を構成できない）。純粋部分は単体テスト、受入はホスト実測、3 OS は 10.x。
+
 
 - **7.6（機構・重要）**: 終了拒否は**フロントエンドの購読が存在するだけで基盤が自動で拒否する**。`tauri-2.11.5/src/manager/window.rs:170-174` が `has_js_listener("tauri://close-requested")` を見て `api.prevent_close()` し、同イベントを emit する。**したがって Rust 側に 2 つ目の拒否を足してはならない**。JS 側（`@tauri-apps/api` 2.11.1 の `window.js:1632-1639`）はハンドラが `preventDefault()` を呼ばない場合に限り `this.destroy()` を実行するので、**購読側は常に同期的に `preventDefault()` を呼び、閉じるか否かは往復の結果だけが決める**。閉じる確定操作は **`destroy()` のみ**（`close()` は `CloseRequested` を再発火して自動拒否へ再突入する）。
 - **7.6**: 境界は `can_close_window`（**要求型を持たない**。呼び出し元は注入された `WebviewWindow` からのみ得る＝偽装不可）。応答は `IpcResult<CanCloseWindowResponse, IpcError>`、`CanCloseWindowResponse { context, verdict }`、`WindowCloseVerdict = Allow | Deny{reason}`。**`Deny` は `status: "ok"` 側**（「委譲先が拒否した」と「通信が失敗した」をフロントが区別できるように）。判定は 6.2 の `app.state::<DocumentHostPort>()` を実行時に引く（6.2 の申し送りをここで履行）。ACL は `permissions/app.toml` の `allow-can-close-window` ＋ `capabilities/default.json` の許可（**与えないと pruning で消える**）。

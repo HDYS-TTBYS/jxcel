@@ -140,6 +140,7 @@ use tauri_plugin_log::log::{self, LevelFilter};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 
 use crate::commands;
+use crate::dialog;
 use crate::menu;
 use crate::ports::DocumentHostPort;
 use crate::window::{self, WindowRegistry, WindowRequest};
@@ -329,6 +330,13 @@ pub fn run() -> Result<(), StartupError> {
     //   に行われる。個別機能はこの後 `app.state::<MenuRegistry>()` から自分の項目を足せる。
     menu::install(app.handle());
 
+    // 手順 4.3: ファイル選択の項目の登録（要件 2.4。タスク 7.7）。**7.4 と同じ登録口**へ
+    //   「開く」を足す。選択されたときの処理は、7.5 が解決した活性化の対象ウィンドウに対して
+    //   ファイル選択を提示し、選ばれた位置を委譲点（`DocumentHostPort`）へ引き渡す。**本機能は
+    //   パスを読まない**（`src-tauri/src/dialog.rs` の module doc）。9.6 の画面は同じ実装を
+    //   コマンド（`pick_document_file`）から通る。
+    dialog::install(app.handle());
+
     // 手順 4.5: 記録機構の実効設定を起動時に確認する（要件 8.1、8.5）。起動行を記録し、
     //   記録中のファイルが方針の保存先に現れたことを確かめる。書けなければ診断の保存先の
     //   前提不成立として報告する（無言で劣化させない）。
@@ -418,14 +426,15 @@ fn sweep_orphans_at_startup(app: &AppHandle) -> usize {
 ///
 /// # 検証専用の差し替え（非既定の feature）
 ///
-/// `verification-triggers` feature が有効な**検証ビルドでのみ**、環境変数
-/// [`crate::ports::VERIFY_DENY_CLOSE_ENV`] が名指しするラベルのウィンドウを拒否する委譲先を
-/// 差し込める（完了状態「委譲先が拒否を返すとウィンドウが閉じず、許可を返すと閉じる」を
-/// 実測するため）。**既定のビルドにはこの分岐ごと存在しない** — 実装は下の
-/// `#[cfg(feature)]` 版だけであり、既定版は [`DocumentHostPort::default`] を返す。
+/// `verification-triggers` feature が有効な**検証ビルドでのみ**、検証用の委譲先を差し込む。
+/// それは環境変数 [`crate::ports::VERIFY_DENY_CLOSE_ENV`] が名指しするラベルのウィンドウを
+/// 拒否し（完了状態「委譲先が拒否を返すとウィンドウが閉じず、許可を返すと閉じる」を実測する
+/// ため）、**引き渡された（ウィンドウ, 位置）を記録する**（完了状態「選ばれた位置が委譲先へ
+/// 届いた」を実測するため。要件 2.4。タスク 7.7）。**既定のビルドにはこの分岐ごと存在しない**
+/// — 実装は下の `#[cfg(feature)]` 版だけであり、既定版は [`DocumentHostPort::default`] を返す。
 #[cfg(feature = "verification-triggers")]
 fn document_host_port() -> DocumentHostPort {
-    crate::ports::verification_port_from_env().unwrap_or_default()
+    crate::ports::verification_port()
 }
 
 /// 既定のビルド（配布物）の委譲点。**常に許可する既定実装だけを使う。**

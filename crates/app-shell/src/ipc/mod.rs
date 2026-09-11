@@ -15,6 +15,9 @@
 //! - 7.6: 終了可否の問い合わせの応答（[`CanCloseWindowResponse`] / [`WindowCloseVerdict`]）。
 //!   **要求の型は無い** — 呼び出し元ウィンドウは Tauri が注入する `WebviewWindow` から得るため、
 //!   フロントエンドがウィンドウを申告する payload を持たない（偽装できない）
+//! - 7.7: ファイル選択の結果と応答（[`DocumentPickOutcome`] / [`PickDocumentFileResponse`]）。
+//!   **選択された位置は境界を越えない** — 委譲先（`DocumentHost::attach`）へ引き渡すだけで、
+//!   本機能もフロントエンドもその中身に触れないためである（要件 2.4）
 
 use serde::{Deserialize, Serialize};
 
@@ -210,6 +213,54 @@ pub struct CanCloseWindowResponse {
     pub verdict: WindowCloseVerdict,
 }
 
+/// ファイル選択の結果（タスク 7.7。要件 2.4）。
+///
+/// 選択手段（`src-tauri/src/dialog.rs` の DialogGate）が得た結果と、その位置をドキュメント
+/// 所有者へ引き渡した結果を、**1 つの判別可能な合併型**にまとめてフロントエンドへ返す。
+/// `outcome` を判別子とするため、利用側は網羅的に分岐できる。
+///
+/// **`Cancelled` と `Rejected` は失敗ではない。**「利用者が取り消した」ことも「所有者が
+/// 受け取らなかった」ことも、コマンドが正常に答えた結果である。したがって封筒
+/// （[`IpcResult`]）の `status: "error"` の腕には載せない — 載せると「通信が失敗した」ことと
+/// 区別できなくなる（tasks.md 7.6 が終了拒否で同じ判断をしている）。`Rejected` は利用者へ
+/// 伝えるための材料（`reason`）を運び、**見せ方を決めるのは呼び出し元である**。
+///
+/// **選択された位置そのものは境界を越えない。** 位置は `DocumentHost::attach` へ引き渡す
+/// だけであり（要件 2.4）、アプリケーションシェルもフロントエンドもその中身に触れない。
+/// したがってパスを表す型はここに現れない。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(tag = "outcome")]
+pub enum DocumentPickOutcome {
+    /// 利用者が選択を取り消した。**正常な結果であり、引き渡しは起きていない。**
+    Cancelled,
+    /// 選択された位置を委譲先へ引き渡し、**委譲先が受け入れた**。
+    Attached,
+    /// 選択された位置を委譲先へ引き渡したが、**委譲先が受け取らなかった**。
+    ///
+    /// `reason` は拒否の理由（空でもよい）。利用者へ提示するための材料であり、そのまま見せる
+    /// 文言とは限らない。
+    Rejected {
+        /// 拒否の理由。
+        reason: String,
+    },
+}
+
+/// ファイル選択の応答（タスク 7.7。要件 2.4、4.6）。
+///
+/// **呼び出し元ウィンドウの文脈を必ず含む。**呼び出し元は Tauri が注入する `WebviewWindow`
+/// から得るので、**フロントエンドがウィンドウの識別子を payload で申告する経路は存在しない**
+/// （偽装できない。要件 4.6、tasks.md 7.1）。`outcome` が選択と引き渡しの結果である。
+///
+/// **要求の型は無い。** この機能に必要な入力は操作対象のウィンドウだけであり、それは基盤が
+/// 注入する（[`CanCloseWindowResponse`] と同じ形）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct PickDocumentFileResponse {
+    /// 呼び出し元ウィンドウの文脈（要件 4.6）。
+    pub context: WindowContext,
+    /// 選択と引き渡しの結果（要件 2.4）。
+    pub outcome: DocumentPickOutcome,
+}
+
 /// TypeScript の生成物を再生成する、唯一の文書化されたコマンド（タスク 2.2）。
 ///
 /// 生成物のヘッダにもこの文字列を埋め込むため、定数として一箇所に持つ。実行ファイルは
@@ -320,6 +371,21 @@ fn concrete_can_close_window_result(cfg: &ts_rs::Config) -> (String, String) {
     (NAME.to_owned(), text)
 }
 
+/// ファイル選択の応答の具体形（タスク 7.7）。 [`concrete_window_context_result`] と同じ理由で
+/// 置く。ペイロード型は [`PickDocumentFileResponse`] である。
+fn concrete_pick_document_file_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "PickDocumentFileResult";
+    let mut text = String::from(
+        "// ファイル選択の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を名指し\n\
+         // しないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<PickDocumentFileResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
 /// 設定コマンドの応答の具体形（タスク 7.1）。 [`concrete_window_context_result`] と同じ理由で
 /// 置く。ペイロード型は [`SettingsResponse`] である。
 fn concrete_settings_result(cfg: &ts_rs::Config) -> (String, String) {
@@ -357,11 +423,14 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<SettingsChangedEvent>(&cfg),
         declared::<WindowCloseVerdict>(&cfg),
         declared::<CanCloseWindowResponse>(&cfg),
+        declared::<DocumentPickOutcome>(&cfg),
+        declared::<PickDocumentFileResponse>(&cfg),
         declared::<IpcError>(&cfg),
         declared::<IpcResult<WindowContext, IpcError>>(&cfg),
         concrete_window_context_result(&cfg),
         concrete_settings_result(&cfg),
         concrete_can_close_window_result(&cfg),
+        concrete_pick_document_file_result(&cfg),
     ];
     declarations.sort_by(|a, b| a.0.cmp(&b.0));
 
