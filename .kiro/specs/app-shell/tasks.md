@@ -326,7 +326,7 @@
 
 - [ ] 8. Integration: 補助プロセスのホストと描画監視
 
-- [ ] 8.1 配置解決・監督の束ね・出力の診断連携を実装する
+- [x] 8.1 配置解決・監督の束ね・出力の診断連携を実装する
   - 実行時のパス解決をプラットフォームごとに分ける。標準の同梱機構を使う環境と、走査対象の外へ置く環境で解決先が異なる
   - 整合性検査を起動の前に必ず通す
   - 種類ごとに 1 つのプロセスを共有する監督の不変条件をそのまま利用し、複数の要求元に同じハンドルを返す
@@ -479,6 +479,17 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **8.1（解決規則・重要）**: Windows / macOS は**実行ファイル自身のディレクトリ**（macOS は `Contents/MacOS`、Windows は `$INSTDIR`）に**トリプル接尾辞を外した語幹**（Windows のみ `.exe`）で置かれる（`external_binaries` が `-<triple>[.exe]` を付与し、`tauri-build::copy_binaries` / tauri-bundler の `Settings::copy_binaries` / NSIS の `installer.nsi` が除去することをソースで確認）。**Linux は `usr/share/jxcel/sidecar-smoke`** で、**AppImage の根は `APPDIR` から取る**。deb も同じ `usr/share/jxcel/` に落ちる（実測）。**`usr/bin` への複製は無い**（走査対象外という決定の実効性を AppImage の中身で確認）。**通常経路で展開する処理は存在しない。**
+- **8.1**: 原本が未配置のときの挙動はプラットフォームで違う（Windows / macOS は `tauri-build` がビルド時に落ち、Linux は `cargo build` は通って実行時に**パスを含む `NotFound`** を記録する。1.7 の記述どおり）。`target/share/jxcel/sidecar-smoke` に同じ形を作れば同じバイナリが解決・起動する（開発時の実測手段）。
+- **8.1**: 整合性の順序は `ensure` → `Supervisor::ensure` → preflight → `integrity::verify` → `Command::spawn` で、**8.1 は順序に何も挟まない**。1 バイト改変した複製では**起動を試みる前に**期待値／実測値つきで拒否される（`pgrep` は空）。
+- **8.1**: **複数の要求元は監督の不変条件をそのまま使う**（`SidecarHost` の複製 2 つからバリアで同時 `ensure` → 両方 `Ok`・pid 一致・OS 上のプロセス数 1）。
+- **8.1**: 出力の結線は `SidecarEvent` の購読 1 本。**対象名 `jxcel::sidecar`**、stdout → Info、stderr → Warn、`Exited{Deliberate}` → Info、`Exited{Unexpected}` → Warn。保存先は 5.2 の Folder ターゲットに委譲（`~/.local/share/com.jxcel.app/logs/jxcel.log`）で、**ディレクトリの源は 1 つ**。4.4 の秘匿は「外のプロセスが書いた行であり、アプリはドキュメント値を保持しない」として doc 化し、**ドキュメント内容を運びうる種類**の制約も明記。
+- **8.1（`expected_sidecar_executables` の判断・重要）**: 期待パスは Windows と Linux(deb) には与えるが、**macOS（`ps comm` が 16 文字で切れる。3.5 の申し送り）と Linux(AppImage)（マウント根が実行ごとに変わる）には与えない**。与えない場合も**名前照合で掃除は働く**（実測 2 例）。**macOS の実行時確認は 10.x（CI）が行う。**
+- **8.1**: 検証専用の代用解決（`verification_sidecar_path`）は**削除**し、検証の起動も `state::<SidecarHost>().ensure` を通る（解決経路は 1 本）。
+- **8.1**: **`tauri.linux.conf.json` に `bundle.linux.deb.files` を追加**（1.7 は AppImage のみだった）。deb も「配布物」であり 5.1 の対象。**10.2 は deb も検証対象に含めること。**
+- **8.1（検証手段の追加・重要）**: **Windows クロス check は通せる**。ホストに `llvm-rc` が無いだけなので、コンテナ内に一時的な `llvm-rc` スタブを用意し `RC=<stub>` を与えれば `cargo check -p jxcel --all-targets --target x86_64-pc-windows-msvc` が **Finished** する（`externalBin` のプレースホルダ `.exe` も必要。使用後は撤去）。**10.2 / 10.4 はこの手段を使える。**
+
 
 - **7.7（依存の決定・重要）**: `tauri-plugin-dialog` は **2.0.0〜2.7.3 のすべてで `tauri-plugin-fs` を非オプション依存に持つ**ため採用しない（要件 4.7 の第一の制御＝「fs が依存木に無い」を守る）。`rfd` の GTK 経路は **0.16 / 0.17 とも親ウィンドウを NULL で固定**しているため Linux では使えない。**採用: Linux は `gtk` 0.18 を直接**（既に解決済み・単一リンケージ・新しいパッケージは増えない）、**Windows / macOS は `rfd` 0.17 をターゲット別に宣言**（`set_parent` が Win32 の owner HWND / macOS の sheet に効く）。`Cargo.lock` の増加は `rfd 0.17.2` の 1 件のみ。`cargo tree -p jxcel` に fs / dialog / shell のプラグインは 0 件。
 - **7.7**: 実装は `src-tauri/src/dialog.rs`。**親は必ず操作対象ウィンドウ**（コマンド経路は注入された `WebviewWindow`、メニュー経路は 7.5 の活性化対象。**payload からは受け取らない**）。**親が消えている場合（対象なし・`gtk_window()` 失敗・未 realize）は親なしで出すのではなく「利用できない」として報告する。**

@@ -57,18 +57,18 @@
 //! 値が `panic:<ミリ秒>` のとき意図的にパニックする。片付けは 1 箇所のままである）。
 //!
 //! タスク 5.6 が加えたのは**アプリ終了時の補助プロセスの終了**である（要件 5.6）。監督
-//! （[`Supervisor`]）をアプリの管理状態として 1 実体だけ所有し（[`sidecar_supervisor`]）、
-//! 通常終了でプロセスが終わる直前に必ず届く唯一のイベント [`RunEvent::Exit`] で
-//! `shutdown_all` を**同期で**呼ぶ（[`shutdown_sidecars`]）。**基盤側の終了時清掃には依存
-//! しない** — この子は Rust が `std::process::Command` で起動しており、`tauri-plugin-shell` は
-//! 依存にすら入っていない（同プラグインの終了時清掃は JS→IPC 経路で起動した子だけを対象と
-//! する）。強制終了やパニックではイベントループを経由せず `RunEvent::Exit` が届かないため、
-//! それらの経路は次の機構が覆う: **Unix は補助プロセス自身の親監視**（1.6 / 3.5 が
-//! `--parent-pid` を注入し、親が消えたら子が自己終了する。`killpg` は `shutdown_all` の内側で
-//! しか走らないため、SIGKILL の後の Unix には届かない）、**Windows は Job Object の
-//! `KILL_ON_JOB_CLOSE`**（3.3。カーネルが強制するため親の異常終了後も有効な唯一の機構）。
-//! 起動時の残留掃除（[`sweep_orphans_at_startup`]）が最後の backstop である。終了時に待つ猶予は
-//! プラットフォームで分ける（[`SIDECAR_SHUTDOWN_GRACE`]）。
+//! （[`Supervisor`]）をアプリの管理状態として 1 実体だけ所有し（[`sidecar_host`] が束ねる
+//! [`SidecarHost`]）、通常終了でプロセスが終わる直前に必ず届く唯一のイベント
+//! [`RunEvent::Exit`] で `shutdown_all` を**同期で**呼ぶ（[`shutdown_sidecars`]）。**基盤側の
+//! 終了時清掃には依存しない** — この子は Rust が `std::process::Command` で起動しており、
+//! `tauri-plugin-shell` は依存にすら入っていない（同プラグインの終了時清掃は JS→IPC 経路で
+//! 起動した子だけを対象とする）。強制終了やパニックではイベントループを経由せず
+//! `RunEvent::Exit` が届かないため、それらの経路は次の機構が覆う: **Unix は補助プロセス自身の
+//! 親監視**（1.6 / 3.5 が `--parent-pid` を注入し、親が消えたら子が自己終了する。`killpg` は
+//! `shutdown_all` の内側でしか走らないため、SIGKILL の後の Unix には届かない）、**Windows は
+//! Job Object の `KILL_ON_JOB_CLOSE`**（3.3。カーネルが強制するため親の異常終了後も有効な
+//! 唯一の機構）。起動時の残留掃除（[`sweep_orphans_at_startup`]）が最後の backstop である。
+//! 終了時に待つ猶予はプラットフォームで分ける（[`SIDECAR_SHUTDOWN_GRACE`]）。
 //!
 //! タスク 6.1 が加えたのは**ウィンドウの生成とレジストリ**である（要件 2.1〜2.3、2.5、2.10）。
 //! 生成は [`window::open`] の 1 経路に一本化し、**非同期でのみ**行う — 同期のコマンドや
@@ -100,6 +100,21 @@
 //! **既定のビルドでは常に許可する既定実装だけが入る** — 拒否を返す委譲先は非既定の
 //! `verification-triggers` feature の下にのみ存在し、拒否の実測にだけ使う。
 //!
+//! タスク 8.1 が加えたのは**補助プロセスの実行ファイルの解決（プラットフォーム別）と、その
+//! 出力の診断連携**である（要件 5.1、5.2、5.3、5.5、5.9）。実体は
+//! `src-tauri/src/sidecar_host.rs` にあり、本ファイルは 3 箇所でそれを使う:
+//!
+//! 1. **監督の生成**（[`sidecar_host`]）。`Supervisor` を [`SidecarHost`] で束ね、解決規則から
+//!    得た期待パス（[`expected_sidecar_executables`]）と終了の猶予を与えて管理状態に置く。
+//!    **すべての要求元は `AppHandle::state::<SidecarHost>()` から同じ実体を取って `ensure`
+//!    する**ため、「種類ごとに 1 つのプロセス」という不変条件（要件 5.5）が要求元の数に
+//!    よらず成立する。整合性検査は監督の内側で起動の前に走る（要件 5.3）。
+//! 2. **出力の購読の結線**（`run` の手順 4.4 = `Builder::build` の後、`app.run` の前）。
+//!    その時点で記録機構のロガーは取り付け済みであり、補助プロセスを起動しうる経路
+//!    （下流スペックの `setup`、`RunEvent::Ready` の検証の引き金）はまだ 1 つも走っていない。
+//! 3. **検証専用の引き金からの起動**（[`start_verification_sidecar`]）。1.7 の原本の置き場を
+//!    直接指す代用の解決はここで消え、**通常の起動とまったく同じ解決**を通る。
+//!
 //! 本ファイルがまだ持たないもの（各タスクがここへ書き込む）:
 //!
 //! - タスク 7.5: メニュー項目へのショートカットの割り当てと表示、フォーカス先ウィンドウへの
@@ -110,9 +125,6 @@
 //!   [`reserve_render_fallback_point`] の中身を埋める。
 //! - タスク 9.6: ドキュメントを関連付けていないウィンドウの操作導線（新規作成・既存ファイルを
 //!   開く）。ドキュメントの関連付けそのものは 6.1 が [`window::open`] で実装済みである。
-//! - タスク 8.1: 補助プロセスの実行ファイルの絶対パスの解決（プラットフォーム別）と、出力の
-//!   診断連携。[`sidecar_supervisor`] が監督の唯一の生成点であり、8.1 はそこへ解決済みの
-//!   期待パスを流し込み、`AppHandle::state` から同じ実体を取って `ensure` する。
 
 use std::backtrace::{Backtrace, BacktraceStatus};
 use std::collections::HashMap;
@@ -127,12 +139,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use app_shell::diagnostics::{self, DiagnosticsLevel};
 use app_shell::settings::{self, FileSettingsStore, RecoveredFrom, SettingsStore};
-// 検証専用の引き金（`verification-triggers` feature）だけが使う 2 つ。既定のビルドでは
-// インポートごと消える（配布物に検証専用の経路を入れない）。
-#[cfg(feature = "verification-triggers")]
-use app_shell::sidecar::integrity::BUILD_TARGET_TRIPLE;
-#[cfg(feature = "verification-triggers")]
-use app_shell::sidecar::SidecarSpec;
 use app_shell::sidecar::{SidecarKind, SidecarSupervisor, Supervisor};
 use tauri::utils::config::{Csp, CspDirectiveSources};
 use tauri::{AppHandle, Manager, RunEvent};
@@ -143,6 +149,7 @@ use crate::commands;
 use crate::dialog;
 use crate::menu;
 use crate::ports::DocumentHostPort;
+use crate::sidecar_host::{self, SidecarHost};
 use crate::window::{self, WindowRegistry, WindowRequest};
 
 /// 起動を継続できない前提の名前: アプリケーションデータ領域（設定の保存先）。
@@ -291,10 +298,13 @@ pub fn run() -> Result<(), StartupError> {
     // `startup` は直後に管理状態へ移すため、その前に `Arc` を複製しておく。
     let settings_store = Arc::clone(startup.settings());
     let builder = builder.manage(startup);
-    // 補助プロセスの監督（要件 5.6。タスク 5.6）。アプリ全体で 1 実体だけ所有し、起動時の
-    // 残留掃除（手順 5）と終了時の終了（[`shutdown_sidecars`]）が同じ登録簿を見るようにする。
-    // 8.1 の `SidecarHost` は `AppHandle::state` からこの実体を取って `ensure` する。
-    let builder = builder.manage(sidecar_supervisor());
+    // 補助プロセスのホスト（要件 5.1〜5.3、5.5、5.9。タスク 8.1）。監督を束ね、解決済みの
+    // 期待パスを与えたうえでアプリ全体で 1 実体だけ置く。起動時の残留掃除（手順 5）と終了時の
+    // 終了（[`shutdown_sidecars`]）が同じ登録簿を見るようにする。**要求元はすべて
+    // `app.state::<SidecarHost>()` から取り、`ensure` する**（種類ごとに 1 つのプロセスという
+    // 不変条件はこの 1 実体が担う。タスク 5.6 が `Supervisor` を直接置いていたのを 8.1 が
+    // 束ね直した）。
+    let builder = builder.manage(sidecar_host());
 
     // 設定の共有実体をコマンド面の管理状態として置く（要件 7.3。タスク 7.1）。上の
     // `settings_store` と同じ `Arc` である。設定変更の通知（要件 7.4）は構築の後にこの
@@ -336,6 +346,18 @@ pub fn run() -> Result<(), StartupError> {
     //   パスを読まない**（`src-tauri/src/dialog.rs` の module doc）。9.6 の画面は同じ実装を
     //   コマンド（`pick_document_file`）から通る。
     dialog::install(app.handle());
+
+    // 手順 4.4: 補助プロセスの出力を診断の記録先へ流す購読（要件 5.9。タスク 8.1）。
+    //   **位置の根拠**: 記録機構のロガーは手順 4 の `Builder::build` で取り付けられるため、
+    //   それより前では `log::…!` がどこにも残らない。逆にこれより後では、補助プロセスを
+    //   起動しうる経路（下流スペックが `Builder::setup` へ足すもの、`RunEvent::Ready` の
+    //   検証の引き金）が走り始めている恐れがあり、購読は過去を遡らないので最初の出力を
+    //   取りこぼす。**`Builder::build` の後・`app.run` の前が唯一の窓である**（その間の
+    //   手順 4.1〜4.3 は補助プロセスを起動しない）。
+    //
+    //   戻るハンドルは保持しない（スレッドはプロセスの寿命と同じだけ生きる）。結線に失敗した
+    //   場合は `watch_output` が警告を記録し、**起動は続ける**（要件 5.4 の精神）。
+    let _subscriber = app.state::<SidecarHost>().watch_output();
 
     // 手順 4.5: 記録機構の実効設定を起動時に確認する（要件 8.1、8.5）。起動行を記録し、
     //   記録中のファイルが方針の保存先に現れたことを確かめる。書けなければ診断の保存先の
@@ -412,11 +434,11 @@ fn register_single_instance(builder: tauri::Builder<tauri::Wry>) -> tauri::Build
 /// 掃除は最善努力であり、失敗を報告しない（戻り値は終了させた数だけである。[`Supervisor`] の
 /// 契約）。起動を止めてはならない（要件 5.4 の精神）。
 ///
-/// **アプリの管理状態にある監督（[`sidecar_supervisor`]）を使う。**ここで別の実体を作ると、
+/// **アプリの管理状態にあるホスト（[`sidecar_host`]）を使う。**ここで別の実体を作ると、
 /// 8.1 が解決した期待パスが掃除側にだけ効き、終了時の終了（[`shutdown_sidecars`]）とは別の
 /// 登録簿を見ることになる。
 fn sweep_orphans_at_startup(app: &AppHandle) -> usize {
-    app.state::<Supervisor>().sweep_orphans()
+    app.state::<SidecarHost>().supervisor().sweep_orphans()
 }
 
 /// ドキュメント所有者への委譲点を組み立てる（要件 2.1・2.6。タスク 6.2 が定義し、7.6 が消費する）。
@@ -447,25 +469,23 @@ fn document_host_port() -> DocumentHostPort {
     DocumentHostPort::default()
 }
 
-/// アプリ全体で 1 つの監督を作る。**タスク 8.1 が差し替える seam である。**
+/// アプリ全体で 1 つの補助プロセスのホストを作る（タスク 8.1 が 5.6 の seam をここで埋めた）。
 ///
-/// 8.1（`src-tauri/src/sidecar_host.rs`）は補助プロセスの実行ファイルをプラットフォーム別に
-/// 解決し、その絶対パスを [`expected_sidecar_executables`] へ流す。Linux は
-/// `usr/share/jxcel/sidecar-smoke`、Windows / macOS は実行ファイルの隣（`externalBin`）である
-/// （tasks.md 1.7 の配置規約）。解決が入るまでは期待パスの集合が空なので、残留の掃除は実行
-/// ファイル名の一致だけで働く（[`Supervisor::with_expected_executables`] の既定）。
-///
-/// **この 1 実体を起動時の掃除（[`sweep_orphans_at_startup`]）と終了時の終了
-/// （[`shutdown_sidecars`]）が共有する。**2 つ作ると、8.1 が解決した期待パスが掃除側にだけ
-/// 効いたり、終了時に別の登録簿を見て起動済みの子を取り逃したりする。
+/// `sidecar_host.rs` は補助プロセスの実行ファイルをプラットフォーム別に解決し（Linux は
+/// `usr/share/jxcel/sidecar-smoke`、Windows / macOS は実行ファイルの隣 = `externalBin`。
+/// tasks.md 1.7）、その解決から得た期待パスを掃除へ与える。**この 1 実体を起動時の掃除
+/// （[`sweep_orphans_at_startup`]）と終了時の終了（[`shutdown_sidecars`]）が共有する** —
+/// 2 つ作ると、期待パスが掃除側にだけ効いたり、終了時に別の登録簿を見て起動済みの子を取り逃す。
 ///
 /// 終了の猶予は [`SIDECAR_SHUTDOWN_GRACE`] を明示的に与える（`shutdown_all` はこの値を
 /// 使って猶予段の満了まで `RunEvent::Exit` のコールバックを待たせるため、プラットフォーム差が
 /// そのまま終了時の凍結時間になる）。
-fn sidecar_supervisor() -> Supervisor {
-    Supervisor::new()
-        .with_expected_executables(expected_sidecar_executables())
-        .with_grace(SIDECAR_SHUTDOWN_GRACE)
+fn sidecar_host() -> SidecarHost {
+    SidecarHost::new(
+        Supervisor::new()
+            .with_expected_executables(expected_sidecar_executables())
+            .with_grace(SIDECAR_SHUTDOWN_GRACE),
+    )
 }
 
 /// 補助プロセスの終了に与える猶予。**プラットフォームで分ける**（タスク 5.6 が決めた。
@@ -498,19 +518,17 @@ const SIDECAR_SHUTDOWN_GRACE: std::time::Duration = if cfg!(windows) {
     app_shell::sidecar::supervisor::DEFAULT_GRACE
 };
 
-/// 残留の掃除が名前の一致に加えて要求する「このアプリの補助プロセスの実行ファイルの絶対パス」。
+/// 残留の掃除が名前の一致に加えて要求する「このアプリの補助プロセスの実行ファイルの絶対パス」
+/// （タスク 5.1 が空のまま 8.1 へ送った seam。**8.1 がここを埋めた**）。
 ///
-/// **今は空を返す。**この解決はタスク 8.1（`SidecarHost`）が所有する。8.1 がプラットフォーム別の
-/// パス解決を実装した時点で、その結果がここへ流れる。空の間は実行ファイル名の一致だけで掃除する
-/// （[`Supervisor`] の既定挙動）。
+/// 実体は `sidecar_host::expected_executables()` である — **解決と同じ 1 箇所**から導くため、
+/// 起動するパスと掃除が期待するパスが食い違わない。どのプラットフォームで何を与えるか
+/// （macOS では与えない、AppImage でも与えない）の根拠はその関数の doc にある。
 ///
-/// 空を選ぶ理由（配線を 8.1 に残す理由）: macOS では `ps -p <pid> -o comm=` が起動時パスではなく
-/// コマンド名（カーネルの `p_comm` は 16 文字で切詰め）を返すため、**期待パスを設定すると
-/// 絶対パス比較が一致せず掃除が無音で no-op になる**（tasks.md 3.5 の申し送り）。8.1 が期待パスを
-/// 配線する前に macOS の実機（10.x の CI）で名前照合が成立することを確認しなければならない。
-/// 今ここで推測のパスを入れると、この no-op を自分で作ることになる。
+/// 空を返す場合でも**掃除そのものは働く** — 実行ファイル名の一致だけの判定へ落ちる
+/// （[`Supervisor::with_expected_executables`] の既定挙動）。**無音で no-op にはならない**。
 fn expected_sidecar_executables() -> Vec<PathBuf> {
-    Vec::new()
+    sidecar_host::expected_executables()
 }
 
 // ---------------------------------------------------------------------------
@@ -1509,9 +1527,10 @@ fn present_existing_or_create(app: &AppHandle) {
 /// - `exit:<ミリ秒>`: 同上（明示形）
 /// - `panic:<ミリ秒>`（5.5 が足した形）: `VerificationAction::Panic` — **意図的なパニックで
 ///   プロセスを異常終了させ、異常終了の記録（要件 8.2）を実測するために使う**
-/// - `sidecar:<ミリ秒>`（5.6 が足した形）: `VerificationAction::Sidecar` — **監督を直接呼んで
-///   補助プロセスを 1 つ起動し、その ms 後に通常終了する**。終了時に補助プロセスが残らないこと
-///   （要件 5.6）を実測するために使う
+/// - `sidecar:<ミリ秒>`（5.6 が足した形）: `VerificationAction::Sidecar` — **ホスト
+///   （`SidecarHost`）を通して補助プロセスを 1 つ起動し、その ms 後に通常終了する**。配布物と
+///   同じ解決・整合性検査・共有の経路で起動し、終了時に補助プロセスが残らないこと（要件 5.6）を
+///   実測するために使う
 /// - `fail-window:<ミリ秒>`（6.1 が足した形）: `VerificationAction::FailWindow` — **ウィンドウの
 ///   生成を意図的に失敗させ、その ms 後に通常終了する**。失敗が報告され、既に開いている他の
 ///   ウィンドウが動作し続けること（要件 2.10）を実測するために使う
@@ -1536,10 +1555,12 @@ enum VerificationAction {
     Exit,
     /// 意図的なパニック（5.5 が足した動作）。**メインスレッドで**起こす。
     Panic,
-    /// **監督を直接呼んで補助プロセスを 1 つ起動した状態を作る**（タスク 5.6 が足した動作）。
-    /// 終了時に残らないことを実測するために使う。起動は直ちに行い、`<ミリ秒>` は他の動作と
-    /// 同じく終了までの待ちである。配布物経由の起動経路（8.1 の `SidecarHost`）が揃うまでの
-    /// 代用であり、その時点でこの動作は不要になる。
+    /// **ホスト（[`SidecarHost`]）を通して補助プロセスを 1 つ起動した状態を作る**（タスク 5.6 が
+    /// 足し、8.1 が本物の解決へ置き換えた動作）。終了時に残らないこと（要件 5.6）と、配布物と
+    /// 同じ経路で解決・整合性検査・出力の記録が成立すること（要件 5.2、5.3、5.9）を実測するために
+    /// 使う。起動は直ちに行い、`<ミリ秒>` は他の動作と同じく終了までの待ちである。
+    /// **10.x の 3 OS 検証もこの動作を使う**（配布物から起動して補助プロセスが現れることを
+    /// 確かめる経路がほかに無い）。
     Sidecar,
     /// **ウィンドウの生成を意図的に失敗させ、既存のウィンドウが動作し続けることを実測する**
     /// （タスク 6.1 が足した動作。要件 2.10）。失敗は直ちに起こし、`<ミリ秒>` は他の動作と
@@ -1749,7 +1770,8 @@ fn handle_run_event(app: &AppHandle, event: RunEvent) {
 /// 強制するため親の異常終了後も有効な唯一の機構）である。[`sweep_orphans_at_startup`] が最後の
 /// backstop である。
 fn shutdown_sidecars(app: &AppHandle) {
-    let supervisor = app.state::<Supervisor>();
+    let host = app.state::<SidecarHost>();
+    let supervisor = host.supervisor();
     // 起動中の種類を先に数える（core の `shutdown_all` は件数を返さないため、core の契約を
     // 広げずにここで数える）。`get` は死んでいる登録を除去するので、数え漏れない。
     //
@@ -1805,7 +1827,8 @@ fn handle_reopen(app: &AppHandle, has_visible_windows: bool) {
 /// に `<ミリ秒>`（または `exit:<ミリ秒>`）が設定されているときだけ、その時間だけ待ってから
 /// [`request_exit`] を呼ぶ。`panic:<ミリ秒>` のときは代わりに**意図的なパニック**を起こし、
 /// 異常終了の記録（要件 8.2）を実測できるようにする（5.5 が足した形）。`sidecar:<ミリ秒>` の
-/// ときは**直ちに監督を直接呼んで補助プロセスを 1 つ起動**し（[`start_verification_sidecar`]）、
+/// ときは**直ちにホスト（[`SidecarHost`]）を通して補助プロセスを 1 つ起動**し
+/// （[`start_verification_sidecar`]）、
 /// その ms 後に通常終了する（5.6 が足した形。終了時に残らないことを実測する）。
 /// `fail-window:<ミリ秒>` のときは**直ちにウィンドウの生成を失敗させ**
 /// （[`window::force_creation_failure`]）、その ms 後に通常終了する（6.1 が足した形。失敗が
@@ -1862,63 +1885,39 @@ fn arm_verification_exit_trigger(app: &AppHandle) {
     });
 }
 
-/// 検証専用: 監督を直接呼んで補助プロセスを 1 つ起動する（タスク 5.6）。
+/// 検証専用: ホストを通して補助プロセスを 1 つ起動する（タスク 5.6 が置き、8.1 が本物の経路へ
+/// 置き換えた）。
 ///
-/// **配布物経由の起動経路の代用である。**プラットフォーム別の実行ファイルの解決と、整合性検査を
-/// 通した起動を束ねるのは 8.1（`sidecar_host.rs`）の責務であり、ここは 1.7 の同梱原本の置き場
-/// （[`verification_sidecar_path`]）を直接指して「監督経由で起動した状態」を作る。これは
-/// [`VERIFY_EXIT_ENV`] が設定された検証のときだけ通る経路であり、通常の起動では呼ばれない。
+/// **通常の起動とまったく同じ経路を通る。**1.7 の同梱原本の置き場を直接指していた代用の解決
+/// （旧 `verification_sidecar_path`）は 8.1 で消えた — 検証だけが別の解決を使うと、配布物で
+/// 通る経路を検証できない（tasks.md 8.1 の完了状態は「配布物の解決と起動が成功すること」で
+/// ある）。ここは `AppHandle::state` からアプリの唯一の [`SidecarHost`] を取り、その
+/// [`SidecarHost::ensure`] を呼ぶだけである。したがって検証で観測できるものは、配布物で
+/// 起きるものと同じである:
+///
+/// - プラットフォーム別の解決（このホストは Linux なので `usr/share/jxcel/sidecar-smoke`）
+/// - **整合性検査が起動の前**に通ること（ダイジェスト不一致・期待値の不在はここで拒否される）
+/// - 種類ごとに 1 つのプロセスという不変条件（終了時の終了が同じ登録簿を見る）
+/// - 補助プロセスの出力が診断の記録先へ現れること（手順 4.4 の購読）
+///
+/// **この関数は検証ビルドにしか存在しない**（`verification-triggers` feature）。既定の
+/// ビルドには環境変数の読み取りもこの経路も入らない。
 ///
 /// 起動の失敗は記録に残す（**検証の失敗を無言にしない**）。失敗してもアプリは通常終了の経路へ
 /// 進むので、終了時の終了処理そのものは実測できる。
 #[cfg(feature = "verification-triggers")]
 fn start_verification_sidecar(app: &AppHandle) {
-    let executable = verification_sidecar_path();
-    let spec = SidecarSpec {
-        kind: SidecarKind::Smoke,
-        executable: executable.clone(),
-        args: Vec::new(),
-    };
-    // アプリの管理状態にある監督（[`sidecar_supervisor`]）へ登録する。終了時の終了
-    // （[`shutdown_sidecars`]）が同じ登録簿を見るため、この子は通常終了で終了される。
-    match app.state::<Supervisor>().ensure(&spec) {
+    match app
+        .state::<SidecarHost>()
+        .ensure(SidecarKind::Smoke, Vec::new())
+    {
         Ok(handle) => log::info!(
-            "検証用の補助プロセスを起動した: kind={} pid={} executable={}",
+            "検証用の補助プロセスを起動した: kind={} pid={}",
             handle.kind().as_str(),
             handle.pid(),
-            executable.display(),
         ),
-        Err(error) => log::error!(
-            "検証用の補助プロセスを起動できなかった（{}）: {error}",
-            executable.display(),
-        ),
+        Err(error) => log::error!("検証用の補助プロセスを起動できなかった: {error}"),
     }
-}
-
-/// 検証専用の引き金が起動する補助プロセスの実行ファイル（1.7 の同梱原本の置き場）。
-///
-/// **8.1 のランタイム解決の代用である。**`CARGO_MANIFEST_DIR` はビルド時の `src-tauri/` を
-/// 指し、その値が配布物にも埋め込まれる。8.1 がプラットフォーム別の解決を実装した時点で、
-/// この関数は解決済みのパス（Windows / macOS = 実行ファイルの隣の `externalBin`、Linux =
-/// `usr/share/jxcel/sidecar-smoke`）を返す経路に置き換わる。それまでは、このリポジトリの
-/// 検証で 1.7 が配置した原本だけを指す（語幹は [`SidecarKind::as_str`]、接尾辞は
-/// [`BUILD_TARGET_TRIPLE`] と Windows の `.exe`。tasks.md 1.7 の命名規約と同じ組み立て）。
-#[cfg(feature = "verification-triggers")]
-fn verification_sidecar_path() -> PathBuf {
-    let suffix = if BUILD_TARGET_TRIPLE.contains("windows") {
-        ".exe"
-    } else {
-        ""
-    };
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("sidecars")
-        .join(format!(
-            "{}-{}{}",
-            SidecarKind::Smoke.as_str(),
-            BUILD_TARGET_TRIPLE,
-            suffix,
-        ))
 }
 
 // ---------------------------------------------------------------------------
