@@ -12,8 +12,11 @@
 //! コマンド名は文字列リテラルで書かず、単一の源（`crates/app-shell/src/ipc/command_names.rs` の
 //! 名前定数）を参照する（tasks.md 2.2）。
 //!
-//! すべてのコマンドは [`IpcResult`] を返し、例外に頼らない（要件 4.4）。呼び出し元ウィンドウは
-//! 引数として受け取り（[`tauri::WebviewWindow`] が Tauri により注入される）、境界の文脈
+//! すべてのコマンドは [`IpcResult`] を返し、例外に頼らない（要件 4.4）。唯一の例外は
+//! [`bulk::bulk_echo`] である — 要件 4.5 が JSON を経由しない生バイトの応答を要求するため、
+//! 封筒（`serde` で JSON になる）を返せない。例外の根拠と消費者への見え方は `bulk` の
+//! モジュール doc に書いてある（タスク 7.2）。呼び出し元ウィンドウは引数として受け取り
+//! （[`tauri::WebviewWindow`] が Tauri により注入される）、境界の文脈
 //! （`app_shell::ipc::WindowContext`）へ写して呼び出し先が識別できるようにする（要件 4.6）。
 //!
 //! # 根と `COMMAND_NAMES` の同期
@@ -37,7 +40,7 @@
 //! - 本ファイル: 根の列挙と、登録名・コマンド名の同期の検査。
 //! - [`shell_cmds`]: app-shell 自身のコマンド（本タスク 7.1 の設定の読み書きと、設定変更の
 //!   通知の配線）。
-//! - [`bulk`]: 大きなペイロードの経路（タスク 7.2 が実装する）。
+//! - [`bulk`]: 大きなペイロードの経路（タスク 7.2）。封筒を通らない唯一のコマンドを持つ。
 
 mod bulk;
 mod shell_cmds;
@@ -84,6 +87,7 @@ macro_rules! command_root {
 command_root! {
     command_names::SETTINGS_GET => shell_cmds::settings_get,
     command_names::SETTINGS_SET => shell_cmds::settings_set,
+    command_names::BULK_ECHO => bulk::bulk_echo,
 }
 
 #[cfg(test)]

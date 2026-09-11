@@ -53,6 +53,15 @@ import type { COMMAND_NAMES, IpcError, IpcResult } from "./bindings";
 export type CommandName = (typeof COMMAND_NAMES)[number];
 
 /**
+ * 生バイトで応答するコマンド名（要件 4.5）。生成物の `CommandName` から取り出す。
+ *
+ * `Extract` を使うのは、名前を 2 つ目の一覧として手書きしないためである。単一の源
+ * （`crates/app-shell/src/ipc/command_names.rs` の `COMMAND_NAMES`）から `bulk_echo` が
+ * 消えれば、この型は `never` になり、`invokeRaw` の呼び出しが型検査で落ちる。
+ */
+export type RawCommandName = Extract<CommandName, "bulk_echo">;
+
+/**
  * フロントエンド局所の失敗（要件 4.4）。`invoke` 自体の拒否を表す。
  *
  * 生成物の `IpcError` と同じく `kind` で判別され、`detail.message` に原因を運ぶ。
@@ -121,11 +130,16 @@ function describeRejection(cause: unknown): string {
 }
 
 /**
- * 通信境界を越える唯一の入口（要件 4.1）。Tauri の `invoke` へ委譲し、型付けだけを足す。
+ * 封筒を返すコマンドを呼ぶ入口（要件 4.1）。Tauri の `invoke` へ委譲し、型付けだけを足す。
  *
- * **すべてのコマンドは封筒 `IpcResult` そのものを返す**（design.md「CommandSurface」の
+ * **封筒を返すすべてのコマンドは `IpcResult` そのものを返す**（design.md「CommandSurface」の
  * 「すべてのコマンドは `IpcResult` を返す。例外に頼らない」、要件 4.2・4.4）。`invoke` は
  * その封筒に解決するので、本関数は**解決値を再包装せずそのまま返す**。
+ *
+ * **例外は生バイトの経路（要件 4.5）だけである。** `bulk_echo` は JSON を通さない
+ * `tauri::ipc::Response` で応答するため、封筒へ解決しない。その呼び出しには
+ * [`invokeRaw`] を使うこと（本関数を当てると、`application/octet-stream` のバイト列を
+ * 封筒として解釈することになり、`status` の分岐が成立しない。tasks.md 7.2）。
  *
  * 戻り値は常に判別可能な合併型である:
  * - 解決した封筒はそのまま返る。成功なら `data` がコマンドのペイロード、失敗なら `error` が
@@ -148,6 +162,37 @@ export async function invokeCommand<T>(
       error: { kind: "Frontend", detail: { message: describeRejection(cause) } },
     };
   }
+}
+
+/**
+ * 生バイトで応答するコマンドを呼ぶ入口（要件 4.5。design.md「CommandSurface」の大きな
+ * ペイロードの経路）。
+ *
+ * **封筒を意図的に通らない。** 応答は `tauri::ipc::Response` が `application/octet-stream`
+ * として配るため、`invoke` は `ArrayBuffer` へ解決する。`IpcResult` へは解決しないので、
+ * [`invokeCommand`] の戻り値（`status` で分岐する合併型）はこの経路には当てはまらない。
+ *
+ * 代償を明示する:
+ * - 封筒の `status: "error"` の腕は存在しない。**拒否（例外）として現れるのは経路そのものの
+ *   失敗だけ**（未知のコマンド、IPC の不在など）であり、呼び出し側は `try` / `catch` で扱う。
+ *   コマンド自身の誤用は拒否にならない: **中身のあるペイロードを送ったのに 0 バイトが返った
+ *   場合、それは空のデータではなく「生バイトでない引数」または「上限超過」の腕である**
+ *   （どちらの原因かは Rust 側の記録に警告として残る。`commands/bulk.rs` を参照）。
+ * - 引数は**バッファそのもの**を渡す。`{ payload: bytes }` のようにオブジェクトへ入れ子に
+ *   すると、Tauri は `Uint8Array` を `Array.from()` で数値の配列へ変換し、JSON として送る
+ *   （受け手は生バイトとして扱えず、空の応答と警告になる）。引数全体をバッファにすること。
+ * - 送ったバイトと返るバイトは同一である（受け手はエコーする）。100k 行規模のバッチは
+ *   **1 回の呼び出し**で渡す。行ごとに呼ぶコマンドは境界に存在しない。
+ *
+ * @param command 生バイトで応答するコマンド名（`RawCommandName`。生成物の合併型から導く）
+ * @param payload 引数全体として送るバッファ（`ArrayBuffer` またはその型付き配列）
+ * @returns 応答の生バイト。`application/octet-stream` のため `ArrayBuffer` になる
+ */
+export async function invokeRaw(
+  command: RawCommandName,
+  payload: ArrayBuffer | Uint8Array,
+): Promise<ArrayBuffer> {
+  return await invoke<ArrayBuffer>(command, payload);
 }
 
 // ---------------------------------------------------------------------------
@@ -217,3 +262,13 @@ export function describeGeneratedKindsOnly(error: IpcClientError): string {
  */
 // @ts-expect-error 生成された名前定数に無い文字列は `CommandName` に代入できない
 export const handWrittenCommandName: CommandName = "not_a_generated_command";
+
+/**
+ * 負例: 生バイトで応答しないコマンドを `RawCommandName` へ代入した利用側。
+ * `RawCommandName` は生成物の合併型から `bulk_echo` だけを取り出した型なので、
+ * 封筒を返す `settings_get` は代入できない。`@ts-expect-error` を外すと TS2322 で落ちる。
+ *
+ * **生バイトの経路と封筒の経路が型で混ざらない**ことの証拠である（要件 4.5。tasks.md 7.2）。
+ */
+// @ts-expect-error 封筒を返すコマンドは生バイト経路の入口へ渡せない
+export const envelopedCommandIsNotRaw: RawCommandName = "settings_get";

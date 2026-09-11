@@ -275,7 +275,7 @@
   - _Requirements: 4.1, 4.4, 4.6, 7.4_
   - _Depends: 2.1, 2.2, 2.4, 4.3, 6.1_
 
-- [ ] 7.2 大きなペイロードの経路を実装する
+- [x] 7.2 大きなペイロードの経路を実装する
   - 応答を JSON を経由しない形で返す経路を用意する。内容の種別が JSON でもテキストでもない場合、フロントエンドには生のバッファとして届く
   - 引数側で生のバイト列を送る場合、バッファが引数全体でなければならない。入れ子にすると数値の配列へ変換される
   - **行ごとに境界を越えることを必要としない形にする**
@@ -479,6 +479,11 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **7.2**: 生バイト経路は `bulk_echo(window: WebviewWindow, request: tauri::ipc::Request<'_>) -> tauri::ipc::Response` で、**7.1 の「全コマンドが封筒を返す」規則に対する唯一の意図的な例外**（封筒は JSON 直列化であり 4.5 が禁じる）。成功は生バイト（`application/octet-stream` → フロントエンドは `ArrayBuffer`）、**経路レベルの失敗（未知のコマンド・IPC 不在）だけが拒否**になり、フロントエンドは `kind: "Frontend"` へ写す。**コマンド自身は決して拒否しない**: 生バイトでない引数（入れ子）や上限超過（64 MiB）は**空の生応答 + Rust 側の警告**で解決する。呼び出し側は「中身のあるペイロードを送ったのに 0 バイトが返った」ことでこれを検出する（`invokeRaw` の doc に明記）。
+- **7.2**: フロントエンドは `invokeRaw(command: RawCommandName, payload: ArrayBuffer | Uint8Array): Promise<ArrayBuffer>`。`RawCommandName = Extract<CommandName, "bulk_echo">` なので、**`COMMAND_NAMES` から `bulk_echo` が消えると型が `never` になり呼び出しが型検査で落ちる**。
+- **7.2**: 引数は**バッファそのもの（引数全体）**でなければならない。`{ payload: bytes }` のように入れ子にすると Tauri が `Array.from()` を通して `InvokeBody::Json` として届く（実測: 受信 0 バイト + 警告）。
+- **7.2（実測）**: 10 万行（4,700,000 B）を**1 回の呼び出し**で往復、約 29〜34 ms、`isArrayBuffer: true` / `isUint8Array: false`、全バイト一致、Rust 側のログは 1 行だけ。**行ごとに境界を越える経路は存在しない**（この経路のコマンドは `bulk_echo` のみ）。
 
 - **7.1**: コマンド登録の根は `src-tauri/src/commands/mod.rs` の `command_root!` マクロで、**`tauri::generate_handler!` へ渡す一覧とテストが `COMMAND_NAMES` と突き合わせる一覧の両方の源**。規約: 各機能は自分のモジュール（`shell_cmds.rs` / `bulk.rs` …）に関数を置き、**根は列挙だけ**を行う。機械的な固定は 3 つ — ①登録名 ⊆ `COMMAND_NAMES`、②登録名 == ハンドラの関数名（Tauri は関数識別子をコマンド名にする）、③重複なし。加えて `const _: &[&str] = &[…]` で名前定数を参照し、改名・削除がテスト外でもコンパイルを壊す。**逆向き（配列 ⊆ 登録）は意図的に強制しない**（配列は後続タスクが名前を先に予約する場所）。
 - **7.1**: 境界に足した型（ts-rs は `src/ipc/mod.rs` のみ）: `SettingsValue`（`serde_json::Value` の新定型、`#[ts(type = "unknown")]`。`any` も整数型も出さない）、`SettingsGetRequest { key }`、`SettingsSetRequest { key, value }`、`SettingsResponse { context, key, value }`（`context` は **2.1 の `WindowContext` をそのまま使う**）、`SettingsResult = IpcResult<SettingsResponse, IpcError>`。**カタログ外の鍵は invoke の拒否ではなく封筒の error 腕**（`kind: Settings`）になる。
