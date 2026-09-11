@@ -137,7 +137,9 @@ esac
 # --- ビルドと配置 -----------------------------------------------------------
 cd "$repo_root"
 
-echo "sidecar-smoke を release でビルドします（ターゲット: $target）" >&2
+# 変数の直後に全角文字が続く展開は必ず `${...}` で区切る。macOS の bash は全角文字の
+# 先頭バイトまで変数名として読み、`set -u` の下で「unbound variable」になる。
+echo "sidecar-smoke を release でビルドします（ターゲット: ${target}）" >&2
 if [ -n "$explicit" ]; then
   cargo build -p sidecar-smoke --release --target "$target"
   build_dir="$repo_root/target/$target/release"

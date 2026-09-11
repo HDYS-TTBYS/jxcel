@@ -126,7 +126,7 @@ while [ "$elapsed" -lt "$timeout_secs" ]; do
   fi
 
   if [ "$died" = 0 ] && ! kill -0 "$pid" 2>/dev/null; then
-    echo "注意: 起動したプロセス（pid=$pid）が先に終了しました。ウィンドウの出現を待ち続けます" >&2
+    echo "注意: 起動したプロセス（pid=${pid}）が先に終了しました。ウィンドウの出現を待ち続けます" >&2
     died=1
   fi
 
@@ -135,7 +135,7 @@ while [ "$elapsed" -lt "$timeout_secs" ]; do
 done
 
 if [ "$died" = 1 ]; then
-  echo "NG: 起動したプロセスがウィンドウを出す前に終了しました（pid=$pid）" >&2
+  echo "NG: 起動したプロセスがウィンドウを出す前に終了しました（pid=${pid}）" >&2
   echo "--- アプリの出力（末尾）---" >&2
   if [ -f "$log" ]; then
     tail -n 40 "$log" >&2
