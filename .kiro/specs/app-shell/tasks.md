@@ -207,7 +207,7 @@
   - _Requirements: 8.1, 8.5_
   - _Depends: 4.4, 5.1_
 
-- [ ] 5.3 外部ネットワーク経路の遮断を設定する
+- [x] 5.3 外部ネットワーク経路の遮断を設定する
   - HTTP クライアントのプラグインを依存に入れない
   - 通信内容保護方針を設定し、接続先を通信境界の宛先だけに限定する
   - **設定漏れを起動時に検出する**。宛先の記述が欠けると呼び出しが警告 1 行だけを残して低速な文字列経路へ恒久的に降格するため、静かに壊れることを防ぐ
@@ -479,6 +479,12 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **5.3**: CSP は `default-src 'self'; connect-src ipc: http://ipc.localhost; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'`（`src-tauri/tauri.conf.json` は JSON なのでコメント不可。根拠は `lifecycle.rs::csp_config` の日本語 doc にある）。**`connect-src` は IPC の宛先 2 つだけ**で、これが無いと IPC の `fetch` が CSP に拒否されて**警告 1 行だけを残して低速な文字列経路へ恒久的に降格する**（tauri#12835）。`default-src 'self'` が明示していないディレクティブ（img/font/media/frame/worker 等）を閉じる。
+- **5.3**: **`style-src 'self'` で足りる。`'unsafe-inline'` を足してはならない。** React の `style={{…}}` は CSSOM 経由で適用されるため CSP の対象外であり、`index.html` のインライン `<style>` は Tauri がビルド時に注入するスタイル nonce で許可される（レビューで `'unsafe-inline'` を外してもピクセルが**バイト単位で同一**になることを実測）。当初これを誤って説明していた doc は訂正済み。
+- **5.3**: 起動時の確認は**コンパイル済みの実効 Config**（`context.config().app.security.csp`）を読み、`connect-src` を**集合として完全一致**で検査する（欠落・ワイルドカード・余分な宛先のいずれも拒否）。失敗は 5.1 の前提不成立経路（stderr + `jxcel-startup-error.log` + exit 1）。起動行に実効 `connect-src` を残す。**`csp_config` は `csp` を読むが、dev ビルドで Tauri が実際に配るのは `dev_csp.or(csp)`** である（現状 `devCsp` 未設定なので一致している。将来 `devCsp` を足すならこの検査も追随させること）。
+- **5.3**: HTTP クライアントのプラグイン/クレートは**デスクトップの依存グラフに存在しない**（`reqwest` / `hyper` は tauri の android/iOS 向け cfg 経由で `Cargo.lock` に現れるだけ）。capabilities は `core:default` のまま。
+- **5.3（検証の切り分け）**: CSP による**外部遮断の実測はヘッドレス Chromium**（同一の CSP を適用して `securitypolicyviolation` を観測。IPC の宛先は「ポリシー上は許可され、別層で失敗する」ことを区別して確認）、**WebKitGTK では描画が成立することのみ**を実測した。Windows / macOS の実行時強制は未検証（CI の 10.4 で扱う）。
 
 - **5.2**: `tauri-plugin-log` の設定を**明示的に上書き**する。`targets = [Stdout, Folder { path: 4.4 の log_dir(), file_name: Some("jxcel") }]`（`targets` は既定の `[Stdout, LogDir]` を**置換**するのでログが二重に出ない）、`max_file_size = MAX_LOG_FILE_BYTES`（8,000,000）、`rotation_strategy = KeepSome(KEEP_SOME_ARCHIVED_FILES)`（5）、`level` は 5.1 の設定ストアから `SettingsKey::DiagnosticsLevel` を読む。**保存先は `DiagnosticsPolicy::log_dir()` を唯一の源としてプラグインの Folder ターゲットに渡す**ので、プラグイン側の `LogDir` 解決と食い違いようがない。
 - **5.2**: **フロントエンドの記録（`Webview` ターゲット）は有効にしない**。購読側が前提になり capability も増えるため。`capabilities/default.json` は `core:default` のまま。

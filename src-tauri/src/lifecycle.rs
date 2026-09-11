@@ -26,6 +26,15 @@
 //! 起動時の確認は [`confirm_effective_logging`] が担う。手順の並びは [`run`] のとおりで、
 //! 記録機構は単一インスタンス（手順 2）の後・構築（手順 4）の前に登録する。
 //!
+//! タスク 5.3 が加えたのは**通信内容保護方針による外部ネットワーク経路の遮断と、その実効値の
+//! 起動時確認**である（要件 1.6、8.3）。方針そのものは `tauri.conf.json` の `app.security.csp`
+//! にあり、`connect-src` を通信境界（IPC）の宛先だけに限定する。取り出しは [`csp_config`]、
+//! 構築前の確認は [`confirm_csp_values`]、構築後の起動行と再確認は [`confirm_effective_csp`] が
+//! 担う。**`connect-src` に IPC の宛先が欠けると、通信境界の呼び出しが警告 1 行だけを残して
+//! 低速な文字列経路へ恒久的に降格する**（tauri#12835）ため、構築の前に落とす。
+//! HTTP クライアントのプラグインは依存に入れない（`src-tauri/Cargo.toml`。要件 1.6 の
+//! 「経路が構造的に存在しない」側の担保）。
+//!
 //! 本ファイルがまだ持たないもの（各タスクがここへ書き込む）:
 //!
 //! - タスク 5.4: 最後のウィンドウを閉じたときの終了と常駐慣習の扱い（要件 2.8, 2.9）。
@@ -36,6 +45,7 @@
 //! - タスク 6.1 / 9.6: 引き継いだ起動要求と、ウィンドウおよびドキュメントの対応付け。
 //!   [`present_window_for_request`] が seam である。
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,6 +54,7 @@ use std::sync::Arc;
 use app_shell::diagnostics::{self, DiagnosticsLevel};
 use app_shell::settings::{self, FileSettingsStore, RecoveredFrom, SettingsStore};
 use app_shell::sidecar::{SidecarSupervisor, Supervisor};
+use tauri::utils::config::{Csp, CspDirectiveSources};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_log::log::{self, LevelFilter};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
@@ -56,6 +67,12 @@ const PREREQUISITE_DIAGNOSTICS: &str = "診断情報の保存先";
 
 /// 起動を継続できない前提の名前: Tauri ランタイムとウィンドウの構築。
 const PREREQUISITE_RUNTIME: &str = "Tauri ランタイム";
+
+/// 起動を継続できない前提の名前: 外部ネットワーク経路の遮断（通信内容保護方針）。
+///
+/// 欠けた宛先を検査する側 (`confirm_csp_values`) が使う。**静かに壊れる種類の失敗**なので、
+/// 満たされなかった前提として名指しして起動を中止する（要件 1.4、1.6、8.3）。
+const PREREQUISITE_CSP: &str = "通信内容保護方針 (CSP)";
 
 /// 起動失敗の記録を残すファイル名。実行ファイルの隣、書けなければ OS の一時ディレクトリに置く。
 const STARTUP_FAILURE_FILE_NAME: &str = "jxcel-startup-error.log";
@@ -99,6 +116,16 @@ pub fn run() -> Result<(), StartupError> {
     //   自ら終了する（この関数は 2 つ目のプロセスでは戻らない）。
     let builder = register_single_instance(tauri::Builder::default());
 
+    // 手順 2.5: 通信内容保護方針の実効値を取り出し、外部への経路が塞がれていることを
+    //   構築の前に確認する（要件 1.6、8.3。タスク 5.3）。値は `generate_context!` が
+    //   `tauri.conf.json` から読み込んだ実効の `Config` から取る（定数の読み直しでも
+    //   ファイルの再読込でもない）。`connect-src` に IPC の宛先が欠けると、通信境界の呼び出しが
+    //   警告 1 行だけを残して低速な文字列経路へ恒久的に降格する（tauri#12835）ため、
+    //   構築の前に落とす。Tauri は同じ「前提不成立」の経路を利用者に提示する（要件 1.4）。
+    let context = tauri::generate_context!();
+    let csp = csp_config(context.config());
+    confirm_csp_values(&csp)?;
+
     // 手順 3: 診断の初期化。設定ストアと診断の保存先をここで解決・準備し、記録機構へ渡す
     //   実効設定（4.4 の方針値 + 設定から読んだ詳細度）を組み立てる。前提が満たせない場合は
     //   `?` で抜け、`main` が満たされなかった前提を名指しして非 0 で終了する（要件 1.4。
@@ -125,13 +152,17 @@ pub fn run() -> Result<(), StartupError> {
     //   **単一インスタンスの 2 つ目のプロセスはこの中で引数を引き渡して自ら終了する**
     //   （この関数は 2 つ目のプロセスでは戻らない）。
     let app = builder
-        .build(tauri::generate_context!())
+        .build(context)
         .map_err(|error| StartupError::new(PREREQUISITE_RUNTIME, error.to_string()))?;
 
     // 手順 4.5: 記録機構の実効設定を起動時に確認する（要件 8.1、8.5）。起動行を記録し、
     //   記録中のファイルが方針の保存先に現れたことを確かめる。書けなければ診断の保存先の
     //   前提不成立として報告する（無言で劣化させない）。
     confirm_effective_logging(&logging)?;
+
+    // 手順 4.6: 実効の `connect-src` を起動行として記録し、検査を再度通す（要件 1.6、8.3。
+    //   タスク 5.3）。ロガーは手順 4 で取り付けられたため、この行は方針の保存先へ残る。
+    confirm_effective_csp(&csp)?;
 
     // 手順 5: 残留プロセスの掃除（要件 5.6、タスク 3.5）。前回の実行が終了処理を走らせられずに
     //   残した補助プロセスを終了させる。
@@ -473,6 +504,167 @@ fn to_level_filter(level: DiagnosticsLevel) -> LevelFilter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 外部ネットワーク経路の遮断（要件 1.6, 8.3。タスク 5.3）
+// ---------------------------------------------------------------------------
+
+/// 通信内容保護方針の `connect-src` が許可しなければならない唯一の宛先（通信境界）。
+///
+/// `ipc:` は Linux / macOS の IPC カスタムプロトコル、`http://ipc.localhost` は Windows の
+/// IPC エンドポイントである（research.md「IPC の転送形式と大きなペイロード」）。3 OS が同一の
+/// `tauri.conf.json` を共有するため、両方を常に許可する。
+///
+/// **欠けると静かに壊れる。** 方針を設定した状態で `connect-src` にこの宛先が無いと、Tauri の
+/// `fetch` による IPC が拒否され、`console.warn` を 1 行残しただけで `postMessage` の文字列
+/// 経路へ**恒久的に降格する**（tauri#12835）。呼び出し自体は成功し続けるため気づきにくく、
+/// 大きなペイロード（要件 4.5）だけが目に見えず遅くなる。したがって起動時に検出して中止する。
+const REQUIRED_CONNECT_SRC: [&str; 2] = ["ipc:", "http://ipc.localhost"];
+
+/// 実効の通信内容保護方針のうち、起動時の確認（タスク 5.3）が対象にする部分。
+///
+/// **「実効値」であることの根拠**: 値は [`tauri::generate_context!`] が `tauri.conf.json`
+/// （およびプラットフォーム別の `tauri.<os>.conf.json`）から読み込んでコンパイル時に埋め込んだ
+/// [`tauri::Config`] から取り出す。実行時に `tauri.conf.json` を読み直すのでも、Rust の定数を
+/// そのまま読むのでもなく、**Tauri が各ウィンドウの応答ヘッダに載せる値そのもの**
+/// （`AppManager::csp` → `set_csp`）を検査する。Tauri は配信時に `script-src` / `style-src` へ
+/// nonce を足すが `connect-src` には触れないため、`connect-src` は設定値と配信値が一致する。
+///
+/// **`tauri.conf.json` にコメントを書けない**ため、方針を構成する各指示子の理由はこの Rust 側の
+/// doc に記す（下の [`csp_config`]）。
+struct CspConfig {
+    /// 実効の方針を 1 行にしたもの（起動行に出す）。
+    policy: String,
+    /// 実効の `connect-src` が許可する宛先（順序は保存しない）。
+    connect_src: Vec<String>,
+}
+
+/// `tauri.conf.json` の実効設定から通信内容保護方針を取り出す（タスク 5.3）。
+///
+/// 設定する方針（`app.security.csp`）と、各指示子を置く理由は次のとおりである。**方針は
+/// 「外部への経路を与えない」（要件 1.6）ことと「記録を外部へ送信しない」（要件 8.3）ことを
+/// 実行時に強制する唯一の機構であり、指示子が 1 つ欠けるとその経路が開く。**
+///
+/// - `default-src 'self'` — 明示しない全種別（画像・フォント・メディア・フレーム・
+///   `EventSource` など）の取得元を自前の資産だけに閉じる。**これが無いと、画像やフレームの
+///   読み込みという形で任意の外部オリジンへの経路が残る。**
+/// - `connect-src ipc: http://ipc.localhost` — `fetch` / `XMLHttpRequest` / `WebSocket` の
+///   接続先を通信境界（IPC）だけに限定し、`default-src` の `'self'` を上書きする。
+///   **これが欠けると IPC の `fetch` が CSP に拒否され、警告 1 行だけで低速な文字列経路へ
+///   恒久的に降格する**（[`REQUIRED_CONNECT_SRC`]）。同時に、外部オリジンへの接続は
+///   `ipc:` / `http://ipc.localhost` 以外すべて拒否される。
+/// - `script-src 'self'` — 実行できるコードを自前の資産だけにする。リモートスクリプトの
+///   読み込みは取得と実行の両方の経路になるため、ここを閉じる。Tauri は配信時に自前の
+///   初期化スクリプトへ nonce を足すが、それは `default-src` の `'self'` を緩めない
+///   （`script-src` を明示しても Tauri の初期化スクリプトは動作する）。
+/// - `style-src 'self'` — 自前の資産のスタイルだけを許す。**初期画面はこれで描画されるため
+///   `'unsafe-inline'` は不要である**（当初は必要と判断して付けていたが誤りだった。実測で
+///   画素が一致した）。(1) `src/shell/Layout.tsx` の `style={{ … }}` は React が CSSOM
+///   （`CSSStyleDeclaration`）経由で適用するため CSP の `style-src` の対象外であり、
+///   (2) `src/index.html` のインライン `<style>` はビルド時に Tauri の `__TAURI_STYLE_NONCE__`
+///   トークンが埋め込まれ、配信時に実 nonce へ置換されて `style-src` に載るためである
+///   （`tauri-codegen` の `inject_nonce_token` → `AppManager::set_csp`）。したがって
+///   `'unsafe-inline'` を外しても描画は変わらず、方針だけが厳しくなる。
+/// - `object-src 'none'` — プラグイン・埋め込みオブジェクトの読み込みを全面禁止する。
+///   `default-src 'self'` では自前オリジンからの埋め込みが残るため、経路を完全に塞ぐ。
+/// - `base-uri 'none'` — `<base href>` による相対 URL の基準の付け替えを禁止する。
+///   これが無いと、相対 URL が外部オリジンへ向け直される経路が残る。
+/// - `form-action 'none'` — フォーム送信を全面禁止する。**`form-action` は `default-src` の
+///   影響を受けない**（フォールバックが無い）ため、明示しなければフォーム送信という外部への
+///   経路が残る。
+///
+/// 指示子を増やす場合は、それが外部への経路を開かないことを確かめ、[`REQUIRED_CONNECT_SRC`]
+/// を緩めるなら [`confirm_csp_values`] の検査と本 doc を同時に更新すること。
+fn csp_config(config: &tauri::Config) -> CspConfig {
+    // 注意: dev ビルドでは Tauri が `dev_csp.or(csp)` を配信する（`AppManager::csp` は
+    // `is_dev()` のとき `dev_csp` を優先する）。`app.security.devCsp` は現在未設定なので
+    // `csp` がそのまま実効値であり、この取り出しは正確である。**将来 `devCsp` を設定するなら、
+    // この関数は dev 側の値も検査するよう更新すること**（さもないと起動時の確認だけが
+    // 実際に配信される方針を見落とす）。
+    csp_config_from(config.app.security.csp.as_ref())
+}
+
+/// [`csp_config`] の純粋な部分。`Csp` から実効の `connect-src` を取り出す。
+///
+/// 方針の解釈は [`Csp`] の `From<Csp> for HashMap`（`;` と空白で分割する。tauri-utils の
+/// 実装）に委ねる。**自前の文字列分割を書かない** — 配信時の解釈と食い違う余地を作らないため。
+fn csp_config_from(csp: Option<&Csp>) -> CspConfig {
+    let policy = csp.map(Csp::to_string).unwrap_or_default();
+    let connect_src = csp
+        .map(|csp| {
+            let directives: HashMap<String, CspDirectiveSources> = csp.clone().into();
+            directives
+                .get("connect-src")
+                .cloned()
+                .map(Vec::<String>::from)
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    CspConfig { policy, connect_src }
+}
+
+/// 構築の前に、実効の方針が IPC の宛先だけを許可していることを確かめる（要件 1.6、8.3）。
+///
+/// **静かに壊れることの防止が目的である。** `connect-src` が欠ける、片方の宛先が抜ける、
+/// 余分な宛先（外部オリジン・ワイルドカード）が混ざる、のいずれでも起動を中止する。
+/// **「IPC の宛先が含まれる」だけの部分一致にしない** — 外部オリジンを併記した方針も
+/// 要件 1.6 を破るため、集合の一致で判定する。
+///
+/// # Errors
+///
+/// 実効の `connect-src` が [`REQUIRED_CONNECT_SRC`] と一致しないとき [`StartupError`]
+/// （前提「通信内容保護方針 (CSP)」）。呼び出し元（`main`）が 5.1 の前提不成立経路
+/// （stderr + `jxcel-startup-error.log` + 非 0 終了）で提示する。
+fn confirm_csp_values(config: &CspConfig) -> Result<(), StartupError> {
+    if sorted(&config.connect_src) != sorted(&REQUIRED_CONNECT_SRC) {
+        return Err(StartupError::new(
+            PREREQUISITE_CSP,
+            format!(
+                "connect-src が通信境界の宛先だけを許可していない（実効値: {} / 必須: {}）。\
+                 connect-src に IPC の宛先が欠けると、通信境界の呼び出しが警告 1 行だけを残して\
+                 低速な文字列経路へ恒久的に降格する（tauri#12835）。tauri.conf.json の \
+                 app.security.csp を直すこと。",
+                show_sources(&config.connect_src),
+                show_sources(&REQUIRED_CONNECT_SRC),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// 構築の後に、実効の `connect-src` を起動行として記録し、**同じ検査を再度通す**
+/// （要件 1.6、8.3。タスク 5.3 の完了状態）。
+///
+/// 構築の後に置くのは、ロガーが手順 4 で初めて取り付けられるためである（これより前の
+/// `log::…!` はどこにも残らない）。保守担当はこの行で「どの宛先が実効で許可されているか」を
+/// 起動記録から確認できる。
+///
+/// # Errors
+///
+/// [`confirm_csp_values`] と同じ。構築を挟んだ後でも値が変わっていないことを確かめる。
+fn confirm_effective_csp(config: &CspConfig) -> Result<(), StartupError> {
+    log::info!(
+        "通信内容保護方針の実効 connect-src: {} / 方針全体: {}",
+        show_sources(&config.connect_src),
+        if config.policy.is_empty() { "(未設定)" } else { &config.policy },
+    );
+    confirm_csp_values(config)
+}
+
+/// 宛先の集合を比較・表示できる形に正規化する（複製してソートする）。
+fn sorted<S: AsRef<str>>(sources: &[S]) -> Vec<String> {
+    let mut normalized: Vec<String> = sources.iter().map(|s| s.as_ref().to_owned()).collect();
+    normalized.sort();
+    normalized
+}
+
+/// 宛先の並びを起動行・エラー文向けに 1 つの文字列にする。空なら「(なし)」と出す。
+fn show_sources<S: AsRef<str>>(sources: &[S]) -> String {
+    if sources.is_empty() {
+        return "(なし)".to_owned();
+    }
+    sources.iter().map(|s| s.as_ref()).collect::<Vec<_>>().join(" ")
+}
+
 /// 手順 3 が準備した状態。後続タスクが `AppHandle::state` から読む。
 ///
 /// 5.1 は準備と前提確認を行い、記録機構の登録（5.2）が保存先と設定ストアをここから消費する。
@@ -721,5 +913,67 @@ fn focus_window(window: &tauri::WebviewWindow) {
     }
     if let Err(error) = window.set_focus() {
         tauri_plugin_log::log::warn!("ウィンドウを前面に出せない: {error}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// テスト（タスク 5.3）: `connect-src` の検査が load-bearing であること
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::{confirm_csp_values, csp_config_from, CspConfig};
+    use tauri::utils::config::Csp;
+
+    /// 方針文字列から実効設定を組み立てる（本番の `csp_config` が `Config` から取り出すのと
+    /// 同じ経路を通す。方針の解釈をテスト側で二重実装しないための入口である）。
+    fn policy(text: &str) -> CspConfig {
+        csp_config_from(Some(&Csp::Policy(text.to_owned())))
+    }
+
+    #[test]
+    fn connect_src_with_exactly_the_ipc_destinations_is_accepted() {
+        let config = policy(
+            "default-src 'self'; connect-src ipc: http://ipc.localhost; script-src 'self'",
+        );
+        assert_eq!(config.connect_src.len(), 2);
+        assert!(confirm_csp_values(&config).is_ok());
+    }
+
+    #[test]
+    fn a_missing_ipc_destination_is_rejected_and_named() {
+        let error = confirm_csp_values(&policy("default-src 'self'; connect-src ipc:"))
+            .expect_err("欠けた宛先は拒否しなければならない");
+        assert!(
+            error.to_string().contains("http://ipc.localhost"),
+            "どの宛先が欠けているかを名指しする: {error}"
+        );
+    }
+
+    #[test]
+    fn an_extra_connect_destination_is_rejected() {
+        assert!(
+            confirm_csp_values(&policy(
+                "connect-src ipc: http://ipc.localhost https://example.com"
+            ))
+            .is_err(),
+            "IPC 以外の宛先を許可してはならない"
+        );
+    }
+
+    #[test]
+    fn a_wildcard_connect_destination_is_rejected() {
+        assert!(
+            confirm_csp_values(&policy("connect-src ipc: http://ipc.localhost *")).is_err(),
+            "ワイルドカードを許可してはならない"
+        );
+    }
+
+    #[test]
+    fn an_absent_connect_src_is_rejected() {
+        assert!(
+            confirm_csp_values(&policy("default-src 'self'")).is_err(),
+            "connect-src の記述漏れを検出しなければならない"
+        );
     }
 }
