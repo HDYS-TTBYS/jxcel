@@ -45,7 +45,7 @@
   - _Requirements: 6.1, 6.2, 6.7_
   - _Depends: 1.1, 1.3, 1.4_
 
-- [ ] 1.6 機構検証用の最小の補助プロセスを作る
+- [x] 1.6 機構検証用の最小の補助プロセスを作る
   - 親プロセスの識別子を受け取って監視し、親が消えたら自己終了する実行ファイルを作る
   - 標準出力へ応答を返すだけの機能を持たせる。実用的な機能は持たせない
   - **完了状態**: 親プロセスを強制終了させると、この補助プロセスが一定時間内に自ら終了することがテストで確認できる
@@ -479,6 +479,10 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **1.6**: `crates/sidecar-smoke` は `--parent-pid <PID>` を受け取り、**100 ms 間隔**で親を監視して消えたら exit 0 で自己終了する。Unix の判定は「自分が監視対象の直接の子である場合は `getppid()` が監視対象から離れたこと」と「`kill(pid, 0)` が ESRCH を返すこと」の併用である。**`kill(pid,0)` は未回収のゾンビにも成功する**ため、後者だけでは足りない（Linux で実測確認済み）。Windows は `OpenProcess(PROCESS_SYNCHRONIZE)` + `WaitForSingleObject(handle, 0)`。引数欠落・不正は stderr に usage を出して **exit 2**、正常な自己終了は **exit 0**。stdout は起動行＋stdin の行ごとの応答で、毎行 flush する。
+- **1.6 → 3.5 への申し送り**: 監視対象が**直接の親ではない**かつ**未回収のゾンビ**である場合、この機構では死を検出できない（`kill(pid,0)` がゾンビに成功し、reparent 判定は直接の親でないため効かない）。監督（3.2）は直接 spawn するので実際の経路は直接の親側であり問題ないが、**3.5 の孤児掃除が唯一の backstop である**という前提を崩さないこと。3.5 は PID と実行ファイル名の両方で照合する。
+- **環境**: `~/.local/bin/xcargo` で `cargo check --target x86_64-pc-windows-msvc` / `aarch64-apple-darwin` ができる（rustup target 導入済み・リンカ不要）。cfg(windows) / cfg(unix) の分岐を含む変更では**必ず両ターゲットでコンパイル検証する**こと。1.6 の Windows 分岐はこれで警告なしに通ることを確認済み。
 
 - **1.5**: 配布物は `npx tauri build --bundles <OS 別>` で作る（Linux `appimage,deb` / macOS `app,dmg` / Windows `nsis`）。ローカル実測: **AppImage 76 MB（79,559,160 B）**、deb 2.8 MB、素の release バイナリ 11 MB。research.md の「WebKitGTK 同梱で約 76 MB」と一致。CI の Linux は**最古の対象環境 `ubuntu-22.04`** に固定した（1.1 の `ubuntu-latest` から変更）。
 - **1.5**: **`actions/upload-artifact` は実行権限を保持しない。** 10.2 が配布物から補助プロセスや実行ファイルを取り出す際は権限の復元が要る。1.7 の Linux 配置検証でも同じ前提に立つこと。

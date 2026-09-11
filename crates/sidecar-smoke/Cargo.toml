@@ -17,6 +17,23 @@ description = "jxcel 補助プロセス機構の検証専用ヘルパー（配�
 #    名前から分かること）。
 # 3. tauri には依存しない（`crates/` 配下のドメインクレートに適用される規則。
 #    ワークスペース直下の依存ポリシーを参照）。
-# 4. 実体（親プロセスの監視と標準出力への応答）はタスク 1.6 が追加する。
+# 4. 親プロセスの監視と標準出力への応答が本クレートの役割のすべてである。プロトコル・
+#    JSON・引数解析フレームワーク・記録機構・設定読み取り・その他の「実用的な機能」を
+#    足してはならない（design.md「Out of Boundary」）。依存も監視に必要な最小限に限る。
+# 5. プラットフォーム別依存は条件付きコンパイルで切る。他方のプラットフォームのビルドには
+#    これらのクレートが一切現れない（crates/app-shell がタスク 1.2 で採った形を踏襲する）。
 # ---------------------------------------------------------------------------
 [dependencies]
+
+[target.'cfg(unix)'.dependencies]
+# 親の生存確認（`kill(pid, 0)`）と、自身が監視対象から reparent されたかの確認
+# （`getppid()`）に使う。`/proc` を持たない macOS でも同じ経路が動く（main.rs の
+# `parent_alive` を参照）。既定 feature のみで足りる。
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# 親の終了をプロセスハンドルで待つ（`OpenProcess` + `WaitForSingleObject`）ために使う。
+# features は必要な最小集合である:
+#   - Win32_Foundation: HANDLE / CloseHandle / WAIT_OBJECT_0 / WAIT_TIMEOUT
+#   - Win32_System_Threading: OpenProcess / WaitForSingleObject / PROCESS_SYNCHRONIZE
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
