@@ -229,7 +229,7 @@
   - _Requirements: 8.2_
   - _Depends: 5.2_
 
-- [ ] 5.6 アプリ終了時の補助プロセス終了を結線する
+- [x] 5.6 アプリ終了時の補助プロセス終了を結線する
   - アプリケーションの終了時に、起動したすべての補助プロセスを終了させる
   - **基盤側の終了時清掃に頼らない**。採用する起動方法で起動した子は基盤側の清掃対象に入らず、破棄処理も持たない
   - 検証のため、監督を直接呼んで補助プロセスを 1 つ起動した状態を作る。配布物経由の経路が通るのは補助プロセスのホストが揃ってからである
@@ -479,6 +479,12 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **5.6**: 補助プロセスの終了は **`RunEvent::Exit` で `shutdown_all()` を同期実行**して結線する。tauri 2.11.5 はこのコールバックを `cleanup_before_exit` より前に呼ぶので、**`request_exit`（`app.exit(0)`）と最後のウィンドウを閉じる経路の両方**がここに到達する。**基盤側の終了時清掃には頼れない**（`tauri-plugin-shell` は依存にすら無く、子はコアの `Command::new` が起動しているので同プラグインの登録対象外）。
+- **5.6**: **猶予はプラットフォーム別に選ぶ**。`sidecar_supervisor()` が `with_grace(SIDECAR_SHUTDOWN_GRACE)` を渡し、**Unix はコア既定の 3 秒、Windows は 300 ms**。Windows の穏当段 `CTRL_BREAK_EVENT` はコンソールを持たない GUI の子へ届かないため、3 秒待つのは**イベントループが止まったまま見える 3 秒の凍結**にしかならない（3.3 が先送りした判断をここで下した）。300 ms はコンソール起動時の協調の機会を残しつつ体感不能。**コアの定数は変えていない**（`with_grace` はテスト seam として用意されていたものを production でも使う）。
+- **5.6**: 終了ログは「終了を完了した（対象として観測: N 件）」と**実際に観測した対象**を述べる形にした（`shutdown_all` の前に生存を数えるため、8.1 以降の並行 `ensure` 下では終了件数とは一致しえない）。空のときは「終了時点で起動している補助プロセスは観測されなかった」。
+- **5.6**: 異常経路はこのコードを通らない。**Unix の実効的な機構は子自身の親監視**（`--parent-pid`。実測で SIGKILL の 55〜112 ms 後に消える）、Windows は Job Object、その backstop が 3.5 の起動時掃除である（`killpg` は `shutdown_all` の中でしか走らない）。
+- **5.6（軽微・コア側の残件）**: `crates/app-shell/src/sidecar/supervisor.rs` の `with_grace` の doc は「テスト seam であり production は `DEFAULT_GRACE`」と書いてあるが、**production は `SIDECAR_SHUTDOWN_GRACE` を渡すようになった**。挙動に影響は無いが、次にコアを触るときに文面を直すこと。
 
 - **5.5**: panic hook を診断ステップ（`init_diagnostics` の末尾、`Builder::build` より前）で設置し、**専用の `jxcel-crash.log`** を方針のログディレクトリへ `settings::atomic::replace_with`（同一ディレクトリの一時ファイル → write/flush/`sync_all` → rename → Unix は親ディレクトリ fsync）で書く。**ログプラグイン経由にしない理由**: 設置時点でプラグインはまだ存在せず起動時パニックを取りこぼす／プラグインはバッファするので死ぬ前に書けない／プラグインのアクティブファイルへ追記すると `current_size` のローテーション会計が狂う。
 - **5.5**: **プラグインのローテーションは `jxcel-crash.log` を消せない**（`remove_old_files` は `<stem>_<date>.log` にしかマッチしない。ソースと実測の両方で確認済み）。サイズは `MAX_CRASH_RECORD_BYTES = 64 KiB` で、**`const _: () = assert!(MAX_RETAINED_LOG_BYTES + MAX_CRASH_RECORD_BYTES <= MAX_TOTAL_LOG_BYTES)`** がコンパイル時に 8.5 を守る。**置換（追記ではない）**なので古い記録は破棄される。長すぎる記録は UTF-8 文字境界で切詰め、切詰めマーカー行を付ける。

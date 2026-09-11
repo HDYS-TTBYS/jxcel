@@ -56,6 +56,20 @@
 //! が担う。**異常終了の引き金は 5.4 の検証専用の環境変数に統合した**（[`VERIFY_EXIT_ENV`] の
 //! 値が `panic:<ミリ秒>` のとき意図的にパニックする。片付けは 1 箇所のままである）。
 //!
+//! タスク 5.6 が加えたのは**アプリ終了時の補助プロセスの終了**である（要件 5.6）。監督
+//! （[`Supervisor`]）をアプリの管理状態として 1 実体だけ所有し（[`sidecar_supervisor`]）、
+//! 通常終了でプロセスが終わる直前に必ず届く唯一のイベント [`RunEvent::Exit`] で
+//! `shutdown_all` を**同期で**呼ぶ（[`shutdown_sidecars`]）。**基盤側の終了時清掃には依存
+//! しない** — この子は Rust が `std::process::Command` で起動しており、`tauri-plugin-shell` は
+//! 依存にすら入っていない（同プラグインの終了時清掃は JS→IPC 経路で起動した子だけを対象と
+//! する）。強制終了やパニックではイベントループを経由せず `RunEvent::Exit` が届かないため、
+//! それらの経路は次の機構が覆う: **Unix は補助プロセス自身の親監視**（1.6 / 3.5 が
+//! `--parent-pid` を注入し、親が消えたら子が自己終了する。`killpg` は `shutdown_all` の内側で
+//! しか走らないため、SIGKILL の後の Unix には届かない）、**Windows は Job Object の
+//! `KILL_ON_JOB_CLOSE`**（3.3。カーネルが強制するため親の異常終了後も有効な唯一の機構）。
+//! 起動時の残留掃除（[`sweep_orphans_at_startup`]）が最後の backstop である。終了時に待つ猶予は
+//! プラットフォームで分ける（[`SIDECAR_SHUTDOWN_GRACE`]）。
+//!
 //! 本ファイルがまだ持たないもの（各タスクがここへ書き込む）:
 //!
 //! - タスク 7.4 / 7.5: メニューの「終了」項目。[`request_exit`] を呼ぶこと。
@@ -63,6 +77,9 @@
 //!   [`reserve_render_fallback_point`] の中身を埋める。
 //! - タスク 6.1 / 9.6: 引き継いだ起動要求と、ウィンドウおよびドキュメントの対応付け。
 //!   [`present_window_for_request`] が seam である。
+//! - タスク 8.1: 補助プロセスの実行ファイルの絶対パスの解決（プラットフォーム別）と、出力の
+//!   診断連携。[`sidecar_supervisor`] が監督の唯一の生成点であり、8.1 はそこへ解決済みの
+//!   期待パスを流し込み、`AppHandle::state` から同じ実体を取って `ensure` する。
 
 use std::backtrace::{Backtrace, BacktraceStatus};
 use std::collections::HashMap;
@@ -77,7 +94,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use app_shell::diagnostics::{self, DiagnosticsLevel};
 use app_shell::settings::{self, FileSettingsStore, RecoveredFrom, SettingsStore};
-use app_shell::sidecar::{SidecarSupervisor, Supervisor};
+use app_shell::sidecar::integrity::BUILD_TARGET_TRIPLE;
+use app_shell::sidecar::{SidecarKind, SidecarSpec, SidecarSupervisor, Supervisor};
 use tauri::utils::config::{Csp, CspDirectiveSources};
 use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_log::log::{self, LevelFilter};
@@ -199,6 +217,10 @@ pub fn run() -> Result<(), StartupError> {
     // 明示的な終了の掛け金（5.4）。終了要求のコールバックがここから読む。
     let builder = builder.manage(ExitControl::default());
     let builder = builder.manage(startup);
+    // 補助プロセスの監督（要件 5.6。タスク 5.6）。アプリ全体で 1 実体だけ所有し、起動時の
+    // 残留掃除（手順 5）と終了時の終了（[`shutdown_sidecars`]）が同じ登録簿を見るようにする。
+    // 8.1 の `SidecarHost` は `AppHandle::state` からこの実体を取って `ensure` する。
+    let builder = builder.manage(sidecar_supervisor());
 
     // 手順 4: 構築。ここで GTK / WebKit のランタイムと、登録順に各プラグインが初期化される。
     //   **記録機構のロガーもここで取り付けられる**（`tauri-plugin-log` の `setup`）。そのため
@@ -237,7 +259,7 @@ pub fn run() -> Result<(), StartupError> {
     //   持った時点で実害になる）。単一インスタンスの判定は手順 4 のプラグイン初期化で行われるため、
     //   **生存している側だけがこの位置に到達する。**ここは依然として「アプリが使えるように
     //   なる前」である — ウィンドウは手順 6 の `RunEvent::Ready` で初めて作られる。
-    let swept = sweep_orphans_at_startup();
+    let swept = sweep_orphans_at_startup(app.handle());
     // 記録機構は手順 3.5 で登録済みであり、この行は方針の保存先（要件 8.1）へ残る。
     log::info!("残留プロセスの掃除で {swept} 件を終了した");
 
@@ -283,10 +305,64 @@ fn register_single_instance(builder: tauri::Builder<tauri::Wry>) -> tauri::Build
 ///
 /// 掃除は最善努力であり、失敗を報告しない（戻り値は終了させた数だけである。[`Supervisor`] の
 /// 契約）。起動を止めてはならない（要件 5.4 の精神）。
-fn sweep_orphans_at_startup() -> usize {
-    let supervisor = Supervisor::new().with_expected_executables(expected_sidecar_executables());
-    supervisor.sweep_orphans()
+///
+/// **アプリの管理状態にある監督（[`sidecar_supervisor`]）を使う。**ここで別の実体を作ると、
+/// 8.1 が解決した期待パスが掃除側にだけ効き、終了時の終了（[`shutdown_sidecars`]）とは別の
+/// 登録簿を見ることになる。
+fn sweep_orphans_at_startup(app: &AppHandle) -> usize {
+    app.state::<Supervisor>().sweep_orphans()
 }
+
+/// アプリ全体で 1 つの監督を作る。**タスク 8.1 が差し替える seam である。**
+///
+/// 8.1（`src-tauri/src/sidecar_host.rs`）は補助プロセスの実行ファイルをプラットフォーム別に
+/// 解決し、その絶対パスを [`expected_sidecar_executables`] へ流す。Linux は
+/// `usr/share/jxcel/sidecar-smoke`、Windows / macOS は実行ファイルの隣（`externalBin`）である
+/// （tasks.md 1.7 の配置規約）。解決が入るまでは期待パスの集合が空なので、残留の掃除は実行
+/// ファイル名の一致だけで働く（[`Supervisor::with_expected_executables`] の既定）。
+///
+/// **この 1 実体を起動時の掃除（[`sweep_orphans_at_startup`]）と終了時の終了
+/// （[`shutdown_sidecars`]）が共有する。**2 つ作ると、8.1 が解決した期待パスが掃除側にだけ
+/// 効いたり、終了時に別の登録簿を見て起動済みの子を取り逃したりする。
+///
+/// 終了の猶予は [`SIDECAR_SHUTDOWN_GRACE`] を明示的に与える（`shutdown_all` はこの値を
+/// 使って猶予段の満了まで `RunEvent::Exit` のコールバックを待たせるため、プラットフォーム差が
+/// そのまま終了時の凍結時間になる）。
+fn sidecar_supervisor() -> Supervisor {
+    Supervisor::new()
+        .with_expected_executables(expected_sidecar_executables())
+        .with_grace(SIDECAR_SHUTDOWN_GRACE)
+}
+
+/// 補助プロセスの終了に与える猶予。**プラットフォームで分ける**（タスク 5.6 が決めた。
+/// 3.3 の申し送りが「短縮するなら穏当段が届かない環境では猶予を待たない判断が要る」として
+/// 5.6 に委ねたもの）。
+///
+/// **Unix は 3.3 の既定（`DEFAULT_GRACE` = 3 秒）のまま。**穏やかな段（プロセスグループ宛の
+/// `SIGTERM`）が実際に届き、子は通常ミリ秒で終了するため、上限まで待つのは「猶予信号を無視した」
+/// 場合だけである（実測でも約 22 ms）。
+///
+/// **Windows は 300 ms に短縮する。**Windows の穏やかな段は
+/// `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT)` であり、コンソールを持たない GUI プロセス
+/// （release は `windows_subsystem = "windows"`）の子には**実質 no-op** である。`terminate` は
+/// `signal_graceful` の失敗を無視して猶予の満了まで待つため、既定の 3 秒を与えると
+/// **終了のたびに約 3 秒の無反応な凍結**が起きる。しかも [`RunEvent::Exit`] のコールバックは
+/// `cleanup_before_exit` より前に走り、ウィンドウを残したままイベントループを止めているので、
+/// その凍結は利用者に見える。300 ms は次の妥協である:
+///
+/// - 失うもの: 穏やかな段に協力したはずの補助プロセスが、猶予の満了を待たずに強制段
+///   （`TerminateJobObject`）で終了させられる。**補助プロセスは終了する**（要件 5.6 は満たす）が、
+///   書きかけの出力を流す機会を失いうる。
+/// - 得るもの: 終了時の凍結が知覚されにくい長さ（おおむね 100〜200 ms 未満が体感の閾値と
+///   される）に収まる。コンソールから起動された場合は `CTRL_BREAK_EVENT` が届く余地も残る。
+///
+/// **この値は Windows ではコンパイル検証しかしていない**（この環境に Windows 実機が無い。
+/// 5.1 の申し送りと同じ制約）。実機で計測したら更新すること。
+const SIDECAR_SHUTDOWN_GRACE: std::time::Duration = if cfg!(windows) {
+    std::time::Duration::from_millis(300)
+} else {
+    app_shell::sidecar::supervisor::DEFAULT_GRACE
+};
 
 /// 残留の掃除が名前の一致に加えて要求する「このアプリの補助プロセスの実行ファイルの絶対パス」。
 ///
@@ -1290,6 +1366,9 @@ fn focus_window(window: &tauri::WebviewWindow) {
 /// - `exit:<ミリ秒>`: 同上（明示形）
 /// - `panic:<ミリ秒>`（5.5 が足した形）: [`VerificationAction::Panic`] — **意図的なパニックで
 ///   プロセスを異常終了させ、異常終了の記録（要件 8.2）を実測するために使う**
+/// - `sidecar:<ミリ秒>`（5.6 が足した形）: [`VerificationAction::Sidecar`] — **監督を直接呼んで
+///   補助プロセスを 1 つ起動し、その ms 後に通常終了する**。終了時に補助プロセスが残らないこと
+///   （要件 5.6）を実測するために使う
 ///
 /// **動作の選択を別の環境変数に分けない。**分けると「検証専用の引き金」の片付けが 2 箇所に
 /// なってしまう。7.4 / 7.5 が片付ける対象はこの 1 つ（+ [`arm_verification_exit_trigger`] と
@@ -1303,6 +1382,11 @@ enum VerificationAction {
     Exit,
     /// 意図的なパニック（5.5 が足した動作）。**メインスレッドで**起こす。
     Panic,
+    /// **監督を直接呼んで補助プロセスを 1 つ起動した状態を作る**（タスク 5.6 が足した動作）。
+    /// 終了時に残らないことを実測するために使う。起動は直ちに行い、`<ミリ秒>` は他の動作と
+    /// 同じく終了までの待ちである。配布物経由の起動経路（8.1 の `SidecarHost`）が揃うまでの
+    /// 代用であり、その時点でこの動作は不要になる。
+    Sidecar,
 }
 
 impl VerificationAction {
@@ -1311,6 +1395,7 @@ impl VerificationAction {
         match name {
             "exit" => Some(Self::Exit),
             "panic" => Some(Self::Panic),
+            "sidecar" => Some(Self::Sidecar),
             _ => None,
         }
     }
@@ -1320,6 +1405,7 @@ impl VerificationAction {
         match self {
             Self::Exit => "exit",
             Self::Panic => "panic",
+            Self::Sidecar => "sidecar",
         }
     }
 }
@@ -1448,11 +1534,75 @@ fn handle_run_event(app: &AppHandle, event: RunEvent) {
         }
         // 起動の完了時に検証専用の引き金を用意する。環境変数が無ければ何もしない。
         RunEvent::Ready => arm_verification_exit_trigger(app),
+        // 通常終了でプロセスが終わる直前の最後の同期点（要件 5.6。タスク 5.6）。
+        RunEvent::Exit => shutdown_sidecars(app),
         #[cfg(target_os = "macos")]
         RunEvent::Reopen {
             has_visible_windows, ..
         } => handle_reopen(app, has_visible_windows),
         _ => {}
+    }
+}
+
+/// 通常終了でプロセスが終わる直前に、監督経由で起動したすべての補助プロセスを同期的に終了させる
+/// （要件 5.6。タスク 5.6）。
+///
+/// **使うイベントは [`RunEvent::Exit`] である。**tauri 2.11.5 の `App::make_run_event_loop_callback`
+/// は `RuntimeRunEvent::Exit` でこのコールバックを呼んだ**後**に `cleanup_before_exit` を呼ぶため、
+/// `RunEvent::Exit` は「通常終了でプロセスが終わる前の最後の同期点」である。`RunEvent::ExitRequested`
+/// は拒否できる段であり、macOS の常駐で拒否された場合は終了しないため使わない。2 つの通常終了
+/// 経路の双方が `ControlFlow::Exit` を経て `Event::LoopDestroyed` で `RunEvent::Exit` に到達する:
+///
+/// - [`request_exit`] → `app.exit(0)` → `ExitRequested { code: Some(0) }`（wry 2.11.4 の
+///   `Message::RequestExit`）
+/// - 最後のウィンドウを閉じる → `ExitRequested { code: None }`（wry 2.11.4 の
+///   `TaoWindowEvent::Destroyed` でウィンドウが空になったとき）
+///
+/// **基盤側の終了時清掃には依存しない。**子は Rust の [`Supervisor`] が `std::process::Command`
+/// で起動しており、`tauri-plugin-shell` は依存にすら入っていない（同プラグインの終了時清掃は
+/// JS→IPC 経路で起動した子だけを対象とする）。tauri の `cleanup_before_exit` は資源表を空に
+/// するだけで、Rust から起動した子を登録簿に持たない（この関数はそれより前に走る）。
+///
+/// **待ち時間はこのコールバックを止める。**`shutdown_all` は猶予段の満了まで待つため、与える
+/// 猶予がそのまま終了時の凍結になる。したがって監督には [`SIDECAR_SHUTDOWN_GRACE`] を与える
+/// （Unix は 3.3 の既定 3 秒のまま。Windows は穏やかな段が届かず待つ意味が無いため 300 ms）。
+///
+/// **このコードは通常終了でしか走らない。**強制終了（`SIGKILL` / `TerminateProcess`）やパニック
+/// による異常終了はイベントループを経由せず `RunEvent::Exit` が届かない（research.md
+/// 「サイドカーのライフサイクル」）。それらを覆うのは **Unix では補助プロセス自身の親監視**
+/// （1.6 / 3.5 の `--parent-pid`。`killpg` はこの関数の内側でしか走らないため、SIGKILL の後の
+/// Unix には届かない）と、**Windows では Job Object の `KILL_ON_JOB_CLOSE`**（3.3。カーネルが
+/// 強制するため親の異常終了後も有効な唯一の機構）である。[`sweep_orphans_at_startup`] が最後の
+/// backstop である。
+fn shutdown_sidecars(app: &AppHandle) {
+    let supervisor = app.state::<Supervisor>();
+    // 起動中の種類を先に数える（core の `shutdown_all` は件数を返さないため、core の契約を
+    // 広げずにここで数える）。`get` は死んでいる登録を除去するので、数え漏れない。
+    //
+    // **数は「この時点で観測した対象」であり、実際に終了させた件数ではない。**この後
+    // `shutdown_all` が登録簿を空にするまでの間に 8.1 が `ensure` した子は、この数に現れない
+    // （`shutdown_all` は登録簿のロックを保持して終わるので、取り逃すことはない）。記録の
+    // 文言もその区別に合わせる。
+    let observed: Vec<&'static str> = SidecarKind::ALL
+        .iter()
+        .filter(|kind| supervisor.get(**kind).is_some())
+        .map(|kind| kind.as_str())
+        .collect();
+    if observed.is_empty() {
+        log::info!("終了時点で起動している補助プロセスは観測されなかった");
+        return;
+    }
+    match supervisor.shutdown_all() {
+        Ok(()) => log::info!(
+            "補助プロセスの終了を完了した（対象として観測: {} 件: {}）",
+            observed.len(),
+            observed.join(", "),
+        ),
+        Err(error) => log::error!(
+            "補助プロセスの終了に失敗した（対象として観測: {} 件: {}）: {error}",
+            observed.len(),
+            observed.join(", "),
+        ),
     }
 }
 
@@ -1474,21 +1624,23 @@ fn handle_reopen(app: &AppHandle, has_visible_windows: bool) {
     present_existing_or_create(app);
 }
 
-/// 明示的な終了（[`request_exit`]）または意図的なパニックを、環境変数で実測するための
-/// **検証専用**の引き金（[`VERIFY_EXIT_ENV`]）。
+/// 明示的な終了（[`request_exit`]）、意図的なパニック、または補助プロセスの起動を、環境変数で
+/// 実測するための**検証専用**の引き金（[`VERIFY_EXIT_ENV`]）。
 ///
 /// メニュー項目（7.4 / 7.5）が作られる前は、[`request_exit`] を人手で呼ぶ経路が無い。環境変数
 /// に `<ミリ秒>`（または `exit:<ミリ秒>`）が設定されているときだけ、その時間だけ待ってから
 /// [`request_exit`] を呼ぶ。`panic:<ミリ秒>` のときは代わりに**意図的なパニック**を起こし、
-/// 異常終了の記録（要件 8.2）を実測できるようにする（5.5 が足した形）。**環境変数が無い通常の
-/// 起動では関数の先頭で即座に戻るので何もしない**（解釈できない値のときも何もしない）。
+/// 異常終了の記録（要件 8.2）を実測できるようにする（5.5 が足した形）。`sidecar:<ミリ秒>` の
+/// ときは**直ちに監督を直接呼んで補助プロセスを 1 つ起動**し（[`start_verification_sidecar`]）、
+/// その ms 後に通常終了する（5.6 が足した形。終了時に残らないことを実測する）。**環境変数が
+/// 無い通常の起動では関数の先頭で即座に戻るので何もしない**（解釈できない値のときも何もしない）。
 /// したがって配布物の既定の振る舞いを変えない。
 ///
 /// 7.4 / 7.5 がメニュー項目を結線したら、この引き金は不要になる。残す場合もメニューの経路を
 /// 置き換えてはならない（引き金は環境変数が設定された検証のときだけ働く）。
 ///
 /// **名前は 5.4 のままにしてある**（tasks.md の 5.4 の申し送りが片付け対象としてこの名前を
-/// 指しているため）。動作は 2 つを選べるが、仕組みは 1 つのままである。
+/// 指しているため）。動作は 3 つを選べるが、仕組みは 1 つのままである。
 fn arm_verification_exit_trigger(app: &AppHandle) {
     let Ok(value) = std::env::var(VERIFY_EXIT_ENV) else {
         return;
@@ -1502,10 +1654,15 @@ fn arm_verification_exit_trigger(app: &AppHandle) {
         "検証専用の引き金が有効である: {delay_ms} ms 後に {} を行う",
         action.name(),
     );
+    // 補助プロセスの起動は**待たずに直ちに行う**（`<ミリ秒>` は終了までの待ちである。
+    // アプリが生きている間に補助プロセスが動いていることを外部から観測できるようにする）。
+    if action == VerificationAction::Sidecar {
+        start_verification_sidecar(&app);
+    }
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(delay_ms));
         match action {
-            VerificationAction::Exit => request_exit(&app),
+            VerificationAction::Exit | VerificationAction::Sidecar => request_exit(&app),
             // **パニックはメインスレッドで起こす。**ほかのスレッドで起こしたパニックはその
             // スレッドを終わらせるだけでプロセスは生き続けるため、「意図的に異常終了させる」を
             // 満たさない。`run_on_main_thread` はイベントループへ処理を渡すので、パニックは
@@ -1521,8 +1678,65 @@ fn arm_verification_exit_trigger(app: &AppHandle) {
     });
 }
 
+/// 検証専用: 監督を直接呼んで補助プロセスを 1 つ起動する（タスク 5.6）。
+///
+/// **配布物経由の起動経路の代用である。**プラットフォーム別の実行ファイルの解決と、整合性検査を
+/// 通した起動を束ねるのは 8.1（`sidecar_host.rs`）の責務であり、ここは 1.7 の同梱原本の置き場
+/// （[`verification_sidecar_path`]）を直接指して「監督経由で起動した状態」を作る。これは
+/// [`VERIFY_EXIT_ENV`] が設定された検証のときだけ通る経路であり、通常の起動では呼ばれない。
+///
+/// 起動の失敗は記録に残す（**検証の失敗を無言にしない**）。失敗してもアプリは通常終了の経路へ
+/// 進むので、終了時の終了処理そのものは実測できる。
+fn start_verification_sidecar(app: &AppHandle) {
+    let executable = verification_sidecar_path();
+    let spec = SidecarSpec {
+        kind: SidecarKind::Smoke,
+        executable: executable.clone(),
+        args: Vec::new(),
+    };
+    // アプリの管理状態にある監督（[`sidecar_supervisor`]）へ登録する。終了時の終了
+    // （[`shutdown_sidecars`]）が同じ登録簿を見るため、この子は通常終了で終了される。
+    match app.state::<Supervisor>().ensure(&spec) {
+        Ok(handle) => log::info!(
+            "検証用の補助プロセスを起動した: kind={} pid={} executable={}",
+            handle.kind().as_str(),
+            handle.pid(),
+            executable.display(),
+        ),
+        Err(error) => log::error!(
+            "検証用の補助プロセスを起動できなかった（{}）: {error}",
+            executable.display(),
+        ),
+    }
+}
+
+/// 検証専用の引き金が起動する補助プロセスの実行ファイル（1.7 の同梱原本の置き場）。
+///
+/// **8.1 のランタイム解決の代用である。**`CARGO_MANIFEST_DIR` はビルド時の `src-tauri/` を
+/// 指し、その値が配布物にも埋め込まれる。8.1 がプラットフォーム別の解決を実装した時点で、
+/// この関数は解決済みのパス（Windows / macOS = 実行ファイルの隣の `externalBin`、Linux =
+/// `usr/share/jxcel/sidecar-smoke`）を返す経路に置き換わる。それまでは、このリポジトリの
+/// 検証で 1.7 が配置した原本だけを指す（語幹は [`SidecarKind::as_str`]、接尾辞は
+/// [`BUILD_TARGET_TRIPLE`] と Windows の `.exe`。tasks.md 1.7 の命名規約と同じ組み立て）。
+fn verification_sidecar_path() -> PathBuf {
+    let suffix = if BUILD_TARGET_TRIPLE.contains("windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("sidecars")
+        .join(format!(
+            "{}-{}{}",
+            SidecarKind::Smoke.as_str(),
+            BUILD_TARGET_TRIPLE,
+            suffix,
+        ))
+}
+
 // ---------------------------------------------------------------------------
-// テスト（タスク 5.3 / 5.4）
+// テスト（タスク 5.3 / 5.4 / 5.5 / 5.6）
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1792,10 +2006,25 @@ mod tests {
     }
 
     #[test]
+    fn the_verification_trigger_can_start_a_sidecar() {
+        // 5.6 が足した形。**同じ環境変数のまま**補助プロセスを起動した状態を作れる
+        // （片付けは 1 箇所のまま）。
+        assert_eq!(
+            parse_verification_trigger("sidecar:1500"),
+            Some((VerificationAction::Sidecar, 1500))
+        );
+        assert_eq!(
+            parse_verification_trigger(" sidecar : 0 "),
+            Some((VerificationAction::Sidecar, 0))
+        );
+    }
+
+    #[test]
     fn an_uninterpretable_verification_trigger_selects_nothing() {
         // 解釈できない値では**何もしない**（配布物の既定の振る舞いを変えない）。
         for value in [
-            "", "abc", "panic", "panic:", "exit:", "crash:1500", "1500:panic", "-1", "1.5",
+            "", "abc", "panic", "panic:", "exit:", "sidecar", "sidecar:", "sidecar:x",
+            "crash:1500", "1500:panic", "-1", "1.5",
         ] {
             assert_eq!(
                 parse_verification_trigger(value),
