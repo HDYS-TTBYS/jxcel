@@ -370,7 +370,7 @@
   - _Requirements: 9.3, 9.4_
   - _Depends: 7.1, 9.1_
 
-- [ ] 9.3 画面単位のエラー隔離を実装する
+- [x] 9.3 画面単位のエラー隔離を実装する
   - 個別機能の画面の描画中にエラーが発生しても、アプリケーション全体を停止させない
   - 該当する領域にエラーを提示する
   - **完了状態**: 意図的にエラーを投げる画面を差し込んでも他の領域が動作し続け、該当領域にだけエラーが表示される
@@ -479,6 +479,13 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **9.3（隔離の位置）**: 境界は `ShellRegion` の中の **`<Screen …/>` 1 式だけ**を包む（`Layout.tsx`。9.1 の契約どおり）。クローム・領域の識別・遷移機構・ハートビート・終了拒否の購読はすべて境界の外なので、画面の失敗でこれらが止まる経路は無い。**`Layout` 自身の描画エラー（レジストリ不正など）は境界の上位なので包めない**（設計どおり。プログラミング誤りとして起動時に露見させる）。
+- **9.3（捕まえる／捕まえない・実測で確定）**: 捕まえるのは**描画・ライフサイクル・`useEffect`**（いずれも実ブラウザで提示が出て、未捕捉例外は 0 件）。**捕まえないのはイベントハンドラ内・非同期（Promise / `setTimeout`）内**（実測で main 世界に未捕捉として残り、**誤った画面に提示を出さない**）。理由は帰属が機械的に決まらないことで、要件 9.5 の文言も「描画中」である。**この線引きは module doc に書いてあり、doc と実装が一致している**（8.2 の棄却と同種の欠陥を作らないこと）。
+- **9.3（提示と回復）**: 目印は `[data-testid="jxcel-screen-error"]` ＋ 同要素の **`data-screen-error="<画面の識別子>"`** ＋ `role="alert"`。再試行は `jxcel-screen-error-retry`、他の画面へは `jxcel-screen-error-go-<id>`。**見せるのは固定文言とボタンだけ**で、例外メッセージ・スタック・ソースパスは出さない（生の例外は `componentDidCatch` の `console.error` のみ）。配色は `./theme` の `--jxcel-*` だけを参照するので明暗に追随する。**回復は `key={screen.id}`** による境界の作り直し（遷移で提示が消え、遷移先は通常描画。同じ画面へ戻れば再試行され、失敗を記憶して握り潰さない）。
+- **9.3（診断へ送らない・理由つき）**: 要件 9.5 は診断を要求せず、①フロントエンドから記録へ書くコマンドは存在しない（`command_names.rs` の集合は閉じており、追加は Rust と生成物に触れて本タスクの境界を越える）②5.2 は `Webview` ターゲットを意図的に無効にしている。したがって保証は**利用者に見える提示とシェルの生存**であり、生の例外は開発者向けコンソールに残すだけ。
+- **9.3（ブラウザ検証の型・重要）**: Vite dev サーバ＋**`persist: true` の単一 `tab.run`** で行う（指定しないとターン境界で execution context が壊れる）。`tab.run` の `page.evaluate` は**隔離世界**なので main 世界の `window.*` は見えず、**未捕捉例外は CDP の `Runtime.exceptionThrown`** で観測する（`page.on('pageerror')` は届かない）。観測は DOM 属性で行う。
+
 
 - **9.2（外観の形・重要）**: 外観の唯一の源は `src/shell/theme.ts`。適用先は **`<html>`** で、`data-appearance`（`light` / `dark`）、`data-appearance-choice`（`system` / `light` / `dark`）、`color-scheme`、および **CSS カスタムプロパティ `--jxcel-*`** を CSSOM で与える。シェルのクローム（`[data-testid="jxcel-shell"]` / `jxcel-shell-chrome`）も個別機能の画面も**同じ変数群を参照する**（画面は自前の配色を持たない）。**新しい設定キーもコマンドも増やしていない** — 既存の `SettingsKey::AppearanceTheme`（`appearance.theme`）と `settings_get` / `settings_set` / `SETTINGS_CHANGED_EVENT` を使う（7.1 / 4.1 / 4.3 の経路そのもの）。
 - **9.2（初回描画・重要）**: `src/main.tsx` は `createRoot().render()` の**前に** `bootstrapAppearance()` を await する（**上限 `APPEARANCE_READ_TIMEOUT_MS = 1500 ms`**）。`src/index.html` には **JS 前の下地**が `prefers-color-scheme` に追随して置いてあるので、最悪でも「空の下地が OS の色で出る」だけであり、**シェル自体は常に解決済みの外観で描かれる**（間違った外観のシェルは出ない）。実測: 通常の初回描画 ≈0.4 秒、読み取りが上限まで遅れた場合 ≈1.54 秒（**起動予算 2 秒に対して余裕 ≈0.46 秒**）、ハートビート ≈1.57 秒（**3 秒の期限に対して余裕 ≈1.43 秒**）。**予算を詰めるときの唯一の調整点は `APPEARANCE_READ_TIMEOUT_MS`**。

@@ -56,9 +56,11 @@
  *
  * # 後続タスクがここへ差し込む場所
  *
- * - **9.3（画面単位のエラー隔離）**: `ShellRegion` の中の `<Screen … />` 1 式を
- *   `./ScreenBoundary` で包む。**境界の粒度は画面 1 つ**（`screen.id` を鍵に与える）。
- *   シェルのクロームと他の領域は包まない。
+ * - **9.3（画面単位のエラー隔離）— 実装済み**: `ShellRegion` の中の `<Screen … />` 1 式を
+ *   `./ScreenBoundary` で包んだ。**境界の粒度は画面 1 つ**（`screen.id` を `key` と
+ *   `screenId` に与える）。シェルのクロームと領域そのものは包まない。エラー時は同じ領域に
+ *   提示（`[data-testid="jxcel-screen-error"]`）が出て、境界は `key` の変化で作り直される
+ *   （詳細は `./ScreenBoundary` のモジュール doc）。
  * - **9.7（3 OS 描画確認の最小画面）**: `src/features/smoke/` の 2 画面を `ScreenDefinition`
  *   として `SHELL_SCREEN_REGISTRY` に足す。**遷移機構には触れない**（足すだけで表示できる）。
  *   描画の通知（`./renderHeartbeat`）も再利用し、2 つ目の発信側を足さないこと。
@@ -84,7 +86,7 @@
  * 実用画面ではない**（実用水準へ育てるのは下流のスペックであり、10.4 用の画面は 9.7 が足す）。
  * 配色はタスク 9.2 が `./theme` のカスタムプロパティへ移した。
  */
-import type { ReactElement } from "react";
+import { useMemo, type ReactElement } from "react";
 
 import {
   useShellRouter,
@@ -92,6 +94,7 @@ import {
   type ScreenProps,
   type ShellScreenRegistry,
 } from "./router";
+import { ScreenBoundary } from "./ScreenBoundary";
 import {
   APPEARANCE_VARS,
   useAppearance,
@@ -248,6 +251,13 @@ function AppearanceControl({
 export interface ShellRegionProps {
   /** 表示する画面（`useShellRouter` が返す現在の定義）。 */
   readonly screen: ScreenDefinition;
+  /**
+   * エラー時に提示する他の画面（自分自身を除く）。`ScreenBoundary` の回復導線が使う。
+   *
+   * 失敗した画面自身は遷移の操作を持てない（描画が失敗している）ため、**領域から出る導線は
+   * シェル側のエラー提示が持つ**（要件 9.5。`./ScreenBoundary` のモジュール doc「回復」）。
+   */
+  readonly alternatives: readonly ScreenDefinition[];
   /** 遷移を要求する唯一の入口（`useShellRouter` が返すもの）。 */
   readonly navigate: ScreenProps["navigate"];
 }
@@ -258,7 +268,11 @@ export interface ShellRegionProps {
  * `flex: 1 1 auto` と `min-height: 0` は、画面の内容が増えてもウィンドウを押し広げず、
  * **領域の中でスクロールさせる**ためのものである（3 OS 描画確認の表形式の画面はこれに依存する）。
  */
-export function ShellRegion({ screen, navigate }: ShellRegionProps): ReactElement {
+export function ShellRegion({
+  screen,
+  alternatives,
+  navigate,
+}: ShellRegionProps): ReactElement {
   const Screen = screen.component;
   return (
     <section
@@ -277,10 +291,20 @@ export function ShellRegion({ screen, navigate }: ShellRegionProps): ReactElemen
       }}
     >
       {/*
-        タスク 9.3 はこの 1 式を `<ScreenBoundary screenId={screen.id}>` で包む。境界を領域の
-        外へ出さないこと（クロームまで巻き込むとアプリ全体が止まる。要件 9.5）。
+        エラー隔離の境界は**この 1 式だけ**を包む（クロームや領域そのものを包むとアプリ全体が
+        止まる。要件 9.5、`./ScreenBoundary` のモジュール doc「配置」）。`key` に画面の
+        識別子を与えるのは、**別の画面へ遷移したときに境界を作り直し、失敗状態を持ち越さない**
+        ためである（同 doc「回復」）。
       */}
-      <Screen screenId={screen.id} navigate={navigate} />
+      <ScreenBoundary
+        key={screen.id}
+        screenId={screen.id}
+        title={screen.title}
+        alternatives={alternatives}
+        navigate={navigate}
+      >
+        <Screen screenId={screen.id} navigate={navigate} />
+      </ScreenBoundary>
     </section>
   );
 }
@@ -296,6 +320,16 @@ export function ShellRegion({ screen, navigate }: ShellRegionProps): ReactElemen
 export function Layout(): ReactElement {
   const router = useShellRouter(SHELL_SCREEN_REGISTRY);
   const appearance = useAppearance();
+
+  // エラー提示の回復導線に出す「他の画面」。**表示中の画面自身は除く**（同じ画面へは
+  // 「再試行」で戻る）。画面の集合はモジュール定数なので、現在の識別子だけが入力である。
+  const alternatives = useMemo(
+    () =>
+      SHELL_SCREEN_REGISTRY.screens.filter(
+        (screen) => screen.id !== router.current.id,
+      ),
+    [router.current.id],
+  );
 
   return (
     <main
@@ -347,7 +381,11 @@ export function Layout(): ReactElement {
         </span>
       </header>
 
-      <ShellRegion screen={router.current} navigate={router.navigate} />
+      <ShellRegion
+        screen={router.current}
+        alternatives={alternatives}
+        navigate={router.navigate}
+      />
     </main>
   );
 }
