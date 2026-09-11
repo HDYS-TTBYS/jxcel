@@ -680,9 +680,19 @@ pub fn open(directory: &Path) -> Result<(Arc<FileSettingsStore>, OpenReport), Se
         source,
     })?;
     // 綴り違い（`./` を挟む等）でも同じ実体へ寄せるため、正規化したパスをキーにする。
+    // **正規化したパスは登録簿のキーにだけ使う。** 読み込み・書き込み・復旧の報告には
+    // 使わない: macOS では `/var` が `/private/var` に、Windows では `C:\…` が `\\?\C:\…`
+    // （8.3 形式の短い名前も展開される）になり、呼び出し側の知らない綴りがユーザー向けの
+    // 復旧の報告に出てしまう（CI の macOS / Windows で実際に食い違った）。
     let canonical = fs::canonicalize(directory).map_err(|source| SettingsError::DirectoryUnavailable {
         path: directory.to_path_buf(),
         source,
+    })?;
+    // 読み込みと書き込みの対象は、呼び出し側の綴りを絶対パスにしたものである（シンボリック
+    // リンクを解決せず、`\\?\` 形式にもしない）。絶対パスにするのは、相対パスで開いた後に
+    // カレントディレクトリが変わっても書き込み先が動かないようにするため。
+    let absolute = std::path::absolute(directory).map_err(|source| {
+        SettingsError::DirectoryUnavailable { path: directory.to_path_buf(), source }
     })?;
 
     let mut entries = REGISTRY.lock().unwrap_or_else(PoisonError::into_inner);
@@ -693,7 +703,7 @@ pub fn open(directory: &Path) -> Result<(Arc<FileSettingsStore>, OpenReport), Se
 
     // 登録簿のロックを保持したまま読み込む。同じディレクトリへの並行 `open` が二重に
     // 読み込んで別の実体を作ることを防ぐ。
-    let (state, recovered_from) = FileSettingsStore::load(&canonical);
+    let (state, recovered_from) = FileSettingsStore::load(&absolute);
     let store = Arc::new(FileSettingsStore {
         state: RwLock::new(state),
         publish_order: Mutex::new(()),

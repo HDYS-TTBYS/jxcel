@@ -489,6 +489,33 @@ fn unreadable_settings_path_starts_from_defaults_and_preserves_it() {
     assert!(scratch.target().is_dir(), "開き直しでパスが変わった");
 }
 
+/// 復旧の報告に載るパスは**呼び出し側の綴り**であり、シンボリックリンクを解決した綴りでは
+/// ない（ユーザーに見せる事実に、呼び出し側の知らないパスを出さない）。
+///
+/// macOS の一時ディレクトリ（`/var` → `/private/var`）と Windows（`\\?\` 形式・8.3 形式の
+/// 短い名前の展開）では、正規化したパスを報告すると呼び出し側の綴りと食い違い、CI で
+/// 実際に落ちた。Linux の一時ディレクトリはシンボリックリンクを含まず同じ食い違いが
+/// 起きないため、シンボリックリンクで同じ状況を作り、開発機でも再現できるようにする。
+#[cfg(unix)]
+#[test]
+fn recovery_reports_the_callers_spelling_not_the_resolved_path() {
+    let scratch = Scratch::new("symlinked");
+    let real = scratch.path().join("real");
+    fs::create_dir(&real).expect("実体のディレクトリを作れる");
+    fs::write(real.join(SETTINGS_FILE_NAME), b"{\"appearance.theme\":").expect("壊れた内容を置ける");
+    let link = scratch.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("シンボリックリンクを作れる");
+
+    let (_store, report) = open(&link).expect("シンボリックリンク経由で開ける");
+    let fact = recovered(&report);
+    assert_eq!(
+        fact.path,
+        link.join(SETTINGS_FILE_NAME),
+        "復旧の報告が呼び出し側の綴りでない（シンボリックリンクを解決した綴りを報告している）"
+    );
+    assert!(matches!(fact.cause, RecoveryCause::Malformed), "原因が違う: {:?}", fact.cause);
+}
+
 /// 未知の `schema_version` を持つファイルは解釈せず、既定値で起動して事実を報告する
 /// （design.md「Logical Data Model」の規則、要件 7.5）。
 ///
