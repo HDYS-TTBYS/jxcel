@@ -13,6 +13,14 @@ dist/
 # 同じ内容が再生成される。capability の逸脱を検査するタスク 7.3 はこの生成物を入力にする。
 src-tauri/gen/
 
+# サイドカーの同梱原本の置き場（tasks.md 1.7）。**原本はビルド成果物であり追跡しない。**
+# 中身は `scripts/stage-sidecars.sh` が `sidecars/sidecar-smoke-<ターゲットトリプル>[.exe]`
+# として配置する。`.gitkeep` だけは置き場を保つために追跡する（`git check-ignore -v
+# sidecars/sidecar-smoke-x86_64-unknown-linux-gnu` が一致し、`sidecars/.gitkeep` が
+# 一致しないことを検査できる）。
+/sidecars/*
+!/sidecars/.gitkeep
+
 # 注: src/ipc/bindings.ts は追跡する。ts-rs の生成物だが、決定 2 のドリフト検査
 # （crates/app-shell/tests/bindings_drift.rs）がコミット済みの内容とバイト比較する対象で
 # あり、フロントエンドのビルドを Rust ツールチェーンから独立させるための入力でもある。

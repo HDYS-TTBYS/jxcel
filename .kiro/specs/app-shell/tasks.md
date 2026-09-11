@@ -52,7 +52,7 @@
   - _Requirements: 5.1_
   - _Depends: 1.1_
 
-- [ ] 1.7 補助プロセスの配置規約と 3 OS のバンドル配置を実装する
+- [x] 1.7 補助プロセスの配置規約と 3 OS のバンドル配置を実装する
   - 同梱原本の置き場と、ターゲットトリプル接尾辞付きの名前へ配置する手順を**明示的な成果物として用意する**。ワークスペース内のクレート成果物を別クレートのビルド時処理が参照する順序は保証されないため、暗黙に任せない
   - **配置はプラットフォームで分ける**。Windows と macOS は標準の同梱機構を使う。Linux は標準の同梱機構が実行ファイルを書き換えるため、走査対象の外へ置く経路を使う
   - 原本が未配置のまま検査を実行しても壊れないよう、不在時の扱いを決める
@@ -479,6 +479,12 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **1.7**: 配置規約の確定事項。(a) 原本は **`sidecars/sidecar-smoke-<TARGET>`**（Windows は `.exe`）へ `scripts/stage-sidecars.sh`（唯一の文書化された手順・POSIX sh・冪等）が配置する。`sidecars/` は `.gitkeep` のみ追跡し、配置物は gitignore。(b) Windows / macOS は `bundle.externalBin: ["../sidecars/sidecar-smoke"]`。**`externalBin` はターゲットトリプル接尾辞を自動で付ける**（`tauri-utils` の `external_binaries()`）。(c) Linux は `bundle.linux.appimage.files` で **`usr/share/jxcel/sidecar-smoke`** に置く。**JSON のキーが AppDir 内の宛先、値がホスト側の原本**である（tauri-bundler の `copy_custom_files` が `copy_file(path, &data_dir.join(pkg_path))` と呼ぶ順序。逆向きなら `!from.exists()` で失敗する）。この宛先パスは 8.1 のランタイム解決の入力。
+- **1.7**: プラットフォーム別のバンドル設定は `src-tauri/tauri.{linux,macos,windows}.conf.json` で表現する（`tauri-utils` の config 読み込みがプラットフォーム接尾辞のファイルを併合し、不在は `Ok(None)` で正常）。1 つの `tauri.conf.json` では Linux と Windows/macOS で配置機構を変えられないため。
+- **1.7**: **原本が未配置のときの失敗点はプラットフォームで違う。** Linux は `appimage.files` がバンドル時（`npx tauri build`）に「Failed to copy custom files: … does not exist」で**落ちる**。`cargo build` は**落ちない**（`tauri-build` は `appimage.files` を一切参照しない）。Windows / macOS は `externalBin` のため `cargo build` 時点で `tauri-build` が落ちる。**3.1 はこの前提で「沈黙して通す」経路を作らないこと**（`build.rs` は panic せず期待ダイジェストを出さない／`verify` は `Mismatch`・`Unreadable` と区別できる第 3 の変種を返す）。
+- **1.7**: `cargo build --release --target <T>` はホストトリプルであっても native ビルドとバイトが異なる。**CI は native のホストトリプルで配置する**（スクリプトがそう動く）。ビルド時ダイジェストと同梱物が同一ファイルを指す前提を崩さないこと。
+- **1.7**: ローカル実測: AppImage は 79,559,160 B → **79,755,768 B**（+196,608 B、原本 509,736 B が squashfs 圧縮）。展開した AppDir 内の `usr/share/jxcel/sidecar-smoke` は**原本と sha256 が一致し実行権限を持ち、`usr/bin/` には複製が無い**（patchelf の走査対象外であることの実測）。Windows / macOS のバンドル内容は CI でしか確認できない。
 
 - **1.6**: `crates/sidecar-smoke` は `--parent-pid <PID>` を受け取り、**100 ms 間隔**で親を監視して消えたら exit 0 で自己終了する。Unix の判定は「自分が監視対象の直接の子である場合は `getppid()` が監視対象から離れたこと」と「`kill(pid, 0)` が ESRCH を返すこと」の併用である。**`kill(pid,0)` は未回収のゾンビにも成功する**ため、後者だけでは足りない（Linux で実測確認済み）。Windows は `OpenProcess(PROCESS_SYNCHRONIZE)` + `WaitForSingleObject(handle, 0)`。引数欠落・不正は stderr に usage を出して **exit 2**、正常な自己終了は **exit 0**。stdout は起動行＋stdin の行ごとの応答で、毎行 flush する。
 - **1.6 → 3.5 への申し送り**: 監視対象が**直接の親ではない**かつ**未回収のゾンビ**である場合、この機構では死を検出できない（`kill(pid,0)` がゾンビに成功し、reparent 判定は直接の親でないため効かない）。監督（3.2）は直接 spawn するので実際の経路は直接の親側であり問題ないが、**3.5 の孤児掃除が唯一の backstop である**という前提を崩さないこと。3.5 は PID と実行ファイル名の両方で照合する。

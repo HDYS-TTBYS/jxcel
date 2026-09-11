@@ -1,0 +1,8 @@
+# このディレクトリは補助プロセスの同梱原本の置き場である（tasks.md 1.7）。
+#
+# 原本はビルド成果物であり追跡しない（`.gitignore` の `/sidecars/*` を参照）。
+# `scripts/stage-sidecars.sh` が唯一の配置手順であり、`sidecar-smoke-<ターゲットトリプル>`
+# （Windows は `.exe` 付き）という名前でここへ複製する。名前の語幹 `sidecar-smoke` は
+# `crates/app-shell` の `SidecarKind::Smoke::as_str()` が返す値（タスク 1.2 の契約）である。
+#
+# この `.gitkeep` は置き場をクローン直後から保つためだけに存在する。

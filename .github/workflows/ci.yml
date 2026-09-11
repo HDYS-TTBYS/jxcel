@@ -1,8 +1,10 @@
-# CI パイプライン（tasks.md 1.1 / 1.5 / Requirements 3.2, 6.1, 6.2, 6.3, 6.7, 8.3）
+# CI パイプライン（tasks.md 1.1 / 1.5 / 1.7 / Requirements 3.2, 5.1, 6.1, 6.2, 6.3, 6.7, 8.3）
 #
 #   - test : Linux / macOS / Windows の 3 OS マトリクスでビルドとテストを実行し、
 #     さらに 3 プラットフォーム分の配布物（バンドル）を生成して、起動とウィンドウの表示を
 #     確認し、成果物として保存する（tasks.md 1.5。要件 6.1, 6.7）。
+#     サイドカーの同梱原本は `scripts/stage-sidecars.sh`（唯一の文書化された手順）で
+#     配布物生成の前に配置する（tasks.md 1.7。要件 5.1）。
 #     本スペックはこの既存マトリクスを拡張する。**プラットフォーム別のワークフローを
 #     新設しない**（要件 6.2）。ジョブも増やさない（`test` は 1 つのまま）。
 #     （決定的シリアライズは OS を跨いだバイト同一性を要求するため 3 OS 必須）。
@@ -120,6 +122,19 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      # サイドカーの同梱原本を配置する（tasks.md 1.7）。**唯一の文書化された手順**は
+      # `scripts/stage-sidecars.sh` である（クローン直後からこの 1 手順で原本が揃う）。
+      # 3 OS すべてで、`tauri build` より前 — かつ Windows / macOS では `tauri-build` が
+      # `bundle.externalBin` の原本をビルド時に要求するため `cargo build --workspace`
+      # より前 — に実行する。POSIX sh なので Windows でも Git Bash（`shell: bash`）で
+      # 同じものが走る。配置規約（Windows / macOS は `externalBin`、Linux は
+      # `appimage.files` → `usr/share/jxcel/sidecar-smoke`）と不在時の扱いは
+      # スクリプトの日本語ヘッダを参照。Windows / macOS の設定は platform 別設定ファイルが
+      # Tauri CLI により自動でマージされるため、`--config` は使わない。
+      - name: Stage sidecar original
+        shell: bash
+        run: bash scripts/stage-sidecars.sh
 
       # Tauri アプリ（`src-tauri/`、パッケージ名 `jxcel`）を含むワークスペース全体を
       # ビルドする。Tauri の依存を加えた状態でこの段が通ることが、以降の検証の前提である。
