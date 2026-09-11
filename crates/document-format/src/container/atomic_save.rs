@@ -64,6 +64,10 @@ const RENAME_MAX_BACKOFF: Duration = Duration::from_millis(200);
 ///
 /// アンチウイルス・検索インデクサ・自アプリの別インスタンスが短時間ハンドルを保持する
 /// ことがあるため、待ってからやり直せば通る（design「AtomicWriter / Responsibilities」）。
+///
+/// ただし 5 は曖昧である: **置換先が既存のディレクトリのときも 5 が返る**（Unix の
+/// `EISDIR` に当たる恒久的な失敗）。コードだけでは両者を区別できないため、
+/// `rename_with_retries` が置換先の種別を見てディレクトリなら再試行しない。
 #[cfg(windows)]
 const RETRYABLE_RENAME_CODES: &[i32] = &[5, 32, 33];
 
@@ -227,7 +231,9 @@ fn parent_dir(target: &Path) -> Result<&Path, DocumentError> {
 }
 
 /// `rename` を [`RENAME_ATTEMPTS`] 回まで試す。再試行するのは共有違反系のエラーコード
-/// （[`RETRYABLE_RENAME_CODES`]）だけで、Unix では常に 1 回で終わる。
+/// （[`RETRYABLE_RENAME_CODES`]）だけで、Unix では常に 1 回で終わる。置換先が既存の
+/// ディレクトリなら、コードが再試行対象でも再試行しない（Windows はこの場合も
+/// `ERROR_ACCESS_DENIED` を返す。[`RETRYABLE_RENAME_CODES`] の docs）。
 ///
 /// 予算を使い切った場合にだけ `retried` を `true` にして返す（[`DocumentError::Io`] の
 /// docs にある「保存経路のみが `true` にする」の唯一の実装箇所）。
@@ -237,7 +243,7 @@ fn rename_with_retries(staged: &Path, target: &Path) -> Result<(), DocumentError
         match fs::rename(staged, target) {
             Ok(()) => return Ok(()),
             Err(err) => {
-                if !is_retryable_rename_error(&err) {
+                if !is_retryable_rename_error(&err) || is_directory(target) {
                     // 待っても直らない失敗（対象がディレクトリ、親が消えた、等）。
                     return Err(io_error(err, false));
                 }
@@ -267,6 +273,13 @@ fn is_retryable_rename_error(err: &io::Error) -> bool {
         Some(code) => RETRYABLE_RENAME_CODES.contains(&code),
         None => false,
     }
+}
+
+/// `path` が既存のディレクトリか。シンボリックリンクは辿らない（`rename` はリンクそのもの
+/// を置換するため、判定もリンク自身の種別で行う）。種別を取れない場合は偽とし、判定を
+/// エラーコードに委ねる。
+fn is_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
 }
 
 /// 親ディレクトリのエントリを永続化する（Unix）。
@@ -341,8 +354,9 @@ mod tests {
     }
 
     /// 置換が成立する前の失敗であること（`Err` かつ `retried` が偽）を確かめる。
-    /// この環境（Unix）では再試行対象の OS エラーコードが無いので、`retried` は常に偽に
-    /// なるはずである。
+    /// Unix には再試行対象の OS エラーコードが無い。Windows で呼ぶのは待っても直らない
+    /// 失敗（対象がディレクトリ、親が無い）だけなので、どちらでも `retried` は偽になる
+    /// はずである。
     fn assert_failed_before_replacement(err: DocumentError, context: &str) {
         match err {
             DocumentError::Io { retried, .. } => {
@@ -473,8 +487,10 @@ mod tests {
     }
 
     /// 要件 5.6（失敗経路 1）: 対象がディレクトリのときは置換が失敗し（Unix では
-    /// `EISDIR`）、そのディレクトリと、中に在る既存ファイル、兄弟ファイルは 1 バイトも
-    /// 変わらない。失敗しても一時ファイルは残らない。
+    /// `EISDIR`、Windows では `ERROR_ACCESS_DENIED`）、そのディレクトリと、中に在る既存
+    /// ファイル、兄弟ファイルは 1 バイトも変わらない。失敗しても一時ファイルは残らない。
+    /// Windows では再試行対象のコードが返るが、恒久的な失敗なので再試行しない
+    /// （`retried` が偽）。
     #[test]
     fn failure_on_a_directory_target_keeps_it_untouched() {
         let dir = tempfile::tempdir().expect("一時ディレクトリを作れない");
@@ -742,6 +758,22 @@ mod tests {
         assert!(
             !is_retryable_rename_error(&io::Error::from_raw_os_error(2)),
             "存在しないパスを再試行対象にしている"
+        );
+    }
+
+    /// 再試行を打ち切る置換先の判定: 既存のディレクトリだけが真で、ファイルと存在しない
+    /// パスは偽（判定をエラーコードに委ねる）。Windows でコード 5 を返す 2 つの状況
+    /// （共有違反とディレクトリ）を分ける根拠であり、Unix でも同じ判定になることを確かめる。
+    #[test]
+    fn only_an_existing_directory_stops_the_retries() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリを作れない");
+        let file = target_with_original(dir.path());
+
+        assert!(is_directory(dir.path()), "ディレクトリを判定できない");
+        assert!(!is_directory(&file), "ファイルをディレクトリとした");
+        assert!(
+            !is_directory(&dir.path().join("missing")),
+            "存在しないパスをディレクトリとした"
         );
     }
 }
