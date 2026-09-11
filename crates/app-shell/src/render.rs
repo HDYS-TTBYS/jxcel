@@ -44,20 +44,51 @@
 //! 正常な描画を不成立と誤判定して印を立ててしまう。
 //!
 //! **誤判定の代償は 1 回の起動に限られる。** 印は次の起動で 8.3 が代替経路を適用した後、
-//! 描画の成立が観測された時点（[`RenderWatchdog`] が `Painted` / `SoftwareRaster` を確定した
-//! 時点）で下ろされる。したがって誤って印を立てても、その次の起動は代替経路で始まり、
-//! 描画が成立すればその次の起動からは適用されない。
+//! **通常の描画経路が成立したこと**（[`RenderWatchdog`] が `Painted` を確定した時点）で
+//! 下ろされる。したがって誤って印を立てても、その次の起動は代替経路で始まり、描画が成立
+//! すればその次の起動からは適用されない。
 //!
-//! # 8.3 が読む印のインタフェース
+//! # 8.3 が読む印のインタフェースと、その状態機械（要件 10.3）
 //!
 //! - **鍵**: [`SettingsKey::RenderFallback`]（ファイル上の名前は `render.fallback`）。真偽値。
-//! - **意味**: `true` なら「直近に確定した判定が `NoPaint` であった」。
-//! - **書く側**: [`RenderWatchdog`] だけである。`NoPaint` を確定したときに `true` を書き、
-//!   `Painted` / `SoftwareRaster` を確定したときに `false` を書く（既に同じ値なら書かない。
-//!   未設定のまま `false` を書くこともない）。
+//! - **意味**: `true` なら「直近に確定的に観測した描画の試行が `NoPaint` であった」。
+//! - **書く側**: [`RenderWatchdog`] だけである。**8.3 は印を書かない**（書き手が 2 つに
+//!   なると、描画の成立を観測していない段で印を消しうる）。
 //! - **読む側**: タスク 8.3 が起動時（`tauri::Builder` を組み立てる前）に
-//!   [`render_fallback_pending`] で読む。**8.3 は印を書かない**（書き手が 2 つになると、
-//!   描画の成立を観測していない段で印を消しうる）。
+//!   [`render_fallback_pending`] で読む。
+//!
+//! ## 判定 → 印の写像（**8.3 の申し送りで確定した規則**）
+//!
+//! | 確定した判定 | 印 | 根拠 |
+//! |---|---|---|
+//! | [`RenderVerdict::NoPaint`] | `true` を書く | 描画が成立しなかった。次回は代替経路を試す |
+//! | [`RenderVerdict::Painted`] | `false` を書く | **通常の描画経路が成立した。**印を下ろす |
+//! | [`RenderVerdict::SoftwareRaster`] | **動かさない** | 下の「振動の回避」を参照 |
+//!
+//! 同値なら書かない。**未設定のまま `false` を書くこともない**（正常な環境の設定ファイルに
+//! 無意味な鍵を作らない）。
+//!
+//! ## 振動の回避（タスク 8.3 が確定させた規則。**旧: `SoftwareRaster` で `false` を書いた**）
+//!
+//! `SoftwareRaster` は「描画は成立したが、低速な経路（ソフトウェア実装）である」ことを
+//! 意味する。**この判定で印を下ろすと恒久的な振動になる**: 代替経路を適用した起動が
+//! ソフトウェア経路で描画に成功する → 印が下りる → 次の起動は代替経路を適用しない →
+//! 描画が再び不成立になる → 印が立つ → 次の起動は代替経路を適用する、を繰り返す。
+//! すなわち**成立の原因が代替経路である場合に、それを 1 回おきに捨ててしまう**。
+//!
+//! したがって写像を **`Painted` だけが印を下ろす**ように定めた。これは design.md
+//! 「RenderWatchdog」の「`Painted` が観測できたら印を消す」に一致する。`Painted` は
+//! **通常の描画経路（ハードウェア加速を含む経路）が成立した**ことを意味するので、それを
+//! 観測できたときにだけ「もう代替経路は要らない」と結論できる。
+//!
+//! ### 残る仮定（代替経路の選択と表裏である）
+//!
+//! `Painted` を確定した起動が**代替経路を適用していた**場合、その成功が代替経路のおかげで
+//! ある可能性は排除できない。その場合は次の起動で印が下り、描画が再び不成立になれば
+//! [`RenderVerdict::NoPaint`] で印が立ち、その次の起動で再び適用される（**起動 1 回分の
+//! 遅れ**）。この残余は、採用する回避策が「通常の描画経路を壊さない」ものであるほど小さく
+//! なる（[`crate::render_fallback`] の候補表を参照）。`SoftwareRaster` を下ろさない規則は
+//! この残余を**振動ではなく 1 回の遅れに留める**ためのものである。
 //!
 //! # 記録の内容（要件 8.1、8.4、10.2）
 //!
@@ -475,10 +506,20 @@ impl RenderWatchdog {
         }
     }
 
-    /// 印を判定に合わせる。**既に同じ値なら書かない**（起動ごとの無駄な書き込みを避け、
-    /// 未設定のまま `false` を書くこともしない）。失敗は人が読める 1 行で返す。
+    /// 印を判定に合わせる（要件 10.3）。**既に同じ値なら書かない**（起動ごとの無駄な書き込みを
+    /// 避け、未設定のまま `false` を書くこともしない）。失敗は人が読める 1 行で返す。
+    ///
+    /// 写像は [`RenderVerdict::NoPaint`] → `true`、[`RenderVerdict::Painted`] → `false`、
+    /// [`RenderVerdict::SoftwareRaster`] → **動かさない**である。`SoftwareRaster` で下ろすと
+    /// 代替経路が成立の原因である場合に 1 回おきにそれを捨てる恒久的な振動になる — 理由は
+    /// モジュール doc「振動の回避」にある。
     fn update_mark(&self, verdict: RenderVerdict) -> Result<(), String> {
-        let pending = verdict == RenderVerdict::NoPaint;
+        let pending = match verdict {
+            RenderVerdict::NoPaint => true,
+            RenderVerdict::Painted => false,
+            // 描画は成立している（低速なだけ）ので、印を**動かさない**。
+            RenderVerdict::SoftwareRaster => return Ok(()),
+        };
         let current = self.mark.current();
         if current == Some(pending) || (current.is_none() && !pending) {
             return Ok(());
@@ -893,6 +934,36 @@ mod tests {
         // もう一枚描画が成立しても、同じ値なので書かない。
         watchdog.start(&label("empty-3"));
         watchdog.notify(&label("empty-3"), None);
+        assert_eq!(mark.writes.load(Ordering::SeqCst), 2);
+    }
+
+    /// ソフトウェアラスタライザは印を動かさない（**振動の回避**。要件 10.3）。
+    ///
+    /// 代替経路を適用した起動がソフトウェア経路で描画に成功した場合、ここで印を下ろすと
+    /// 次の起動が代替経路を捨て、描画が再び不成立になる — 1 回おきの恒久的な振動になる。
+    #[test]
+    fn a_software_rasterizer_keeps_the_mark_it_found() {
+        let (clock, _recorder, mark, watchdog) = watch(10);
+        watchdog.start(&label("empty-1"));
+        clock.advance(20);
+        watchdog.expire_due();
+        assert_eq!(mark.current(), Some(true));
+        assert_eq!(mark.writes.load(Ordering::SeqCst), 1);
+
+        // 代替経路を適用した起動で描画が成立しても、ソフトウェア経路なら印は下ろさない。
+        watchdog.start(&label("empty-2"));
+        watchdog.notify(&label("empty-2"), Some("llvmpipe"));
+        assert_eq!(mark.current(), Some(true));
+        assert_eq!(
+            mark.writes.load(Ordering::SeqCst),
+            1,
+            "書き込んではならない"
+        );
+
+        // 通常の描画経路が成立したときにだけ印が下りる。
+        watchdog.start(&label("empty-3"));
+        watchdog.notify(&label("empty-3"), Some("Apple GPU"));
+        assert_eq!(mark.current(), Some(false));
         assert_eq!(mark.writes.load(Ordering::SeqCst), 2);
     }
 

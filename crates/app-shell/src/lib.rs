@@ -18,10 +18,16 @@
 //! [`render`] は初回描画の監視と三値の判定を所有する（tasks.md 8.2、要件 10.1、10.2）。
 //! **GUI を起動せずに検証できるよう、時計と記録先を注入できる形にしてある** — 判定と記録の
 //! 経路は実画面なしの `cargo test` で固定される。
+//!
+//! [`render_fallback`] は判定が残した印に従って描画の代替経路を選び、適用する（tasks.md 8.3、
+//! 要件 10.3）。**回避策の選択はこのモジュールの表 1 箇所だけが決め、機構は変数名を知らない**
+//! （research.md 決定 7 の「特定の変数に賭けない」）。印 → 適用の判断は、環境とプラットフォーム
+//! を注入できる形で実画面なしに検証される。
 
 pub mod accelerator;
 pub mod diagnostics;
 pub mod ipc;
 pub mod render;
+pub mod render_fallback;
 pub mod settings;
 pub mod sidecar;

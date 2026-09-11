@@ -45,10 +45,14 @@
 //! # 8.3 が読む印（要件 10.3）
 //!
 //! 設定 [`SettingsKey::RenderFallback`]（`render.fallback`、真偽値）である。**書くのは中核の
-//! [`RenderWatchdog`] だけ** — `NoPaint` を確定したときに `true`、`Painted` /
-//! `SoftwareRaster` を確定したときに `false`（同じ値なら書かない）。8.3 は起動時
-//! （`tauri::Builder` を組み立てる前）に [`app_shell::render::render_fallback_pending`] で読み、
-//! **印を書かない**。詳しくは中核のモジュール doc「8.3 が読む印のインタフェース」。
+//! [`RenderWatchdog`] だけ** — `NoPaint` を確定したときに `true`、`Painted` を確定したときに
+//! `false`（同じ値なら書かない）。**`SoftwareRaster` は印を動かさない** — 描画は成立して
+//! いる（低速なだけ）ので、そこで下ろすと代替経路が成立の原因である場合に 1 回おきにそれを
+//! 捨てる恒久的な振動になる（規則の全体と根拠は中核のモジュール doc「振動の回避」）。
+//! 8.3 は起動時（`tauri::Builder` を組み立てる前、`lifecycle::run` の手順 1）に
+//! [`app_shell::render::render_fallback_pending`] で読み、**印を書かない**。適用そのものは
+//! [`app_shell::render_fallback`] が所有し、適用した事実は `lifecycle` がロガーの取り付け後に
+//! 起動行として記録する（対象名は本モジュールと同じ `jxcel::render`）。
 //!
 //! # 提示がアプリ自身の資産に依存しない理由（要件 10.2）
 //!
@@ -451,22 +455,28 @@ fn missing_paint_title(record: &VerdictRecord) -> String {
 
 /// DOM へ差し込む注意書き（複数行）。題名と同じ情報を、改行を保った形で運ぶ。
 ///
-/// **この時点で真であることだけを述べる。** 代替経路の適用はタスク 8.3 が実装するため、
-/// 「次回の起動では描画の代替経路を試みます」とは書かない（未実装の機能を利用者へ約束すると、
-/// 提示している情報そのものが誤りになる。8.2 の時点で真なのは「不成立を記録した」ことと
-/// 「アプリは動作を続ける」ことである）。**8.3 が適用を実装したら、その事実を述べる行を
-/// 足してよい**（そのときは真になる）。
+/// **この時点で真であることだけを述べる。** 代替経路の約束
+/// （「次回の起動では、描画の代替経路を試みます」）は、**このプラットフォームに適用できる
+/// 回避策があるときだけ**述べる（[`app_shell::render_fallback::current_policy`]）。この起動が
+/// 不成立を確定した時点で、判定の中核は印を**既に設定へ書いている**ので（`expire_due` は
+/// 提示より先に記録と印の更新を行う）、次回の起動の手順 1（`lifecycle` の
+/// `reserve_render_fallback_point`）はその印を読んで適用する。**Windows / macOS には適用
+/// できる回避策が無い**ので、そこでは約束を述べない（述べれば偽になる）。
 fn missing_paint_notice(record: &VerdictRecord) -> String {
-    format!(
-        "jxcel: 初回描画が成立しませんでした。\n\
-         {} ミリ秒待っても、描画フレームの中から通知が届きませんでした。\n\
-         対象のウィンドウ: {}\n\
-         診断情報の保存先: {}\n\
-         この事実は診断情報に記録し、アプリはこのまま動作を続けます。",
-        record.elapsed_millis,
-        record.label.as_str(),
-        log_location(),
-    )
+    let mut lines = vec![
+        "jxcel: 初回描画が成立しませんでした。".to_owned(),
+        format!(
+            "{} ミリ秒待っても、描画フレームの中から通知が届きませんでした。",
+            record.elapsed_millis
+        ),
+        format!("対象のウィンドウ: {}", record.label.as_str()),
+        format!("診断情報の保存先: {}", log_location()),
+        "この事実は診断情報に記録し、アプリはこのまま動作を続けます。".to_owned(),
+    ];
+    if !app_shell::render_fallback::current_policy().is_empty() {
+        lines.push("次回の起動では、描画の代替経路を試みます。".to_owned());
+    }
+    lines.join("\n")
 }
 
 /// 差し込む注意書きの要素の `id`。
@@ -642,9 +652,11 @@ mod tests {
 
     /// 注意書きは、**この時点で真であることだけ**を述べる。
     ///
-    /// 代替経路の適用はタスク 8.3 が実装する。実装前に「次回の起動では描画の代替経路を
-    /// 試みます」と書くと、提示している情報が利用者に対して誤りになる（レビュー指摘 2）。
-    /// **8.3 が適用を実装したら、この否定を外して約束の行を足してよい**（そのときは真になる）。
+    /// 代替経路の約束（8.3 が実装した）は、**このプラットフォームに適用できる回避策がある
+    /// ときだけ**述べる。Windows / macOS には適用できる回避策が無いので、そこで約束すると
+    /// 提示している情報が利用者に対して誤りになる。したがって否定ではなく
+    /// **「約束の有無が回避策の有無と一致する」**ことを固定する（8.2 が置いた否定の期待は、
+    /// 8.3 が適用を実装した時点でこの形へ置き換えた）。
     #[test]
     fn the_notice_states_only_what_is_true_now() {
         let notice = missing_paint_notice(&record(None));
@@ -653,9 +665,10 @@ mod tests {
         assert!(notice.contains("empty-1"), "{notice}");
         assert!(notice.contains("記録"), "{notice}");
         assert!(notice.contains("動作を続け"), "{notice}");
-        assert!(
-            !notice.contains("代替経路"),
-            "未実装の機能（8.3 の代替経路）を利用者へ約束している: {notice}"
+        assert_eq!(
+            notice.contains("代替経路"),
+            !app_shell::render_fallback::current_policy().is_empty(),
+            "適用できる回避策が無いプラットフォームで代替経路を約束してはならない: {notice}"
         );
         assert!(notice.contains('\n'), "{notice}");
     }

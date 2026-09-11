@@ -7,8 +7,9 @@
 //! タスク 5.1 が置いた実体は次の 3 つである:
 //!
 //! 1. **起動順序の固定**（[`run`]）。順序は 1 箇所の直線的な関数として書き、
-//!    「回避策の予約点 → 単一インスタンスの登録 → 診断の初期化 → 構築 → 残留プロセスの掃除 →
-//!    実行」を本体の並びそのもので表す。**掃除だけがタスク 5.1 の文言と位置が異なる** —
+//!    「描画の代替経路の適用（手順 1）→ 単一インスタンスの登録 → 診断の初期化 → 構築 →
+//!    残留プロセスの掃除 → 実行」を本体の並びそのものとして表す。**掃除だけがタスク 5.1 の
+//!    文言と位置が異なる** —
 //!    構築の前に置くと、引き継ぎ側の 2 つ目のプロセスも掃除を実行して動作中のアプリの補助
 //!    プロセスを終了させる（要件 5.5・5.6 を破る）。理由と実測は [`run`] の手順 5 にある。
 //! 2. **単一インスタンス化**（要件 1.5）。プラグインは**最初に**登録する。二重起動は
@@ -121,8 +122,9 @@
 //!   振り向け、フォーカス移動のたびの有効・無効の更新（要件 3.3、3.5）。**7.4 は登録口と
 //!   プラットフォーム差の吸収までである** — 組み込みの「終了」項目にもショートカットはまだ
 //!   付いていない（5.4 の申し送りどおり 7.5 が与える）。
-//! - タスク 8.3: 描画の代替経路の判定と適用（要件 10.3）。
-//!   [`reserve_render_fallback_point`] の中身を埋める。
+//! - タスク 8.3: 描画の代替経路の判定と適用（要件 10.3）。**[`reserve_render_fallback_point`]
+//!   が前回の印を読んで適用し**（手順 1。GTK / WebKit の初期化前）、記録はロガーの取り付け後
+//!   （手順 4.8）に行う。選択そのものは Tauri 非依存の [`render_fallback`] が所有する。
 //! - タスク 9.6: ドキュメントを関連付けていないウィンドウの操作導線（新規作成・既存ファイルを
 //!   開く）。ドキュメントの関連付けそのものは 6.1 が [`window::open`] で実装済みである。
 
@@ -138,6 +140,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use app_shell::diagnostics::{self, DiagnosticsLevel};
+use app_shell::render_fallback::{self, FallbackOrigin, FallbackOutcome};
 use app_shell::settings::{self, FileSettingsStore, RecoveredFrom, SettingsStore};
 use app_shell::sidecar::{SidecarKind, SidecarSupervisor, Supervisor};
 use tauri::utils::config::{Csp, CspDirectiveSources};
@@ -218,13 +221,19 @@ const _: () = assert!(
 /// 起動を継続できない前提が満たされないとき [`StartupError`] を返す。呼び出し元（`main`）は
 /// [`report_startup_failure`] でメッセージを提示し、非 0 の終了コードで終える（要件 1.4）。
 pub fn run() -> Result<(), StartupError> {
-    // 手順 1: 描画の回避策を適用する場所の予約（中身は 8.3 が埋める。ここでは判定しない）。
+    // 手順 1: 描画の代替経路の適用（要件 10.3。タスク 8.3）。
     //   回避策の環境変数は GTK / WebKit のコードが動く前に設定しなければならない。GTK /
     //   WebKit のランタイムは手順 4 の `Builder::build` で生成される（tauri の `Runtime::new`）。
-    //   したがって予約点は手順 4 より前でなければならない（決定 7、research.md 実測）。
+    //   したがって適用は手順 4 より前でなければならない（決定 7、research.md 実測）。
     //   **無条件には適用しない**（要件 10.3。一部の環境の問題を全環境の性能低下と
-    //   引き換えに直さない）。
-    reserve_render_fallback_point();
+    //   引き換えに直さない）— 前回の起動が残した印が立っているときだけ適用する。
+    //   印は設定ストアにあるため、この手順は**ストアを自前で開く**（手順 3 の
+    //   `init_diagnostics` より前である。同じディレクトリの `open` は同じ実体を返すので、
+    //   ストアが 2 つになることはない。要件 7.3）。**開けなくても起動は止めない**
+    //   （その事実は手順 3 が本来の報告経路で扱う）。
+    //   適用した事実の記録は手順 4.8 まで遅れる — 記録機構のロガーが手順 4 で初めて
+    //   取り付けられるためである（5.2 の起動行と同じ事情）。
+    let render_fallback = reserve_render_fallback_point();
 
     // 手順 2: 単一インスタンスの登録。**最初のプラグインとして登録する。**プラグインの
     //   初期化は登録順に行われるため、後続タスクが足すプラグイン（5.2 の記録機構など）より
@@ -395,6 +404,13 @@ pub fn run() -> Result<(), StartupError> {
         MAX_CRASH_RECORD_BYTES,
     );
 
+    // 手順 4.8: 描画の代替経路の適用を起動行として記録する（要件 10.3。タスク 8.3）。
+    //   **適用そのものは手順 1 で済んでいる**（GTK / WebKit の初期化前でなければ意味が無い）。
+    //   記録だけがここまで遅れるのは、記録機構のロガーが手順 4 で初めて取り付けられるためで
+    //   ある（5.2 の起動行と同じ事情）。**印が無ければ何も出さない**（正常な環境の起動行を
+    //   ノイズで埋めない）。行の水準と区分は `render_fallback_record` の doc にある。
+    record_render_fallback(&render_fallback);
+
     // 手順 5: 残留プロセスの掃除（要件 5.6、タスク 3.5）。前回の実行が終了処理を走らせられずに
     //   残した補助プロセスを終了させる。
     //
@@ -418,18 +434,109 @@ pub fn run() -> Result<(), StartupError> {
     Ok(())
 }
 
-/// 手順 1: 描画の回避策を適用するために確保した予約点（**未実装**）。
+/// 手順 1: 描画の代替経路の適用（要件 10.3。タスク 8.3）。
 ///
-/// タスク 8.3 がここに「設定に残した印を読む → 必要なら回避策の環境変数を適用する →
-/// 適用した事実を記録する」を埋める。**この段では判定処理を書かない**（タスク 5.1 の指示。
-/// 判定と適用は 8.3 が所有する）。8.3 はこの関数の中身だけを置き換える — 呼び出し位置
-/// （`run` の手順 1）は順序の制約そのものであるため動かさない。
+/// 前回の起動が描画不成立（`NoPaint`）を記録していれば、その印を設定から読み、**GTK と
+/// WebKit のコードが動く前**に回避策の環境変数を適用する。順序の根拠は `run` の手順 1 の
+/// コメントと research.md 決定 7。**印が無ければ何も適用しない**（無条件適用は一部の環境の
+/// 問題を全環境の性能低下と引き換えに直すことになる。要件 10.3）。
 ///
-/// 位置の根拠: 回避策の環境変数は GTK と WebKit のコードが動く前に設定しなければならず、
-/// 検出した時点では既に手遅れである（design.md「RenderWatchdog」）。検出時は設定に印を残し、
-/// **次回の起動で構築の前に読んで適用する**（要件 10.3）。
-fn reserve_render_fallback_point() {
-    // 判定と適用は 8.3 が埋める。ここは順序の予約だけを担う。
+/// # 設定ストアをここで開く理由（8.2 からの申し送り）
+///
+/// 印は [`app_shell::settings::SettingsKey::RenderFallback`] にあり、読むには設定ストアが
+/// 要る。この手順は `init_diagnostics`（手順 3）より前に走るため、**ストアを自前で開く**。
+/// `settings::open` は同じディレクトリに対して**同じ実体**を返すので、手順 3 が開くストアと
+/// 同一である（要件 7.3。ストアが 2 つになる経路は無い）。
+///
+/// # 起動を止めない（フォールバックのフォールバック）
+///
+/// ストアを開けない場合は**何も適用せずに** [`FallbackOutcome::unreadable`] を返す。
+/// 前提不成立の報告は手順 3（`init_diagnostics`）が本来の 1 経路で行う。ここで `?` を返すと
+/// 報告経路が 2 本になり、診断の初期化より前に前提不成立を報告する経路ができてしまう。
+/// 印の値が真偽でない（読めない）場合も同じで、**立っていないものとして扱う**
+/// （[`app_shell::render::render_fallback_pending`]）。いずれの場合も起動は続き、印は次の
+/// 起動の判定（`Painted`）で下ろされる。
+///
+/// 選択と適用そのものは Tauri 非依存の [`render_fallback`] が所有する（**判定をこの関数に
+/// 書かない**。タスク 5.1 の指示）。
+///
+/// # 2 つ目のプロセスもこの手順を通る
+///
+/// 単一インスタンスの判定は手順 4 のプラグイン初期化で起きるため、引き継ぎ側の 2 つ目の
+/// プロセスもこの手順を実行する。適用した環境変数はそのプロセスのものに過ぎず、続く手順 4 で
+/// 引数を引き渡して終了するので、動作中のアプリへは影響しない。**この手順を単一インスタンスの
+/// 登録より後ろへ動かしてはならない** — 適用は GTK / WebKit の初期化より前でなければならず、
+/// その初期化は手順 4 で起きる。
+fn reserve_render_fallback_point() -> FallbackOutcome {
+    let Ok(directory) = settings::app_data_dir() else {
+        return FallbackOutcome::unreadable();
+    };
+    match settings::open(&directory) {
+        Ok((store, _report)) => render_fallback::apply_pending(&store),
+        Err(_) => FallbackOutcome::unreadable(),
+    }
+}
+
+/// 手順 4.8 の記録の材料（**純粋関数**。単体テストで固定する）。
+///
+/// 適用した事実と、適用した回避策（環境変数名と値）を 1 行にまとめる。**どの代替経路を
+/// 用いたかを特定できる**ことが要件 10.3 の「代替経路を用いた事実を診断情報に記録する」の
+/// 中身である。記録の水準は 8.2 の判定の記録（`jxcel::render`。`NoPaint` は error、
+/// `SoftwareRaster` は warn、`Painted` は info）と同じ規約に従う:
+///
+/// - **適用した** → `info`（意図した縮退であり、異常ではない）
+/// - **印は立っているが適用できる回避策が無い**（Windows / macOS）→ `debug`
+///   （初期値の `Info` では出ない。利用者の環境では起きないが、Linux 以外で印だけが残る
+///   状態を保守担当が説明できるようにする）
+/// - 印が無い・印を読めなかった → `None`（記録しない。正常な環境の起動行をノイズで埋めない）
+fn render_fallback_record(outcome: &FallbackOutcome) -> Option<(log::Level, String)> {
+    match outcome.pending {
+        Some(true) if !outcome.applied.is_empty() => {
+            let applications = outcome
+                .applied
+                .iter()
+                .map(|application| {
+                    let origin = match application.origin {
+                        FallbackOrigin::Added => "適用",
+                        FallbackOrigin::Replaced => "置換",
+                        FallbackOrigin::AlreadySet => "既に設定済み",
+                    };
+                    format!("{}={}（{origin}）", application.variable, application.value)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some((
+                log::Level::Info,
+                format!(
+                    "描画の代替経路を適用した（{applications}）。前回の起動で描画が成立しなかった\
+                     印に基づく判定であり、次回の起動で通常の描画経路が成立すれば印を下ろす"
+                ),
+            ))
+        }
+        // 印はあるのに適用が空 = このプラットフォームに回避策が無い（Linux / WebKitGTK 以外）。
+        Some(true) => Some((
+            log::Level::Debug,
+            format!(
+                "描画の代替経路の印が立っているが、このプラットフォーム（{}）に適用できる\
+                 回避策は無い（対象は Linux / WebKitGTK である）",
+                render_fallback::RenderPlatform::current().as_str(),
+            ),
+        )),
+        // 印が無い（`Some(false)`）か、読めなかった（`None`）。
+        _ => None,
+    }
+}
+
+/// 手順 1 の結論を起動行として記録する（要件 10.3。
+/// [`render_fallback_record`] の doc を参照）。
+///
+/// **適用そのものは手順 1 で済んでいる。**記録だけがここまで遅れるのは、記録機構のロガーが
+/// 手順 4 で初めて取り付けられるためである（5.2 の起動行と同じ事情）。
+fn record_render_fallback(outcome: &FallbackOutcome) {
+    let Some((level, line)) = render_fallback_record(outcome) else {
+        return;
+    };
+    log::log!(target: crate::watchdog::LOG_TARGET, level, "{line}");
 }
 
 /// 手順 2: 単一インスタンスのプラグインを**最初のプラグインとして**登録する（要件 1.5）。
@@ -1945,13 +2052,17 @@ fn start_verification_sidecar(app: &AppHandle) {
 mod tests {
     use super::{
         clamp_to_char_boundary, confirm_csp_values, csp_config_from, format_crash_record,
-        record_once, vetoes_exit, write_crash_record, CrashRecord, CspConfig, ExitControl,
-        Residency, ABNORMAL_TERMINATION_RECORDING, MAX_CRASH_RECORD_BYTES,
+        record_once, render_fallback_record, vetoes_exit, write_crash_record, CrashRecord,
+        CspConfig, ExitControl, Residency, ABNORMAL_TERMINATION_RECORDING, MAX_CRASH_RECORD_BYTES,
     };
     #[cfg(feature = "verification-triggers")]
     use super::{parse_verification_trigger, VerificationAction};
+    use app_shell::render_fallback::{
+        FallbackApplication, FallbackOrigin, FallbackOutcome, RenderFallback,
+    };
     use std::sync::atomic::Ordering;
     use tauri::utils::config::Csp;
+    use tauri_plugin_log::log::Level;
 
     /// 方針文字列から実効設定を組み立てる（本番の `csp_config` が `Config` から取り出すのと
     /// 同じ経路を通す。方針の解釈をテスト側で二重実装しないための入口である）。
@@ -2272,5 +2383,77 @@ mod tests {
                 "解釈できてはならない: {value:?}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 描画の代替経路の起動記録（タスク 8.3、要件 10.3）
+    // -----------------------------------------------------------------------
+
+    fn applied_outcome(origin: FallbackOrigin) -> FallbackOutcome {
+        let fallback = RenderFallback {
+            variable: "WEBKIT_DISABLE_DMABUF_RENDERER",
+            value: "1",
+        };
+        FallbackOutcome {
+            pending: Some(true),
+            applied: vec![FallbackApplication {
+                variable: fallback.variable,
+                value: fallback.value,
+                origin,
+            }],
+        }
+    }
+
+    /// 適用したときは、適用した回避策を特定できる info の 1 行を返す（要件 10.3）。
+    #[test]
+    fn an_applied_fallback_is_recorded_with_what_was_applied() {
+        let (level, line) = render_fallback_record(&applied_outcome(FallbackOrigin::Added))
+            .expect("適用した事実は記録しなければならない");
+
+        assert_eq!(level, Level::Info);
+        assert!(line.contains("代替経路"), "{line}");
+        assert!(line.contains("WEBKIT_DISABLE_DMABUF_RENDERER=1"), "{line}");
+        assert!(line.contains("適用"), "{line}");
+        assert!(!line.contains('\n'), "{line}");
+    }
+
+    /// 置き換えた場合と既にあった場合も、由来が記録から読める。
+    #[test]
+    fn the_origin_of_the_application_is_readable_from_the_record() {
+        let (_, replaced) = render_fallback_record(&applied_outcome(FallbackOrigin::Replaced))
+            .expect("置き換えた事実も記録する");
+        assert!(replaced.contains("置換"), "{replaced}");
+
+        let (_, already) = render_fallback_record(&applied_outcome(FallbackOrigin::AlreadySet))
+            .expect("既にあった事実も記録する");
+        assert!(already.contains("既に設定済み"), "{already}");
+    }
+
+    /// 印はあるが適用できる回避策が無い場合は Debug の 1 行に留める（初期値では出ない）。
+    #[test]
+    fn a_pending_mark_without_a_policy_is_recorded_at_debug() {
+        let outcome = FallbackOutcome {
+            pending: Some(true),
+            applied: Vec::new(),
+        };
+
+        let (level, line) = render_fallback_record(&outcome).expect("説明できる行を残す");
+
+        assert_eq!(level, Level::Debug);
+        assert!(
+            line.contains(app_shell::render_fallback::RenderPlatform::current().as_str()),
+            "{line}"
+        );
+    }
+
+    /// 印が無い起動と、印を読めなかった起動は**何も記録しない**（正常な起動行を汚さない）。
+    #[test]
+    fn a_clear_or_unreadable_mark_records_nothing() {
+        assert!(render_fallback_record(&FallbackOutcome {
+            pending: Some(false),
+            applied: Vec::new(),
+        })
+        .is_none());
+        assert!(render_fallback_record(&FallbackOutcome::unreadable()).is_none());
     }
 }
