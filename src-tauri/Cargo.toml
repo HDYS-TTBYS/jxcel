@@ -1,0 +1,33 @@
+[package]
+name = "jxcel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "jxcel デスクトップアプリケーション（Tauri v2 アダプタ）"
+
+# ---------------------------------------------------------------------------
+# 依存方針（design.md「Allowed Dependencies」・tech.md「Dependency Floors」準拠）
+#
+# 1. 本クレートは Tauri アダプタであり、`tauri` / `tauri-build` を持つことが役割である。
+#    ワークスペース直下の「tauri への依存を持たないこと」という規則は `crates/*` の
+#    ドメインクレートに限った規則であり、本クレートはその対象外である。
+#    ここに業務ロジックを書かない。ウィンドウ・コマンド・メニュー・補助プロセスのホストは
+#    `app-shell` の機構を呼ぶだけの薄いアダプタに留める（structure.md）。
+# 2. tauri の下限は 2.11.3（tech.md「Dependency Floors」）。2.11.1 の security fix 2 件
+#    （`AppManifest` 未設定時に自前コマンドの ACL が迂回される問題、Windows における
+#    `.localhost` サフィックスの origin 混同）と、2.11.3 の起動性能改善より前へ
+#    ピン留めしない。本スペックが解決する版は 2.11.5（design.md「Technology Stack」）。
+# 3. `tauri-plugin-fs` / `tauri-plugin-shell` を依存に入れない（要件 4.7。決定 3）。
+#    `core:default` にどちらも含まれないため、依存が無ければフロントエンドからの到達経路が
+#    存在しない。これが第一の制御であり、`scripts/check-capabilities.sh` が第二の制御である。
+#    プラグインの追加はタスク 1.3 が行う（本タスクでは 1 つも追加しない）。
+# 4. `tauri_build::build()` の結線はタスク 1.3 が行う。`tauri_build::build()` は
+#    `tauri.conf.json` を必須とする（不在時は tauri-utils の config 読み込みが失敗する）ため、
+#    設定ファイルを追加する同じ変更で結線する。build.rs のコメントを参照。
+# ---------------------------------------------------------------------------
+[dependencies]
+tauri = "2.11.3"
+
+[build-dependencies]
+tauri-build = "2.6.3"

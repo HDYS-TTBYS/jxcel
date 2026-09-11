@@ -4,7 +4,7 @@
 # 根拠（.kiro/specs/document-format/design.md「Performance Tests」・
 # requirements 8.1 / 8.2・tasks.md 8.9）:
 #   10 万行 × 30 列のドキュメントを **開く 3 秒以内**、**保存 2 秒以内**で処理する。
-#   `.github/workflows/bench.yml` の `cargo bench --workspace` が残す criterion の
+#   `.github/workflows/bench.yml` の `cargo bench -p document-format` が残す criterion の
 #   計測値（`target/criterion/**/new/estimates.json`）を読み、平均（mean）の
 #   点推定値が予算を超えていれば非 0 で終了し、CI を失敗させる。これにより予算超過を
 #   機能追加と同時に検出する。

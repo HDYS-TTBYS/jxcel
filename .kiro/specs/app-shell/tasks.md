@@ -2,7 +2,7 @@
 
 - [ ] 1. Foundation: ワークスペース・足場・検証環境
 
-- [ ] 1.1 ワークスペースを 3 クレート構成へ拡張し、既存 CI を維持する
+- [x] 1.1 ワークスペースを 3 クレート構成へ拡張し、既存 CI を維持する
   - `crates/app-shell`、`crates/sidecar-smoke`、`src-tauri` をワークスペースの members に加える
   - ワークスペース直下の「tauri への依存を一切持たないこと」という方針コメントを、**ドメインクレートに限った規則へ書き換える**。現在の文面はワークスペース全体の規則であり、Tauri アプリを加えた初日に自己矛盾する
   - 既存の 3 OS 検証ジョブに、Tauri のビルドに必要な Linux のシステム依存とフロントエンドのツールチェーンを追加する
@@ -477,3 +477,10 @@
   - **完了状態**: 10 万行の受け渡しが 1 回の呼び出しで完了し、呼び出し回数が定数であることが検証結果に現れる
   - _Requirements: 4.5_
   - _Depends: 7.2_
+
+## Implementation Notes
+
+- **1.1**: Tauri の依存集合を加えると `cargo audit` は 0 脆弱性のまま warning 7 件（`proc-macro-error 1.0.4` は glib-macros 経由、`glib 0.18.5` の unsound は atk/gtk ← muda/tao ← tauri、`unic-*` 5 件は urlpattern ← tauri-utils）を報告する。いずれも上流内在で ignore リストを追加してはならない（要件 6.3、ci.yml のコメント）。監査ゲートは非 0 終了のみで落とす。
+- **1.1**: Linux の Tauri ビルドには Tauri 公式の文書化パッケージ一覧に加えて `libdbus-1-dev` が要る（既定 feature の `dbus` → `libdbus-sys` のビルドスクリプトが `dbus-1.pc` を要求する）。`libxdo-dev` / `libayatana-appindicator3-dev` は `tray-icon` feature を使うまで不要。
+- **1.1**: `src-tauri/build.rs` の `tauri_build::build()` と `main.rs` の `tauri::generate_context!()` はどちらも `tauri.conf.json` をコンパイル時に要求するため、同ファイルを追加するタスク 1.3 で結線する。
+- **環境**: このマシンの `cargo` は podman シムでリポジトリだけを bind-mount する。WebKitGTK/GTK の開発ファイルはリポジトリ直下 `.devsys/root`（git 除外済み）に展開し、`.cargo/config.toml` の `[env]` で pkg-config に指している。GUI の目視検証はホスト側で `GDK_BACKEND=x11` を強制して `xwininfo -root -tree` でウィンドウを確認する（Wayland に行くと X ツリーに現れない）。

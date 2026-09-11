@@ -1,0 +1,26 @@
+[package]
+name = "app-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "jxcel アプリケーションシェルの中核（Tauri 非依存のドメインクレート）"
+
+# ---------------------------------------------------------------------------
+# 依存方針（design.md「Allowed Dependencies」・structure.md 準拠）
+#
+# 1. tauri 禁止: 本クレートは Tauri に依存してはならない。推移的依存も不可であり、
+#    `cargo tree -p app-shell` のどこにも tauri が現れてはならない。本クレートが所有する
+#    機構（補助プロセスの監督・同梱物の整合性検査・設定の原子的書き込み・
+#    ショートカット競合検査・診断方針）は、GUI を起動せずにテストできなければならない
+#    （structure.md「Rust ドメインクレート」「Tauri を必要とするスペックは 2 つに割る」）。
+# 2. 他の jxcel ドメインクレートへの依存禁止: roadmap における本スペックの依存は none で
+#    あり、document-format をはじめとする他のドメインクレートに依存しない。
+# 3. 実依存と下限はタスク 1.2 以降で追加する（型生成は tech.md「Key Libraries」の
+#    `ts-rs` を採り、`tauri-specta` は却下済み。決定 1）。
+# ---------------------------------------------------------------------------
+[dependencies]
+
+[lib]
+name = "app_shell"
+path = "src/lib.rs"

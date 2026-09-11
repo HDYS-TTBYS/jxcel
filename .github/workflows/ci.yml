@@ -1,8 +1,11 @@
-# CI パイプライン（tasks.md 1.2 / Requirements 3.2, 8.3）
+# CI パイプライン（tasks.md 1.1 / 1.5 / Requirements 3.2, 6.2, 6.3, 8.3）
 #   - test : Linux / macOS / Windows の 3 OS マトリクスでビルドとテストを実行する
-#     （決定的シリアライズは OS を跨いだバイト同一性を要求するため 3 OS 必須）
+#     （決定的シリアライズは OS を跨いだバイト同一性を要求するため 3 OS 必須）。
+#     本スペックはこの既存マトリクスを拡張する。**プラットフォーム別のワークフローを
+#     新設しない**（要件 6.2）。
 #   - audit: cargo audit をゲートとして組み込む。非 0 終了で即パイプライン失敗
-#     （例外・スキップ・エラー無視の設定は一切許可しない）
+#     （例外・スキップ・エラー無視の設定は一切許可しない）。Tauri の依存集合を
+#     加えた状態でも本ゲートが走り続けることを確認する（要件 6.3）。
 # zip >= 2.3.0 の下限（RUSTSEC-2025-0168、design.md Security Considerations）は
 # scripts/check-zip-floor.sh が Cargo.lock の解決版を機械検査する（両ジョブで実行）。
 name: CI
@@ -22,12 +25,61 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Linux の WebKitGTK 系開発パッケージと仮想ディスプレイ。
+      # Tauri v2 は OS の WebView にリンクするため、ヘッダと .pc ファイルが無いと
+      # `webkit2gtk-sys` / `gtk-sys` / `soup3-sys` / `javascriptcore-rs-sys` の
+      # ビルドスクリプトが pkg-config の解決に失敗し、ワークスペース全体が落ちる。
+      #   - libwebkit2gtk-4.1-dev        : WebView 本体（Tauri v2 が使う 4.1 系）
+      #   - libgtk-3-dev                 : ウィンドウと GTK ウィジェット
+      #   - libsoup-3.0-dev              : WebKitGTK 4.1 系が要求する HTTP 実装
+      #   - libjavascriptcoregtk-4.1-dev : JS エンジン
+      #   - librsvg2-dev                 : アイコン（SVG）の読み込み
+      #   - libssl-dev                   : OpenSSL ヘッダ（openssl-sys の解決）
+      #   - libdbus-1-dev                : tauri の既定 feature `dbus` →
+      #     tauri-runtime-wry → tao/dbus → dbus → libdbus-sys が `dbus-1.pc` を
+      #     pkg-config に要求する。欠けると libdbus-sys のビルドスクリプトが panic し、
+      #     ワークスペース全体が落ちる（ローカルで実測）。Tauri のドキュメントの
+      #     パッケージ一覧には現れないが、既定 feature のビルドには必須である。
+      #   - pkg-config                   : 上記の解決機構そのもの
+      #   - patchelf                     : AppImage バンドル時の実行ファイル書き換え（タスク 1.5）
+      #   - xvfb                         : 仮想ディスプレイ。ウィンドウ表示を伴う検証
+      #     （タスク 1.5 の起動・描画確認）は GUI の無いランナーではこの上で走らせる。
+      # macOS / Windows は OS 標準の WebView を使うため追加パッケージを要さない。
+      - name: Install Linux system dependencies (Tauri v2)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libdbus-1-dev \
+            pkg-config \
+            patchelf \
+            xvfb
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      # フロントエンドのツールチェーン（React + Vite + TypeScript。tasks.md 1.4 / 1.5）。
+      # 本スペックのフロントエンドは `src/` にあり、ビルドは Node 側で行う。Rust の
+      # ビルドより先に入れておくことで、後続タスクが追加する `npm ci` / `tsc --noEmit` の
+      # 段が同じジョブに載る（ジョブを新設しない = 要件 6.2）。
+      # なお package-lock.json はタスク 1.4 が追加するため、`cache: npm` は指定しない
+      # （lock ファイル不在時に actions/setup-node が失敗するため）。
+      - name: Install Node.js frontend toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # Tauri アプリ（`src-tauri/`、パッケージ名 `jxcel`）を含むワークスペース全体を
+      # ビルドする。Tauri の依存を加えた状態でこの段が通ることが、以降の検証の前提である。
       - name: Build
         run: cargo build --workspace --all-targets
 
@@ -64,7 +116,9 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
-      # ゲート厳守: cargo audit が非 0 で終わったらここでパイプラインを落とす
+      # ゲート厳守: cargo audit が非 0 で終わったらここでパイプラインを落とす。
+      # Tauri の依存集合は本スペックで最もゲートに触れやすい（要件 6.3）。
+      # 勧告が出た場合も ignore リストを追加して隠さない。
       - name: cargo audit
         run: cargo audit
 

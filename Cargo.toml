@@ -1,13 +1,22 @@
 # jxcel Cargo workspace
 #
-# 依存ポリシー（.kiro/steering 準拠）:
-# - tauri への依存を一切持たないこと（推移的依存も含む不可）。
-#   本ワークスペースのクレートは GUI を起動せずにテスト可能でなければならない。
+# 依存ポリシー（.kiro/steering/structure.md 準拠）:
+# - **ドメインクレート（`crates/*`）は tauri への依存を一切持たないこと**（推移的依存も含む）。
+#   これは「エンジンと UI の分離」を依存グラフで強制する規則であり、ドメインのテストに
+#   GUI の起動が必要になった時点で層が壊れている、という判定基準（structure.md）に対応する。
+#   適用範囲は `crates/` 配下のドメインクレートに限る。`src-tauri/` は Tauri に接続する
+#   アダプタクレートであり、`tauri` / `tauri-build` を持つことが役割そのものであるため、
+#   本規則の対象外とする（design.md「Allowed Dependencies」）。
 # - 他の jxcel ドメインクレートへの依存を持たないこと
 #   （document-format は依存グラフの最下層 = ルートクレートである）。
 [workspace]
 resolver = "2"
-members = ["crates/document-format"]
+members = [
+    "crates/document-format",
+    "crates/app-shell",
+    "crates/sidecar-smoke",
+    "src-tauri",
+]
 
 [workspace.package]
 version = "0.1.0"
