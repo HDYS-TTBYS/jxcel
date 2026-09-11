@@ -141,8 +141,12 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
+      # `--no-fail-fast`: 既定の `cargo test` は最初に落ちたテストターゲットで止まり、
+      # 残りの統合テストと doctest を走らせない。OS 固有の失敗は 1 回の実行ですべて
+      # 見えている必要がある（Windows で lib の 1 件が落ちた結果、統合テストが
+      # 一度も走らなかったことがある）。
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
       # 設計意図: 決定性（要件 3.1, 3.2）は「同一文書の 2 回保存のバイト一致」と
       # 「Linux / macOS / Windows の 3 OS の出力バイト一致」で検証する。後者は

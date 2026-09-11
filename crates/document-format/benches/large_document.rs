@@ -19,11 +19,12 @@
 //! # 計測環境の規定（要件 8.3）
 //!
 //! 計測条件は「**SSD を搭載した 4 コア以上の一般的なデスクトップ環境**」である。CI の
-//! GitHub-hosted ランナー（`ubuntu-latest` / `macos-latest` / `windows-latest`）は
-//! SSD ストレージ搭載・4 コア以上であることが GitHub 公式に明記されており、この条件を
-//! 満たす（`.github/workflows/bench.yml` のコメントと同じ前提）。本ベンチは予算判定の
-//! 根拠として release プロファイル（`cargo bench`）の計測値を用いる。debug プロファイルの
-//! テスト実行（`tests/row_granular_diff.rs` が 10 万行のフル経路を走らせる。同ファイルの
+//! GitHub-hosted ランナー（`ubuntu-latest` / `macos-latest` / `windows-latest`）は、
+//! 本リポジトリが private であるため 2 vCPU（macOS は 3 コア M1）であり、この条件より
+//! **弱い**。予算判定はこの弱い環境で要件値そのものに対して行う（通れば要件の環境でも
+//! 通るとみなす保守的な代理。`.github/workflows/bench.yml` 冒頭の「計測環境」）。
+//! 本ベンチは予算判定の根拠として release プロファイル（`cargo bench`）の計測値を
+//! 用いる。debug プロファイルのテスト実行（`tests/row_granular_diff.rs` が 10 万行のフル経路を走らせる。同ファイルの
 //! docs「3 位置のループを別の（小さい）標本で回す理由」参照）は予算判定に使わない。
 //!
 //! # 標本（測定条件）
