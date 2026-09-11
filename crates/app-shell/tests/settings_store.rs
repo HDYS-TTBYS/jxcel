@@ -1,6 +1,7 @@
-//! 設定ストアの原子性・永続化・共有・直列化（要件 7.1、7.2、7.3。tasks.md 4.1）。
+//! 設定ストアの原子性・永続化・共有・直列化・未知キー保持・破損時の既定値起動
+//! （要件 7.1〜7.7。tasks.md 4.1、4.2）。
 //!
-//! 固定するのは次の 6 つである:
+//! 固定するのは次の 9 つである:
 //!
 //! 1. **完了状態（tasks.md 4.1）**: 書き込みの途中でプロセスを強制終了しても、対象ファイルには
 //!    直前の完全な内容か新しい完全な内容のいずれかが残る（部分的な内容は残らない）
@@ -10,6 +11,12 @@
 //! 5. 複数スレッドからの並行 `set` が失われない（書き込みの直列化）
 //! 6. OS 標準のアプリケーションデータ領域の解決が各 OS の規約に従い、環境変数が無ければ
 //!    Err を返す（パニックしない）。識別子は `src-tauri/tauri.conf.json` と一致する（要件 7.2）
+//! 7. **完了状態（tasks.md 4.2、前半）**: 未知のキー（入れ子のオブジェクトを含む）が読み書きを
+//!    経ても失われない（要件 7.6）
+//! 8. **完了状態（tasks.md 4.2、後半）**: 壊れた設定からも既定値で起動し、復旧の事実を返し、
+//!    ファイルを削除も変更もしない（要件 7.5）。未知の版も同じ経路である
+//! 9. キー空間が閉じている（`SettingsKey` の列挙がカタログの全体であり、任意の名前を持つ鍵を
+//!    作る公開の入口が無い）ことと、ドキュメントの内容を名指しできないこと（要件 7.7）
 //!
 //! # 強制終了による原子性の検証
 //!
@@ -47,33 +54,31 @@ use std::time::{Duration, Instant};
 
 use app_shell::settings::atomic::TEMP_FILE_PREFIX;
 use app_shell::settings::{
-    app_data_base_dir, app_data_base_dir_with, app_data_dir, open, OpenReport, SettingsError,
-    SettingsKey, SettingsStore, APP_IDENTIFIER, SETTINGS_FILE_NAME,
+    app_data_base_dir, app_data_base_dir_with, app_data_dir, open, OpenReport, RecoveryCause,
+    RecoveredFrom, SettingsError, SettingsKey, SettingsStore, APP_IDENTIFIER, SETTINGS_FILE_NAME,
+    SUPPORTED_SCHEMA_VERSION,
 };
 
 // ---------------------------------------------------------------------------
 // テストが使うキー
 // ---------------------------------------------------------------------------
 
-const TEST_KEY: SettingsKey = SettingsKey::new("test.value");
-const COUNT_KEY: SettingsKey = SettingsKey::new("test.count");
-const OBJECT_KEY: SettingsKey = SettingsKey::new("test.object");
-const MISSING_KEY: SettingsKey = SettingsKey::new("test.missing");
-const BLOCKER_KEY: SettingsKey = SettingsKey::new("test.blocker");
+/// 4.1 の往復テストが使う鍵。カタログ（[`SettingsKey`]）の各型を 1 つずつ通す。
+const TEST_KEY: SettingsKey = SettingsKey::AppearanceTheme;
+const COUNT_KEY: SettingsKey = SettingsKey::SchemaVersion;
+const OBJECT_KEY: SettingsKey = SettingsKey::WindowGeometry;
+const MISSING_KEY: SettingsKey = SettingsKey::RenderFallback;
+const BLOCKER_KEY: SettingsKey = SettingsKey::RenderFallback;
 
-/// 並行書き込みテストでスレッドごとに固定するキー。文字列リテラルから作る（`SettingsKey` は
-/// 安定した文字列を要求するため、実行時に組み立てた名前は使わない）。
-const CONCURRENT_THREADS: usize = 8;
+/// 並行書き込みテストでスレッドごとに固定するキー。カタログの非メタ鍵を使い切る（キー空間は
+/// 閉じているため、テスト専用の鍵を新しく作ることはできない。設計どおりである）。
+const CONCURRENT_THREADS: usize = 4;
 const CONCURRENT_WRITES_PER_THREAD: usize = 64;
 const CONCURRENT_KEYS: [SettingsKey; CONCURRENT_THREADS] = [
-    SettingsKey::new("concurrent.0"),
-    SettingsKey::new("concurrent.1"),
-    SettingsKey::new("concurrent.2"),
-    SettingsKey::new("concurrent.3"),
-    SettingsKey::new("concurrent.4"),
-    SettingsKey::new("concurrent.5"),
-    SettingsKey::new("concurrent.6"),
-    SettingsKey::new("concurrent.7"),
+    SettingsKey::AppearanceTheme,
+    SettingsKey::DiagnosticsLevel,
+    SettingsKey::RenderFallback,
+    SettingsKey::WindowGeometry,
 ];
 
 // ---------------------------------------------------------------------------
@@ -156,13 +161,13 @@ fn set_then_get_round_trips_across_a_fresh_open() {
     assert_eq!(report, OpenReport::default(), "4.1 の open は復旧の事実を返さない");
 
     store.set(&TEST_KEY, &"文字列").expect("書ける");
-    store.set(&COUNT_KEY, &7u32).expect("書ける");
+    store.set(&COUNT_KEY, &SUPPORTED_SCHEMA_VERSION).expect("書ける");
     store
         .set(&OBJECT_KEY, &serde_json::json!({"a": [1, 2, 3]}))
         .expect("書ける");
 
     assert_eq!(store.get::<String>(&TEST_KEY).as_deref(), Some("文字列"));
-    assert_eq!(store.get::<u32>(&COUNT_KEY), Some(7));
+    assert_eq!(store.get::<u32>(&COUNT_KEY), Some(SUPPORTED_SCHEMA_VERSION));
     assert_eq!(
         store.get::<serde_json::Value>(&OBJECT_KEY),
         Some(serde_json::json!({"a": [1, 2, 3]}))
@@ -174,7 +179,7 @@ fn set_then_get_round_trips_across_a_fresh_open() {
     drop(store);
     let (fresh, _) = open(scratch.path()).expect("開き直せる");
     assert_eq!(fresh.get::<String>(&TEST_KEY).as_deref(), Some("文字列"));
-    assert_eq!(fresh.get::<u32>(&COUNT_KEY), Some(7));
+    assert_eq!(fresh.get::<u32>(&COUNT_KEY), Some(SUPPORTED_SCHEMA_VERSION));
     assert_eq!(
         fresh.get::<serde_json::Value>(&OBJECT_KEY),
         Some(serde_json::json!({"a": [1, 2, 3]}))
@@ -351,6 +356,288 @@ fn concurrent_writes_do_not_lose_updates() {
 }
 
 // ---------------------------------------------------------------------------
+// 要件 7.6: 未知キーの保持（完了状態の前半）
+// ---------------------------------------------------------------------------
+
+/// 既定値で起動した事実を取り出す（無ければ失敗する）。
+fn recovered(report: &OpenReport) -> &RecoveredFrom {
+    report.recovered_from().expect("復旧の事実が報告されていない")
+}
+
+/// 未知のキー（入れ子のオブジェクトを含む）は読み書きの往復で失われない（要件 7.6）。
+///
+/// 現行版のファイルに、このモジュールが [`SettingsKey`] として解釈しない鍵を混ぜ、既知の鍵を
+/// `set` した後で生のファイルを読み直す。**完了状態（tasks.md 4.2、前半）** の後半は、開き直した
+/// 実体でも未知の鍵が残ることまで確かめる。
+#[test]
+fn unknown_keys_survive_a_read_modify_write() {
+    let scratch = Scratch::new("unknown-keys");
+    let original = serde_json::json!({
+        "schema_version": SUPPORTED_SCHEMA_VERSION,
+        "appearance.theme": "dark",
+        // このモジュールが解釈しない鍵（別の版が書いた項目の想定）と、その入れ子のオブジェクト。
+        "future.layout": {"sidebar": {"width": 240, "pinned": true}, "tabs": ["a", "b"]},
+        "legacy.widgets": [1, 2, {"nested": null}],
+    });
+    fs::write(scratch.target(), serde_json::to_vec(&original).expect("直列化できる"))
+        .expect("設定ファイルを置ける");
+
+    let (store, report) = open(scratch.path()).expect("設定ストアを開ける");
+    assert!(report.recovered_from().is_none(), "現行版のファイルを復旧として扱った");
+    assert_eq!(store.get::<String>(&TEST_KEY).as_deref(), Some("dark"));
+
+    // 既知の鍵を書き換える。未知の鍵は値の形を変えずに残らなければならない。
+    store.set(&TEST_KEY, &"light").expect("書ける");
+
+    let after: serde_json::Value =
+        serde_json::from_slice(&fs::read(scratch.target()).expect("対象を読める")).expect("完全な JSON");
+    assert_eq!(after["appearance.theme"], serde_json::json!("light"), "既知の鍵が更新されていない");
+    assert_eq!(after["future.layout"], original["future.layout"], "未知のキーが失われた");
+    assert_eq!(after["legacy.widgets"], original["legacy.widgets"], "未知の入れ子が失われた");
+    assert_eq!(after["schema_version"], original["schema_version"], "版が失われた");
+
+    // 開き直しても未知のキーは残る。
+    drop(store);
+    let (fresh, reopened) = open(scratch.path()).expect("開き直せる");
+    assert!(reopened.recovered_from().is_none());
+    assert_eq!(fresh.get::<String>(&TEST_KEY).as_deref(), Some("light"));
+    let after_reopen: serde_json::Value =
+        serde_json::from_slice(&fs::read(scratch.target()).expect("対象を読める")).expect("完全な JSON");
+    assert_eq!(after_reopen["future.layout"], original["future.layout"], "開き直しで失われた");
+    assert_eq!(after_reopen["legacy.widgets"], original["legacy.widgets"], "開き直しで失われた");
+}
+
+// ---------------------------------------------------------------------------
+// 要件 7.5: 破損時の既定値起動（完了状態の後半）
+// ---------------------------------------------------------------------------
+
+/// 壊れた設定からも既定値で起動し、復旧の事実を返し、ファイルを変更しない（要件 7.5）。
+///
+/// 0 バイト・不正な JSON・オブジェクトでない JSON をそれぞれ用意し、**いずれも** `open` が
+/// 成功すること、`get` が既定値（`None`）を返すこと、復旧の事実が載ること、元のバイト列が
+/// そのまま残ることを確かめる。開き直しても同じである（削除も変更もしない）。
+#[test]
+fn corrupt_settings_start_from_defaults_and_preserve_the_file() {
+    let corruptions: [(&str, Vec<u8>); 4] = [
+        ("0 バイト", Vec::new()),
+        ("不正な JSON", b"{\"appearance.theme\":".to_vec()),
+        ("オブジェクトでない JSON（配列）", b"[1, 2, 3]".to_vec()),
+        ("オブジェクトでない JSON（null）", b"null".to_vec()),
+    ];
+
+    for (label, contents) in corruptions {
+        let scratch = Scratch::new("corrupt");
+        fs::write(scratch.target(), &contents).expect("壊れた内容を置ける");
+
+        let (store, report) = open(scratch.path())
+            .unwrap_or_else(|error| panic!("{label}: 壊れていても起動できなければならない: {error}"));
+        assert_eq!(store.get::<String>(&TEST_KEY), None, "{label}: 既定値で起動していない");
+        assert_eq!(
+            store.get::<serde_json::Value>(&OBJECT_KEY),
+            None,
+            "{label}: 既定値で起動していない"
+        );
+        let fact = recovered(&report);
+        assert_eq!(fact.path, scratch.target(), "{label}: 対象のパスが違う");
+        assert!(
+            matches!(fact.cause, RecoveryCause::Malformed),
+            "{label}: 原因が違う: {:?}",
+            fact.cause
+        );
+        assert_eq!(fs::read(scratch.target()).expect("読める"), contents, "{label}: ファイルを変更した");
+
+        // 実体を手放して開き直す（登録簿が空になり、必ずディスクから読み直す）。
+        drop(store);
+        let (reopened, second) = open(scratch.path()).expect("開き直せる");
+        assert!(second.recovered_from().is_some(), "{label}: 2 回目の open が復旧を報告しない");
+        assert_eq!(reopened.get::<String>(&TEST_KEY), None, "{label}: 開き直しで既定値でない");
+        assert_eq!(
+            fs::read(scratch.target()).expect("読める"),
+            contents,
+            "{label}: 開き直しでファイルが変わった"
+        );
+    }
+}
+
+/// 設定パスをファイルとして読めない場合も既定値で起動し、そのパスを消さない（要件 7.5）。
+///
+/// 設定パスをディレクトリで塞ぐと `fs::read` が失敗する（内容が壊れているのではなく、内容を
+/// 読めない場合）。これも `open` を止めず、復旧として報告し、パスを置き換えない。
+#[test]
+fn unreadable_settings_path_starts_from_defaults_and_preserves_it() {
+    let scratch = Scratch::new("unreadable-path");
+    fs::create_dir(scratch.target()).expect("設定パスをディレクトリで塞げる");
+
+    let (store, report) = open(scratch.path()).expect("読めなくても起動できなければならない");
+    assert_eq!(store.get::<String>(&TEST_KEY), None, "既定値で起動していない");
+    let fact = recovered(&report);
+    assert_eq!(fact.path, scratch.target());
+    assert!(
+        matches!(fact.cause, RecoveryCause::Unreadable),
+        "原因が違う: {:?}",
+        fact.cause
+    );
+    assert!(scratch.target().is_dir(), "読めなかったパスを消した／置き換えた");
+
+    drop(store);
+    let (_, second) = open(scratch.path()).expect("開き直せる");
+    assert!(second.recovered_from().is_some(), "2 回目の open が復旧を報告しない");
+    assert!(scratch.target().is_dir(), "開き直しでパスが変わった");
+}
+
+/// 未知の `schema_version` を持つファイルは解釈せず、既定値で起動して事実を報告する
+/// （design.md「Logical Data Model」の規則、要件 7.5）。
+///
+/// 検出は「`schema_version` が存在し、現行版 [`SUPPORTED_SCHEMA_VERSION`] と等しくない」こと。
+/// 整数として読めない値も同じ経路に落ち、報告の `found` が `None` になる。ファイルは変更しない。
+#[test]
+fn unknown_schema_version_starts_from_defaults_and_reports_it() {
+    // 未知の整数の版。
+    let scratch = Scratch::new("unknown-version");
+    let future = SUPPORTED_SCHEMA_VERSION + 1;
+    let original = serde_json::json!({
+        "schema_version": future,
+        "appearance.theme": "dark",
+        "future.option": {"nested": true},
+    });
+    let bytes = serde_json::to_vec(&original).expect("直列化できる");
+    fs::write(scratch.target(), &bytes).expect("設定ファイルを置ける");
+
+    let (store, report) = open(scratch.path()).expect("未知の版でも起動できなければならない");
+    assert_eq!(store.get::<String>(&TEST_KEY), None, "未知の版の値を解釈した");
+    assert_eq!(
+        recovered(&report).cause,
+        RecoveryCause::UnsupportedSchemaVersion { found: Some(i64::from(future)) }
+    );
+    assert_eq!(fs::read(scratch.target()).expect("読める"), bytes, "ファイルを変更した");
+
+    // 整数として読めない版。
+    let scratch = Scratch::new("non-integer-version");
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "schema_version": "next",
+        "appearance.theme": "dark",
+    }))
+    .expect("直列化できる");
+    fs::write(scratch.target(), &bytes).expect("設定ファイルを置ける");
+
+    let (store, report) = open(scratch.path()).expect("整数でない版でも起動できなければならない");
+    assert_eq!(store.get::<String>(&TEST_KEY), None, "未知の版の値を解釈した");
+    assert_eq!(
+        recovered(&report).cause,
+        RecoveryCause::UnsupportedSchemaVersion { found: None }
+    );
+    assert_eq!(fs::read(scratch.target()).expect("読める"), bytes, "ファイルを変更した");
+}
+
+// ---------------------------------------------------------------------------
+// 要件 7.7: 閉じたキー空間とドキュメント内容の排除
+// ---------------------------------------------------------------------------
+
+/// カタログの全体が往復し、キー空間が閉じている（要件 7.7）。
+///
+/// **閉性の証明**: [`SettingsKey`] は閉じた列挙であり、下の `catalog_name` は `_` を置かない
+/// 網羅的な `match` である。カタログに鍵を足せばこの `match` がコンパイルできなくなるため、
+/// 「列挙 = カタログの全体」が型とコンパイラで固定される。文字列から鍵を作る公開の入口は
+/// [`SettingsKey::from_name`] だけで、カタログ外の名前は `None` になる。したがって任意の
+/// 文字列を鍵として持ち込む公開 API は存在しない（`SettingsKey` に文字列を取るコンストラクタは
+/// 無く、`String` / `&str` からの変換も実装していない）。
+#[test]
+fn shell_key_catalog_round_trips_and_is_closed() {
+    /// 網羅的な対応（`_` を置かない）。鍵を足すとコンパイルエラーになる。
+    const fn catalog_name(key: SettingsKey) -> &'static str {
+        match key {
+            SettingsKey::SchemaVersion => "schema_version",
+            SettingsKey::WindowGeometry => "window.geometry",
+            SettingsKey::AppearanceTheme => "appearance.theme",
+            SettingsKey::DiagnosticsLevel => "diagnostics.level",
+            SettingsKey::RenderFallback => "render.fallback",
+        }
+    }
+
+    // カタログは重複の無い 5 鍵であり、名前と往復する。
+    assert_eq!(SettingsKey::ALL.len(), 5, "カタログの数が design.md の表と違う");
+    for (index, key) in SettingsKey::ALL.iter().copied().enumerate() {
+        assert_eq!(key.as_str(), catalog_name(key), "名前がカタログと違う");
+        assert_eq!(SettingsKey::from_name(key.as_str()), Some(key), "名前から鍵を引けない");
+        assert!(
+            !SettingsKey::ALL[..index].contains(&key),
+            "カタログに同じ鍵が二度現れる: {key}"
+        );
+    }
+
+    // カタログ外の名前は鍵にならない（文字列からの入口は閉じている）。
+    for outside in ["", "test.value", "window.geometry.x", "appearance", "document.cells"] {
+        assert_eq!(SettingsKey::from_name(outside), None, "カタログ外の名前が鍵になった: {outside}");
+    }
+
+    // 各鍵は保存して読み戻せる（型は design.md の表に合わせる）。
+    let geometry = serde_json::json!({"x": 1, "y": 2, "width": 3, "height": 4});
+    let scratch = Scratch::new("catalog");
+    let (store, _) = open(scratch.path()).expect("設定ストアを開ける");
+    for key in SettingsKey::ALL {
+        let written = match key {
+            SettingsKey::SchemaVersion => store.set(&key, &SUPPORTED_SCHEMA_VERSION),
+            SettingsKey::WindowGeometry => store.set(&key, &geometry),
+            SettingsKey::AppearanceTheme => store.set(&key, &"dark"),
+            SettingsKey::DiagnosticsLevel => store.set(&key, &"debug"),
+            SettingsKey::RenderFallback => store.set(&key, &true),
+        };
+        written.unwrap_or_else(|error| panic!("{key} を書けない: {error}"));
+    }
+
+    for key in SettingsKey::ALL {
+        let read = match key {
+            SettingsKey::SchemaVersion => {
+                store.get::<u32>(&key) == Some(SUPPORTED_SCHEMA_VERSION)
+            }
+            SettingsKey::WindowGeometry => store.get::<serde_json::Value>(&key) == Some(geometry.clone()),
+            SettingsKey::AppearanceTheme => store.get::<String>(&key).as_deref() == Some("dark"),
+            SettingsKey::DiagnosticsLevel => store.get::<String>(&key).as_deref() == Some("debug"),
+            SettingsKey::RenderFallback => store.get::<bool>(&key) == Some(true),
+        };
+        assert!(read, "{key} を読み戻せない");
+    }
+}
+
+/// ドキュメントの内容を設定として保存する鍵も API も無い（要件 7.7）。
+///
+/// 鍵は閉じた列挙であり、文字列から鍵を作る唯一の入口 [`SettingsKey::from_name`] はカタログ外を
+/// 拒否する。したがって、ドキュメントの内容（セル値・行・スキーマ）を指す名前を設定の鍵として
+/// 名指しできない。保存の入口は [`SettingsStore::set`] で、その第 1 引数は [`SettingsKey`] を
+/// 要求する。生の名前・生のバイト列・ドキュメント型を受け取る保存 API は存在しない。
+///
+/// **型で閉じられない残余**: `set<T: Serialize>` は総称であり（design.md「Service Interface」の
+/// 署名）、型の上では任意の値をシェルの鍵に載せられる。この一点だけは型では示せず、レビューで
+/// 支える（鍵がカタログに限られることと、生の保存 API が無いことは、このテストの範囲で示せる）。
+#[test]
+fn no_document_content_can_be_named_as_a_setting() {
+    for document_name in [
+        "document.cells",
+        "document.rows.0",
+        "document.schema",
+        "cells.0.value",
+        "sheet.1.cell",
+    ] {
+        assert_eq!(
+            SettingsKey::from_name(document_name),
+            None,
+            "ドキュメントの内容を指す名前が設定の鍵になった: {document_name}"
+        );
+    }
+
+    // 書けるのはカタログの鍵だけで、ファイルに載るのもそれだけである。
+    let scratch = Scratch::new("no-document");
+    let (store, _) = open(scratch.path()).expect("設定ストアを開ける");
+    store.set(&SettingsKey::RenderFallback, &false).expect("書ける");
+
+    let raw: serde_json::Value =
+        serde_json::from_slice(&fs::read(scratch.target()).expect("読める")).expect("完全な JSON");
+    let object = raw.as_object().expect("オブジェクトである");
+    assert_eq!(object.len(), 1, "カタログ外の鍵が保存された");
+    assert_eq!(object[SettingsKey::RenderFallback.as_str()], serde_json::json!(false));
+}
+
+// ---------------------------------------------------------------------------
 // 要件 7.2: OS 標準のアプリケーションデータ領域
 // ---------------------------------------------------------------------------
 
@@ -497,8 +784,9 @@ const CRASH_READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// 書き込みの窓の観測を待つ上限。超えたら「観測できなかった」として落とす。
 const CRASH_SIGHTING_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// ワーカーのキー。親子が同じ定数から作る。
-const CRASH_KEY: SettingsKey = SettingsKey::new("crash.payload");
+/// ワーカーのキー。親子が同じ定数から作る。文字列を値に持つ鍵なら何でもよい（このテストが
+/// 見るのは書き込みの原子性だけである）。
+const CRASH_KEY: SettingsKey = SettingsKey::AppearanceTheme;
 
 /// 長さ `bytes` の、`marker` だけからなる値（状態 A と状態 B で長さを揃える）。
 fn crash_state(marker: char, bytes: usize) -> String {

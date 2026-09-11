@@ -1,41 +1,86 @@
-//! 設定の永続化（要件 7.1〜7.3。design.md「Core Layer / SettingsStore」）。
+//! 設定の永続化（要件 7.1〜7.7。design.md「Core Layer / SettingsStore」）。
 //!
 //! 設定ストアは自前で持つ（`tauri-plugin-store` は採らない。research.md 決定 6）。理由は、
 //! プラグインの保存が truncate-then-write で原子的でないこと、未知キーの保持（要件 7.6）と
 //! 破損時の既定値起動（要件 7.5）の意味論を持たないことである。
 //!
-//! 本モジュール（tasks.md 4.1）が持つのは次の 5 つである:
+//! 本モジュール（tasks.md 4.1、4.2）が持つのは次のものである:
 //!
 //! - 原子的な置き換え。[`atomic`] が同一ディレクトリの一時ファイル → `sync_all` → `rename`
 //!   の順で行う（truncate-then-write はしない）
 //! - 保存先の解決。各 OS が定める標準のアプリケーションデータ領域の下に識別子を足す
 //!   （要件 7.2。[`app_data_base_dir`] / [`app_data_dir`]）
-//! - キー空間の型 [`SettingsKey`]。安定した文字列へ落ちる
+//! - 閉じたキー空間 [`SettingsKey`] と、カタログのメタ [`SUPPORTED_SCHEMA_VERSION`]（要件 7.7）
 //! - 同一ディレクトリにつき 1 つの共有実体を返す [`open`]（要件 7.3）
-//! - [`SettingsStore::get`] / [`SettingsStore::set`] と、書き込みの直列化
+//! - [`SettingsStore::get`] / [`SettingsStore::set`] と、書き込みの直列化（要件 7.1）
+//! - 未知キーの保持（要件 7.6）と、読み取りに失敗したときの既定値起動・報告（要件 7.5）
 //!
-//! ファイルは `SettingsKey` をキーとする 1 つの JSON オブジェクトである（design.md
-//! 「Logical Data Model」の Settings 構造）。値は [`serde_json::Value`] として読み書きするため、
-//! このモジュールが解釈しないキーもそのまま往復する。
+//! ファイルはキーから値への 1 つの JSON オブジェクトである（design.md「Logical Data Model」
+//! の Settings 構造）。値は [`serde_json::Value`] として読み書きする。
+//!
+//! # キー空間（要件 7.7）
+//!
+//! 保存できるのは [`SettingsKey`] が列挙するシェルの設定だけである。`SettingsKey` は**閉じた
+//! 列挙**であり、文字列から鍵を作る公開の入口は [`SettingsKey::from_name`] だけである。これは
+//! カタログにある名前しか受け付けないため、任意の名前 — とりわけドキュメントの内容（セル値・
+//! 行・スキーマ）を指す名前 — を設定の鍵として持ち込む API は存在しない。[`SettingsStore::set`]
+//! は `T: Serialize` の総称であり（design.md「Service Interface」の署名）、型の上では任意の値を
+//! シェルの鍵に載せられてしまう。この一点だけは型では閉じられないため、鍵空間の閉性と合わせて
+//! レビューで支える（「シェルの設定以外を保存しない」という規則そのものである）。
+//!
+//! # 未知キーの保持（要件 7.6）
+//!
+//! このモジュールが [`SettingsKey`] として解釈しないキー（別の版が書いた項目など）は、値の形を
+//! 変えずに保持し、書き戻す。`document-format` が確立した「理解できないものを壊さない」原則の
+//! 継承である。仕組みは単純で、[`SettingsStore::set`] は書き込みのたびに**保持している写像の
+//! 全体**を直列化する。`set` が差し替えるのは要求された鍵の値だけで、他の鍵を落とす経路は無い。
+//!
+//! # 読み取り失敗時の既定値起動（要件 7.5）
+//!
+//! 設定ファイルの内容を読み取れない場合、[`open`] は失敗を返さず、空の設定（= 既定値）で起動し、
+//! [`OpenReport::recovered_from`] に事実を載せる。**起動を中止しない。ファイルを削除しない**
+//! （利用者が内容を確認できるようにする）。復旧として扱うのは次の 3 つである:
+//!
+//! - 内容を読み取れない（権限がない、設定パスがディレクトリである等）— [`RecoveryCause::Unreadable`]
+//! - JSON オブジェクトとして解釈できない（0 バイト、不正な JSON、オブジェクトでない JSON）—
+//!   [`RecoveryCause::Malformed`]
+//! - `schema_version` が現行版と一致しない — [`RecoveryCause::UnsupportedSchemaVersion`]
+//!
+//! [`open`] が `Err` を返すのは、**保存先ディレクトリを用意できない場合だけ**である
+//! （[`SettingsError::DirectoryUnavailable`]）。これは「設定の内容を読めなかった」ではなく
+//! 「そもそも置き場所が無い」であり、起動の前提が成立していない（design.md「Error Handling」の
+//! 「起動時の前提不成立」）。
+//!
+//! # schema_version（design.md「Logical Data Model」）
+//!
+//! [`SettingsKey::SchemaVersion`] の値が現行版 [`SUPPORTED_SCHEMA_VERSION`] と一致しないファイルは、
+//! 別の版のものとして**解釈しない**。既定値で起動し、[`RecoveryCause::UnsupportedSchemaVersion`]
+//! を報告する。検出は「`schema_version` が存在し、その値が現行版と等しくない」ことであり、整数と
+//! して読めない値も同じ経路に落ちる（報告の `found` が `None` になる）。版を持たないファイルは
+//! 現行版として扱う（4.1 以前が書いたファイルと、版を書かない現行の書き手のため）。
+//!
+//! 現行の `set` は `schema_version` を自動では書かない。版を書くのはファイルを所有する書き手
+//! （アダプタ層）の責務であり、本モジュールは版を読んで解釈だけをする。カタログに
+//! [`SettingsKey::SchemaVersion`] があるため、書き手は `set` で版を保存できる。
 //!
 //! # 後続タスクが拡張するもの（このモジュールでは宣言しない）
 //!
-//! - **4.2**: 未知キーの保持の保証（要件 7.6）と、読み取りに失敗したときの既定値起動・復旧の
-//!   報告（要件 7.5）。[`open`] の第 2 要素 [`OpenReport`] がその受け口であり、4.1 は常に空の
-//!   値を返す。読み取りに失敗した既存ファイルは、4.1 では [`SettingsError::ParseFailed`] として
-//!   返す（既定値で起動するかどうかは 4.2 が決める）
-//! - **4.3**: 変更通知の購読（要件 7.4）。`subscribe` はここに置かない
-//! - **`schema_version`**: design.md「Logical Data Model」は設定ファイルの版を持つ。版の解釈は
-//!   4.2（未知の版は既定値で起動する）が担う。4.1 は版を特別扱いしない — ファイルがキーから
-//!   値への JSON オブジェクトである限り、4.2 が版のキーを足しても形式は変わらない
+//! - **4.3**: 変更通知の購読（要件 7.4）。[`SettingsStore`] に
+//!   `fn subscribe(&self) -> Receiver<SettingsChanged>` を足し、[`SettingsStore::set`] が
+//!   値の差し替えとファイルへの書き込みを終えた**後**（書き込みロックを解放した後に）購読者へ
+//!   通知する。`SettingsStore` は `Send + Sync` を保つこと — 実体は全ウィンドウで共有される
+//!   （要件 7.3）ため、購読者の登録も同じ実体内で直列化する。[`open`] の形は変えない。
 //!
 //! # design.md からの意図的な差異
 //!
-//! design.md の `open` は戻り値を `Arc<dyn SettingsStore>` と書くが、[`SettingsStore`] の
-//! [`get`](SettingsStore::get) / [`set`](SettingsStore::set) は型引数を持つ汎用メソッドであり、
-//! そのような trait は object-safe ではない（`dyn` にできない。E0038）。境界で型付きの値を
-//! 得ることを優先し、[`open`] は実体の `Arc` を返す。object-safe な層が必要になった時点で、
-//! そのとき raw な非汎用メソッドを足せばよい。
+//! - design.md の `open` は戻り値を `Arc<dyn SettingsStore>` と書くが、[`SettingsStore`] の
+//!   [`get`](SettingsStore::get) / [`set`](SettingsStore::set) は型引数を持つ汎用メソッドであり、
+//!   そのような trait は object-safe ではない（`dyn` にできない。E0038）。境界で型付きの値を
+//!   得ることを優先し、[`open`] は実体の `Arc` を返す。object-safe な層が必要になった時点で、
+//!   そのとき raw な非汎用メソッドを足せばよい
+//! - design.md の `open` の第 2 要素は `Option<RecoveredFrom>` だが、本モジュールは [`OpenReport`]
+//!   を返す。復旧の事実は [`OpenReport::recovered_from`] で取り出せる。4.1 が確立した戻り値の形を
+//!   変えないための受け口である
 
 pub mod atomic;
 
@@ -62,36 +107,73 @@ pub const APP_IDENTIFIER: &str = "com.jxcel.app";
 /// 設定ファイルの名前。保存先ディレクトリ（[`app_data_dir`]）の直下に置く。
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
 
+/// 現行の設定ファイルの版（[`SettingsKey::SchemaVersion`]）。
+///
+/// これと一致しない版を持つファイルは解釈せず、既定値で起動して復旧の事実を報告する
+/// （design.md「Logical Data Model」の `schema_version` の規則）。
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
+
 // ---------------------------------------------------------------------------
-// キー空間
+// キー空間（要件 7.7）
 // ---------------------------------------------------------------------------
 
-/// 設定のキー。
+/// 設定のキー。**閉じた列挙**であり、これが保存できる鍵の全体である（design.md
+/// 「Logical Data Model」の Settings 構造。要件 7.7）。
 ///
-/// **安定した文字列**（`window.geometry` のようなドット区切りの名前）でファイルに載る。
-/// 境界では裸の文字列ではなくこの型を通す（design.md「SettingsStore / Service Interface」）。
-/// 名前を変えると保存済みの値が読めなくなるため、公開後は変更しない。
+/// ファイルに載るのは [`as_str`](SettingsKey::as_str) が返す安定した文字列（`window.geometry`
+/// のようなドット区切りの名前）である。名前を変えると保存済みの値が読めなくなるため、公開後は
+/// 変更しない。[`SettingsKey::SchemaVersion`] だけがメタ情報であり、他はシェルの設定値である。
 ///
-/// 具体のキーの一覧（design.md「Logical Data Model」の表）は、それを必要とする後続タスクが
-/// 定数として足す。4.1 はキーの綴りを決める型と、その文字列化・順序だけを持つ。
+/// **閉じていることの意味**: 文字列から鍵を作る公開の入口は [`from_name`](SettingsKey::from_name)
+/// だけで、これはカタログにある名前しか受け付けない。任意の名前 — とりわけドキュメントの内容を
+/// 指す名前 — を設定の鍵として持ち込む API は存在しない（要件 7.7）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SettingsKey(&'static str);
+pub enum SettingsKey {
+    /// 設定ファイルの版（メタ）。値は整数。
+    SchemaVersion,
+    /// 直近に閉じられたウィンドウの位置とサイズ（要件 2.7）。値はオブジェクト。
+    WindowGeometry,
+    /// 外観。`system` / `light` / `dark`（要件 9.3、9.4）。値は文字列。
+    AppearanceTheme,
+    /// 記録の詳細度（要件 8.7）。値は詳細度を表す文字列。
+    DiagnosticsLevel,
+    /// 前回の起動で描画が成立しなかった印（要件 10.3）。値は真偽。
+    RenderFallback,
+}
 
 impl SettingsKey {
-    /// 安定した名前からキーを作る。
-    pub const fn new(name: &'static str) -> Self {
-        Self(name)
-    }
+    /// カタログの全体（閉じたキー空間）。並びはファイルに載る名前の昇順である。
+    pub const ALL: [SettingsKey; 5] = [
+        SettingsKey::AppearanceTheme,
+        SettingsKey::DiagnosticsLevel,
+        SettingsKey::RenderFallback,
+        SettingsKey::SchemaVersion,
+        SettingsKey::WindowGeometry,
+    ];
 
     /// ファイルとエラー表示に載る安定した文字列。
     pub const fn as_str(self) -> &'static str {
-        self.0
+        match self {
+            SettingsKey::SchemaVersion => "schema_version",
+            SettingsKey::WindowGeometry => "window.geometry",
+            SettingsKey::AppearanceTheme => "appearance.theme",
+            SettingsKey::DiagnosticsLevel => "diagnostics.level",
+            SettingsKey::RenderFallback => "render.fallback",
+        }
+    }
+
+    /// ファイルに載る名前から鍵を引く。
+    ///
+    /// **カタログにある名前だけを受け付け**、それ以外は `None` を返す。文字列から鍵を作る唯一の
+    /// 入口であり、この閉性がキー空間の閉性そのものである（要件 7.7）。
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|key| key.as_str() == name)
     }
 }
 
 impl fmt::Display for SettingsKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.0)
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -182,25 +264,19 @@ fn non_empty_env(lookup: &dyn Fn(&str) -> Option<OsString>, name: &str) -> Optio
 // ---------------------------------------------------------------------------
 
 /// 設定ストアの失敗。原因を区別できる。
+///
+/// **設定の内容を読めなかったことは失敗ではない**（要件 7.5）。それは既定値で起動して
+/// [`OpenReport`] で報告する事実であり、`Err` は起動の前提が崩れた場合に限る。
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
     /// OS 標準のアプリケーションデータ領域を決められない（環境変数が無い等）。
     #[error("アプリケーションデータ領域を解決できない: {reason}")]
     AppDataDirUnavailable { reason: String },
 
-    /// 保存先ディレクトリを用意できない。
+    /// 保存先ディレクトリを用意できない。**起動の前提が成立していない**（design.md
+    /// 「Error Handling」の「起動時の前提不成立」）。
     #[error("設定ディレクトリを用意できない: {path}: {source}")]
     DirectoryUnavailable { path: PathBuf, source: io::Error },
-
-    /// 既存の設定ファイルを読み取れない。
-    #[error("設定ファイルを読み取れない: {path}: {source}")]
-    ReadFailed { path: PathBuf, source: io::Error },
-
-    /// 既存の設定ファイルを解釈できない（破損、またはオブジェクトでない）。
-    ///
-    /// 破損したファイルから既定値で起動するかどうか（要件 7.5）は 4.2 が決める。
-    #[error("設定ファイルを解釈できない: {path}: {source}")]
-    ParseFailed { path: PathBuf, source: serde_json::Error },
 
     /// 設定値を JSON へ変換できない。
     #[error("設定値を JSON に変換できない: {key}: {source}")]
@@ -226,17 +302,81 @@ pub trait SettingsStore: Send + Sync {
 
     /// 値を保存してから返る。戻った時点で値はメモリとディスクの両方にある。
     ///
+    /// 鍵は [`SettingsKey`]（閉じたカタログ）に限られる。**このモジュールが解釈しない鍵は
+    /// 書き込みで落ちない** — 保持している写像の全体を直列化するためである（要件 7.6）。
+    ///
     /// 失敗した場合、メモリとディスクのどちらも変更前のままである。
     fn set<T: Serialize>(&self, key: &SettingsKey, value: &T) -> Result<(), SettingsError>;
 }
 
-/// `open` が返す第 2 要素。design.md の `Option<RecoveredFrom>` に対応する受け口である。
+// ---------------------------------------------------------------------------
+// 復旧の報告（要件 7.5）
+// ---------------------------------------------------------------------------
+
+/// 既定値で起動するに至った原因。design.md の `RecoveredFrom` が運ぶ事実である。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryCause {
+    /// 設定ファイルの内容を読み取れなかった（権限がない、設定パスがディレクトリである等）。
+    /// **ファイルは削除も置換もしない**。
+    Unreadable,
+    /// 内容が JSON オブジェクトとして解釈できない（0 バイト、不正な JSON、オブジェクトでない
+    /// JSON）。**ファイルは削除も置換もしない**。
+    Malformed,
+    /// `schema_version` が現行版 [`SUPPORTED_SCHEMA_VERSION`] と一致しない。
+    ///
+    /// `found` は検出した値。整数として読めない値の場合は `None`（いずれも「その版は知らない」
+    /// という同じ扱いになる）。
+    UnsupportedSchemaVersion { found: Option<i64> },
+}
+
+impl fmt::Display for RecoveryCause {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RecoveryCause::Unreadable => formatter.write_str("設定ファイルを読み取れなかった"),
+            RecoveryCause::Malformed => {
+                formatter.write_str("設定ファイルを JSON オブジェクトとして解釈できなかった")
+            }
+            RecoveryCause::UnsupportedSchemaVersion { found: Some(found) } => {
+                write!(formatter, "設定ファイルの schema_version が未知（検出値 {found}）")
+            }
+            RecoveryCause::UnsupportedSchemaVersion { found: None } => {
+                formatter.write_str("設定ファイルの schema_version が整数として読めない")
+            }
+        }
+    }
+}
+
+/// 読み取れなかった設定ファイルと、その原因。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredFrom {
+    /// 対象の設定ファイルのパス。**削除していない**（利用者が内容を確認できる）。
+    pub path: PathBuf,
+    /// 既定値で起動した原因。
+    pub cause: RecoveryCause,
+}
+
+impl fmt::Display for RecoveredFrom {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.cause, self.path.display())
+    }
+}
+
+/// [`open`] が返す第 2 要素。design.md の `Option<RecoveredFrom>` に対応する受け口である。
 ///
-/// **4.1 の時点で復旧経路は存在しない**ため、この型は空であり、[`open`] は常に空の値を返す。
-/// 破損したファイルからの復旧（要件 7.5）を実装する 4.2 がここへ事実を載せる。呼び出し側は
-/// 今のうちから受け取っておけるので、4.2 は [`open`] の形を変えずに済む。
+/// 設定ファイルを読めた場合は [`OpenReport::default`]（復旧なし）である。既定値で起動した場合は
+/// [`OpenReport::recovered_from`] が事実を返す。呼び出し側（アダプタ層）はこれを診断情報へ
+/// 記録する（要件 7.5）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OpenReport {}
+pub struct OpenReport {
+    recovered_from: Option<RecoveredFrom>,
+}
+
+impl OpenReport {
+    /// 既定値で起動した事実。設定ファイルを読めた場合は `None`。
+    pub fn recovered_from(&self) -> Option<&RecoveredFrom> {
+        self.recovered_from.as_ref()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // 実体
@@ -248,8 +388,8 @@ struct State {
     file: PathBuf,
     /// ファイルの中身。キーは [`SettingsKey::as_str`]、値は生の JSON。
     ///
-    /// 生の [`Value`] を保つため、このモジュールが解釈しないキーも失われない（保証そのものは
-    /// 4.2 が定める）。
+    /// このモジュールが解釈しないキーもこの写像にそのまま載るため、書き戻しで失われない
+    /// （要件 7.6）。
     values: Map<String, Value>,
 }
 
@@ -262,19 +402,52 @@ pub struct FileSettingsStore {
     /// 読み取りを待たせないための追加の機構は持たない。その代わり、`set` が戻った時点で
     /// メモリとディスクが必ず一致する。
     state: RwLock<State>,
+    /// 読み込み時に既定値で起動した事実。実体が生きている間は同じ事実を返す
+    /// （復旧はこの実体の読み込みについての事実であり、途中の書き込みで消える性質のものではない）。
+    recovered_from: Option<RecoveredFrom>,
 }
 
 impl FileSettingsStore {
-    /// ディレクトリから読み込む。ファイルが無ければ空から始める。
-    fn load(directory: &Path) -> Result<Self, SettingsError> {
+    /// ディレクトリから読み込む。**内容の失敗では `Err` を返さない**（要件 7.5）。
+    ///
+    /// ファイルが無ければ空から始める。内容を読み取れない・解釈できない・版が未知の場合は、
+    /// 空の写像（= 既定値）から始め、事実を第 2 要素に載せる。対象のファイルには触れない。
+    fn load(directory: &Path) -> (State, Option<RecoveredFrom>) {
         let file = directory.join(SETTINGS_FILE_NAME);
-        let values = match fs::read(&file) {
-            Ok(bytes) => serde_json::from_slice::<Map<String, Value>>(&bytes)
-                .map_err(|source| SettingsError::ParseFailed { path: file.clone(), source })?,
-            Err(source) if source.kind() == io::ErrorKind::NotFound => Map::new(),
-            Err(source) => return Err(SettingsError::ReadFailed { path: file.clone(), source }),
+        let bytes = match fs::read(&file) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return (State { file, values: Map::new() }, None);
+            }
+            Err(_) => {
+                return (
+                    State { file: file.clone(), values: Map::new() },
+                    Some(RecoveredFrom { path: file, cause: RecoveryCause::Unreadable }),
+                );
+            }
         };
-        Ok(Self { state: RwLock::new(State { file, values }) })
+
+        match serde_json::from_slice::<Value>(&bytes) {
+            Ok(Value::Object(values)) => match unsupported_schema_version(&values) {
+                None => (State { file, values }, None),
+                Some(found) => (
+                    State { file: file.clone(), values: Map::new() },
+                    Some(RecoveredFrom {
+                        path: file,
+                        cause: RecoveryCause::UnsupportedSchemaVersion { found },
+                    }),
+                ),
+            },
+            Ok(_) | Err(_) => (
+                State { file: file.clone(), values: Map::new() },
+                Some(RecoveredFrom { path: file, cause: RecoveryCause::Malformed }),
+            ),
+        }
+    }
+
+    /// この実体の読み込みについての報告。
+    fn open_report(&self) -> OpenReport {
+        OpenReport { recovered_from: self.recovered_from.clone() }
     }
 
     /// 読み取りロックを取る。毒されていても中の状態は壊れていない（書き込みロックが守る不変条件は
@@ -286,6 +459,17 @@ impl FileSettingsStore {
     /// 書き込みロックを取る（[`Self::read`] と同じ理由で毒を回復する）。
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, State> {
         self.state.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// `schema_version` が現行版と一致しなければ、その値を返す。版が無い場合と現行版の場合は `None`。
+///
+/// 整数として読めない値も `Some(None)` になる（未知の版として扱う）。
+fn unsupported_schema_version(values: &Map<String, Value>) -> Option<Option<i64>> {
+    match values.get(SettingsKey::SchemaVersion.as_str()) {
+        None => None,
+        Some(value) if value.as_i64() == Some(i64::from(SUPPORTED_SCHEMA_VERSION)) => None,
+        Some(value) => Some(value.as_i64()),
     }
 }
 
@@ -306,6 +490,9 @@ impl SettingsStore for FileSettingsStore {
         // `set` を直列化し、あるスレッドの写しが別のスレッドの書き込みを上書きすることを防ぐ。
         let mut state = self.write();
         let previous = state.values.insert(key.as_str().to_owned(), encoded);
+        // **写像の全体**を直列化する。これが未知キーの保持そのものである（要件 7.6）:
+        // カタログに無い鍵も値の形を変えずにそのまま書き戻る。ここで鍵を絞る経路を作っては
+        // ならない。
         let bytes = match serde_json::to_vec(&state.values) {
             Ok(bytes) => bytes,
             Err(source) => {
@@ -351,18 +538,14 @@ static REGISTRY: LazyLock<Mutex<HashMap<PathBuf, Weak<FileSettingsStore>>>> =
 /// 設定ストアを開く（design.md「SettingsStore / Service Interface」の `open`）。
 ///
 /// 同じディレクトリに対する `open` は**同じ実体**を返す（要件 7.3）。ディレクトリが無ければ
-/// 作り、正規化したパスで登録簿を引く。既存の設定ファイルはここで読み込む。
+/// 作り、正規化したパスで登録簿を引く。既存の設定ファイルはここで読み込む。既存の実体を返す
+/// 場合も、その実体の読み込みについての [`OpenReport`] を返す（復旧の事実は実体ごとに一定）。
 ///
 /// # Errors
 ///
-/// ディレクトリを用意できない場合（[`SettingsError::DirectoryUnavailable`]）、既存のファイルを
-/// 読み取れない場合（[`SettingsError::ReadFailed`]）、JSON オブジェクトとして解釈できない場合
-/// （[`SettingsError::ParseFailed`]）に返す。破損したファイルから既定値で起動するかどうか
-/// （要件 7.5）は 4.2 が決める。
-///
-/// # 戻り値
-///
-/// 第 2 要素は 4.2 が復旧の事実を載せる受け口であり、4.1 は常に空の [`OpenReport`] を返す。
+/// 保存先ディレクトリを用意できない場合（[`SettingsError::DirectoryUnavailable`]）だけを返す。
+/// 設定の内容を読み取れない場合は失敗ではなく、既定値で起動して [`OpenReport`] に事実を載せる
+/// （要件 7.5）。
 pub fn open(directory: &Path) -> Result<(Arc<FileSettingsStore>, OpenReport), SettingsError> {
     fs::create_dir_all(directory).map_err(|source| SettingsError::DirectoryUnavailable {
         path: directory.to_path_buf(),
@@ -376,12 +559,15 @@ pub fn open(directory: &Path) -> Result<(Arc<FileSettingsStore>, OpenReport), Se
 
     let mut entries = REGISTRY.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(existing) = entries.get(&canonical).and_then(Weak::upgrade) {
-        return Ok((existing, OpenReport::default()));
+        let report = existing.open_report();
+        return Ok((existing, report));
     }
 
     // 登録簿のロックを保持したまま読み込む。同じディレクトリへの並行 `open` が二重に
     // 読み込んで別の実体を作ることを防ぐ。
-    let store = Arc::new(FileSettingsStore::load(&canonical)?);
+    let (state, recovered_from) = FileSettingsStore::load(&canonical);
+    let store = Arc::new(FileSettingsStore { state: RwLock::new(state), recovered_from });
+    let report = store.open_report();
     entries.insert(canonical, Arc::downgrade(&store));
-    Ok((store, OpenReport::default()))
+    Ok((store, report))
 }

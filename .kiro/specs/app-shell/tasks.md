@@ -147,7 +147,7 @@
   - _Boundary: SettingsStore_
   - _Depends: 1.2_
 
-- [ ] 4.2 未知キーの保持と破損時の既定値起動を実装する
+- [x] 4.2 未知キーの保持と破損時の既定値起動を実装する
   - 解釈できないキーを捨てずにそのまま保持し、書き戻す
   - 読み取りに失敗した場合は既定値で起動し、失敗した事実を返す。**起動を中止しない。設定ファイルを削除しない**
   - 保存できる値の範囲をシェルの設定に限り、ドキュメントの内容を受け付けない
@@ -479,6 +479,12 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **4.2**: 失敗の分類が確定した。**`Err` は保存先ディレクトリを用意できない `DirectoryUnavailable` だけ**。設定ファイルを読めない（権限なし・パスがディレクトリ等）は `Unreadable`、JSON オブジェクトとして解釈できない（0 バイト・不正 JSON・非オブジェクト）は `Malformed`、`schema_version` 不一致は `UnsupportedSchemaVersion` で、**いずれも既定値で起動して `OpenReport::recovered_from()` に事実を載せ、ファイルを削除も変更もしない**（要件 7.5。記録そのものは呼び出し側の診断 4.4/4.5 が担う）。4.1 の `SettingsError::{ReadFailed, ParseFailed}` は返す経路が無くなったため削除済み。
+- **4.2**: 未知キーは `set` が保持写像の**全体**を直列化することで保持される（対象鍵の値だけを置換。鍵を絞る経路は存在しない）。
+- **4.2**: **`SettingsKey` は 4.1 の newtype + `new(&'static str)` から閉じた列挙へ変更**した。カタログは design の 5 鍵（`schema_version` / `window.geometry` / `appearance.theme` / `diagnostics.level` / `render.fallback`）で、`ALL` と `from_name`（カタログ外は `None`）を持ち、`SettingsKey::new` / `From` / serde / ts-rs の実装は**リポジトリ内に残っていない**。これによりキー空間の閉性（要件 7.7）が型で成立する。**4.3 / 4.5 / 6.3 / 9.2 / 8.3 はこの列挙を通じて鍵を参照すること**（任意文字列鍵を作る入口を復活させない）。なお `set<T: Serialize>` は design の署名どおり任意のペイロードをカタログ鍵の下に保存できる（7.7 の担保は鍵空間の閉性であって値の型ではない）。
+- **4.2**: `schema_version` の規則: 鍵が存在して `SUPPORTED_SCHEMA_VERSION = 1` と異なれば既定値 + 報告（整数として読めない値も同じ経路）。鍵が無いファイルは現行版として扱う。**`set` は版を自動では書かない**（4.1 のファイル形状テストを壊さないため）。版を書くのはアダプタ層の責務で、`SettingsKey::SchemaVersion` を明示的に `set` すればよい。
+- **4.2（挙動上の注意）**: 破損ファイルは `open` では保全されるが、**その後の最初の `set` が保持写像（既定＝空）全体を書き戻すため、その時点で破損バイトは置き換わる**。要件違反ではない（削除も切り詰めもしない）が、利用者に内容を確認させたいならアダプタが書き込み前に記録・退避するのが望ましい。
 
 - **4.1**: 書き込みは `settings/atomic.rs::replace` = **同一ディレクトリの一時ファイルを `create_new`（O_EXCL）で作り → `write_all` + `flush` + `sync_all` → `rename` → Unix は親ディレクトリを fsync**。切り詰め経路は存在しない。一時名は prefix + pid + 連番で衝突せず、`TempGuard` が失敗経路で必ず片付ける。**rename 後のディレクトリ fsync 失敗は意図的に握り潰す**（「Err なら対象は不変」という契約を守るため）。
 - **4.1**: 書き込み直列化は `RwLock` の書きロックが**挿入 + serialize + replace の全体**を覆う（load-modify-store）。読み手が破れた中間状態を見ることはない。`open(dir)` は同一ディレクトリで**同一インスタンス**を返す（`REGISTRY` で共有。要件 7.3）。
