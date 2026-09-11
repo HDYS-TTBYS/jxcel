@@ -83,3 +83,7 @@ Skills with "Parallel Research" sections list independent work items that benefi
 - Load entire `.kiro/steering/` as project memory
 - Default files: `product.md`, `tech.md`, `structure.md`
 - Custom files are supported (managed via `$kiro-steering-custom`)
+
+## ユーザー追加
+- Before committing, ALWAYS run auto-formatting with `qlty fmt`
+- Before finishing, ALWAYS run `qlty check --fix --level=low` and fix any lint errors
