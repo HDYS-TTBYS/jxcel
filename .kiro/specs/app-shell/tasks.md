@@ -85,7 +85,7 @@
   - _Requirements: 4.3_
   - _Depends: 2.2_
 
-- [ ] 2.4 フロントエンドの薄い呼び出しラッパを実装する
+- [x] 2.4 フロントエンドの薄い呼び出しラッパを実装する
   - 生成された名前定数を参照する。コマンド名の文字列リテラルを手で書かない
   - 戻り値は判別可能な合併型として返し、利用側が網羅的に分岐できるようにする
   - **完了状態**: ラッパ経由の呼び出しが型検査を通り、成功と失敗の分岐を網羅しないコードが型検査で落ちる
@@ -479,6 +479,11 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **2.4**: `src/ipc/client.ts` の `invokeCommand` は**解決値をそのまま返す純粋な透過**である。`return await invoke<IpcResult<T, IpcError>>(command, args);` であり、**解決値を新しい封筒で包んではならない**（包むとドメインの失敗が `status: "ok"` として報告され、要件 4.4 が壊れる。round-1 のレビューで棄却された実例）。封筒を新しく作るのは `invoke` が拒否した経路だけ（`{status:"error", error:{kind:"Frontend", detail:{message}}}`）。
+- **2.4**: 合成した誤り型は `IpcClientError = IpcError | FrontendIpcError`、戻りは `IpcClientResult<T> = IpcResult<T, IpcClientError>`。生成の `IpcError` は変更せず、フロントエンド局所の `kind: "Frontend"` を足すだけなので `status` / `kind` の絞り込みは保たれる。**生成の 3 種だけを分岐する呼び出し側は `Frontend` を明示的に扱う必要がある**（型検査がそれを強制する）。`CommandName = (typeof COMMAND_NAMES)[number]`。
+- **2.4**: 完了状態の証明は `client.ts` 内の `// @ts-expect-error` による**ネガティブ型検査**（非網羅の `status` 分岐・非網羅の `kind` 分岐・手書きコマンド名の 3 つ）。この節は `tsconfig.json` の `include: ["src"]` に入るので **10.1 の `tsc --noEmit` が CI で強制する**。`assertNever` はラッパ自身のエラー処理（`describeIpcError` の `default`）で実行使しており、`IpcError` に種別が増えるとラッパ側がコンパイルエラーになる。
+- **2.4**: `args` はラッパでは型付けしない（`unknown` のまま渡す）。コマンド名は生成物の合併型で守られているが、**引数の型は各コマンドを定義する 7.x が与える**責務である。
 
 - **2.3**: ドリフト検査は `crates/app-shell/tests/bindings_drift.rs`。`render_bindings()` と追跡済み `src/ipc/bindings.ts` を**生バイトで比較**し（トリム・改行変換・再エンコードなし。BOM・CRLF・末尾改行の差も検出）、パスは `CARGO_MANIFEST_DIR` から導くので cwd に依存しない。失敗メッセージはファイル・相対パス・再生成コマンド・両側のバイト長・最初に食い違うオフセットと行番号・前後の抜粋を含む。
 - **2.3**: 要件 4.3 は**2 段**で成立する。この検査は「追跡済み成果物が古い」ことを捕まえ、`tsc --noEmit` が「フロント側が追随していない」ことを捕まえる（design.md IpcContract の Implementation Notes）。**10.1 が CI に両方を入れること**。
