@@ -47,20 +47,26 @@ sha2 = "0.10"
 # プラットフォーム別の依存は条件付きコンパイルで切る。他方のプラットフォームのビルドには
 # これらのクレートが一切現れない（tasks.md 1.2、design.md「Core プラットフォーム」）。
 [target.'cfg(windows)'.dependencies]
-# Job Object と `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` によるサイドカーの終了保証
-# （要件 5.6、research.md 決定 5）。features は Job Object API に必要な最小集合である:
+# 補助プロセスの終了保証（要件 5.6、research.md 決定 5）と残留プロセスの掃除（tasks.md 3.5）。
+# features は使う API に必要な最小集合である:
 #   - Win32_System_JobObjects: CreateJobObjectW / SetInformationJobObject /
 #     AssignProcessToJobObject / TerminateJobObject / QueryInformationJobObject と JOBOBJECT_* 型
 #   - Win32_System_Threading: CREATE_NEW_PROCESS_GROUP（穏やかな終了の宛先になる
-#     プロセスグループを作る作成フラグ）
+#     プロセスグループを作る作成フラグ）、および残留の掃除の OpenProcess /
+#     QueryFullProcessImageNameW / TerminateProcess / GetExitCodeProcess / WaitForSingleObject
 #   - Win32_System_Console: GenerateConsoleCtrlEvent / CTRL_BREAK_EVENT（猶予段の穏やかな終了）
+#   - Win32_System_Diagnostics + Win32_System_Diagnostics_ToolHelp: 残留の掃除の列挙
+#     （CreateToolhelp32Snapshot / Process32FirstW / Process32NextW / PROCESSENTRY32W /
+#     TH32CS_SNAPPROCESS）。`ToolHelp` モジュールは親の `Win32_System_Diagnostics` を要求する。
 #   - Win32_Security: CreateJobObjectW が取る SECURITY_ATTRIBUTES
 # `Win32_System_JobObjects` は Win32_System → Win32 → Win32_Foundation を引き込むため、
-# HANDLE / CloseHandle のために Foundation を明示する必要はない（0.61.2 の feature 依存を
-# windows-sys の Cargo.toml で確認した）。
+# HANDLE / CloseHandle / STILL_ACTIVE のために Foundation を明示する必要はない
+# （0.61.2 の feature 依存を windows-sys の Cargo.toml で確認した）。
 windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_System_Console",
+    "Win32_System_Diagnostics",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }

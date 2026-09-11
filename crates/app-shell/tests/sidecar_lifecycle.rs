@@ -1,5 +1,5 @@
-//! 補助プロセスの起動・共有・再起動、起動失敗の区別、終了保証、出力の取得と予期せぬ終了の通知
-//! （要件 5.4、5.5、5.6、5.7、5.8、5.9、tasks.md 3.2〜3.4）。
+//! 補助プロセスの起動・共有・再起動、起動失敗の区別、終了保証、出力の取得と予期せぬ終了の通知、
+//! 残留プロセスの掃除と親監視の結線（要件 5.4〜5.9、tasks.md 3.2〜3.5）。
 //!
 //! **完了状態**（同じ種類への要求を並行して 10 回出しても起動したプロセスが 1 つであること）を、
 //! 実プロセスで固定する。実際に起動するのは配置規約（tasks.md 1.7）が置く原本
@@ -13,23 +13,27 @@
 //! あるため、整合性検査を差し替える seam（[`Supervisor::with_verifier`]）を使う。本番の
 //! [`Supervisor::new`] は実検査（[`app_shell::sidecar::integrity::verify`]）をそのまま使う。
 //!
+//! 残留プロセスの掃除（tasks.md 3.5）は、監督を経由せずに直接起動した補助プロセスを
+//! **前回の実行が残したもの**と見立てて検証する。掃除は識別子だけでなく**実行ファイル名**でも
+//! 照合するため、別名へ複製したプロセスを終了させないこと（PID 再利用の誤終了の防止）を
+//! 同じ節で固定する。親監視の引数は監督が注入する（`sidecar_spec` は与えない）。
+//!
 //! プロセス数は OS から数える。Linux は `/proc`（コンテナ内に `pgrep` / `ps` が無いことを実測）、
 //! macOS は `pgrep`、Windows は `tasklist` を使う。cargo は同一バイナリ内のテストを並行に
 //! 走らせるため、このファイルのテストは直列化する。子プロセスは [`SidecarGuard`] の `Drop` で
-//! 必ず強制終了して回収し、成功・失敗のどちらの経路でも孤児を残さない。
+//! 必ず強制終了して回収し、成功・失敗のどちらの経路でも孤児を残さない。直接起動した検証用の
+//! プロセスも、各テストが最後に回収する（ゾンビを残さない）。
 
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-#[cfg(any(target_os = "macos", windows))]
-use std::process::Command;
 
 use app_shell::sidecar::integrity::{IntegrityError, BUILD_TARGET_TRIPLE, EXPECTED_DIGESTS};
 use app_shell::sidecar::supervisor::{
@@ -147,13 +151,16 @@ fn make_executable(path: &Path, mode: u32) {
     fs::set_permissions(path, permissions).expect("権限を設定できる");
 }
 
-/// 起動する補助プロセスの仕様。親監視（tasks.md 1.6）が生存できるよう、監視対象はテスト自身の
-/// 識別子にする。テストが終われば親が消え、補助プロセスは自ら終了する経路も持つ。
+/// 起動する補助プロセスの仕様。
+///
+/// **親監視の引数（`--parent-pid`）はここでは与えない。** 監督が自分の識別子を注入する
+/// （要件 5.6、tasks.md 3.5 の親監視の結線）。この関数が引数を足すと、注入の経路が試されない
+/// まま「テストだけが親監視を渡している」状態になり、本番の結線が壊れても気づけない。
 fn sidecar_spec(executable: &Path) -> SidecarSpec {
     SidecarSpec {
         kind: SidecarKind::Smoke,
         executable: executable.to_path_buf(),
-        args: vec!["--parent-pid".to_string(), std::process::id().to_string()],
+        args: Vec::new(),
     }
 }
 
@@ -1508,5 +1515,478 @@ fn deliberate_shutdown_is_distinguishable_from_an_unexpected_exit() {
     assert!(
         status.status().is_some(),
         "終了状態が取得できていない: {status:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 残留プロセスの掃除と親監視の結線（要件 5.6、tasks.md 3.5）
+// ---------------------------------------------------------------------------
+
+/// 監督を経由せずに補助プロセスを直接起動する。前回の実行が残したプロセスを模す。
+///
+/// `--idle` は親監視も応答も持たず永遠に待つ（`crates/sidecar-smoke`）。前回の実行が強制終了
+/// された場合に残るのは、この形のプロセス（監視を持たない孫、または監視対象が未回収のゾンビで
+/// 監視が効かなかった子）である — 1.6 の申し送りのとおり親監視だけでは塞げない経路が実在し、
+/// **3.5 の掃除が唯一の backstop** になる。監督の登録簿には載らないため、掃除の照合に掛かる
+/// かどうかをこのテストが直接決められる。
+fn spawn_leftover(executable: &Path, tag: &str) -> Child {
+    Command::new(executable)
+        .arg("--idle")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|error| panic!("残存プロセス（{tag}）を起動できる: {error}"))
+}
+
+/// テストが監督を経由せずに直接起動したプロセスを、必ず強制終了して回収するガード。
+///
+/// [`SidecarGuard`] は監督のハンドルを持つ子にしか使えない。直接起動した検証用のプロセス
+/// （残存プロセス・別名の複製）はハンドルを持たないため、このガードが `Drop` で回収する。
+/// アサーションが失敗して panic した経路でも孤児を残さない（次のテストの数え合わせを壊さない）。
+struct LeftoverGuard {
+    child: Child,
+}
+
+impl LeftoverGuard {
+    fn new(child: Child) -> Self {
+        LeftoverGuard { child }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// 明示的に回収する（`Drop` より前に終了状態を観測したい場合）。
+    fn reap(mut self) -> std::process::ExitStatus {
+        self.child.wait().expect("残存プロセスを回収できる")
+    }
+}
+
+impl Drop for LeftoverGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) if Instant::now() >= deadline => return,
+                Ok(None) => thread::sleep(Duration::from_millis(10)),
+            }
+        }
+    }
+}
+
+fn file_name_of(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .expect("実行ファイルにファイル名がある")
+        .to_string()
+}
+
+/// その識別子の実行ファイル名を OS から取得する。`None` は生存していないか取得できない場合。
+#[cfg(target_os = "linux")]
+fn process_executable_name(pid: u32) -> Option<String> {
+    let path = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+}
+
+#[cfg(target_os = "macos")]
+fn process_executable_name(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .expect("ps を実行できる");
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let name = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    Path::new(name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+}
+
+#[cfg(windows)]
+fn process_executable_name(pid: u32) -> Option<String> {
+    let output = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .expect("tasklist を実行できる");
+    let text = String::from_utf8_lossy(&output.stdout);
+    let name = text.lines().next()?.trim_start_matches('"');
+    let name = name.split('"').next()?.trim();
+    (!name.is_empty() && !name.starts_with("INFO:")).then(|| name.to_string())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn process_executable_name(_pid: u32) -> Option<String> {
+    panic!("この OS ではプロセスの実行ファイル名を取得する経路を持たない")
+}
+
+/// OS から見て、その識別子のプロセスがまだ実行中か。**ゾンビは実行中と見なさない。**
+///
+/// ゾンビを生存と扱うと、終了させたのに生存と観測して猶予時間を無駄に消費する。残留の掃除は
+/// 「実行中のプロセス」を対象にするので、ここでも同じ意味に揃える。
+#[cfg(target_os = "linux")]
+fn process_is_alive(pid: u32) -> bool {
+    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // `pid (comm) state ...` — comm は空白や括弧を含みうるので、最後の `)` の次を見る。
+    let Some((_, rest)) = stat.rsplit_once(')') else {
+        return false;
+    };
+    !matches!(rest.trim_start().chars().next(), None | Some('Z') | Some('X'))
+}
+
+#[cfg(target_os = "macos")]
+fn process_is_alive(pid: u32) -> bool {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "stat="])
+        .output()
+        .expect("ps を実行できる");
+    if !output.status.success() {
+        return false;
+    }
+    match String::from_utf8_lossy(&output.stdout).trim().chars().next() {
+        Some(state) => !matches!(state, 'Z' | 'X'),
+        None => false,
+    }
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    let output = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .expect("tasklist を実行できる");
+    String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn process_is_alive(_pid: u32) -> bool {
+    panic!("この OS ではプロセスの生存を確認する経路を持たない")
+}
+
+/// その識別子のプロセスの実行ファイル名が期待どおりになるまで待つ（`exec` 完了の観測）。
+fn wait_for_executable_name(pid: u32, name: &str, timeout: Duration, context: &str) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if process_executable_name(pid).as_deref() == Some(name) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            eprintln!("{context}: 実行ファイル名が {name} にならない（pid {pid}）");
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// その識別子のプロセスが消えるまで待つ。掃除の効果は非同期なので、固定の待ちではなく観測で待つ。
+fn wait_for_process_gone(pid: u32, timeout: Duration, context: &str) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !process_is_alive(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            eprintln!("{context}: pid {pid} が消えない");
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// 起動行（`sidecar-smoke ready pid=<自身> parent_pid=<監視対象>`）から監視対象を取り出す。
+fn parse_parent_pid(line: &str) -> Option<u32> {
+    line.split_whitespace()
+        .find_map(|token| token.strip_prefix("parent_pid="))
+        .and_then(|value| value.parse().ok())
+}
+
+/// 起動時に、前回の実行が残した補助プロセスを掃除する（tasks.md 3.5 の完了状態、要件 5.6）。
+///
+/// 監督を経由せずに起動したプロセスを「前回の実行（強制終了されて終了処理が走らなかった）が
+/// 残したもの」と見立てる。現在の監督の登録簿には無いので、掃除が見つけて終了させなければ
+/// ならない。**API の戻り値だけでなく OS から見た不在**まで確かめる（[`process_is_alive`] と
+/// 実行中の補助プロセス数）。
+#[test]
+fn sweep_orphans_terminates_a_leftover_sidecar() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("sweep_orphans_terminates_a_leftover_sidecar");
+        return;
+    };
+
+    let leftover = LeftoverGuard::new(spawn_leftover(&executable, "leftover"));
+    let pid = leftover.pid();
+    assert!(
+        wait_for_executable_name(
+            pid,
+            &file_name_of(&executable),
+            Duration::from_secs(10),
+            "残存プロセスの起動"
+        ),
+        "残存プロセスが起動しない"
+    );
+    assert_eq!(
+        wait_for_sidecar_count(1, Duration::from_secs(10), "残存プロセスの起動"),
+        1,
+        "残存プロセスが OS から見えていない"
+    );
+
+    let supervisor = Supervisor::new();
+    let swept = supervisor.sweep_orphans();
+
+    assert!(
+        swept >= 1,
+        "残存プロセスを 1 つも掃除できていない（swept={swept}）"
+    );
+    assert!(
+        wait_for_process_gone(pid, Duration::from_secs(10), "掃除の後"),
+        "掃除の後も残存プロセスが実行中である"
+    );
+    assert_eq!(
+        wait_for_sidecar_count(0, Duration::from_secs(10), "掃除の後"),
+        0,
+        "OS 上に残存プロセスが残っている"
+    );
+
+    let status = leftover.reap();
+    eprintln!("掃除された残存プロセスの終了状態: {status:?}");
+}
+
+/// 実行ファイル名が一致しないプロセスは、識別子が対象でも終了させない（design.md
+/// 「PID と実行ファイル名の両方で照合する」）。
+///
+/// 識別子の再利用を模す: 前回の補助プロセスの識別子が、無関係な実行ファイルのプロセスへ
+/// 再利用された状況を作る。名前で照合する実装はこれを終了させない。**名前の照合を外す
+/// （識別子だけで照合する）とこのテストが落ちることは、実装時に観測して記録してある**
+/// （swept=1 になり、別名のプロセスが終了させられた）。
+#[test]
+fn sweep_orphans_does_not_kill_a_process_with_a_different_executable_name() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("sweep_orphans_does_not_kill_a_process_with_a_different_executable_name");
+        return;
+    };
+
+    let dir = TempDir::new("different-name");
+    #[cfg(unix)]
+    let copy = dir.path().join("unrelated-sidecar-process");
+    #[cfg(windows)]
+    let copy = dir.path().join("unrelated-sidecar-process.exe");
+    fs::copy(&executable, &copy).expect("別名へ複製できる");
+    #[cfg(unix)]
+    make_executable(&copy, 0o755);
+
+    let impostor = LeftoverGuard::new(
+        Command::new(&copy)
+            .arg("--idle")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("別名のプロセスを起動できる"),
+    );
+    let pid = impostor.pid();
+    assert!(
+        wait_for_executable_name(
+            pid,
+            &file_name_of(&copy),
+            Duration::from_secs(10),
+            "別名プロセスの起動"
+        ),
+        "別名のプロセスが起動しない"
+    );
+
+    let supervisor = Supervisor::new();
+    let swept = supervisor.sweep_orphans();
+
+    assert!(
+        process_is_alive(pid),
+        "実行ファイル名が一致しないプロセスを終了させた（swept={swept}、pid {pid}）"
+    );
+}
+
+/// 掃除は、現在の監督が追跡している子を対象にしない（要件 5.6、tasks.md 3.5）。
+#[test]
+fn sweep_orphans_does_not_disturb_tracked_children() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("sweep_orphans_does_not_disturb_tracked_children");
+        return;
+    };
+
+    let supervisor = Supervisor::new();
+    let handle = supervisor
+        .ensure(&sidecar_spec(&executable))
+        .expect("起動できる");
+    let _guard = SidecarGuard::new(handle.clone());
+    let pid = handle.pid();
+
+    let swept = supervisor.sweep_orphans();
+
+    assert!(
+        handle.try_wait().expect("生存判定できる").is_none(),
+        "追跡している子を掃除が終了させた（swept={swept}、pid {pid}）"
+    );
+    assert!(
+        supervisor.get(SidecarKind::Smoke).is_some(),
+        "追跡している子が登録から消えた"
+    );
+}
+
+/// 監督が自分の識別子を子へ注入し、親監視（tasks.md 1.6 の `--parent-pid`）を起動する
+/// （tasks.md 3.5「異常終了で終了処理が走らない経路に備える」）。
+///
+/// 呼び出し側が既に `--parent-pid` を渡していても重複させず、監督の識別子で置き換える。
+/// 主張は 3 つ: (a) 起動行が報告する監視対象が監督の識別子である、(b) OS から見た
+/// コマンドラインにフラグが 1 つだけである、(c) 呼び出し側の値（ここでは 1）が残っていない。
+/// **注入を外すとこのテストが落ちることは、実装時に観測して記録してある**（起動行が
+/// `parent_pid=1` を報告し、`Some(1)` と監督の識別子が一致しない）。
+#[test]
+fn supervisor_injects_its_own_pid_into_the_parent_watch() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("supervisor_injects_its_own_pid_into_the_parent_watch");
+        return;
+    };
+
+    let supervisor = Supervisor::new();
+    let events = supervisor.subscribe();
+    // 呼び出し側が別の値を渡している。監督はこれを重複させず置き換えなければならない
+    // （重複すれば sidecar-smoke は使い方を出して終了コード 2 で終わり、起動行は出ない）。
+    let spec = SidecarSpec {
+        kind: SidecarKind::Smoke,
+        executable: executable.clone(),
+        args: vec!["--parent-pid".to_string(), "1".to_string()],
+    };
+    let handle = supervisor.ensure(&spec).expect("起動できる");
+    let _guard = SidecarGuard::new(handle.clone());
+
+    let supervisor_pid = std::process::id();
+    let mut reported: Option<u32> = None;
+    let mut ready = false;
+    while !ready {
+        match recv_event(&events, Duration::from_secs(10), "起動行") {
+            SidecarEvent::Output { line, .. } if line.starts_with("sidecar-smoke ready") => {
+                reported = parse_parent_pid(&line);
+                ready = true;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        reported,
+        Some(supervisor_pid),
+        "起動行が報告する監視対象が監督の識別子でない（呼び出し側の値が残っている可能性）"
+    );
+
+    #[cfg(target_os = "linux")]
+    {
+        let pid = handle.pid();
+        let cmdline = fs::read(format!("/proc/{pid}/cmdline")).expect("子のコマンドラインを読める");
+        let args: Vec<String> = cmdline
+            .split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect();
+        let flags = args
+            .iter()
+            .filter(|arg| arg.as_str() == "--parent-pid")
+            .count();
+        assert_eq!(flags, 1, "親監視のフラグが重複している: {args:?}");
+        let value = args
+            .iter()
+            .position(|arg| arg == "--parent-pid")
+            .and_then(|index| args.get(index + 1));
+        let expected = supervisor_pid.to_string();
+        assert_eq!(
+            value.map(String::as_str),
+            Some(expected.as_str()),
+            "コマンドラインの監視対象が監督の識別子でない: {args:?}"
+        );
+    }
+}
+
+/// 掃除は冪等である。残存が無ければ 2 回目は 0 を返し、失敗しない。
+#[test]
+fn sweep_orphans_is_idempotent() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("sweep_orphans_is_idempotent");
+        return;
+    };
+
+    let leftover = LeftoverGuard::new(spawn_leftover(&executable, "idempotence"));
+    let pid = leftover.pid();
+    assert!(
+        wait_for_executable_name(
+            pid,
+            &file_name_of(&executable),
+            Duration::from_secs(10),
+            "残存プロセスの起動"
+        ),
+        "残存プロセスが起動しない"
+    );
+
+    let supervisor = Supervisor::new();
+    assert!(
+        supervisor.sweep_orphans() >= 1,
+        "1 回目の掃除が残存プロセスを終了させていない"
+    );
+    assert!(
+        wait_for_process_gone(pid, Duration::from_secs(10), "1 回目の掃除の後"),
+        "残存プロセスが残っている"
+    );
+    assert_eq!(supervisor.sweep_orphans(), 0, "2 回目の掃除が 0 を返さない");
+}
+
+/// 掃除は、解決した実行ファイルがこのアプリの使うパスであることも要求する（design.md の
+/// 照合規則を、名前だけでなくパスまで強めたもの。tasks.md 3.5 の指定）。
+///
+/// 名前が一致しても、期待するパスの集合に無ければ終了させない。正しいパスを与えれば終了する。
+#[test]
+fn sweep_orphans_requires_the_expected_executable_path() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("sweep_orphans_requires_the_expected_executable_path");
+        return;
+    };
+
+    let leftover = LeftoverGuard::new(spawn_leftover(&executable, "expected-path"));
+    let pid = leftover.pid();
+    assert!(
+        wait_for_executable_name(
+            pid,
+            &file_name_of(&executable),
+            Duration::from_secs(10),
+            "残存プロセスの起動"
+        ),
+        "残存プロセスが起動しない"
+    );
+
+    // 同じ語幹を持つが別の場所のパスを期待値にする。名前は一致するがパスが一致しない。
+    let elsewhere = TempDir::new("expected-path-elsewhere");
+    let wrong = elsewhere.path().join(file_name_of(&executable));
+    fs::write(&wrong, b"").expect("期待値のファイルを作れる");
+    let supervisor = Supervisor::new().with_expected_executables([wrong]);
+    assert_eq!(supervisor.sweep_orphans(), 0, "期待するパスに無いのに掃除した");
+    assert!(process_is_alive(pid), "期待するパスに無いのに終了させた");
+
+    let supervisor = Supervisor::new().with_expected_executables([executable.clone()]);
+    assert!(
+        supervisor.sweep_orphans() >= 1,
+        "期待するパスなのに掃除できていない"
+    );
+    assert!(
+        wait_for_process_gone(pid, Duration::from_secs(10), "正しい期待値での掃除の後"),
+        "残存プロセスが残っている"
     );
 }

@@ -85,16 +85,16 @@
 //! クラッシュと誤報しない）に倒れており、逆向き — 意図的な終了が `Unexpected` になる — は
 //! 起こらない（フラグは信号より先に立つ）。
 //!
-//! # 後続タスクへの申し送り
+//! # 関連するタスクの申し送り
 //!
-//! - **3.5**: [`SidecarSupervisor`] は `ensure` / `get` / `shutdown_all` / `subscribe` を
-//!   宣言している。`sweep_orphans`（残留の掃除）は 3.5 がこの trait に追加する — ここに
-//!   空のスタブを置くと「実装済み」と誤認されるため置かない。終了保証は `group_unix` /
-//!   `job_windows` が持つ。
+//! - **3.5（実装済み）**: [`SidecarSupervisor::sweep_orphans`] が残留の掃除を担い、列挙・同定・
+//!   終了の機構は `orphan_sweep` が持つ。親監視の引数（`--parent-pid`）は [`spawn`] が
+//!   [`child_args`] を通じて注入する。終了保証は `group_unix` / `job_windows` が持つ。
 //! - **8.1**: 出来事を診断の記録先へ流すのは `SidecarHost` の責務である。監督は publish
-//!   するだけで、記録の購読は [`SidecarSupervisor::subscribe`] の受信側が行う。
+//!   するだけで、記録の購読は [`SidecarSupervisor::subscribe`] の受信側が行う。残留の掃除に
+//!   期待する実行ファイルのパスを与えるのは [`Supervisor::with_expected_executables`] である。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -126,6 +126,13 @@ const TERMINATION_POLL: Duration = Duration::from_millis(10);
 
 /// 強制段の後に直接の子を回収する上限。これを超えても待ち続けない（無限に待たない）。
 const REAP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 残留プロセスの掃除で、強制段の後に消滅を待つ上限。
+///
+/// 強制は `SIGKILL`（Unix）/ `TerminateProcess`（Windows）であり即時に効くが、消滅の観測は
+/// 一瞬遅れる。無限に待たないための短い上限である（ゾンビは生存と見なさないので、通常は
+/// この待ちに入らない）。
+const SWEEP_FORCE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// 1 行として通知する最大の長さ。超えた行はこの長さごとに分割して通知する（モジュール冒頭の
 /// 「行の単位と長さの上限」を参照）。改行を書かない子による無制限のメモリ消費を防ぐ。
@@ -435,8 +442,9 @@ impl SidecarHandle {
 
 /// 補助プロセスの監督（design.md「SidecarSupervisor」の Service Interface）。
 ///
-/// `sweep_orphans`（残留の掃除）はタスク 3.5 がこの trait に追加する。ここに空のスタブを置くと
-/// 「実装済み」と誤認されるため宣言しない。
+/// 起動・共有・再起動（[`SidecarSupervisor::ensure`] / [`SidecarSupervisor::get`]）、終了保証
+/// （[`SidecarSupervisor::shutdown_all`]）、出来事の購読（[`SidecarSupervisor::subscribe`]）、
+/// 残留の掃除（[`SidecarSupervisor::sweep_orphans`]）を定める。
 pub trait SidecarSupervisor {
     /// 起動済みなら既存のハンドルを返し、未起動なら起動する。予期せず終了していた場合はこの
     /// 呼び出しで改めて起動を試みる（要件 5.8）。
@@ -461,6 +469,19 @@ pub trait SidecarSupervisor {
     /// 購読は複数作れる。それぞれ独立しており、片方が受信を止めても他方と読み取りスレッドは
     /// 止まらない。既に配られた出来事は再送しない（購読は過去を遡らない）。
     fn subscribe(&self) -> Receiver<SidecarEvent>;
+
+    /// 前回の実行が残した補助プロセスを探して終了させ、終了させた数を返す。起動時に一度呼ぶ
+    /// （要件 5.6。design.md「SidecarSupervisor」の Service Interface）。
+    ///
+    /// **識別子（PID）と実行ファイル名の両方で照合する。** 列挙した時点の名前だけでなく、
+    /// 信号を送る直前にその識別子の実行ファイルを解決し直し、名前が一致することを確かめる —
+    /// これが「列挙してから終了するまでに識別子が再利用される」窓を閉じる（PID 再利用による
+    /// 無関係なプロセスの誤終了を避ける。design.md の明文の規則）。
+    ///
+    /// この監督が登録簿で追跡している子と、この呼び出し元自身は決して対象にしない。
+    /// 冪等であり、2 回目に残存が無ければ 0 を返す。**戻り値は数だけで、失敗は報告しない** —
+    /// 掃除は最善努力であり、起動を止めてはならない（要件 5.4 の精神）。
+    fn sweep_orphans(&self) -> usize;
 }
 
 /// アプリ全体で 1 実体の監督。
@@ -480,6 +501,10 @@ pub struct Supervisor {
     grace: Duration,
     /// 出来事の配布先。起動した子の読み取りスレッドと監視スレッドが共有する。
     subscribers: Arc<Subscribers>,
+    /// このアプリが使う実行ファイルの絶対パス（解決済み）。残留の掃除（要件 5.6）が、
+    /// 実行ファイル名の一致に加えて**この集合への所属**を要求する。8.1 が解決したパスを
+    /// [`Supervisor::with_expected_executables`] で与える。空なら名前の一致だけで判定する。
+    expected_executables: Arc<HashSet<PathBuf>>,
 }
 
 impl Supervisor {
@@ -491,6 +516,7 @@ impl Supervisor {
             verify,
             grace: DEFAULT_GRACE,
             subscribers: Arc::new(Subscribers::default()),
+            expected_executables: Arc::new(HashSet::new()),
         }
     }
 
@@ -509,7 +535,24 @@ impl Supervisor {
             verify,
             grace: DEFAULT_GRACE,
             subscribers: Arc::new(Subscribers::default()),
+            expected_executables: Arc::new(HashSet::new()),
         }
+    }
+
+    /// このアプリが使う補助プロセスの実行ファイルの絶対パスを与える（設計 8.1 の結線点）。
+    ///
+    /// 残留の掃除（[`SidecarSupervisor::sweep_orphans`]）は、実行ファイル名の一致に加えて
+    /// **解決した実行ファイルがこの集合に含まれること**を要求する。空のまま（既定）なら
+    /// 名前の一致だけで判定する。8.1 はプラットフォーム別のパス解決の結果をここへ渡す。
+    ///
+    /// パスは与えられた形のまま保持し、照合時に正規化する（`canonicalize`）。ファイルが
+    /// 既に消えている場合でも比較できるよう、生の値との一致も併せて確かめる。
+    pub fn with_expected_executables<I>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = PathBuf>,
+    {
+        self.expected_executables = Arc::new(paths.into_iter().collect());
+        self
     }
 
     /// 猶予時間を差し替える（テスト seam）。
@@ -602,6 +645,52 @@ impl SidecarSupervisor for Supervisor {
     fn subscribe(&self) -> Receiver<SidecarEvent> {
         self.subscribers.subscribe()
     }
+
+    fn sweep_orphans(&self) -> usize {
+        // 登録簿のロックは「追跡している子の識別子を集める」ためだけに取り、列挙の前に手放す。
+        // 列挙は遅く、その間ロックを持ち続けると `ensure` が待たされる。取るロックは①だけで、
+        // ②③には触れないので取得順の不変条件も崩さない。
+        let tracked: HashSet<u32> = {
+            let registry = self.registry();
+            registry.values().map(SidecarHandle::pid).collect()
+        };
+        let self_pid = std::process::id();
+
+        let mut swept = 0;
+        for process in super::orphan_sweep::running_processes() {
+            // この呼び出し元自身と、この監督が追跡している子は決して対象にしない。
+            if process.pid == self_pid || tracked.contains(&process.pid) {
+                continue;
+            }
+            // 1 度目: 列挙が与えた名前で識別する。
+            if super::orphan_sweep::identify(&process.executable_name).is_none() {
+                continue;
+            }
+            // **2 度目（信号の直前）**: 識別子の実行ファイルをその場で解決し直す。列挙から
+            // ここまでの間に識別子が再利用されていれば、名前が変わるか解決できなくなる。
+            // これを欠くと、再利用された無関係なプロセスを終了させうる（design.md の明文の規則）。
+            let Some(executable) = super::orphan_sweep::resolve_executable(process.pid) else {
+                continue;
+            };
+            if super::orphan_sweep::identify(&executable).is_none() {
+                continue;
+            }
+            // 期待するパスが与えられていれば、解決した実行ファイルがそこに属することも要求する
+            // （8.1 が解決したパス。名前に加えた 2 つ目の錠前である）。
+            if !self.expected_executables.is_empty()
+                && !self
+                    .expected_executables
+                    .iter()
+                    .any(|expected| same_executable(expected, &executable))
+            {
+                continue;
+            }
+            if terminate_orphan(process.pid, self.grace) {
+                swept += 1;
+            }
+        }
+        swept
+    }
 }
 
 /// 1 つの補助プロセスを、猶予段 → 強制段の順にグループ / ジョブ宛で終了させる。
@@ -655,6 +744,103 @@ fn terminate(handle: &SidecarHandle, grace: Duration) -> Result<(), ShutdownErro
     Ok(())
 }
 
+/// 残留プロセス 1 つを終了させる。実際に消滅を観測できたときだけ真を返す。
+///
+/// 対象は前回の実行が起動したプロセスであり、この実行のプロセスグループにも Job Object にも
+/// 入っていない。したがってグループ / ジョブ宛ではなく、識別子へ直接信号を送る
+/// （`orphan_sweep` の「終了の手段」を参照）。
+///
+/// Unix は穏やかな信号（`SIGTERM`）を送り、猶予の間だけ消滅を待ってから強制（`SIGKILL`）へ
+/// 移る。Windows に穏やかな段は無い（`terminate_graceful` が `TerminateProcess` を呼ぶ）ため、
+/// 猶予は待たずに消滅だけを待つ。
+fn terminate_orphan(pid: u32, grace: Duration) -> bool {
+    if super::orphan_sweep::terminate_graceful(pid).is_err() {
+        // 既に存在しない、または信号を送れない。数え上げに含めない。
+        return false;
+    }
+
+    // Windows に穏やかな段は無い（`terminate_graceful` が `TerminateProcess` を呼ぶ）ため、
+    // 猶予は使わない。
+    #[cfg(not(unix))]
+    let _ = grace;
+
+    #[cfg(unix)]
+    {
+        let deadline = Instant::now() + grace;
+        while Instant::now() < deadline {
+            if !super::orphan_sweep::is_alive(pid) {
+                return true;
+            }
+            thread::sleep(TERMINATION_POLL);
+        }
+        let _ = super::orphan_sweep::terminate_force(pid);
+    }
+
+    // 強制段の後（Windows は穏やかな段の後）の消滅を有界に待つ。ゾンビは生存と見なさないため、
+    // 通常は 1 回の観測で真になる。
+    let deadline = Instant::now() + SWEEP_FORCE_TIMEOUT;
+    loop {
+        if !super::orphan_sweep::is_alive(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(TERMINATION_POLL);
+    }
+}
+
+/// 2 つの実行ファイルのパスが同じ実体を指すか。
+///
+/// 正規化して比べる。正規化できない場合（既に消えている等）は生の値での一致にだけ頼る
+/// （「一致しない」ではなく「生の値が同じなら一致」とする — 不要な誤除外を避ける）。
+fn same_executable(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// 子へ渡す引数を組み立てる。**親監視のフラグは監督が所有する**（要件 5.6、tasks.md 3.5）。
+///
+/// 種類が [`SidecarKind::parent_pid_flag`] でフラグを表明していれば、監督の識別子を値として
+/// 注入する。呼び出し側が同じフラグを渡していても**重複させない** — フラグとその値を取り除いて
+/// から、監督のものを足す。`sidecar-smoke` は重複した `--parent-pid` を不正な引数として
+/// 終了コード 2 で拒否するため、重複は起動そのものを壊す。
+///
+/// 注入するのは、実行ファイルの名前がその種類の補助プロセスである場合に限る。テストが機構の
+/// 一部だけを確かめるとき、無関係な実行ファイル（`/bin/cat` など）を同じ種類として渡すことが
+/// あり、その CLI に存在しないフラグを足すと起動が壊れるためである。
+///
+/// **新しい種類を足すとき**: [`SidecarKind::parent_pid_flag`] で `Some` を返す（＝コマンドライン
+/// にそのフラグがあり、値として監視対象を受け取る）か `None` を返す（＝注入しない）かを、
+/// `match` の網羅性が強制する。`None` の種類には監督は何も足さない。
+fn child_args(spec: &SidecarSpec) -> Vec<String> {
+    let Some(flag) = spec.kind.parent_pid_flag() else {
+        return spec.args.clone();
+    };
+    if super::orphan_sweep::identify(&spec.executable) != Some(spec.kind) {
+        return spec.args.clone();
+    }
+
+    let mut args = Vec::with_capacity(spec.args.len() + 2);
+    let mut rest = spec.args.iter();
+    while let Some(arg) = rest.next() {
+        if arg == flag {
+            // フラグの値（次の引数）も一緒に落とす。重複したフラグは起動を壊す。
+            let _ = rest.next();
+            continue;
+        }
+        args.push(arg.clone());
+    }
+    args.push(flag.to_string());
+    args.push(std::process::id().to_string());
+    args
+}
+
 /// 実プロセスを起動し、読み取りと監視のスレッドを張る。
 ///
 /// **整合性検査は起動の前**に行い、失敗したら spawn しない（要件 5.3）。これにより
@@ -675,7 +861,7 @@ fn spawn(
 
     let mut command = Command::new(&spec.executable);
     command
-        .args(&spec.args)
+        .args(child_args(spec))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

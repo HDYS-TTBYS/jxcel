@@ -128,7 +128,7 @@
   - _Requirements: 5.7, 5.9_
   - _Depends: 3.2_
 
-- [ ] 3.5 残留プロセスの掃除と親監視による自己終了を実装する
+- [x] 3.5 残留プロセスの掃除と親監視による自己終了を実装する
   - 起動時に、前回の実行で残ったプロセスを探して終了させる
   - **識別子と実行ファイル名の両方で照合する**。識別子の再利用による誤終了を避ける
   - 異常終了で終了処理が走らない経路に備え、補助プロセス側が親の識別子を監視して自己終了する経路を通す
@@ -479,6 +479,12 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **3.5**: `sweep_orphans(&self) -> usize` と `orphan_sweep.rs`。列挙は Linux = `/proc`（サブプロセス無し）、macOS = `ps -axo pid=,comm=`、Windows = Toolhelp32 スナップショット + `QueryFullProcessImageNameW` / `TerminateProcess`（`windows-sys` の `Win32_System_Diagnostics` + `Win32_System_Diagnostics_ToolHelp` を追加）。**照合は実行ファイル名と識別子の両方**で行い、**信号を送る直前に実行ファイルを再解決して再確認する**（列挙→kill の間の PID 再利用窓を閉じる）。`with_expected_executables(...)` を設定すると期待パス所属も要求する。自分自身と**現在の登録表が追跡している子**は対象外。冪等・有界（2 回目は 0）。
+- **3.5**: **親監視の結線は監督が行う**。`spawn` が自プロセス id を `--parent-pid` として注入し、呼び出し元が同じフラグを渡しても重複しないよう除去する。種類ごとの opt-in は `SidecarKind::parent_pid_flag()`（将来の種類は `None` を返せば注入されない）。
+- **3.5**: 掃除が本当に必要なのは**親監視の届かない残存**である（レビューで実証: 直接の子は親監視で自己終了するが、孫や、監視対象が直接の親でない未回収ゾンビの経路は残る）。「通常のクラッシュで残った直接の子」は親監視が担当し、掃除はその backstop。
+- **3.5（macOS の未検証リスク、8.1 の前提）**: macOS の `ps -p <pid> -o comm=` は**起動時パスではなくコマンド名**（カーネルの `p_comm` は 16 文字で切詰め）を返す。名前照合は接頭辞 `sidecar-smoke-` が 16 文字に収まるため成立するが、**`with_expected_executables` を設定すると絶対パス比較が一致せず掃除が無音で no-op になりうる**。8.1 が期待パスを配線する前に **macOS の CI 実行（10.x）で検証すること**。
+- **3.5（残る窓）**: 再解決と `kill` / `TerminateProcess` の間にも PID 再利用の窓は残る。完全に閉じるには `pidfd` / ハンドルによる信号が必要だが、design が要求するのは PID + 名前照合までである。
 
 - **3.4**: イベントは `SidecarEvent::Output { kind, stream, line }` と `SidecarEvent::Exited { kind, status }`。`status` の具体型 `SidecarExit`（`Deliberate` / `Unexpected`）が由来を担う（design の `status` をフィールド追加なしで具体化したもの）。判定は**監視が記録した終了状態**を基準にするので、**意図的な終了が `Unexpected` として報告されることは構造的に無い**（逆に、自力で死んだ直後に `shutdown_all` が走り監視が未記録だと `Deliberate` 側に倒れる＝安全側）。
 - **3.4**: 購読は購読者ごとの**無限容量 `std::sync::mpsc`** を `Mutex<Vec<Sender>>` に登録する方式。取りこぼしは無いが**遅い購読者はメモリを消費する**。**配布は登録簿のロックを保持しない**ため、購読者が監督へ再入しても循環しない（ロック順: 登録簿 → 子 → 終了状態 → 購読者表。`kill` だけが子を保持したまま終了状態を見る）。
