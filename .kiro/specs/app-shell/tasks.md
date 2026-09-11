@@ -11,7 +11,7 @@
   - **完了状態**: Tauri アプリを members に含めた状態で、既存の 3 OS 検証ジョブとベンチマークのワークフローがどちらも緑になり、脆弱性検査ゲートに未処理の勧告がない
   - _Requirements: 6.2, 6.3_
 
-- [ ] 1.2 Tauri 非依存のコアクレートの骨組みと共有型を用意する
+- [x] 1.2 Tauri 非依存のコアクレートの骨組みと共有型を用意する
   - 通信契約・補助プロセス・設定・診断・ショートカット検査の**モジュール骨組みを先に置く**。後続の並行タスクが同じ入口ファイルを奪い合わないようにする
   - 複数のモジュールが参照する共有の列挙（補助プロセスの種類）をここで定義する
   - 依存を serde / serde_json / thiserror / 型生成ライブラリに限り、ダイジェスト算出はビルド時依存として分ける。プラットフォーム別依存は条件付きコンパイルで切る
@@ -480,6 +480,7 @@
 
 ## Implementation Notes
 
+- **1.2**: `SidecarKind`（`crates/app-shell/src/sidecar/mod.rs`）の文字列表現は `as_str()` が返す `"sidecar-smoke"` で、これは `crates/sidecar-smoke` のパッケージ名 = バイナリ名 = 同梱配置の語幹と一致していなければならない（1.7 の配置規約と 3.5 の孤児掃除が PID とこの名前の両方で照合するため）。`ALL` が全変種を列挙し、`parse()` は語幹の厳密一致のみを受け付ける。変種を追加するスペックは `as_str` / `parse` / `ALL` を同時に更新すること。
 - **1.1**: Tauri の依存集合を加えると `cargo audit` は 0 脆弱性のまま warning 7 件（`proc-macro-error 1.0.4` は glib-macros 経由、`glib 0.18.5` の unsound は atk/gtk ← muda/tao ← tauri、`unic-*` 5 件は urlpattern ← tauri-utils）を報告する。いずれも上流内在で ignore リストを追加してはならない（要件 6.3、ci.yml のコメント）。監査ゲートは非 0 終了のみで落とす。
 - **1.1**: Linux の Tauri ビルドには Tauri 公式の文書化パッケージ一覧に加えて `libdbus-1-dev` が要る（既定 feature の `dbus` → `libdbus-sys` のビルドスクリプトが `dbus-1.pc` を要求する）。`libxdo-dev` / `libayatana-appindicator3-dev` は `tray-icon` feature を使うまで不要。
 - **1.1**: `src-tauri/build.rs` の `tauri_build::build()` と `main.rs` の `tauri::generate_context!()` はどちらも `tauri.conf.json` をコンパイル時に要求するため、同ファイルを追加するタスク 1.3 で結線する。

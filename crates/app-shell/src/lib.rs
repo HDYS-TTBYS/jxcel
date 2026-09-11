@@ -9,5 +9,14 @@
 //! の一方向であり、逆流を許容しない。Tauri の型とランタイムを知るのは `src-tauri/` の
 //! アダプタだけである（structure.md「エンジンと UI の分離」）。
 //!
-//! 本タスク（1.1）ではワークスペースの骨組みのみを置く。各モジュールの実体は
-//! tasks.md の 1.2 以降が追加する。
+//! 本クレートの各モジュールの骨組みはタスク 1.2 が置いた。通信境界（[`ipc`]）・設定
+//! （[`settings`]）・ショートカット検査（[`accelerator`]）・診断方針（[`diagnostics`]）の
+//! 実体は tasks.md の 2.x / 4.x が、補助プロセスの監督（[`sidecar`]）の実体は 3.x が埋める。
+//! 複数のモジュールが参照する共有の列挙（補助プロセスの種類）は [`sidecar::SidecarKind`] に
+//! 定義してある。
+
+pub mod accelerator;
+pub mod diagnostics;
+pub mod ipc;
+pub mod settings;
+pub mod sidecar;
