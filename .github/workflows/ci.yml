@@ -19,11 +19,23 @@
 #
 # zip >= 2.3.0 の下限（RUSTSEC-2025-0168、design.md Security Considerations）は
 # scripts/check-zip-floor.sh が Cargo.lock の解決版を機械検査する（両ジョブで実行）。
+#
+# 権限と供給網（qlty の zizmor が検査する。.qlty/qlty.toml）:
+#   - GITHUB_TOKEN は読み取りだけにする。どのジョブもリポジトリの取得以外に GitHub API を
+#     使わない（成果物とキャッシュは GITHUB_TOKEN ではなく Actions ランタイムのトークンで扱われる）。
+#   - checkout は認証情報を .git/config に残さない。後続の段は git の認証を使わない。
+#   - サードパーティのアクションはコミット SHA で固定し、版をコメントに書く。
+#     dtolnay/rust-toolchain は master の履歴上の SHA に固定し、ツールチェーンを `toolchain:` で
+#     渡す（`@stable` などのブランチは master の外にあり、SHA で固定すると将来消えることがある）。
+#     GitHub 公式の `actions/*` はタグのままにする（zizmor の既定の方針）。
 name: CI
 
 on:
   push:
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -58,6 +70,8 @@ jobs:
               target/release/bundle/nsis/*.exe
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # Linux の WebKitGTK 系開発パッケージと仮想ディスプレイ。
       # Tauri v2 は OS の WebView にリンクするため、ヘッダと .pc ファイルが無いと
@@ -103,7 +117,9 @@ jobs:
             libfuse2
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master (2026-09-03)
+        with:
+          toolchain: stable
 
       # フロントエンドのツールチェーン（React + Vite + TypeScript。tasks.md 1.4 / 1.5）。
       # 本スペックのフロントエンドは `src/` にあり、ビルドは Node 側で行う。Rust の
@@ -125,7 +141,7 @@ jobs:
       # （24.04）で作られたキャッシュを復元し、その中のビルドスクリプトが
       # `GLIBC_2.39 not found` で起動できずに落ちたことがある。
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.os }}
 
@@ -318,12 +334,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master (2026-09-03)
+        with:
+          toolchain: stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked

@@ -1,0 +1,5 @@
+# qlty の rustfmt 用の設定。qlty は cargo fmt ではなく rustfmt にファイルを直接渡すため、
+# Cargo.toml のエディションが伝わらず、rustfmt の既定（2015）で解釈されてしまう。
+# ワークスペースの edition（Cargo.toml の [workspace.package]）と同じ値にしておく。
+# cargo fmt はこのファイルを見ない（リポジトリ直下からの探索範囲に入らない）。
+edition = "2021"

@@ -1,0 +1,140 @@
+# Qlty CLI の設定（`qlty init` の生成物を jxcel 向けに調整したもの）。
+#
+# 使い方:
+#   qlty check          … upstream との差分に含まれるファイルだけを検査する（普段使い）
+#   qlty check --all    … 全ファイルを検査する
+#   qlty fmt            … 差分に含まれるファイルを整形する（rustfmt）
+#
+# 除外・抑止を足すときは、その場に理由を書く。
+#
+# 書式: https://docs.qlty.sh/cli/qlty-toml
+config_version = "0"
+
+exclude_patterns = [
+  "*_min.*",
+  "*-min.*",
+  "*.min.*",
+  "**/.yarn/**",
+  "**/*.d.ts",
+  "**/assets/**",
+  "**/bower_components/**",
+  "**/build/**",
+  "**/cache/**",
+  "**/config/**",
+  "**/db/**",
+  "**/deps/**",
+  "**/dist/**",
+  "**/extern/**",
+  "**/external/**",
+  "**/generated/**",
+  "**/Godeps/**",
+  "**/gradlew/**",
+  "**/mvnw/**",
+  "**/node_modules/**",
+  "**/protos/**",
+  "**/seed/**",
+  "**/target/**",
+  "**/templates/**",
+  "**/testdata/**",
+  "**/vendor/**",
+  # --- ここから jxcel 固有 ---
+  # AI エージェント・仕様駆動ツールの配布物（スキル・プロンプト・設定）。プロダクトのコードではない。
+  ".agents/**",
+  ".claude/**",
+  ".codex/**",
+  ".commandcode/**",
+  ".omp/**",
+  ".pi/**",
+  # 開発機固有の検証用 sysroot（追跡対象外。eslint.config.js と同じ扱い）。
+  ".devsys/**",
+  # ゴールデン・フィクスチャ。バイト比較の入力なので、整形も検査もしない。
+  "**/tests/fixtures/**",
+]
+
+test_patterns = [
+  "**/test/**",
+  "**/spec/**",
+  "**/*.test.*",
+  "**/*.spec.*",
+  "**/*_test.*",
+  "**/*_spec.*",
+  "**/test_*.*",
+  "**/spec_*.*",
+  # Rust の結合テストとベンチマーク（各クレート直下の tests/・benches/）。
+  "**/tests/**",
+  "**/benches/**",
+]
+
+[smells]
+mode = "comment"
+
+# qlty が rustfmt を動かすときの Rust。既定の 1.77.2 は、このプロジェクトが使う
+# stable（1.98 系）で書いた構文を解釈できないことがあるため、版をそろえる。
+# rustfmt 自体はこの実行環境に同梱されたものが使われる（プラグインの version は表示用）。
+[runtimes.enabled]
+rust = "1.98.1"
+
+[[source]]
+name = "default"
+default = true
+
+
+[[plugin]]
+name = "actionlint"
+
+# clippy は qlty からは動かさない（`qlty init` が自動で有効にしたものを外した）。
+# qlty の clippy はこのリポジトリの構成では指摘を 1 件も報告できず、「指摘 0 件」と表示されるため
+# （qlty 0.643.0 で確認。clippy 自体の出力には 11 件あった）:
+# - cargo はワークスペースのメンバーのファイルをワークスペース直下からの相対パス
+#   （crates/document-format/src/lib.rs）で報告するが、qlty はそこへさらにメンバーのディレクトリを
+#   前置する。crates/ 配下のメンバーの指摘は存在しないパスに付いて捨てられる。
+# - 加えて、コンパイル失敗（終了コード 101）も成功として扱う。ビルドできなかったことにも気づけない。
+# Rust の静的検査は `cargo clippy --workspace --all-targets` を直接実行する。
+
+[[plugin]]
+name = "eslint"
+version = "10.10.0"
+package_file = "package.json"
+package_filters = ["eslint"]
+
+[[plugin]]
+name = "osv-scanner"
+
+[[plugin]]
+name = "ripgrep"
+mode = "comment"
+
+# qlty は cargo fmt ではなく rustfmt にファイルを直接渡すため、エディションは
+# .qlty/configs/rustfmt.toml で与える。
+[[plugin]]
+name = "rustfmt"
+version = "1.98.1"
+
+[[plugin]]
+name = "shellcheck"
+
+[[plugin]]
+name = "trufflehog"
+
+[[plugin]]
+name = "zizmor"
+
+# Tauri v2 が引き込む依存の勧告。すべて informational（unsound 1 件・unmaintained 6 件）で、
+# jxcel 側の依存更新では解消できない。CI の cargo audit も警告扱いで失敗にしないので、判断を揃える。
+# - glib 0.18.5（RUSTSEC-2024-0429, unsound）と proc-macro-error 1.0.4（RUSTSEC-2024-0370）:
+#   Linux の GTK バインディング gtk-rs 0.18 経由（tauri / wry / tao / muda / tray-icon）
+# - unic-*（RUSTSEC-2025-0075 / 0080 / 0081 / 0098 / 0100）: tauri-utils → urlpattern 経由
+# ID を個別に指定しているので、新しい勧告はこれまでどおり表示される。Tauri を上げたら見直す。
+# これは qlty の表示だけの扱いであり、CI の cargo audit ゲート（ignore リストを置かない方針）には
+# 手を入れていない。
+[[triage]]
+match.rules = [
+  "osv-scanner:RUSTSEC-2024-0429",
+  "osv-scanner:RUSTSEC-2024-0370",
+  "osv-scanner:RUSTSEC-2025-0075",
+  "osv-scanner:RUSTSEC-2025-0080",
+  "osv-scanner:RUSTSEC-2025-0081",
+  "osv-scanner:RUSTSEC-2025-0098",
+  "osv-scanner:RUSTSEC-2025-0100",
+]
+set.ignored = true

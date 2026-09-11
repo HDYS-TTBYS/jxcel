@@ -18,6 +18,9 @@
 # scripts/check-bench-budget.sh が criterion の計測値（target/criterion 配下の
 # estimates.json）に対して行い、超過していれば最後のステップでジョブを失敗させる
 # （tasks.md 8.9）。本ワークフローは計測値の記録・保存と予算判定を行う。
+#
+# 権限・checkout・アクションの固定の方針は ci.yml の冒頭と同じ（読み取りだけの GITHUB_TOKEN、
+# 認証情報を残さない checkout、サードパーティのアクションはコミット SHA で固定）。
 name: Bench
 
 on:
@@ -34,6 +37,9 @@ on:
       - "crates/document-format/**"
       - "scripts/check-bench-budget.sh"
 
+permissions:
+  contents: read
+
 jobs:
   bench:
     name: criterion (${{ matrix.os }})
@@ -45,12 +51,16 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master (2026-09-03)
+        with:
+          toolchain: stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # criterion: ベースライン名は OS 横断で「main」として保存する。
       # `-p document-format` に限定する（Tauri アプリをビルド対象に巻き込まない）。
