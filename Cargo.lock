@@ -2178,6 +2178,7 @@ dependencies = [
 name = "jxcel"
 version = "0.1.0"
 dependencies = [
+ "app-shell",
  "tauri",
  "tauri-build",
  "tauri-plugin-log",
