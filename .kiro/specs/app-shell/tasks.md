@@ -62,7 +62,7 @@
 
 - [ ] 2. Core: 型付き通信境界の契約
 
-- [ ] 2.1 境界を越える型とエラー封筒を定義する
+- [x] 2.1 境界を越える型とエラー封筒を定義する
   - 境界を越える型に型生成の派生を付ける場所をひとつに限定する。他のモジュールでは付けない
   - 成功と失敗を型で区別する封筒を定義し、判別可能な合併型として TypeScript へ落ちる形にする
   - エラーは原因を区別できる列挙とする。文字列だけのエラーにしない
@@ -479,6 +479,11 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **2.1**: 境界の型は `crates/app-shell/src/ipc/` の 2 ファイルにある。`IpcResult<T, E>`（`#[serde(tag = "status")]` + 変種 `ok` / `error`）と `IpcError`（`#[serde(tag = "kind", content = "detail")]` + 構造体変種 Settings / Sidecar / Window が `message` を持つ）。**design.md の serde 属性はそのまま成立する** — 「隣接タグ付けは構造体変種を取れない」という制約は存在せず、制約があるのは内部タグ付け＋タプル変種の方である（serde 1.0.229 で実測）。ts-rs の derive を付けてよいのは **`src/ipc/` 配下だけ**。
+- **2.1**: 識別子は `WindowLabel(String)` + `#[ts(type = "string")]`（TS では `string`）。**64 ビット整数を境界に出さない**。`WindowContext { window: WindowLabel }` が呼び出し元ウィンドウを表す境界ペイロードで、**7.1 はこれを再定義せず `app_shell::ipc::WindowContext` を使うこと**（要件 4.2 の単一定義）。今後追加するドキュメント／行の識別子も同じ文字列規則に従う。
+- **2.1**: `IpcResult<T, E>::export_to_string()` は**ジェネリック宣言**（`export type IpcResult<T, E> = …`）を返し、ペイロード型はその出力に現れない。**2.2 の生成と 2.4 のラッパは、具体化した型を別途出力する必要がある**（封筒の宣言がペイロード型を名指ししてくれることを前提にしない）。`export_to_string` はファイルを書かないのでドリフト検査に安全。
+- **2.1**: 生成物に対する「`any` を含まない」検査は**コメントを除去してからトークン境界で照合する**（`strip_comments` + `assert_no_type_token`）。生成物には Rust の `///` が JSDoc として入るため、全文一致にすると**正当なドキュメント文言で偽の失敗が出る**（実際に round-1 のレビューで棄却された）。今後この種の検査を書くときは全文一致に戻さないこと。
 
 - **1.7**: 配置規約の確定事項。(a) 原本は **`sidecars/sidecar-smoke-<TARGET>`**（Windows は `.exe`）へ `scripts/stage-sidecars.sh`（唯一の文書化された手順・POSIX sh・冪等）が配置する。`sidecars/` は `.gitkeep` のみ追跡し、配置物は gitignore。(b) Windows / macOS は `bundle.externalBin: ["../sidecars/sidecar-smoke"]`。**`externalBin` はターゲットトリプル接尾辞を自動で付ける**（`tauri-utils` の `external_binaries()`）。(c) Linux は `bundle.linux.appimage.files` で **`usr/share/jxcel/sidecar-smoke`** に置く。**JSON のキーが AppDir 内の宛先、値がホスト側の原本**である（tauri-bundler の `copy_custom_files` が `copy_file(path, &data_dir.join(pkg_path))` と呼ぶ順序。逆向きなら `!from.exists()` で失敗する）。この宛先パスは 8.1 のランタイム解決の入力。
 - **1.7**: プラットフォーム別のバンドル設定は `src-tauri/tauri.{linux,macos,windows}.conf.json` で表現する（`tauri-utils` の config 読み込みがプラットフォーム接尾辞のファイルを併合し、不在は `Ok(None)` で正常）。1 つの `tauri.conf.json` では Linux と Windows/macOS で配置機構を変えられないため。
