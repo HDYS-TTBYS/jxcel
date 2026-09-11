@@ -2,7 +2,7 @@
 //! 前提不成立の報告を確定する。
 //!
 //! 所有: `AppLifecycle`（design.md「Components and Interfaces → Adapter Layer」）。
-//! 要件: 1.2, 1.4, 1.5, 1.6, 2.8, 2.9, 8.2, 10.3。
+//! 要件: 1.2, 1.4, 1.5, 1.6, 2.8, 2.9, 8.1, 8.2, 8.5, 8.7, 10.3。
 //!
 //! タスク 5.1 が置いた実体は次の 3 つである:
 //!
@@ -18,10 +18,16 @@
 //! 3. **起動を継続できない前提不成立の報告**（要件 1.4）。満たされなかった前提を名指しし、
 //!    **無言で終了しない**（[`StartupError`] / [`report_startup_failure`]）。
 //!
+//! タスク 5.2 が加えたのは**記録機構の登録と保持方針の適用、および実効設定の起動時確認**である
+//! （要件 8.1、8.5、8.7）。記録機構 `tauri-plugin-log` の既定は 40 KB / `KeepOne` であり、
+//! 要件 8.5 の 50 MB と桁が違う。したがって方針値（`crates/app-shell/src/diagnostics.rs` の
+//! [`diagnostics::MAX_LOG_FILE_BYTES`] / [`diagnostics::KEEP_SOME_ARCHIVED_FILES`]）で
+//! **明示的に上書きする**。登録は [`register_logging`]、実効設定の組み立ては [`logging_config`]、
+//! 起動時の確認は [`confirm_effective_logging`] が担う。手順の並びは [`run`] のとおりで、
+//! 記録機構は単一インスタンス（手順 2）の後・構築（手順 4）の前に登録する。
+//!
 //! 本ファイルがまだ持たないもの（各タスクがここへ書き込む）:
 //!
-//! - タスク 5.2: 記録機構の登録と保持方針の適用（要件 8.1, 8.5）。
-//!   [`StartupState::log_dir`] が解決済みの保存先を渡す。
 //! - タスク 5.4: 最後のウィンドウを閉じたときの終了と常駐慣習の扱い（要件 2.8, 2.9）。
 //!   実行時のコールバック（[`run`] の手順 6）が結線点である。
 //! - タスク 5.5: 異常終了の記録（要件 8.2）。
@@ -35,10 +41,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use app_shell::diagnostics;
-use app_shell::settings::{self, FileSettingsStore, RecoveredFrom};
+use app_shell::diagnostics::{self, DiagnosticsLevel};
+use app_shell::settings::{self, FileSettingsStore, RecoveredFrom, SettingsStore};
 use app_shell::sidecar::{SidecarSupervisor, Supervisor};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_log::log::{self, LevelFilter};
+use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 
 /// 起動を継続できない前提の名前: アプリケーションデータ領域（設定の保存先）。
 const PREREQUISITE_APP_DATA: &str = "アプリケーションデータ領域";
@@ -51,6 +59,16 @@ const PREREQUISITE_RUNTIME: &str = "Tauri ランタイム";
 
 /// 起動失敗の記録を残すファイル名。実行ファイルの隣、書けなければ OS の一時ディレクトリに置く。
 const STARTUP_FAILURE_FILE_NAME: &str = "jxcel-startup-error.log";
+
+/// 記録機構が書く**記録中のファイル**の名前（拡張子を除く）。ローテーション済みのファイルは
+/// `{これ}_{日時}.log` になる（`tauri-plugin-log` 2.9.1 の `RotatingFile`）。
+///
+/// **プラグインの既定（`package_info().name`）に任せず明示する。** 起動時の確認
+/// （[`confirm_effective_logging`]）が「記録機構が実際にこの名前のファイルを書けた」ことを
+/// 検証できるようにし、確認の対象を `tauri.conf.json` の `productName` に依存させないためである。
+/// 4.4 の書き出し（`diagnostics::export`）は拡張子 `log` のファイルだけを連結するので、
+/// この名前はその対象（`jxcel.log` / `jxcel_*.log`）に含まれる。
+const LOG_FILE_STEM: &str = "jxcel";
 
 // ---------------------------------------------------------------------------
 // 起動の順序（要件 1.2, 1.4, 1.5）
@@ -81,19 +99,39 @@ pub fn run() -> Result<(), StartupError> {
     //   自ら終了する（この関数は 2 つ目のプロセスでは戻らない）。
     let builder = register_single_instance(tauri::Builder::default());
 
-    // 手順 3: 診断の初期化。設定ストアと診断の保存先をここで解決・準備する。前提が満たせない
-    //   場合は `?` で抜け、`main` が満たされなかった前提を名指しして非 0 で終了する
-    //   （要件 1.4。無言で終了しない）。**破損した設定はここで中止しない**（要件 7.5）。
+    // 手順 3: 診断の初期化。設定ストアと診断の保存先をここで解決・準備し、記録機構へ渡す
+    //   実効設定（4.4 の方針値 + 設定から読んだ詳細度）を組み立てる。前提が満たせない場合は
+    //   `?` で抜け、`main` が満たされなかった前提を名指しして非 0 で終了する（要件 1.4。
+    //   無言で終了しない）。**破損した設定はここで中止しない**（要件 7.5）。
     let startup = init_diagnostics()?;
-    tauri_plugin_log::log::info!("診断情報の保存先: {}", startup.log_dir().display());
+
+    // 記録機構の実効設定（要件 8.1、8.5、8.7）。**4.4 の方針値をそのまま使い、プラグインの
+    // 既定（40 KB / `KeepOne`）を明示的に上書きする。**詳細度は 5.1 が開いた設定ストアから
+    // 読む（同じディレクトリのストアを 2 つ開かない。要件 7.3）。
+    let logging = logging_config(startup.log_dir(), &**startup.settings());
+
+    // 実効設定を構築の前に検める。ここで前提不成立を名指ししておくと、方針を適用できない
+    // 原因が記録機構の初期化失敗（プラグインの setup が返す不透明な `tauri::Error` に
+    // 埋もれる）ではなく「診断情報の保存先」であることが利用者に伝わる（要件 1.4）。
+    confirm_logging_values(&logging)?;
+
+    // 手順 3.5: 記録機構の登録。単一インスタンス（手順 2）の後・構築（手順 4）の前である。
+    let builder = register_logging(builder, &logging);
     let builder = builder.manage(startup);
 
     // 手順 4: 構築。ここで GTK / WebKit のランタイムと、登録順に各プラグインが初期化される。
+    //   **記録機構のロガーもここで取り付けられる**（`tauri-plugin-log` の `setup`）。そのため
+    //   これより前の `log::…!` はどこにも残らない。
     //   **単一インスタンスの 2 つ目のプロセスはこの中で引数を引き渡して自ら終了する**
     //   （この関数は 2 つ目のプロセスでは戻らない）。
     let app = builder
         .build(tauri::generate_context!())
         .map_err(|error| StartupError::new(PREREQUISITE_RUNTIME, error.to_string()))?;
+
+    // 手順 4.5: 記録機構の実効設定を起動時に確認する（要件 8.1、8.5）。起動行を記録し、
+    //   記録中のファイルが方針の保存先に現れたことを確かめる。書けなければ診断の保存先の
+    //   前提不成立として報告する（無言で劣化させない）。
+    confirm_effective_logging(&logging)?;
 
     // 手順 5: 残留プロセスの掃除（要件 5.6、タスク 3.5）。前回の実行が終了処理を走らせられずに
     //   残した補助プロセスを終了させる。
@@ -105,8 +143,8 @@ pub fn run() -> Result<(), StartupError> {
     //   **生存している側だけがこの位置に到達する。**ここは依然として「アプリが使えるように
     //   なる前」である — ウィンドウは手順 6 の `RunEvent::Ready` で初めて作られる。
     let swept = sweep_orphans_at_startup();
-    // 5.2 が記録機構を登録するまでは、この記録はどこにも残らない（`log` の既定は何もしない）。
-    tauri_plugin_log::log::info!("残留プロセスの掃除で {swept} 件を終了した");
+    // 記録機構は手順 3.5 で登録済みであり、この行は方針の保存先（要件 8.1）へ残る。
+    log::info!("残留プロセスの掃除で {swept} 件を終了した");
 
     // 手順 6: 実行。終了条件（最後のウィンドウ・常駐慣習）は 5.4 がこのコールバックへ結線する。
     app.run(|_app, _event| {});
@@ -179,9 +217,10 @@ fn expected_sidecar_executables() -> Vec<PathBuf> {
 ///   （design.md「Error Handling」の分類表の「起動時の前提不成立 = 設定ディレクトリを作成
 ///   できない」がこれに対応する）。**設定の内容を読めないことは前提不成立ではない**（要件 7.5）—
 ///   既定値で起動して事実を [`StartupState`] に載せ、記録に残す。壊れたファイルは削除しない。
-/// - **診断の保存先**（要件 8.1）。[`diagnostics::log_dir`] は場所だけを返し、ディレクトリを
-///   作らない（作成は記録機構の登録 = 5.2 の仕事。tasks.md 4.4）。解決できないことは 5.2 が
-///   記録機構を登録できないことなので、ここで前提不成立として報告する。
+/// - **診断の保存先**（要件 8.1）。[`diagnostics::log_dir`] は場所だけを返す。ディレクトリの
+///   用意（作成と書き込み可能性の確認）は記録機構を登録する 5.2 の前提なので、ここで行う
+///   （[`prepare_log_directory`]）。記録機構の `setup` に任せると、方針を適用できない原因が
+///   プラグインが返す不透明な `tauri::Error` に埋もれる。ここで前提不成立として名指しする。
 ///
 /// # Errors
 ///
@@ -197,19 +236,247 @@ fn init_diagnostics() -> Result<StartupState, StartupError> {
     // `StartupState` にも載せる（[`StartupState::recovered_from`]）。
     let recovered = report.recovered_from().cloned();
     if let Some(fact) = &recovered {
-        tauri_plugin_log::log::warn!("設定を読み取れなかったので既定値で起動する: {fact}");
+        log::warn!("設定を読み取れなかったので既定値で起動する: {fact}");
     }
 
     let log_dir = diagnostics::log_dir()
         .map_err(|error| StartupError::new(PREREQUISITE_DIAGNOSTICS, error.to_string()))?;
+    prepare_log_directory(&log_dir).map_err(|error| {
+        // どのディレクトリを用意できなかったかを名指しする（原因が「先客の通常ファイル」でも
+        // 「権限なし」でも、利用者が場所を特定できるようにする）。
+        StartupError::new(
+            PREREQUISITE_DIAGNOSTICS,
+            format!("{}: {error}", log_dir.display()),
+        )
+    })?;
 
     Ok(StartupState { settings, log_dir, recovered })
 }
 
+/// 記録の保存先を用意する（要件 8.1、8.5。タスク 5.2）。
+///
+/// 4.4 の [`diagnostics::log_dir`] は場所を返すだけでディレクトリを作らないため、記録機構を
+/// 登録する前にここで作る。**作成だけでなく書き込み可能性まで確かめる** — `create_dir_all` は
+/// 既存の読み取り専用ディレクトリでも成功し、その場合記録機構は記録を 1 行も残せない。
+///
+/// 失敗は [`StartupError`]（前提「診断情報の保存先」）として報告し、**無言で劣化させない**
+/// （要件 1.4）。確認用の一時ファイルは通常ファイルとして残さない（拡張子 `log` を付けず、
+/// 4.4 の書き出し・プラグインのローテーションの対象から外したうえで削除する）。
+fn prepare_log_directory(directory: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(directory)?;
+    let probe = directory.join(format!(".jxcel-write-probe-{}", std::process::id()));
+    fs::write(&probe, b"")?;
+    fs::remove_file(&probe)
+}
+
+// ---------------------------------------------------------------------------
+// 記録機構の登録と保持方針の適用（要件 8.1, 8.5, 8.7。タスク 5.2）
+// ---------------------------------------------------------------------------
+
+/// 5.2 が記録機構へ実際に渡した実効設定。
+///
+/// 起動時の確認（[`confirm_logging_values`] / [`confirm_effective_logging`]）が、4.4 の方針値が
+/// そのまま渡ったことと、保持の不変条件（(アーカイブ数 + 記録中の 1) × 1 ファイル上限が合計
+/// 上限以下）を照合するための値を持つ。組み立ては [`logging_config`] の 1 箇所だけである。
+struct LoggingConfig {
+    /// 4.4 が解決した保存先（方針と記録機構で唯一の値）。
+    directory: PathBuf,
+    /// 記録中のファイルの語幹（[`LOG_FILE_STEM`]）。
+    file_stem: &'static str,
+    /// 1 ファイル上限（[`diagnostics::MAX_LOG_FILE_BYTES`]）。
+    max_file_bytes: u64,
+    /// 保持するアーカイブ数（[`diagnostics::KEEP_SOME_ARCHIVED_FILES`]）。
+    archived_files: usize,
+    /// 保持されうる総ファイル数（アーカイブ + 記録中）。
+    retained_files: u64,
+    /// 保持されうる合計バイト数。
+    retained_bytes: u64,
+    /// 適用する詳細度（4.5 の設定値）。
+    level: DiagnosticsLevel,
+}
+
+impl LoggingConfig {
+    /// 記録機構が書く記録中のファイルの絶対パス（`{保存先}/{語幹}.log`）。
+    fn active_file(&self) -> PathBuf {
+        self.directory.join(format!("{}.log", self.file_stem))
+    }
+}
+
+/// 4.4 の方針値と設定の詳細度から、記録機構へ渡す実効設定を組み立てる（要件 8.5、8.7）。
+///
+/// **保存先は 4.4 が解決した [`diagnostics::log_dir`] の結果をそのまま使う。** プラグインの
+/// `TargetKind::LogDir` を使うと保存先の算出がプラグイン側にもう 1 つ生まれ、方針と食い違う
+/// 余地が残る（両者が同じ規約であることは今一致しているだけで、構造的な保証ではない）。
+/// 明示的な `TargetKind::Folder { path }` に 4.4 の結果を渡すことで、**両者が同じ値である
+/// ことが構造的に保証される**（食い違わせるにはこの関数を書き換えるしかない）。
+///
+/// 詳細度は 5.1 が開いた設定ストアから読む（要件 7.3。同じディレクトリの実体を共有し、
+/// 2 つ目のストアを開かない）。解釈できない値は [`DiagnosticsLevel::default`]（Info）に落ちる
+/// （4.5 の契約）。
+fn logging_config(log_dir: &Path, settings: &impl SettingsStore) -> LoggingConfig {
+    LoggingConfig {
+        directory: log_dir.to_path_buf(),
+        file_stem: LOG_FILE_STEM,
+        max_file_bytes: diagnostics::MAX_LOG_FILE_BYTES,
+        archived_files: diagnostics::KEEP_SOME_ARCHIVED_FILES as usize,
+        retained_files: diagnostics::RETAINED_LOG_FILES,
+        retained_bytes: diagnostics::MAX_RETAINED_LOG_BYTES,
+        level: DiagnosticsLevel::from_store(settings),
+    }
+}
+
+/// 記録機構を登録する（要件 8.1、8.5）。
+///
+/// **プラグインの既定を明示的に上書きする。** `tauri-plugin-log` 2.9.1 の既定は 1 ファイル
+/// 40 KB / `RotationStrategy::KeepOne` であり、要件 8.5 の合計 50 MB と桁が違う。上書きしないと
+/// 記録は直近 40 KB しか残らない（research.md「ログと設定の永続化」）。
+///
+/// - `max_file_size`: [`diagnostics::MAX_LOG_FILE_BYTES`]（8 MB）
+/// - `rotation_strategy`: [`RotationStrategy::KeepSome`]（
+///   [`diagnostics::KEEP_SOME_ARCHIVED_FILES`] = 5）。**`KeepSome(n)` が保持するのはアーカイブ
+///   n 個であり、記録中の現行ファイルを含まない**（プラグインの `RotatingFile::remove_old_files`
+///   は現行ファイルを除外する）。起動時に `remove_old_files(n)`、ローテーション直前には
+///   アーカイブする 1 個分の余地を空けるため `remove_old_files(n - 1)` を呼ぶ。したがって
+///   保持される総ファイル数は [`diagnostics::RETAINED_LOG_FILES`] = n + 1 = 6 である
+/// - `level`: 設定から読んだ詳細度を `log::LevelFilter` へ 1 対 1 で対応付けたもの
+///   （[`to_level_filter`]）
+///
+/// 対象（`TargetKind`）は標準出力と方針の保存先の 2 つである。**フロントエンドへ転送する
+/// `TargetKind::Webview` は含めない** — 記録をウェブビューへ届けるには各ウィンドウが
+/// `attachConsole` で購読する必要があり、本スペックのどのタスクもそれを要求していない。含めれば
+/// `log://log` イベントの購読とフロント側の実装が前提になり、capability を増やさずに済む現状を
+/// 無理に広げることになる（`src-tauri/capabilities/default.json` は `core:default` のまま）。
+/// フロントエンドの記録を必要とするタスクが、その時点で capability と併せて追加する。
+fn register_logging(
+    builder: tauri::Builder<tauri::Wry>,
+    config: &LoggingConfig,
+) -> tauri::Builder<tauri::Wry> {
+    let logger = tauri_plugin_log::Builder::new()
+        .targets([
+            Target::new(TargetKind::Stdout),
+            // 方針の保存先をそのまま渡す（`LogDir` を使わない理由は `logging_config` の doc）。
+            Target::new(TargetKind::Folder {
+                path: config.directory.clone(),
+                file_name: Some(config.file_stem.to_owned()),
+            }),
+        ])
+        .max_file_size(config.max_file_bytes as u128)
+        .rotation_strategy(RotationStrategy::KeepSome(config.archived_files))
+        .level(to_level_filter(config.level));
+    builder.plugin(logger.build())
+}
+
+/// 実効設定が方針と一致し、かつ保存先をディレクトリとして使えることを構築の前に確かめる
+/// （要件 8.1、8.5）。
+///
+/// 4.4 のコンパイル時検査（`MAX_RETAINED_LOG_BYTES <= MAX_TOTAL_LOG_BYTES`）が方針値どうしの
+/// 不変条件の一次的な守りである。この関数は**実際に記録機構へ渡す値（[`LoggingConfig`]）が
+/// その方針値と一致し、保持の不変条件を満たすこと**を起動時に再確認する。
+///
+/// # Errors
+///
+/// 値の不一致、不変条件の破れ、保存先がディレクトリでない（または解決できない）とき
+/// [`StartupError`]（前提「診断情報の保存先」）。
+fn confirm_logging_values(config: &LoggingConfig) -> Result<(), StartupError> {
+    let archived = config.archived_files as u64;
+    if config.max_file_bytes != diagnostics::MAX_LOG_FILE_BYTES
+        || archived != u64::from(diagnostics::KEEP_SOME_ARCHIVED_FILES)
+        || config.retained_files != archived + 1
+        || config.retained_bytes != config.max_file_bytes * config.retained_files
+        || config.retained_bytes > diagnostics::MAX_TOTAL_LOG_BYTES
+    {
+        return Err(StartupError::new(
+            PREREQUISITE_DIAGNOSTICS,
+            format!(
+                "記録の保持方針が実効値と一致しない（1ファイル上限={} B、アーカイブ={}、保持総数={}、保持合計={} B。方針: 合計上限={} B / 保持総数={}）",
+                config.max_file_bytes,
+                archived,
+                config.retained_files,
+                config.retained_bytes,
+                diagnostics::MAX_TOTAL_LOG_BYTES,
+                diagnostics::RETAINED_LOG_FILES,
+            ),
+        ));
+    }
+    if !config.directory.is_dir() {
+        return Err(StartupError::new(
+            PREREQUISITE_DIAGNOSTICS,
+            format!(
+                "記録の保存先 {} をディレクトリとして使えない",
+                config.directory.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// 適用後の実効設定を起動時に確認し、記録する（要件 8.1、8.5、8.7。タスク 5.2 の完了状態）。
+///
+/// 構築（`Builder::build`）の後に呼ぶ。ロガーはそこで初めて取り付けられ、これより前の
+/// `log::…!` はどこにも残らないためである。行うことは 2 つ:
+///
+/// 1. **実効設定の起動行を記録する** — 保存先、1 ファイル上限、アーカイブ世代数、保持総数、
+///    保持合計、詳細度を 1 行にまとめる。利用者・保守担当はこれで適用後の値を確認できる。
+///    加えて、詳細度が `Debug` 以上のときだけ現れる行を 1 つ置く（詳細度が実際にフィルタへ
+///    効いていることを、設定を変えて起動するだけで観察できるようにする）。
+/// 2. **記録中のファイルが方針の保存先に現れたことを確かめる** — プラグインは対象の `setup`
+///    で記録中のファイルを開く（`RotatingFile::new` の `open_file`）ので、詳細度が `Off` でも
+///    ファイルは作られる。現れなければ記録機構を適用できていない。
+///
+/// # Errors
+///
+/// 記録中のファイルが方針の保存先に現れない（または通常ファイルでない）とき
+/// [`StartupError`]（前提「診断情報の保存先」）。**無言で劣化させない**（要件 1.4）。
+fn confirm_effective_logging(config: &LoggingConfig) -> Result<(), StartupError> {
+    log::info!(
+        "診断の実効設定: 保存先={} / 1ファイル上限={} B / アーカイブ世代={} / 保持総数={} ファイル / 保持合計={} B / 詳細度={:?}",
+        config.directory.display(),
+        config.max_file_bytes,
+        config.archived_files,
+        config.retained_files,
+        config.retained_bytes,
+        config.level,
+    );
+    // 詳細度が Debug 以上のときだけ残る確認行。4.5 の詳細度が実際にフィルタへ効いていることを、
+    // 設定を変えて起動するだけで観察できるようにする。
+    log::debug!(
+        "診断の詳細度フィルタを確認: この行は詳細度が Debug 以上のときだけ現れる（現在={:?}）",
+        config.level
+    );
+
+    let active = config.active_file();
+    match fs::metadata(&active) {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(StartupError::new(
+            PREREQUISITE_DIAGNOSTICS,
+            format!("記録中のファイル {} が通常ファイルでない", active.display()),
+        )),
+        Err(error) => Err(StartupError::new(
+            PREREQUISITE_DIAGNOSTICS,
+            format!("記録機構が {} へ記録を書けなかった: {error}", active.display()),
+        )),
+    }
+}
+
+/// 4.4 の詳細度を `log::LevelFilter` へ 1 対 1 で対応付ける（要件 8.7）。
+///
+/// 4.4 は `log` クレートに依存しない（Tauri 非依存のコアを保つ）ため、この対応付けはアダプタ層
+/// が持つ（`crates/app-shell/src/diagnostics.rs` の `DiagnosticsLevel` の doc）。
+fn to_level_filter(level: DiagnosticsLevel) -> LevelFilter {
+    match level {
+        DiagnosticsLevel::Off => LevelFilter::Off,
+        DiagnosticsLevel::Error => LevelFilter::Error,
+        DiagnosticsLevel::Warn => LevelFilter::Warn,
+        DiagnosticsLevel::Info => LevelFilter::Info,
+        DiagnosticsLevel::Debug => LevelFilter::Debug,
+        DiagnosticsLevel::Trace => LevelFilter::Trace,
+    }
+}
+
 /// 手順 3 が準備した状態。後続タスクが `AppHandle::state` から読む。
 ///
-/// 5.1 は準備と前提確認だけを行い、消費はしない（記録機構の登録は 5.2、設定のコマンド面は 7.1）。
-/// そのため現時点では未使用の読み出し口を含む。
+/// 5.1 は準備と前提確認を行い、記録機構の登録（5.2）が保存先と設定ストアをここから消費する。
+/// 設定のコマンド面（7.1）と異常終了の記録（5.5）も同じ実体を読む。
 pub struct StartupState {
     /// 解決済みの設定ストア（要件 7.x）。
     settings: Arc<FileSettingsStore>,
@@ -219,7 +486,7 @@ pub struct StartupState {
     recovered: Option<RecoveredFrom>,
 }
 
-#[allow(dead_code)] // 5.2（記録機構の登録）と 7.1（設定のコマンド面）が消費するまでの seam。
+#[allow(dead_code)] // recovered_from は 5.5（異常終了の記録）などが消費するまでの seam。
 impl StartupState {
     /// 解決済みの診断の保存先。
     pub fn log_dir(&self) -> &Path {
