@@ -1,16 +1,19 @@
 //! ビルドスクリプト（Tauri のビルド時処理の結線点）。
 //!
-//! 本来ここで `tauri_build::build()` を呼ぶ。同関数はウィンドウ設定の検証・
-//! capability スキーマの生成・ACL マニフェストの生成・`externalBin` の複製を行う
-//! （design.md「Components and Interfaces → Infrastructure → BuildPipeline」および
-//! 決定 3・決定 4）。
+//! `tauri_build::build()` は次を担う（design.md「Components and Interfaces →
+//! Infrastructure → BuildPipeline」）:
 //!
-//! `tauri_build::build()` は `tauri.conf.json` を必須とする。tauri-utils の
-//! `config::parse::read_from` は `tauri.conf.json` / `tauri.conf.json5` / `Tauri.toml` の
-//! いずれも見つからない場合に失敗し、`tauri_build::build()` はその失敗でビルドを止める。
-//! 本タスク（1.1）はワークスペースの members を成立させる足場であり `tauri.conf.json` を
-//! 持たない（同ファイルは task 1.3 の成果物）ため、ここでは呼び出さない。
-//! タスク 1.3 が `tauri.conf.json` を追加するのと同じ変更で、この本体を
-//! `tauri_build::build()` に置き換える。
+//! - `tauri.conf.json` の検証（ウィンドウ設定・識別子・バンドル設定）
+//! - capability スキーマの生成（`src-tauri/gen/schemas/`）
+//! - ACL マニフェストの生成（`src-tauri/gen/schemas/acl-manifests.json`）
+//! - `externalBin` の複製（タスク 1.7 が配置した補助プロセスの原本を扱う）
+//!
+//! 生成先 `src-tauri/gen/` は追跡しない（`.gitignore`）。capability の逸脱を検査する
+//! タスク 7.3 の機械検査は、この生成物を入力にする。
+//!
+//! 本ファイルの結線はタスク 1.3 が行った。`tauri.conf.json` を追加するのと同じ変更で
+//! 結線する必要がある（`tauri_build::build()` は同ファイルを必須とするため）。
 
-fn main() {}
+fn main() {
+    tauri_build::build()
+}

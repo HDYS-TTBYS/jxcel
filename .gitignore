@@ -8,6 +8,16 @@
 node_modules/
 dist/
 
+# Tauri のビルド時生成物（tauri-build が出す capability スキーマと ACL マニフェスト、
+# `externalBin` の複製）。追跡不要であり、`rm -rf src-tauri/gen` の後に再ビルドしても
+# 同じ内容が再生成される。capability の逸脱を検査するタスク 7.3 はこの生成物を入力にする。
+src-tauri/gen/
+
+# 注: src/ipc/bindings.ts は追跡する。ts-rs の生成物だが、決定 2 のドリフト検査
+# （crates/app-shell/tests/bindings_drift.rs）がコミット済みの内容とバイト比較する対象で
+# あり、フロントエンドのビルドを Rust ツールチェーンから独立させるための入力でもある。
+# したがって除外パターンをここに置かない（現在はタスク 2.2 が生成するまで存在しない）。
+
 # Claude Code のローカル上書き設定
 .claude/settings.local.json
 
