@@ -1,0 +1,53 @@
+# 自前コマンドの権限記述（tasks.md 7.3 / 要件 4.7）。
+#
+# このファイルが存在することが「自前コマンドを権限制御の対象にする」スイッチである。
+# ピン留めした tauri 2.11.5 / tauri-build 2.6.3 / tauri-utils 2.9.3 では、`src-tauri/permissions/**/*`
+# に権限ファイルが 1 つでもあると `tauri-build` が ACL マニフェストへ `__app-acl__`
+# （`tauri_utils::acl::APP_ACL_KEY`）を登録する（`tauri-build/src/acl.rs` の
+# `app_manifest_permissions` → `has_app_manifest`）。**自前コマンドは既定では ACL の対象外**で
+# あり、この登録が無い限り capability に何を書いても自前コマンドは常に許可される
+# （`tauri/src/webview/mod.rs` の "Check ACL on plugin commands, when the app defined its ACL
+# manifest" 分岐）。ここで `__app-acl__` を成立させて初めて、capability に無い自前コマンドが
+# 実行時に拒否される。
+#
+# 記述の形は tauri-utils の `PermissionFile`（`acl/manifest.rs`）そのものである:
+#   - `[[permission]]` … 個別の権限。識別子は `__app-acl__` の下で**接頭辞を持たない**
+#     （プラグインの `fs:...` のような `キー:` を付けない）。
+#   - `commands.allow` … 許可する**コマンド名**。Tauri はハンドラの関数識別子をコマンド名に
+#     するため、`settings_get` のような関数名をそのまま書く（`allow-settings-get` のような
+#     ハイフン形は権限識別子の綴りであってコマンド名ではない）。
+#   - `[[set]]` … 複数の権限をまとめた集合。capability からは集合名だけを参照できる。
+#
+# **ここに列挙するのは現在 `src-tauri/src/commands/` の根が登録しているコマンドだけである。**
+# 登録の一覧は `commands/mod.rs` の `command_root!` が単一の源であり、名前は
+# `crates/app-shell/src/ipc/command_names.rs` の定数を参照する（tasks.md 2.2）。
+# コマンドを登録する後続タスクは、対応する権限をここへ足し、`capabilities/default.json` の
+# `app-shell` 集合へ加えること。**足し忘れると `build.removeUnusedCommands` がそのコマンドを
+# 配布物から削る**（どの capability からも許可されないため。tasks.md 7.1 の申し送り）。
+#
+# **`$schema` の行を置かない。** `tauri-build` 2.6.3 はアプリの権限ファイル用のスキーマを
+# 生成しない（`tauri_utils::acl::schema::generate_permissions_schema` はプラグイン向けで、
+# ビルドからは呼ばれない）。`gen/schemas/*-schema.json` は capability ファイルのスキーマで
+# あり、権限ファイルの形（`permission` / `set` キー）を記述していないため、そこを指すと
+# エディタが誤った検証結果を出す。自動生成の権限ファイルが `$schema` を持てるのはプラグインの
+# 権限ディレクトリに `schemas/schema.json` が生成されるためである。
+
+[[permission]]
+identifier = "allow-settings-get"
+description = "設定を 1 つ読み取る自前コマンド（settings_get）を許可する。保存できる値の範囲は設定ストアが定めるカタログに限られる（要件 7.1、7.7）。"
+commands.allow = ["settings_get"]
+
+[[permission]]
+identifier = "allow-settings-set"
+description = "設定を 1 つ書き込む自前コマンド（settings_set）を許可する。カタログ外の鍵はコマンド自身が封筒の失敗として返す（要件 7.1、7.6）。"
+commands.allow = ["settings_set"]
+
+[[permission]]
+identifier = "allow-bulk-echo"
+description = "大きなペイロードを 1 回の往復で受け渡す生バイト経路のコマンド（bulk_echo）を許可する。JSON を通らない応答を返す唯一のコマンドである（要件 4.5）。"
+commands.allow = ["bulk_echo"]
+
+[[set]]
+identifier = "app-shell"
+description = "app-shell が登録する自前コマンドの集合。capability はこの集合名だけを参照する。ファイルシステム系・シェル系の権限はここにも含めない（要件 4.7）。"
+permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo"]

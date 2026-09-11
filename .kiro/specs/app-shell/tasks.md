@@ -283,7 +283,7 @@
   - _Requirements: 4.5_
   - _Depends: 7.1_
 
-- [ ] 7.3 自前コマンドの権限制御とフロントエンドの到達範囲を設定する
+- [x] 7.3 自前コマンドの権限制御とフロントエンドの到達範囲を設定する
   - **自前のコマンドは既定では権限制御の対象外である**。対象にするための記述を用意する
   - 未使用のコマンドをビルド時に削る設定を有効にする
   - 生成される権限の記述を検査する仕組みを用意し、ファイルシステム系・シェル系の権限と全ウィンドウ指定を検出する
@@ -479,6 +479,12 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **7.3**: `src-tauri/permissions/app.toml` に**自前コマンドの権限**を定義する（`allow-settings-get` / `allow-settings-set` / `allow-bulk-echo` と集合 `app-shell`）。`capabilities/default.json` は `permissions: ["core:default", "app-shell"]`、`windows: ["doc-*", "empty-*"]`。`tauri.conf.json` に `build.removeUnusedCommands: true`。
+- **7.3（重要）**: **`__app-acl__` が存在すると、自前コマンドは ACL 対象になり、かつ「どの capability も許可していない登録済みコマンド」は拒否ではなくビルド時に削除される**（実測: 削除ビルドの `allowed-commands.json` に 3 コマンドだけが残り、未許可の登録コマンドはリテラルごと消える）。**したがって登録するコマンドは必ず許可も与えること**（片方だけでは動かない）。
+- **7.3**: `removeUnusedCommands` は**実際の CLI 経路で効いている**（CLI が設定キーを読んで `REMOVE_UNUSED_COMMANDS=<src-tauri>` を設定する。cargo シムをラップして捕捉して確認済み）。素の `cargo build` では削除されない（シムが環境変数を渡さないため。リポジトリの欠陥ではない）。
+- **7.3**: 実行時の拒否を実測。`plugin:fs|read_text_file` → `fs.read_text_file not allowed. Plugin not found`、`plugin:shell|open` / `|execute` も同様、**未許可の自前コマンド** → `Command not found`（＝自前コマンドが本当に ACL で門番されている）。
+- **7.3**: `scripts/check-capabilities.sh` は `src-tauri/gen/schemas/capabilities.json` を **node で構造的に解析**し（説明文の散文で誤検出しない）、**終了コードは 0=適合 / 1=逸脱 / 2=入力が使えない**。逸脱規則は「`permissions` の先頭 `:` より前が `fs` / `shell`」と「`windows` / `webviews` 配列にリテラル `"*"`」。**`windows` キーの不在は逸脱としない**（7.1 の訂正どおり）。生成物が無い場合は **exit 2 + `cargo build -p jxcel` を促すメッセージ**なので、CI で静かに通ることはない。**10.1 がこのスクリプトを CI に組み込むこと**（`actions/setup-node` は既に CI にある）。
 
 - **7.2**: 生バイト経路は `bulk_echo(window: WebviewWindow, request: tauri::ipc::Request<'_>) -> tauri::ipc::Response` で、**7.1 の「全コマンドが封筒を返す」規則に対する唯一の意図的な例外**（封筒は JSON 直列化であり 4.5 が禁じる）。成功は生バイト（`application/octet-stream` → フロントエンドは `ArrayBuffer`）、**経路レベルの失敗（未知のコマンド・IPC 不在）だけが拒否**になり、フロントエンドは `kind: "Frontend"` へ写す。**コマンド自身は決して拒否しない**: 生バイトでない引数（入れ子）や上限超過（64 MiB）は**空の生応答 + Rust 側の警告**で解決する。呼び出し側は「中身のあるペイロードを送ったのに 0 バイトが返った」ことでこれを検出する（`invokeRaw` の doc に明記）。
 - **7.2**: フロントエンドは `invokeRaw(command: RawCommandName, payload: ArrayBuffer | Uint8Array): Promise<ArrayBuffer>`。`RawCommandName = Extract<CommandName, "bulk_echo">` なので、**`COMMAND_NAMES` から `bulk_echo` が消えると型が `never` になり呼び出しが型検査で落ちる**。
