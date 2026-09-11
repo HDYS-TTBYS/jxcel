@@ -1,0 +1,30 @@
+{
+  // jxcel フロントエンドの型検査設定。単一ページ構成（SPA）であり、サーバ側描画は行わない
+  // （design.md「Technology Stack」）。厳格設定に加え、境界の型（src/ipc/bindings.ts の
+  // 生成物）が素の JavaScript へ緩まないよう、未検査の添字参照と暗黙の `any` を塞ぐ。
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
+
+    /* 厳格設定。`any` の混入は ESLint 側（@typescript-eslint/no-explicit-any）でも検査する */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "verbatimModuleSyntax": true,
+
+    /* Vite がバンドルする前提。tsc は型検査のみを担う（npm run typecheck） */
+    "isolatedModules": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src", "vite.config.ts", "eslint.config.js"]
+}

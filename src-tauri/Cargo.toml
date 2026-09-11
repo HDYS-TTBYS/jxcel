@@ -39,7 +39,7 @@ description = "jxcel デスクトップアプリケーション（Tauri v2 ア�
 # （`AppManifest` 未設定時に自前コマンドの ACL が迂回される問題、Windows における
 # `.localhost` サフィックスの origin 混同）と、2.11.3 の起動性能改善より前へ
 # ピン留めしない。本スペックが解決する版は 2.11.5（design.md「Technology Stack」）。
-tauri = "2.11.3"
+tauri = { version = "2.11.3", features = [] }
 
 # 二重起動の制御（要件 1.5）。登録はタスク 5.1 が起動順序の先頭で行う。
 # 下限 2.4.3 は macOS のスレッドブロック不具合の修正版（tech.md「Dependency Floors」）。
@@ -52,4 +52,4 @@ tauri-plugin-log = "2.9.1"
 [build-dependencies]
 # `tauri_build::build()` の実体。ウィンドウ設定の検証・capability スキーマの生成・
 # ACL マニフェストの生成・`externalBin` の複製を担う（BuildPipeline）。
-tauri-build = "2.6.3"
+tauri-build = { version = "2.6.3", features = [] }

@@ -27,7 +27,7 @@
   - _Requirements: 1.1, 1.2_
   - _Depends: 1.1_
 
-- [ ] 1.4 フロントエンドの足場を作る
+- [x] 1.4 フロントエンドの足場を作る
   - React + Vite + TypeScript の単一ページ構成を作る。サーバ側描画は使わない
   - シェル・通信・配信先中立な資産・機能別画面のディレクトリを用意する
   - TypeScript を厳格設定とし、`any` を禁止する検査を入れる
@@ -481,7 +481,11 @@
 ## Implementation Notes
 
 - **1.3**: `tauri-plugin-dialog` は `tauri-plugin-fs` を**非 optional の通常依存**として全リリースで持つ（crates.io の依存データで確認）。したがって 1.3 の「fs/shell プラグインを依存に入れない」という制約と design.md Technology Stack の dialog 採用は両立しない。1.3 は dialog を宣言せず、競合を `src-tauri/Cargo.toml` と `src-tauri/src/dialog.rs` に記録して 7.7 へ送った。7.7 は (a) dialog を宣言して推移的 `tauri-plugin-fs` クレートを許容する（未登録かつ `fs:*` 権限なしなので要件 4.7 の到達経路は生じず、7.3/10.1 の機械検査は capability JSON を見るため影響しない）か、(b) `rfd` を直接使う（`AsyncFileDialog::set_parent`）かを選ぶこと。要件 2.4 はどちらでも満たせる。
-- **1.3**: `tauri::generate_context!()` は `build.frontendDist` のパスが存在しないとコンパイル時に panic する。このため 1.3 は最小の `src/index.html` を追跡対象で置き、`frontendDist` を `../src` に向けている。**1.4 が `src/` を Vite の root にして `src/index.html` を本物のエントリへ育て、`frontendDist` を `../dist` に変える**（Vite の `outDir` は `root` 相対なので `src/dist` にならないよう設定が要る）。
+- **1.3**: `tauri::generate_context!()` は `build.frontendDist` のパスが存在しないとコンパイル時に panic する（`devUrl` を設定していない場合）。このため 1.3 は最小の `src/index.html` を追跡対象で置き、`frontendDist` を `../src` に向けていた。**1.4 で `devUrl` を設定したためこの panic 条件は解消済み**で、`frontendDist` は `../dist` を指している。
+- **1.4**: **配布物は必ず Tauri CLI（`npx tauri build`）で作ること。** `tauri-build` は CLI 以外の `cargo build` では release でも `cargo:rustc-cfg=dev` を出し、`devUrl` があると `tauri-codegen` は `frontendDist` を埋め込まず空アセットのままにする。素の `cargo build -p jxcel` のバイナリは `http://localhost:1420` を見るため、Vite 開発サーバが無ければ**白いウィンドウ**になる（1.3 の目視検証は「空のウィンドウ」だったので矛盾しない）。埋め込みの確認は `npx tauri build` で行う。**1.5 の 3 OS 配布物生成は CLI 経由が必須。**
+- **1.4**: **`tauri build` は `src-tauri/Cargo.toml` の依存行を `{ version = "...", features = [] }` 形式へ書き換える**（CLI 内の `crates/tauri-cli/src/migrate/migrations/v1/manifest.rs`・"failed to rewrite Cargo manifest" 相当の処理。`npx tauri build` 単独で再現済み）。`features = []` は既定 feature を無効化しない（それは `default-features = false`）ので解決結果は不変。ビルドのたびに差分が出るのを避けるため、**CLI が書いた正規形のままコミットする**。手で `tauri = "2.11.3"` に戻さないこと。
+- **1.4**: 初期画面は `src/shell/Layout.tsx` がアクセント色 `#c2185b`（`rgb(194, 24, 91)`）のブロックとアプリ名を描く。3 OS 描画確認（10.4）の画素検査はこの色を目印にできる。`dist/` に CSS 資産は無く（インライン style）ハッシュ付き JS のみ。
+- **1.4**: `npm run typecheck` と `npm run lint` は独立したスクリプトであり、`npm run build` は Vite のみを走らせる（10.1 が CI で別ゲートとして呼べる形）。`any` 禁止は `@typescript-eslint/no-explicit-any: error`（ESLint 10 系 flat config）で機械的に効いており、`printf 'const x: any = 1;\nexport default x;\n' | npx eslint --stdin --stdin-filename src/main.tsx` が非 0 で落ちる。
 - **1.3**: `tauri_build` は Unix で 8bit RGBA PNG のアイコンをコンパイル時に要求する。`src-tauri/icons/icon.png`（32x32 RGBA の仮置き）はそのため必須。**`.ico` / `.icns` の生成と `bundle.icon` の拡張は 1.5** が行う（Windows / macOS のバンドルに必要）。
 - **1.3**: `capabilities/default.json` は `windows` キーを省略している（Tauri v2 では全ウィンドウに適用）。ウィンドウ単位の限定を入れるかは 7.3 が判断する。7.3 の検査はキー不在を `windows: ["*"]` と同一視してはならない。
 - **1.2**: `SidecarKind`（`crates/app-shell/src/sidecar/mod.rs`）の文字列表現は `as_str()` が返す `"sidecar-smoke"` で、これは `crates/sidecar-smoke` のパッケージ名 = バイナリ名 = 同梱配置の語幹と一致していなければならない（1.7 の配置規約と 3.5 の孤児掃除が PID とこの名前の両方で照合するため）。`ALL` が全変種を列挙し、`parse()` は語幹の厳密一致のみを受け付ける。変種を追加するスペックは `as_str` / `parse` / `ALL` を同時に更新すること。

@@ -4,12 +4,23 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>jxcel</title>
+    <!--
+      初期画面をウィンドウ全面に描くための最小の下地のみ。外観（明色・暗色）はタスク 9.2 が
+      src/shell/theme.ts に実装する。ここに機能別画面や通信境界の構成を持ち込まない。
+    -->
+    <style>
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+      }
+    </style>
   </head>
-  <!--
-    タスク 1.3 が置いた最小の初期画面。中身を持たない「空のウィンドウ」を 1 枚開くため
-    だけのものである。タスク 1.4 が src/ を Vite のルートに変え、このファイルを実際の
-    入口（main.tsx を読み込む script 要素の追加）に育てる。そのとき tauri.conf.json の
-    build.frontendDist は ../dist へ向け直す。ここに Vite / React の構成を持ち込まない。
-  -->
-  <body></body>
+  <body>
+    <!-- React のマウント先。src/main.tsx が createRoot で組み立てる。 -->
+    <div id="root"></div>
+    <!-- Vite の入口。ルートが src/ であるため /main.tsx は src/main.tsx を指す。 -->
+    <script type="module" src="/main.tsx"></script>
+  </body>
 </html>
