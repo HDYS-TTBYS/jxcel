@@ -35,10 +35,20 @@
 //! HTTP クライアントのプラグインは依存に入れない（`src-tauri/Cargo.toml`。要件 1.6 の
 //! 「経路が構造的に存在しない」側の担保）。
 //!
+//! タスク 5.4 が加えたのは**最後のウィンドウを閉じたときの終了と、常駐慣習の扱い**である
+//! （要件 2.8、2.9）。既定は 3 OS 共通で「最後のウィンドウが閉じたら終了する」であり、
+//! Tauri の既定をそのまま使う（該当分岐は `cfg` で切られておらず macOS の常駐慣習には
+//! 従わない。research.md「最後のウィンドウを閉じたときの挙動」）。常駐させるのは**常駐の
+//! 慣習を持つプラットフォーム（macOS）**で、かつ**終了コードが指定されていない終了要求**
+//! （`code: None` = 最後のウィンドウが閉じられた経路）だけである（[`vetoes_exit`]）。
+//! **無条件に拒否しない** — 明示的な終了操作（[`request_exit`]）は [`ExitControl`] の掛け金を
+//! 立ててから `app.exit(0)` を呼び、以後は拒否が起きない（tauri#13511 の限界については
+//! [`vetoes_exit`] の doc）。Dock アイコンのクリック（`RunEvent::Reopen`）は `handle_reopen`
+//! が扱う（macOS のみ。ウィンドウのレジストリ 6.1 が入るまでの seam）。
+//!
 //! 本ファイルがまだ持たないもの（各タスクがここへ書き込む）:
 //!
-//! - タスク 5.4: 最後のウィンドウを閉じたときの終了と常駐慣習の扱い（要件 2.8, 2.9）。
-//!   実行時のコールバック（[`run`] の手順 6）が結線点である。
+//! - タスク 7.4 / 7.5: メニューの「終了」項目。[`request_exit`] を呼ぶこと。
 //! - タスク 5.5: 異常終了の記録（要件 8.2）。
 //! - タスク 8.3: 描画の代替経路の判定と適用（要件 10.3）。
 //!   [`reserve_render_fallback_point`] の中身を埋める。
@@ -50,12 +60,13 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use app_shell::diagnostics::{self, DiagnosticsLevel};
 use app_shell::settings::{self, FileSettingsStore, RecoveredFrom, SettingsStore};
 use app_shell::sidecar::{SidecarSupervisor, Supervisor};
 use tauri::utils::config::{Csp, CspDirectiveSources};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_log::log::{self, LevelFilter};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 
@@ -144,6 +155,8 @@ pub fn run() -> Result<(), StartupError> {
 
     // 手順 3.5: 記録機構の登録。単一インスタンス（手順 2）の後・構築（手順 4）の前である。
     let builder = register_logging(builder, &logging);
+    // 明示的な終了の掛け金（5.4）。終了要求のコールバックがここから読む。
+    let builder = builder.manage(ExitControl::default());
     let builder = builder.manage(startup);
 
     // 手順 4: 構築。ここで GTK / WebKit のランタイムと、登録順に各プラグインが初期化される。
@@ -177,8 +190,12 @@ pub fn run() -> Result<(), StartupError> {
     // 記録機構は手順 3.5 で登録済みであり、この行は方針の保存先（要件 8.1）へ残る。
     log::info!("残留プロセスの掃除で {swept} 件を終了した");
 
-    // 手順 6: 実行。終了条件（最後のウィンドウ・常駐慣習）は 5.4 がこのコールバックへ結線する。
-    app.run(|_app, _event| {});
+    // 手順 6: 実行。終了条件（最後のウィンドウ・常駐慣習）は [`handle_run_event`] が扱う
+    //   （タスク 5.4、要件 2.8・2.9）。既定では最後のウィンドウが閉じた時点でランタイムが
+    //   `ExitRequested { code: None }` を発し、それを拒否しなければプロセスは終了する。
+    //   常駐の慣習を持つプラットフォーム（macOS）でだけ、明示的な終了が要求されていない
+    //   限りこれを拒否する（無条件には拒否しない）。
+    app.run(handle_run_event);
 
     Ok(())
 }
@@ -860,9 +877,19 @@ fn present_window_for_request(app: &AppHandle, request: LaunchRequest) {
         create_handover_window(app);
         return;
     }
+    present_existing_or_create(app);
+}
+
+/// 既にあるウィンドウを前面に出し、1 枚も無ければ 1 枚作る。
+///
+/// 引き継ぎ（要件 1.5）と Dock アイコンのクリック（要件 2.9、macOS）の両方が使う。**これは
+/// seam である** — どのウィンドウをどう提示するかは 6.1 の `WindowManager` が所有し、
+/// 6.1 がレジストリを導入したらこの関数はそちらの提示経路への呼び出しに置き換わる。
+fn present_existing_or_create(app: &AppHandle) {
     match app.webview_windows().values().next().cloned() {
         Some(window) => focus_window(&window),
-        // 起動直後に 1 枚も無い場合の保険。通常は `tauri.conf.json` の宣言が先に開いている。
+        // 起動直後や常駐中に 1 枚も無い場合の経路。通常の起動では `tauri.conf.json` の
+        // 宣言が先に開いている。
         None => create_handover_window(app),
     }
 }
@@ -917,12 +944,187 @@ fn focus_window(window: &tauri::WebviewWindow) {
 }
 
 // ---------------------------------------------------------------------------
-// テスト（タスク 5.3）: `connect-src` の検査が load-bearing であること
+// 最後のウィンドウと常駐慣習の扱い（要件 2.8, 2.9。タスク 5.4）
+// ---------------------------------------------------------------------------
+
+/// 検証専用の終了の引き金が読む環境変数の名前。
+///
+/// **通常の利用環境に存在しないことを狙った名前である。**値は整数のミリ秒で、設定されて
+/// いるときだけ [`arm_verification_exit_trigger`] がその時間後に [`request_exit`] を呼ぶ。
+const VERIFY_EXIT_ENV: &str = "JXCEL_VERIFICATION_EXIT_AFTER_MS";
+
+/// プラットフォームが最後のウィンドウを閉じてもアプリを常駐させる慣習を持つか。
+///
+/// **3 OS 共通の既定は「最後のウィンドウが閉じたら終了する」であり、macOS の常駐慣習には
+/// 既定では従わない**（該当分岐は `cfg` で切られていない。research.md「最後のウィンドウを
+/// 閉じたときの挙動」）。したがって要件 2.9 は Tauri の既定任せでは成立せず、macOS のとき
+/// だけ [`vetoes_exit`] が終了要求を拒否する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Residency {
+    /// 最後のウィンドウを閉じてもプロセスを常駐させる慣習を持つ（macOS）。
+    StayResident,
+    /// 最後のウィンドウを閉じたらプロセスを終了する（Windows / Linux）。
+    ExitOnLastWindowClosed,
+}
+
+impl Residency {
+    /// 実行中のプラットフォームの慣習。`cfg!` はコンパイル時に評価されるため実行時の分岐は
+    /// 残らない（macOS 以外は常に [`Residency::ExitOnLastWindowClosed`]）。
+    const CURRENT: Self = if cfg!(target_os = "macos") {
+        Self::StayResident
+    } else {
+        Self::ExitOnLastWindowClosed
+    };
+}
+
+/// 終了要求を拒否して常駐すべきか。**純粋関数**であり、方針をテストで固定する
+/// （`tests::the_residency_policy_follows_platform_conventions`）。
+///
+/// 拒否するのは次の 3 条件がすべて成り立つときだけである:
+///
+/// 1. プラットフォームが常駐の慣習を持つ（macOS）
+/// 2. 終了コードが指定されていない（`code: None` = 最後のウィンドウが閉じられた経路）
+/// 3. 明示的な終了がまだ要求されていない
+///
+/// **`code: Some(_)` を拒否してはならない。** [`request_exit`] は `app.exit(0)` を使うが、
+/// `AppHandle::exit` は `RunEvent::ExitRequested { code: Some(0) }` を発生させる
+/// （tauri 2.11.5 の `App::exit` → `RuntimeHandle::request_exit`）。ここで `Some` を拒否すると
+/// **明示的な終了操作そのものが効かなくなる**。
+///
+/// **無条件の拒否をしてはならない理由（tauri#13511）。**「最後のウィンドウが閉じた」と
+/// 「利用者が終了を選んだ」を区別する手段は `code` が `None` か `Some` かという推定のほかに
+/// 無く、この問題は 2025-05 から未解決である。推定が将来崩れてもプロセスが通常手段で終了
+/// できなくならないよう、明示的な終了は [`ExitControl`] の掛け金で拒否をすべて解除し、
+/// [`request_exit`] から常に [`AppHandle::exit`] を呼べるようにする（条件 3）。
+fn vetoes_exit(residency: Residency, code: Option<i32>, explicit_quit: bool) -> bool {
+    matches!(residency, Residency::StayResident) && code.is_none() && !explicit_quit
+}
+
+/// 明示的な終了が要求されたことを保持する一方通行の掛け金。
+///
+/// [`request_exit`] だけが [`ExitControl::authorize_quit`] を呼ぶ。**いったん立てば戻らない**
+/// — 終了は不可逆な操作であり、「常駐に戻る」経路は存在しないためである。
+#[derive(Default)]
+struct ExitControl {
+    quit_requested: AtomicBool,
+}
+
+impl ExitControl {
+    /// 明示的な終了を認可する。以後 [`vetoes_exit`] は常に `false` を返す。
+    fn authorize_quit(&self) {
+        self.quit_requested.store(true, Ordering::SeqCst);
+    }
+
+    /// 明示的な終了が要求済みか。
+    fn quit_requested(&self) -> bool {
+        self.quit_requested.load(Ordering::SeqCst)
+    }
+}
+
+/// **明示的な終了操作の唯一の入口。**メニューの「終了」、終了コマンド、Dock の「終了」は
+/// すべてこれを呼ぶこと（7.4 / 7.5 への申し送り）。行うことは 2 つである:
+///
+/// 1. [`ExitControl`] の掛け金を立てる。以後 [`vetoes_exit`] は macOS でも `false` を返し、
+///    `code: None` の終了要求（最後のウィンドウが閉じられた経路）でさえ拒否しない。
+/// 2. `app.exit(0)` を呼ぶ。これは `RunEvent::ExitRequested { code: Some(0) }` を発生させるが、
+///    条件 1・2 により [`vetoes_exit`] は `false` を返し、拒否されない。実行時は
+///    `ControlFlow::ExitWithCode(0)` となり、プロセスは終了コード 0 で終わる。
+///
+/// **この経路がプロセスを終了できなくなることはない。** `app.exit(0)` は
+/// `RuntimeHandle::request_exit(0)` を呼んで `run` の制御フローを `Exit` にする
+/// （`tauri-runtime-wry` 2.11.4 の `Message::RequestExit`）。終了を止められるのは
+/// `RunEvent::ExitRequested` のコールバックが `ExitRequestApi::prevent_exit` を呼んだときだけ
+/// であり、掛け金が立った後は [`handle_run_event`] がそれを呼ばない。掛け金は `SeqCst` の
+/// 一方通行なので、立てる側と読む側のどちらが先でも「拒否しない」側に倒れる。
+///
+/// ウィンドウが 1 枚も無くても有効である（常駐中に呼ばれるのが通常の経路である）。
+pub fn request_exit(app: &AppHandle) {
+    app.state::<ExitControl>().authorize_quit();
+    log::info!("明示的な終了操作を受け付けた。常駐の拒否を解除して終了する");
+    app.exit(0);
+}
+
+/// `app.run` のコールバック。終了要求と Dock クリックを扱う（要件 2.8、2.9。タスク 5.4）。
+///
+/// それ以外のイベント（`WindowEvent::CloseRequested` を含む）は処理しない。ウィンドウを
+/// 閉じてよいかの仲介は 7.6 が所有し、ここは「閉じられた後の帰結」だけを決める。
+/// 起動完了時の [`RunEvent::Ready`] では検証専用の終了の引き金（[`arm_verification_exit_trigger`]）
+/// だけを用意する（環境変数が無ければ何もしない）。
+fn handle_run_event(app: &AppHandle, event: RunEvent) {
+    match event {
+        RunEvent::ExitRequested { code, api, .. } => {
+            let explicit_quit = app.state::<ExitControl>().quit_requested();
+            if vetoes_exit(Residency::CURRENT, code, explicit_quit) {
+                log::info!(
+                    "最後のウィンドウが閉じられたが常駐の慣習に従って終了しない（macOS）。\
+                     終了するには明示的な終了操作（request_exit）を使う"
+                );
+                api.prevent_exit();
+            }
+        }
+        // 起動の完了時に検証専用の引き金を用意する。環境変数が無ければ何もしない。
+        RunEvent::Ready => arm_verification_exit_trigger(app),
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen {
+            has_visible_windows, ..
+        } => handle_reopen(app, has_visible_windows),
+        _ => {}
+    }
+}
+
+/// Dock アイコンのクリック（`RunEvent::Reopen`）に対応する（要件 2.9。**macOS のみ**）。
+///
+/// 常駐中は最後のウィンドウが閉じられた後もプロセスが生きているため、利用者が Dock の
+/// アイコンをクリックしてウィンドウを求める経路が要る。見えているウィンドウが 1 枚も無ければ
+/// 1 枚提示し直し、あれば何もしない（前面化は OS が行う）。
+///
+/// **ウィンドウのレジストリ（6.1）がまだ無い。**そのため「既存のウィンドウを前面に出す／
+/// 無ければ 1 枚作る」だけを行い、どのウィンドウをどう提示するかは 6.1 の `WindowManager` に
+/// 委ねる（[`present_existing_or_create`] が seam である）。
+#[cfg(target_os = "macos")]
+fn handle_reopen(app: &AppHandle, has_visible_windows: bool) {
+    if has_visible_windows {
+        return;
+    }
+    log::info!("Dock のクリックを受け付け、ウィンドウを提示し直す");
+    present_existing_or_create(app);
+}
+
+/// 明示的な終了（[`request_exit`]）が確実にプロセスを終わらせることを実測するための、
+/// **検証専用**の引き金。
+///
+/// メニュー項目（7.4 / 7.5）が作られる前は、[`request_exit`] を人手で呼ぶ経路が無い。環境変数
+/// [`VERIFY_EXIT_ENV`] にミリ秒が設定されているときだけ、その時間だけ待ってから
+/// [`request_exit`] を呼ぶ。**環境変数が無い通常の起動では関数の先頭で即座に戻るので何もしない**
+/// （数値として解釈できない値のときも何もしない）。したがって配布物の既定の振る舞いを変えない。
+///
+/// 7.4 / 7.5 がメニュー項目を結線したら、この引き金は不要になる。残す場合もメニューの経路を
+/// 置き換えてはならない（引き金は環境変数が設定された検証のときだけ働く）。
+fn arm_verification_exit_trigger(app: &AppHandle) {
+    let Ok(value) = std::env::var(VERIFY_EXIT_ENV) else {
+        return;
+    };
+    let Ok(delay_ms) = value.parse::<u64>() else {
+        log::warn!("{VERIFY_EXIT_ENV} を数値として解釈できないので無視する: {value:?}");
+        return;
+    };
+    let app = app.clone();
+    log::info!("検証専用の終了の引き金が有効である: {delay_ms} ms 後に明示的な終了を行う");
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        request_exit(&app);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// テスト（タスク 5.3 / 5.4）
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use super::{confirm_csp_values, csp_config_from, CspConfig};
+    use super::{
+        confirm_csp_values, csp_config_from, vetoes_exit, CspConfig, ExitControl, Residency,
+    };
     use tauri::utils::config::Csp;
 
     /// 方針文字列から実効設定を組み立てる（本番の `csp_config` が `Config` から取り出すのと
@@ -975,5 +1177,44 @@ mod tests {
             confirm_csp_values(&policy("default-src 'self'")).is_err(),
             "connect-src の記述漏れを検出しなければならない"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 常駐の方針（タスク 5.4、要件 2.8・2.9）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_residency_policy_follows_platform_conventions() {
+        // Windows / Linux は最後のウィンドウが閉じたら終了する（要件 2.8）。**ここで拒否を
+        // 返したらプロセスが常駐してしまい、既定が壊れる。**
+        assert!(!vetoes_exit(Residency::ExitOnLastWindowClosed, None, false));
+        assert!(!vetoes_exit(
+            Residency::ExitOnLastWindowClosed,
+            Some(0),
+            false
+        ));
+
+        // macOS は `code: None`（最後のウィンドウが閉じられた経路）だけ常駐する（要件 2.9）。
+        assert!(vetoes_exit(Residency::StayResident, None, false));
+    }
+
+    #[test]
+    fn a_coded_exit_request_is_never_vetoed() {
+        // `AppHandle::exit` は `code: Some(_)` を伴う終了要求を出す。これを拒否すると明示的な
+        // 終了操作が効かなくなる（`request_exit` がプロセスを終わらせられなくなる）。
+        assert!(!vetoes_exit(Residency::StayResident, Some(0), false));
+        assert!(!vetoes_exit(Residency::StayResident, Some(1), false));
+    }
+
+    #[test]
+    fn an_explicit_quit_releases_every_veto() {
+        let control = ExitControl::default();
+        assert!(!control.quit_requested(), "初期状態では掛け金は立っていない");
+        control.authorize_quit();
+        assert!(control.quit_requested());
+        // 掛け金が立った後は、macOS の `code: None` でさえ拒否しない。**これが「通常手段で
+        // 終了できなくならない」ことの構造的な担保である**（tauri#13511。
+        // `request_exit` は掛け金を立ててから `app.exit(0)` を呼ぶ）。
+        assert!(!vetoes_exit(Residency::StayResident, None, true));
     }
 }

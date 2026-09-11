@@ -215,7 +215,7 @@
   - _Requirements: 1.6, 8.3_
   - _Depends: 1.3_
 
-- [ ] 5.4 最後のウィンドウと常駐慣習の扱いを実装する
+- [x] 5.4 最後のウィンドウと常駐慣習の扱いを実装する
   - 既定では最後のウィンドウが閉じたときにアプリを終了する
   - 常駐慣習を持つプラットフォームでのみ、終了コードが指定されていない終了要求を拒否して常駐する
   - **拒否を無条件に行わない**。通常手段でプロセスを終了できなくなるため、明示的な終了操作を必ず用意し、そこからは常に終了できるようにする
@@ -479,6 +479,13 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **5.4**: 常駐の判定は**純粋関数 `vetoes_exit(residency, code, latch)`** に切り出し、単体テストで 4 つの重要行を固定する（`ExitOnLastWindowClosed + None → 拒否しない` / `StayResident + None → 拒否` / `StayResident + Some(_) → 拒否しない` / 明示終了のラッチが立っていれば拒否しない）。**拒否は macOS のみ・`code: None` のみ**。Linux / Windows は決して拒否しない。
+- **5.4**: 終了の唯一の入口は `request_exit`（ラッチを立てて `app.exit(0)`）。**7.4 / 7.5 の Quit メニュー項目はこれを呼ぶこと**。プロセスが通常手段で終われなくなる経路は無い（ラッチは一方向、`Some(_)` は決して拒否しない、`AppHandle::exit` は失敗時に `std::process::exit` に落ちる。macOS の ⌘Q / Dock→終了 は tao の `applicationWillTerminate:` 経由で `ExitRequested` を通らないため拒否できない）。
+- **5.4**: `RunEvent::Reopen`（Dock クリック）はウィンドウが無いときだけ提示する（あれば何もしない）。`present_existing_or_create` が **6.1 のレジストリの seam**（6.1 が差し替える。ここでラベル規約を新設しない）。
+- **5.4（7.4/7.5 が必ず片付けること）**: `JXCEL_VERIFICATION_EXIT_AFTER_MS` / `arm_verification_exit_trigger` は**検証専用の環境変数で、release バイナリにも入っている**（未設定なら無影響、数値ならその ms 後に明示終了する）。**7.4 / 7.5 が Quit メニューを配線した時点で削除するか、非既定の cargo feature で括ること**（`cfg(debug_assertions)` だけでは不十分 — 配布形態の実検証ができなくなるため）。
+- **5.4（doc の軽微な不正確さ）**: `request_exit` の doc が実行経路を `ControlFlow::ExitWithCode(0)` と書いているが、tauri-runtime-wry 2.11.4 は `Message::RequestExit(code)` で `ControlFlow::Exit` を設定する。観測可能な契約（終了コード 0 で終了）は正しい。次に触るときに `ControlFlow::Exit`（終了コード 0）へ直すこと。
+- **5.4（検証手順として定着したもの）**: ウィンドウを「WM が閉じるのと同じ方法」で閉じるには、`xwininfo` で見つけたウィンドウへ **`WM_DELETE_WINDOW` の ClientMessage を ctypes + libX11 で送る**（このマシンに `xdotool` / `wmctrl` は無い）。`xshot` と同じ手法で、以後のウィンドウ操作検証にも使える。
 
 - **5.3**: CSP は `default-src 'self'; connect-src ipc: http://ipc.localhost; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'`（`src-tauri/tauri.conf.json` は JSON なのでコメント不可。根拠は `lifecycle.rs::csp_config` の日本語 doc にある）。**`connect-src` は IPC の宛先 2 つだけ**で、これが無いと IPC の `fetch` が CSP に拒否されて**警告 1 行だけを残して低速な文字列経路へ恒久的に降格する**（tauri#12835）。`default-src 'self'` が明示していないディレクティブ（img/font/media/frame/worker 等）を閉じる。
 - **5.3**: **`style-src 'self'` で足りる。`'unsafe-inline'` を足してはならない。** React の `style={{…}}` は CSSOM 経由で適用されるため CSP の対象外であり、`index.html` のインライン `<style>` は Tauri がビルド時に注入するスタイル nonce で許可される（レビューで `'unsafe-inline'` を外してもピクセルが**バイト単位で同一**になることを実測）。当初これを誤って説明していた doc は訂正済み。
