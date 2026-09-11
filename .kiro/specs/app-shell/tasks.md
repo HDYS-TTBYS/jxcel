@@ -78,7 +78,7 @@
   - **完了状態**: 生成を実行するとコマンド名の定数と型定義を含む TypeScript が出力され、2 回実行しても同じ内容になる
   - _Requirements: 4.1, 4.2_
 
-- [ ] 2.3 生成物のドリフト検査を実装する
+- [x] 2.3 生成物のドリフト検査を実装する
   - 生成結果と追跡済みの TypeScript をバイト比較する検査を用意する。差があればテストが失敗する
   - 差分が出たときに、何を再生成すべきかが分かる失敗メッセージを出す
   - **完了状態**: Rust 側の型を 1 つ変更するとテストが失敗し、生成をやり直すと成功する
@@ -479,6 +479,10 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **2.3**: ドリフト検査は `crates/app-shell/tests/bindings_drift.rs`。`render_bindings()` と追跡済み `src/ipc/bindings.ts` を**生バイトで比較**し（トリム・改行変換・再エンコードなし。BOM・CRLF・末尾改行の差も検出）、パスは `CARGO_MANIFEST_DIR` から導くので cwd に依存しない。失敗メッセージはファイル・相対パス・再生成コマンド・両側のバイト長・最初に食い違うオフセットと行番号・前後の抜粋を含む。
+- **2.3**: 要件 4.3 は**2 段**で成立する。この検査は「追跡済み成果物が古い」ことを捕まえ、`tsc --noEmit` が「フロント側が追随していない」ことを捕まえる（design.md IpcContract の Implementation Notes）。**10.1 が CI に両方を入れること**。
+- **2.3（既知の軽微な不備）**: 失敗メッセージの抜粋が、窓の境界が UTF-8 のマルチバイト文字を割ると `�` の連続になる（`bindings_drift.rs` の抜粋生成で窓を char_boundary へ寄せていないため）。ファイル・コマンド・長さ・位置は正しいので診断力は損なわれないが、CI ログの可読性のために窓を文字境界へスナップする修正が望ましい（担当タスクは未割当。10.1 か検証段で拾う）。
 
 - **2.2**: `COMMAND_NAMES`（`crates/app-shell/src/ipc/command_names.rs`）が**唯一の源**。現在の集合は `render_heartbeat` / `can_close_window` / `settings_get` / `settings_set` / `pick_document_file` / `bulk_echo` / `diagnostics_log_location` / `diagnostics_export` / `diagnostics_verbosity_get` / `diagnostics_verbosity_set`。**後続タスク（および後続スペック）は名前を文字列リテラルで登録せず、必ずこの配列へ追加する**。改名・削除は design.md の Revalidation Trigger である（7.1 のハンドラ登録と `bindings.ts` の両方が壊れる）。`bulk_echo` の名前は 7.2 の実装時に確定させること。
 - **2.2**: 生成は `cargo run -p app-shell --bin generate-bindings` の 1 コマンドで `src/ipc/bindings.ts` を書く（開発用バイナリ。**配布物には含まれない** — Tauri が同梱するのは `src-tauri` のバイナリだけ）。`render_bindings()` は `Result<String, ts_rs::ExportError>` を返す純粋関数で、ファイルを書かない。出力は**バイト決定的**（固定ベクタを型名でソート、絶対パス・時刻・環境変数を含まない。実行・環境・cwd を変えても同一 sha256 を実測）。
