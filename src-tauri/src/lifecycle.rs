@@ -116,6 +116,7 @@ use tauri::{AppHandle, Manager, RunEvent};
 use tauri_plugin_log::log::{self, LevelFilter};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 
+use crate::ports::DocumentHostPort;
 use crate::window::{self, WindowRegistry, WindowRequest};
 
 /// 起動を継続できない前提の名前: アプリケーションデータ領域（設定の保存先）。
@@ -237,6 +238,14 @@ pub fn run() -> Result<(), StartupError> {
     // 生成（[`window::open`]）が登録し、破棄の通知（[`window::on_window_event`]）が取り除く。
     // ウィンドウ単位の状態管理機構は基盤側に無いため、ここで自前の写像を管理状態として置く。
     let builder = builder.manage(WindowRegistry::new());
+    // ドキュメント所有者への委譲点（要件 2.1・2.6。タスク 6.2）。**常に許可し、パスを
+    //   受け取っても何もしない既定実装**をアプリ全体で 1 実体だけ置く。終了拒否の仲介
+    //   （7.6）とネイティブファイル選択（7.7）は `app.state::<DocumentHostPort>()` から
+    //   この実体を取り、判定と引き渡しをこのポート経由で行う。**下流スペックは
+    //   `DocumentHostPort::install`（自分の `setup` フック）か、この行の
+    //   `DocumentHostPort::default()` を `DocumentHostPort::new(自分の実装)` へ置き換える
+    //   ことで差し替える**（`ports.rs` のモジュール doc に接続点を記した）。
+    let builder = builder.manage(DocumentHostPort::default());
     // 破棄の通知をレジストリへ流す。**全ウィンドウに効く**（`tauri.conf.json` の宣言の有無に
     // よらず、`WebviewWindowBuilder` で作ったウィンドウにもマネージャ経由で結線される）。
     let builder = builder.on_window_event(window::on_window_event);

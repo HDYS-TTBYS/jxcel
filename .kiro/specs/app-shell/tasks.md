@@ -249,7 +249,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.5, 2.10_
   - _Depends: 1.3_
 
-- [ ] 6.2 (P) ドキュメント所有者への委譲点を定義する
+- [x] 6.2 (P) ドキュメント所有者への委譲点を定義する
   - ウィンドウを閉じてよいかの問い合わせと、選択されたファイルの引き渡しを受け取る契約を定義する
   - **常に許可し、引き渡しを受けても何もしない既定実装を同梱する**。下流のスペックが差し替える
   - **完了状態**: 既定実装が常に許可を返し、差し替えた実装の判定がポート経由で得られることがテストで確認できる。画面を通した往復の確認は終了拒否の仲介と検証段が担う
@@ -479,6 +479,10 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **6.2**: 委譲点は `src-tauri/src/ports.rs`。`DocumentHost`（`may_close` / `attach`）、`CloseVerdict`（Allow/Deny。Deny は呼び出し元が利用者へ伝えられるだけの情報を運ぶ）、`AttachError`、既定実装 `DefaultDocumentHost`（**常に Allow、`attach` はパスに一切触れず `Ok(())`**）、差し替え口 `DocumentHostPort`。**ウィンドウ識別子は `app_shell::ipc::WindowLabel` を再利用**する（3 つ目の型を作らない）。
+- **6.2**: ポートは**同期**で、`may_close` はブロックしない（`Arc` を読みロックの下で複製してから解放してから呼ぶ。ホストが `install` に再入しても循環しない）。**非同期の往復は 7.6 のフロントエンド側リスナ + `can_close_window` コマンド**が担う（design と research の指定どおり）。**7.6 / 7.7 はこのポートを消費し、実行時に `app.state::<DocumentHostPort>()` を取得する経路を実際に通すこと**（この段では登録がコンパイルできることまでしか確認していない。`install(...)` は `Builder::manage` が `build()` より前に走るので、ウィンドウが 1 枚も無い時点で差し替え可能）。
+- **6.2（軽微な doc 修正の申し送り）**: `ports.rs` の説明が「setup フックは `Builder::build` の中で走る」と書いているが、**プラグインの setup は build 時、`Builder::setup` は `RunEvent::Ready`（`app.run` の中）**で走る。結論（`install` の順序に危険が無いこと）は変わらないが、次に触るときに文言を直すこと。
 
 - **6.1**: `WindowRegistry`（managed state）は `label → { label, document: Option<PathBuf>, phase }` を持ち、**`phase` が `Creating` / `Ready` を区別する**。`window::open` は**ビルドを spawn する前に登録**し（構築中に閉じられても漏れない）、成功で `Ready`、`Err` で登録を巻き戻して報告する。`WindowEvent::Destroyed` で除去する。ラベル規約は `doc-<連番>` / `empty-<連番>`（種類ごとに独立した単調カウンタ）。**暫定だった `handover-<連番>` は廃止**し、受け渡し要求もこの規約に合流した。
 - **6.1（round-1 のレビュー指摘・重要）**: **「登録はあるがネイティブウィンドウがまだ無い」状態を「古い登録」と見なしてはならない** — それは `window::open` の登録先行設計における**正常な生成中**の状態である。ここを stale として除去すると**生きているウィンドウが登録から消え**、ドキュメント無しの受け渡しが**重複したウィンドウを作る**（実測で再現された）。`present_existing_or_create` は **`Creating` の間は何も作らず**、生成タスクが完了時に提示する。
