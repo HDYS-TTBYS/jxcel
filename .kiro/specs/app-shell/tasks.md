@@ -239,7 +239,7 @@
 
 - [ ] 6. Integration: ウィンドウの生成と状態
 
-- [ ] 6.1 ウィンドウの生成とレジストリを実装する
+- [x] 6.1 ウィンドウの生成とレジストリを実装する
   - **ウィンドウの生成は非同期で行う**。同期のコマンドやイベントハンドラの中で生成すると一部のプラットフォームで停止する
   - ウィンドウの識別子から状態への写像を保持する。ウィンドウ単位の状態管理は基盤側に存在しない
   - ドキュメントを指定しない起動では、ドキュメントを関連付けないウィンドウを開く
@@ -479,6 +479,12 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **6.1**: `WindowRegistry`（managed state）は `label → { label, document: Option<PathBuf>, phase }` を持ち、**`phase` が `Creating` / `Ready` を区別する**。`window::open` は**ビルドを spawn する前に登録**し（構築中に閉じられても漏れない）、成功で `Ready`、`Err` で登録を巻き戻して報告する。`WindowEvent::Destroyed` で除去する。ラベル規約は `doc-<連番>` / `empty-<連番>`（種類ごとに独立した単調カウンタ）。**暫定だった `handover-<連番>` は廃止**し、受け渡し要求もこの規約に合流した。
+- **6.1（round-1 のレビュー指摘・重要）**: **「登録はあるがネイティブウィンドウがまだ無い」状態を「古い登録」と見なしてはならない** — それは `window::open` の登録先行設計における**正常な生成中**の状態である。ここを stale として除去すると**生きているウィンドウが登録から消え**、ドキュメント無しの受け渡しが**重複したウィンドウを作る**（実測で再現された）。`present_existing_or_create` は **`Creating` の間は何も作らず**、生成タスクが完了時に提示する。
+- **6.1**: **ウィンドウ生成は 1 箇所だけ**（`window::build_window` の `WebviewWindowBuilder::build()`）で、`tauri::async_runtime::spawn` のタスクからのみ到達する。同期文脈（`RunEvent::Ready`、単一インスタンスの受け渡しコールバック、macOS `Reopen`）は `window::open` を呼ぶだけで即座に戻る。**同期で生成すると Windows で停止する**（design の根拠）。
+- **6.1**: **`tauri.conf.json` の宣言ウィンドウを削除した**（`app.windows == []`）。生成は 6.1 の責務であり、起動時のウィンドウは `RunEvent::Ready` でプログラム的に作る。capabilities（`windows` キー無し＝全ウィンドウ適用）と**最後のウィンドウを閉じたときの終了（2.8）は維持**されていることを実測で確認済み。
+- **6.1（既知の非ブロッキング事項）**: (a) `open_startup_window` は `is_empty()` を見てから `open` するため厳密には原子的でなく、**ドキュメント無しの受け渡しが別スレッドで競合すると 2 枚になりうる**（狭い窓）。(b) `Ready` の登録に対応するネイティブウィンドウが `Destroyed` を伴わずに消えた場合、`present_existing_or_create` は新規作成して古い登録を残す（`Destroyed` が届く限り到達しない）。(c) `WebviewWindowBuilder::build()` の Tauri 内部での部分的失敗（ネイティブだけ出来て webview が失敗）では登録の無いウィンドウが残りうる（理論上）。
 
 - **5.6**: 補助プロセスの終了は **`RunEvent::Exit` で `shutdown_all()` を同期実行**して結線する。tauri 2.11.5 はこのコールバックを `cleanup_before_exit` より前に呼ぶので、**`request_exit`（`app.exit(0)`）と最後のウィンドウを閉じる経路の両方**がここに到達する。**基盤側の終了時清掃には頼れない**（`tauri-plugin-shell` は依存にすら無く、子はコアの `Command::new` が起動しているので同プラグインの登録対象外）。
 - **5.6**: **猶予はプラットフォーム別に選ぶ**。`sidecar_supervisor()` が `with_grace(SIDECAR_SHUTDOWN_GRACE)` を渡し、**Unix はコア既定の 3 秒、Windows は 300 ms**。Windows の穏当段 `CTRL_BREAK_EVENT` はコンソールを持たない GUI の子へ届かないため、3 秒待つのは**イベントループが止まったまま見える 3 秒の凍結**にしかならない（3.3 が先送りした判断をここで下した）。300 ms はコンソール起動時の協調の機会を残しつつ体感不能。**コアの定数は変えていない**（`with_grace` はテスト seam として用意されていたものを production でも使う）。

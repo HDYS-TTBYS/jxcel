@@ -70,13 +70,28 @@
 //! 起動時の残留掃除（[`sweep_orphans_at_startup`]）が最後の backstop である。終了時に待つ猶予は
 //! プラットフォームで分ける（[`SIDECAR_SHUTDOWN_GRACE`]）。
 //!
+//! タスク 6.1 が加えたのは**ウィンドウの生成とレジストリ**である（要件 2.1〜2.3、2.5、2.10）。
+//! 生成は [`window::open`] の 1 経路に一本化し、**非同期でのみ**行う — 同期のコマンドや
+//! イベントハンドラの中で `WebviewWindowBuilder::build()` を呼ぶと Windows でデッドロックする
+//! （design.md「WindowManager」）。このファイルの 3 つの同期文脈、すなわち起動時の 1 枚
+//! （[`open_startup_window`]。`RunEvent::Ready`）、引き継いだ起動要求
+//! （[`present_window_for_request`]。単一インスタンスのコールバック）、Dock のクリック
+//! （`handle_reopen`。`RunEvent::Reopen`）は、いずれも [`window::open`] を呼ぶだけで
+//! ブロックしない。ウィンドウの識別子から状態（関連付けられたドキュメントとラベル）への写像は
+//! [`window::WindowRegistry`] が保持する。登録は**生成の前**に行い（生成中に閉じられても登録が
+//! 漏れないため）、生成の完了で段階が進み、破棄の通知（[`window::on_window_event`]）で
+//! 取り除かれる。**生成中の登録は残骸ではない**ため、ドキュメント要求の無い引き継ぎは生成中の
+//! ウィンドウがあれば二重に開かず、その生成が完了時に自ら前面に出る。ラベル規約は
+//! `doc-<連番>` / `empty-<連番>` であり、5.1 が暫定で使っていた `handover-<連番>` はここで
+//! 規約へ収束した。
+//!
 //! 本ファイルがまだ持たないもの（各タスクがここへ書き込む）:
 //!
 //! - タスク 7.4 / 7.5: メニューの「終了」項目。[`request_exit`] を呼ぶこと。
 //! - タスク 8.3: 描画の代替経路の判定と適用（要件 10.3）。
 //!   [`reserve_render_fallback_point`] の中身を埋める。
-//! - タスク 6.1 / 9.6: 引き継いだ起動要求と、ウィンドウおよびドキュメントの対応付け。
-//!   [`present_window_for_request`] が seam である。
+//! - タスク 9.6: ドキュメントを関連付けていないウィンドウの操作導線（新規作成・既存ファイルを
+//!   開く）。ドキュメントの関連付けそのものは 6.1 が [`window::open`] で実装済みである。
 //! - タスク 8.1: 補助プロセスの実行ファイルの絶対パスの解決（プラットフォーム別）と、出力の
 //!   診断連携。[`sidecar_supervisor`] が監督の唯一の生成点であり、8.1 はそこへ解決済みの
 //!   期待パスを流し込み、`AppHandle::state` から同じ実体を取って `ensure` する。
@@ -97,9 +112,11 @@ use app_shell::settings::{self, FileSettingsStore, RecoveredFrom, SettingsStore}
 use app_shell::sidecar::integrity::BUILD_TARGET_TRIPLE;
 use app_shell::sidecar::{SidecarKind, SidecarSpec, SidecarSupervisor, Supervisor};
 use tauri::utils::config::{Csp, CspDirectiveSources};
-use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, RunEvent};
 use tauri_plugin_log::log::{self, LevelFilter};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
+
+use crate::window::{self, WindowRegistry, WindowRequest};
 
 /// 起動を継続できない前提の名前: アプリケーションデータ領域（設定の保存先）。
 const PREREQUISITE_APP_DATA: &str = "アプリケーションデータ領域";
@@ -216,6 +233,13 @@ pub fn run() -> Result<(), StartupError> {
     let builder = register_logging(builder, &logging);
     // 明示的な終了の掛け金（5.4）。終了要求のコールバックがここから読む。
     let builder = builder.manage(ExitControl::default());
+    // ウィンドウのレジストリ（要件 2.1・2.5。タスク 6.1）。アプリ全体で 1 実体だけ持ち、
+    // 生成（[`window::open`]）が登録し、破棄の通知（[`window::on_window_event`]）が取り除く。
+    // ウィンドウ単位の状態管理機構は基盤側に無いため、ここで自前の写像を管理状態として置く。
+    let builder = builder.manage(WindowRegistry::new());
+    // 破棄の通知をレジストリへ流す。**全ウィンドウに効く**（`tauri.conf.json` の宣言の有無に
+    // よらず、`WebviewWindowBuilder` で作ったウィンドウにもマネージャ経由で結線される）。
+    let builder = builder.on_window_event(window::on_window_event);
     let builder = builder.manage(startup);
     // 補助プロセスの監督（要件 5.6。タスク 5.6）。アプリ全体で 1 実体だけ所有し、起動時の
     // 残留掃除（手順 5）と終了時の終了（[`shutdown_sidecars`]）が同じ登録簿を見るようにする。
@@ -1229,14 +1253,15 @@ fn handover(app: &AppHandle, argv: Vec<String>, cwd: String) {
     present_window_for_request(app, request);
 }
 
-/// 引き継いだ起動要求。
+/// 引き継いだ起動要求。**起動時（`RunEvent::Ready`）と引き継ぎ（単一インスタンスの
+/// コールバック）で同じ解釈を使う**（タスク 6.1。解釈を 2 箇所に持たない）。
 struct LaunchRequest {
     /// 要求されたドキュメントの位置（あれば）。
     document: Option<PathBuf>,
 }
 
 impl LaunchRequest {
-    /// 引き継いだ argv から要求を読む。
+    /// 起動要求の argv から要求を読む。
     ///
     /// - Linux / macOS は OS が渡した argv がそのまま入る。
     /// - **Windows はプラグインが argv 全体を `|` で連結した 1 要素として渡す**
@@ -1252,8 +1277,9 @@ impl LaunchRequest {
         #[cfg(not(windows))]
         args.extend(argv.iter().cloned());
 
-        // 先頭は実行ファイル自身である。`-` で始まる引数は現時点で解釈しない
-        // （どの引数がドキュメントを指すかの規則は 6.1 / 9.6 が所有する）。
+        // 先頭は実行ファイル自身である。`-` で始まる引数は現時点で解釈しない。**最初の
+        // `-` で始まらない引数をドキュメントの位置とみなす**（要件 1.5 が引き渡すのは
+        // 実行時の引数であり、どの引数がドキュメントを指すかはこれが唯一の規則である）。
         let document = args
             .into_iter()
             .skip(1)
@@ -1271,86 +1297,68 @@ impl LaunchRequest {
     }
 }
 
-/// 要求に対応するウィンドウを提示する（要件 1.5）。
+/// 起動要求に対応するウィンドウを 1 枚開く（要件 2.2、タスク 6.1）。
 ///
-/// **これは seam である。**どのウィンドウを、どのドキュメントに関連付けて提示するかは
-/// タスク 6.1（ウィンドウのレジストリとラベル規約）と 9.6（ドキュメントを関連付けていない
-/// ウィンドウの操作導線）が所有する。5.1 の時点で保証するのは「要求に対応するウィンドウが
-/// 提示される」ことだけであり、ドキュメントとの対応付けは行わない（引き渡したパスは記録に
-/// 残すだけで、開かない）。
+/// `tauri.conf.json` は起動時のウィンドウを宣言しない（`app.windows` は空である）。生成経路は
+/// 6.1 のレジストリが引き取ったため、起動時の 1 枚もこの経路から開く。要求の読み取りは引き継ぎと
+/// 同じ [`LaunchRequest`] を使う（引数の解釈を 2 箇所に持たない）。
 ///
-/// - ドキュメント要求がある場合: **別のドキュメントを開く要求**なので、既存のウィンドウを
-///   閉じずに新しいウィンドウを提示する（要件 2.3）。
-/// - ドキュメント要求が無い場合: 既にあるウィンドウを前面に出す（新規作成しない）。
-fn present_window_for_request(app: &AppHandle, request: LaunchRequest) {
-    if request.document.is_some() {
-        create_handover_window(app);
-        return;
-    }
-    present_existing_or_create(app);
-}
-
-/// 既にあるウィンドウを前面に出し、1 枚も無ければ 1 枚作る。
-///
-/// 引き継ぎ（要件 1.5）と Dock アイコンのクリック（要件 2.9、macOS）の両方が使う。**これは
-/// seam である** — どのウィンドウをどう提示するかは 6.1 の `WindowManager` が所有し、
-/// 6.1 がレジストリを導入したらこの関数はそちらの提示経路への呼び出しに置き換わる。
-fn present_existing_or_create(app: &AppHandle) {
-    match app.webview_windows().values().next().cloned() {
-        Some(window) => focus_window(&window),
-        // 起動直後や常駐中に 1 枚も無い場合の経路。通常の起動では `tauri.conf.json` の
-        // 宣言が先に開いている。
-        None => create_handover_window(app),
-    }
-}
-
-/// 引き継ぎで新しいウィンドウを 1 枚提示する。
-///
-/// **ウィンドウ生成は非同期で行う。**同期のコマンドやイベントハンドラの中で生成すると一部の
-/// プラットフォームで停止する（design.md「WindowManager」）。このコールバックは Linux では
-/// D-Bus の受信スレッド、macOS では非同期タスク、Windows ではウィンドウメッセージの処理中に
-/// 呼ばれるため、生成は非同期ランタイムへ逃がす。
-///
-/// ラベルは暫定の `handover-<連番>` である。ラベル規約 `doc-<連番>` / `empty-<連番>` と
-/// レジストリは 6.1 が所有するため、ここでは衝突を避ける最小の一意化だけを行う。6.1 が
-/// レジストリを導入したら、この関数は `WindowManager` の生成経路への呼び出しに置き換わる。
-fn create_handover_window(app: &AppHandle) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let label = handover_label(&app);
-        match WebviewWindowBuilder::new(&app, label.clone(), WebviewUrl::default())
-            .title("jxcel")
-            .build()
-        {
-            Ok(window) => focus_window(&window),
-            Err(error) => {
-                // ウィンドウを提示できないことは本体の継続を妨げない（要件 2.10 の精神）。
-                tauri_plugin_log::log::error!("要求されたウィンドウを提示できない: {error}");
+/// **これは同期文脈（`RunEvent::Ready`）だが、[`window::open`] は生成を非同期ランタイムへ
+/// 逃がすのでデッドロックしない。**
+fn open_startup_window(app: &AppHandle) {
+    let argv: Vec<String> = std::env::args().collect();
+    let request = LaunchRequest::from_argv(&argv);
+    match request.document {
+        // ドキュメントを指定した起動: そのドキュメントを関連付けたウィンドウを開く。
+        Some(path) => window::open(app, WindowRequest::Document(path)),
+        // ドキュメントを指定しない起動: ドキュメントを関連付けないウィンドウを開く（要件 2.2）。
+        // 起動前に引き継ぎが既に 1 枚作っている場合は二重に開かない。
+        None => {
+            if app.state::<WindowRegistry>().is_empty() {
+                window::open(app, WindowRequest::Empty);
             }
         }
-    });
+    }
 }
 
-/// 引き継ぎで作るウィンドウのラベル。既存のラベルと衝突しない最小の連番を選ぶ。
-fn handover_label(app: &AppHandle) -> String {
-    let mut ordinal = app.webview_windows().len() + 1;
-    loop {
-        let label = format!("handover-{ordinal}");
-        if !app.webview_windows().contains_key(&label) {
-            return label;
+/// 要求に対応するウィンドウを提示する（要件 1.5、2.3）。
+///
+/// 引き継ぎのコールバック（同期文脈）から呼ばれる。**生成は [`window::open`] が非同期で行う。**
+///
+/// - ドキュメント要求がある場合: **別のドキュメントを開く要求**である。既存のウィンドウは
+///   閉じずに、新しいウィンドウを `doc-<連番>` で開き、要求されたドキュメントを関連付ける
+///   （要件 2.3）。ラベルの払い出しと関連付けは [`window::WindowRegistry`] が担う。
+/// - ドキュメント要求が無い場合: 既にあるウィンドウを前面に出す（新規作成しない）。
+fn present_window_for_request(app: &AppHandle, request: LaunchRequest) {
+    match request.document {
+        Some(path) => window::open(app, WindowRequest::Document(path)),
+        None => present_existing_or_create(app),
+    }
+}
+
+/// 既にあるウィンドウを前面に出し、1 枚も無ければドキュメント無しのウィンドウを 1 枚開く。
+///
+/// 引き継ぎ（要件 1.5）と Dock アイコンのクリック（要件 2.9、macOS）の両方が使う。**どの
+/// ウィンドウを提示するかは 6.1 のレジストリが決める。**
+///
+/// **生成中の登録を「既にあるウィンドウ」として扱う。**登録は生成より先に済むため、登録がある
+/// のにネイティブのウィンドウがまだ無いのは正常な中間状態である（残骸ではない）。ここで
+/// 取り除いたり無視したりすると、生きているウィンドウを写像から落とし、冗長な 2 枚目を作る。
+/// 生成中のウィンドウは生成タスクが完了時に自ら前面に出す（[`window::open`]）ので、この関数は
+/// 二重に開かずに戻るだけでよい（**待たない** — この関数は同期のコールバックから呼ばれる）。
+fn present_existing_or_create(app: &AppHandle) {
+    let registry = app.state::<WindowRegistry>();
+    if let Some(label) = registry.first_ready_label() {
+        if let Some(window) = app.get_webview_window(label.as_str()) {
+            window::focus(&window);
+            return;
         }
-        ordinal += 1;
     }
-}
-
-/// ウィンドウを復元して前面に出す。失敗は記録に残すだけで、引き継ぎの成功を妨げない。
-fn focus_window(window: &tauri::WebviewWindow) {
-    if let Err(error) = window.unminimize() {
-        tauri_plugin_log::log::warn!("ウィンドウを復元できない: {error}");
+    // 生きているウィンドウは無いが、**生成中のウィンドウが要求を満たす**なら二重に開かない。
+    if registry.is_creating() {
+        return;
     }
-    if let Err(error) = window.set_focus() {
-        tauri_plugin_log::log::warn!("ウィンドウを前面に出せない: {error}");
-    }
+    window::open(app, WindowRequest::Empty);
 }
 
 // ---------------------------------------------------------------------------
@@ -1369,6 +1377,9 @@ fn focus_window(window: &tauri::WebviewWindow) {
 /// - `sidecar:<ミリ秒>`（5.6 が足した形）: [`VerificationAction::Sidecar`] — **監督を直接呼んで
 ///   補助プロセスを 1 つ起動し、その ms 後に通常終了する**。終了時に補助プロセスが残らないこと
 ///   （要件 5.6）を実測するために使う
+/// - `fail-window:<ミリ秒>`（6.1 が足した形）: [`VerificationAction::FailWindow`] — **ウィンドウの
+///   生成を意図的に失敗させ、その ms 後に通常終了する**。失敗が報告され、既に開いている他の
+///   ウィンドウが動作し続けること（要件 2.10）を実測するために使う
 ///
 /// **動作の選択を別の環境変数に分けない。**分けると「検証専用の引き金」の片付けが 2 箇所に
 /// なってしまう。7.4 / 7.5 が片付ける対象はこの 1 つ（+ [`arm_verification_exit_trigger`] と
@@ -1387,6 +1398,10 @@ enum VerificationAction {
     /// 同じく終了までの待ちである。配布物経由の起動経路（8.1 の `SidecarHost`）が揃うまでの
     /// 代用であり、その時点でこの動作は不要になる。
     Sidecar,
+    /// **ウィンドウの生成を意図的に失敗させ、既存のウィンドウが動作し続けることを実測する**
+    /// （タスク 6.1 が足した動作。要件 2.10）。失敗は直ちに起こし、`<ミリ秒>` は他の動作と
+    /// 同じく終了までの待ちである。失敗の起こし方は [`window::force_creation_failure`] にある。
+    FailWindow,
 }
 
 impl VerificationAction {
@@ -1396,6 +1411,7 @@ impl VerificationAction {
             "exit" => Some(Self::Exit),
             "panic" => Some(Self::Panic),
             "sidecar" => Some(Self::Sidecar),
+            "fail-window" => Some(Self::FailWindow),
             _ => None,
         }
     }
@@ -1406,6 +1422,7 @@ impl VerificationAction {
             Self::Exit => "exit",
             Self::Panic => "panic",
             Self::Sidecar => "sidecar",
+            Self::FailWindow => "fail-window",
         }
     }
 }
@@ -1518,8 +1535,13 @@ pub fn request_exit(app: &AppHandle) {
 ///
 /// それ以外のイベント（`WindowEvent::CloseRequested` を含む）は処理しない。ウィンドウを
 /// 閉じてよいかの仲介は 7.6 が所有し、ここは「閉じられた後の帰結」だけを決める。
-/// 起動完了時の [`RunEvent::Ready`] では検証専用の終了の引き金（[`arm_verification_exit_trigger`]）
-/// だけを用意する（環境変数が無ければ何もしない）。
+/// 起動完了時の [`RunEvent::Ready`] では起動要求に対応するウィンドウを 1 枚開き
+/// （[`open_startup_window`]。タスク 6.1）、検証専用の終了の引き金
+/// （[`arm_verification_exit_trigger`]）を用意する（環境変数が無ければ何もしない）。
+///
+/// **このコールバックは同期文脈である**（イベントループのメインスレッド）。したがって
+/// ウィンドウの生成をここで直接行ってはならない — [`window::open`] が生成を非同期ランタイムへ
+/// 逃がす（design.md「WindowManager」）。
 fn handle_run_event(app: &AppHandle, event: RunEvent) {
     match event {
         RunEvent::ExitRequested { code, api, .. } => {
@@ -1532,8 +1554,12 @@ fn handle_run_event(app: &AppHandle, event: RunEvent) {
                 api.prevent_exit();
             }
         }
-        // 起動の完了時に検証専用の引き金を用意する。環境変数が無ければ何もしない。
-        RunEvent::Ready => arm_verification_exit_trigger(app),
+        // 起動の完了時に、起動要求に対応するウィンドウを 1 枚開き（タスク 6.1）、検証専用の
+        // 引き金を用意する。環境変数が無ければ引き金は何もしない。
+        RunEvent::Ready => {
+            open_startup_window(app);
+            arm_verification_exit_trigger(app);
+        }
         // 通常終了でプロセスが終わる直前の最後の同期点（要件 5.6。タスク 5.6）。
         RunEvent::Exit => shutdown_sidecars(app),
         #[cfg(target_os = "macos")]
@@ -1612,9 +1638,9 @@ fn shutdown_sidecars(app: &AppHandle) {
 /// アイコンをクリックしてウィンドウを求める経路が要る。見えているウィンドウが 1 枚も無ければ
 /// 1 枚提示し直し、あれば何もしない（前面化は OS が行う）。
 ///
-/// **ウィンドウのレジストリ（6.1）がまだ無い。**そのため「既存のウィンドウを前面に出す／
-/// 無ければ 1 枚作る」だけを行い、どのウィンドウをどう提示するかは 6.1 の `WindowManager` に
-/// 委ねる（[`present_existing_or_create`] が seam である）。
+/// **ウィンドウのレジストリ（6.1）が「既存のウィンドウを前面に出す／無ければ 1 枚作る」を
+/// 所有する**（[`present_existing_or_create`]）。ここはそれを呼ぶだけである。**このハンドラは
+/// 同期文脈（イベントループのメインスレッド）だが、生成は [`window::open`] が非同期で行う。**
 #[cfg(target_os = "macos")]
 fn handle_reopen(app: &AppHandle, has_visible_windows: bool) {
     if has_visible_windows {
@@ -1632,15 +1658,17 @@ fn handle_reopen(app: &AppHandle, has_visible_windows: bool) {
 /// [`request_exit`] を呼ぶ。`panic:<ミリ秒>` のときは代わりに**意図的なパニック**を起こし、
 /// 異常終了の記録（要件 8.2）を実測できるようにする（5.5 が足した形）。`sidecar:<ミリ秒>` の
 /// ときは**直ちに監督を直接呼んで補助プロセスを 1 つ起動**し（[`start_verification_sidecar`]）、
-/// その ms 後に通常終了する（5.6 が足した形。終了時に残らないことを実測する）。**環境変数が
-/// 無い通常の起動では関数の先頭で即座に戻るので何もしない**（解釈できない値のときも何もしない）。
-/// したがって配布物の既定の振る舞いを変えない。
+/// その ms 後に通常終了する（5.6 が足した形。終了時に残らないことを実測する）。
+/// `fail-window:<ミリ秒>` のときは**直ちにウィンドウの生成を失敗させ**
+/// （[`window::force_creation_failure`]）、その ms 後に通常終了する（6.1 が足した形。失敗が
+/// 隔離されることを実測する）。**環境変数が無い通常の起動では関数の先頭で即座に戻るので何も
+/// しない**（解釈できない値のときも何もしない）。したがって配布物の既定の振る舞いを変えない。
 ///
 /// 7.4 / 7.5 がメニュー項目を結線したら、この引き金は不要になる。残す場合もメニューの経路を
 /// 置き換えてはならない（引き金は環境変数が設定された検証のときだけ働く）。
 ///
 /// **名前は 5.4 のままにしてある**（tasks.md の 5.4 の申し送りが片付け対象としてこの名前を
-/// 指しているため）。動作は 3 つを選べるが、仕組みは 1 つのままである。
+/// 指しているため）。動作は 4 つを選べるが、仕組みは 1 つのままである。
 fn arm_verification_exit_trigger(app: &AppHandle) {
     let Ok(value) = std::env::var(VERIFY_EXIT_ENV) else {
         return;
@@ -1654,15 +1682,20 @@ fn arm_verification_exit_trigger(app: &AppHandle) {
         "検証専用の引き金が有効である: {delay_ms} ms 後に {} を行う",
         action.name(),
     );
-    // 補助プロセスの起動は**待たずに直ちに行う**（`<ミリ秒>` は終了までの待ちである。
-    // アプリが生きている間に補助プロセスが動いていることを外部から観測できるようにする）。
-    if action == VerificationAction::Sidecar {
-        start_verification_sidecar(&app);
+    // 補助プロセスの起動と生成の失敗は**待たずに直ちに行う**（`<ミリ秒>` は終了までの待ちで
+    // ある。アプリが生きている間に、補助プロセスが動いていること・他のウィンドウが生きている
+    // ことを外部から観測できるようにする）。
+    match action {
+        VerificationAction::Sidecar => start_verification_sidecar(&app),
+        VerificationAction::FailWindow => window::force_creation_failure(&app),
+        _ => {}
     }
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(delay_ms));
         match action {
-            VerificationAction::Exit | VerificationAction::Sidecar => request_exit(&app),
+            VerificationAction::Exit
+            | VerificationAction::Sidecar
+            | VerificationAction::FailWindow => request_exit(&app),
             // **パニックはメインスレッドで起こす。**ほかのスレッドで起こしたパニックはその
             // スレッドを終わらせるだけでプロセスは生き続けるため、「意図的に異常終了させる」を
             // 満たさない。`run_on_main_thread` はイベントループへ処理を渡すので、パニックは
@@ -2020,11 +2053,26 @@ mod tests {
     }
 
     #[test]
+    fn the_verification_trigger_can_fail_a_window_creation() {
+        // 6.1 が足した形。**同じ環境変数のまま**生成の失敗を起こせる（片付けは 1 箇所のまま。
+        // 要件 2.10 の隔離を実測するために使う）。
+        assert_eq!(
+            parse_verification_trigger("fail-window:3000"),
+            Some((VerificationAction::FailWindow, 3000))
+        );
+        assert_eq!(
+            parse_verification_trigger(" fail-window : 0 "),
+            Some((VerificationAction::FailWindow, 0))
+        );
+    }
+
+    #[test]
     fn an_uninterpretable_verification_trigger_selects_nothing() {
         // 解釈できない値では**何もしない**（配布物の既定の振る舞いを変えない）。
         for value in [
             "", "abc", "panic", "panic:", "exit:", "sidecar", "sidecar:", "sidecar:x",
-            "crash:1500", "1500:panic", "-1", "1.5",
+            "fail-window", "fail-window:", "fail-window:x", "crash:1500", "1500:panic", "-1",
+            "1.5",
         ] {
             assert_eq!(
                 parse_verification_trigger(value),
