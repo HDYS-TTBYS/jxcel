@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 pub mod command_names;
 pub mod error;
 
+pub use command_names::COMMAND_NAMES;
 pub use error::IpcError;
 
 /// 境界を越えるすべてのコマンドが返す封筒（要件 4.2、4.4）。
@@ -76,6 +77,110 @@ impl WindowLabel {
 pub struct WindowContext {
     /// 呼び出し元ウィンドウのラベル。
     pub window: WindowLabel,
+}
+
+/// TypeScript の生成物を再生成する、唯一の文書化されたコマンド（タスク 2.2）。
+///
+/// 生成物のヘッダにもこの文字列を埋め込むため、定数として一箇所に持つ。実行ファイルは
+/// `crates/app-shell/src/bin/generate-bindings.rs` であり、**リポジトリルートで**実行する。
+pub const REGENERATE_BINDINGS_COMMAND: &str = "cargo run -p app-shell --bin generate-bindings";
+
+/// 生成物のヘッダ。生成物であることと再生成の手段を明示する（tasks.md 2.2）。
+fn generated_header() -> String {
+    format!(
+        "// このファイルは生成物である。**手で編集しない。**\n\
+         // 型の宣言は crates/app-shell/src/ipc/ の定義から ts-rs が、コマンド名の定数は\n\
+         // command_names.rs の COMMAND_NAMES が生成する。直すのは生成元である。\n\
+         //\n\
+         // 再生成（リポジトリルートで実行する）: {REGENERATE_BINDINGS_COMMAND}\n\
+         // 本ファイルは追跡対象である。ドリフト検査（タスク 2.3）がバイト比較する。\n"
+    )
+}
+
+/// コマンド名の定数を生成する。単一の源（[`command_names::COMMAND_NAMES`]）をそのまま写し、
+/// 順序も変えない。
+fn command_names_constant() -> String {
+    let mut out = String::new();
+    out.push('\n');
+    out.push_str("/**\n");
+    out.push_str(" * 境界を越えるコマンド名の一覧。`crates/app-shell/src/ipc/command_names.rs` の\n");
+    out.push_str(" * `COMMAND_NAMES` と同一の内容・同一の順序である。`src-tauri` のハンドラ登録と\n");
+    out.push_str(" * 本生成物が同じ配列を参照し、名前のドリフトを構造的に塞ぐ。\n");
+    out.push_str(" */\n");
+    out.push_str("export const COMMAND_NAMES = [\n");
+    for name in command_names::COMMAND_NAMES {
+        out.push_str("  \"");
+        out.push_str(name);
+        out.push_str("\",\n");
+    }
+    out.push_str("] as const;\n");
+    out
+}
+
+/// 型 `T` の TypeScript 宣言を、JSDoc と `export` を付けて組み立て、整列用の型名と対で返す。
+///
+/// `TS::decl` はジェネリックな型でも `type IpcResult<T, E> = ...` の形を返すため、
+/// ジェネリックな宣言もそのまま単一ファイルへ置ける。
+fn declared<T: ts_rs::TS + 'static>(cfg: &ts_rs::Config) -> (String, String) {
+    let mut text = String::new();
+    if let Some(docs) = <T as ts_rs::TS>::docs() {
+        text.push_str(&docs);
+    }
+    text.push_str("export ");
+    text.push_str(&<T as ts_rs::TS>::decl(cfg));
+    text.push('\n');
+    (<T as ts_rs::TS>::ident(cfg), text)
+}
+
+/// 封筒の具体形。`IpcResult<T, E>` の宣言はジェネリックな形（`IpcResult<T, E>`）で出るため、
+/// ペイロード型を名指しする具体形を明示的に生成する（2.1 の申し送り、tasks.md 2.2）。
+///
+/// 現時点で境界が名指しできるペイロード型は [`WindowContext`] だけである。ペイロード型を
+/// 増やしたタスクは、同じ要領で具体形を足す。
+fn concrete_window_context_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "WindowContextResult";
+    let mut text = String::from(
+        "// コマンド応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を名指ししない\n\
+         // ため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<WindowContext, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
+/// 境界を越える型とコマンド名から、追跡対象の TypeScript（`src/ipc/bindings.ts`）を生成する
+/// （tasks.md 2.2、design.md「IpcContract」の Service Interface）。
+///
+/// 同一の入力から常に同一のバイト列を返す。時刻・絶対パス・ホスト名・走査順に依存する内容を
+/// 含めず、宣言は TypeScript の型名で整列するため、型の追加や削除でも順序が揺れない。
+///
+/// `Result` を返すのは design.md の署名に合わせるためである。現在の生成経路は
+/// `TS::decl` / `TS::ident` / `TS::name` だけで完結して失敗しないが、`export_to_string` を
+/// 要する型が境界へ加わったときに失敗を伝えられる形を保つ。
+pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
+    let cfg = ts_rs::Config::default();
+
+    let mut declarations = vec![
+        declared::<WindowLabel>(&cfg),
+        declared::<WindowContext>(&cfg),
+        declared::<IpcError>(&cfg),
+        declared::<IpcResult<WindowContext, IpcError>>(&cfg),
+        concrete_window_context_result(&cfg),
+    ];
+    declarations.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut out = generated_header();
+    out.push_str(&command_names_constant());
+    out.push_str(
+        "\n// ---------------------------------------------------------------------------\n\
+         // 境界を越える型（crates/app-shell/src/ipc/ の定義から ts-rs が生成）\n\n",
+    );
+    for (_, declaration) in declarations {
+        out.push_str(&declaration);
+    }
+    Ok(out)
 }
 
 
@@ -344,5 +449,120 @@ mod tests {
         assert_eq!(value["status"], serde_json::Value::String("error".into()));
         assert!(value.get("error").is_some());
         assert_eq!(serde_json::from_value::<IpcResult<WindowContext, IpcError>>(value).unwrap(), err);
+    }
+
+    // ------------------------------------------------------------------
+    // 2.2: コマンド名の単一配列と TypeScript 生成
+    // ------------------------------------------------------------------
+
+    /// 生成物の `COMMAND_NAMES` の配列リテラルから、要素の文字列を順に取り出す。
+    ///
+    /// 全文一致ではなく配列の中の文字列リテラルだけを取り出すため、整形（インデントや改行）が
+    /// 変わっても「同一の内容・同一の順序」という性質だけを検査できる。名前は snake_case で
+    /// 引用符を含まないため、素朴な走査で足りる。
+    fn emitted_command_names(ts: &str) -> Vec<String> {
+        let start = ts
+            .find("export const COMMAND_NAMES = [")
+            .expect("生成物にコマンド名の定数が必要である");
+        let rest = &ts[start..];
+        let open = rest.find('[').expect("コマンド名の配列が開かれていない");
+        let close = rest.find(']').expect("コマンド名の配列が閉じられていない");
+        assert!(open < close, "配列の開始が終了より後にある");
+        let mut names = Vec::new();
+        let mut chars = rest[open + 1..close].chars();
+        while let Some(c) = chars.next() {
+            if c != '"' {
+                continue;
+            }
+            let mut name = String::new();
+            for c in chars.by_ref() {
+                if c == '"' {
+                    break;
+                }
+                name.push(c);
+            }
+            names.push(name);
+        }
+        names
+    }
+
+    #[test]
+    fn bindings_are_byte_deterministic() {
+        let first = render_bindings().expect("境界の型から TypeScript を生成できなければならない");
+        let second = render_bindings().expect("境界の型から TypeScript を生成できなければならない");
+        assert!(!first.is_empty(), "生成物が空である");
+        assert_eq!(first, second, "同一の入力から常に同一のバイト列が出なければならない");
+    }
+
+    #[test]
+    fn bindings_mirror_command_names_in_order() {
+        let ts = render_bindings().unwrap();
+        let emitted = emitted_command_names(&ts);
+        let expected = COMMAND_NAMES.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            emitted, expected,
+            "生成物のコマンド名は COMMAND_NAMES と同一の内容・同一の順序でなければならない"
+        );
+    }
+
+    #[test]
+    fn command_names_are_unique_and_well_formed() {
+        assert!(!COMMAND_NAMES.is_empty(), "コマンド名の配列を空にしない");
+        let mut seen = std::collections::BTreeSet::new();
+        for name in COMMAND_NAMES {
+            assert!(!name.is_empty(), "空のコマンド名を置かない");
+            assert!(
+                name.chars().next().is_some_and(|c| c.is_ascii_lowercase()),
+                "コマンド名は英小文字で始める: {name}"
+            );
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "コマンド名は snake_case とする: {name}"
+            );
+            assert!(seen.insert(*name), "コマンド名が重複している: {name}");
+        }
+    }
+
+    /// 生成物に型の位置の `any` が無いこと。**整数の数値型も同様に検査する** — 境界の型を
+    /// 数値で露出させないことが 2.1 の不変条件であり、生成物はその合算である。
+    #[test]
+    fn bindings_contain_no_any() {
+        let ts = render_bindings().unwrap();
+        assert_no_any(&ts);
+        assert_no_numeric_type(&ts);
+    }
+
+    #[test]
+    fn bindings_declare_every_boundary_type() {
+        let ts = render_bindings().unwrap();
+        for declaration in [
+            "export type WindowLabel = string;",
+            "export type IpcError =",
+            "export type IpcResult<T, E> =",
+            "export type WindowContext =",
+        ] {
+            assert!(ts.contains(declaration), "生成物に `{declaration}` が無い:\n{ts}");
+        }
+    }
+
+    /// 封筒の宣言はジェネリックな形で出るため、ペイロード型を名指しする具体形を別途出力して
+    /// いることを固定する（2.1 の申し送り）。
+    #[test]
+    fn bindings_name_the_payload_types_of_the_envelope() {
+        let ts = render_bindings().unwrap();
+        assert!(
+            ts.contains("export type WindowContextResult = IpcResult<WindowContext, IpcError>;"),
+            "封筒の具体形がペイロード型を名指ししていない:\n{ts}"
+        );
+    }
+
+    #[test]
+    fn bindings_header_names_the_regeneration_command() {
+        let ts = render_bindings().unwrap();
+        assert!(
+            ts.contains(REGENERATE_BINDINGS_COMMAND),
+            "生成物のヘッダに再生成コマンドが無い:\n{ts}"
+        );
+        assert!(ts.contains("手で編集しない"), "生成物であることの注意がヘッダに無い:\n{ts}");
     }
 }

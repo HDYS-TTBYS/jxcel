@@ -163,6 +163,8 @@ crates/app-shell/                   # Tauri 非依存のコア。GUI なしで�
 │   │   ├── mod.rs                  # 境界を越える型。ts-rs derive を持つ唯一の場所
 │   │   ├── command_names.rs        # コマンド名の単一配列。ハンドラ登録と TS 生成の共通の源
 │   │   └── error.rs                # 型付きエラー封筒
+│   ├── bin/
+│   │   └── generate-bindings.rs    # 生成物を書く唯一の入口（開発用バイナリ。配布物には含めない）
 │   ├── sidecar/
 │   │   ├── mod.rs                  # SidecarSupervisor の公開 API
 │   │   ├── supervisor.rs           # 起動・共有・再起動・終了・出力の取得

@@ -71,7 +71,7 @@
   - _Requirements: 4.2, 4.4_
   - _Depends: 1.2_
 
-- [ ] 2.2 コマンド名の単一配列と TypeScript 生成を実装する
+- [x] 2.2 コマンド名の単一配列と TypeScript 生成を実装する
   - コマンド名を定数配列として定義する。ハンドラ登録と TypeScript の生成物の**両方**がこの配列を参照する
   - 型定義から TypeScript を生成する入口を用意する。同一の入力から常に同一のバイト列が出ること
   - 生成物をリポジトリの追跡対象として置く
@@ -479,6 +479,11 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **2.2**: `COMMAND_NAMES`（`crates/app-shell/src/ipc/command_names.rs`）が**唯一の源**。現在の集合は `render_heartbeat` / `can_close_window` / `settings_get` / `settings_set` / `pick_document_file` / `bulk_echo` / `diagnostics_log_location` / `diagnostics_export` / `diagnostics_verbosity_get` / `diagnostics_verbosity_set`。**後続タスク（および後続スペック）は名前を文字列リテラルで登録せず、必ずこの配列へ追加する**。改名・削除は design.md の Revalidation Trigger である（7.1 のハンドラ登録と `bindings.ts` の両方が壊れる）。`bulk_echo` の名前は 7.2 の実装時に確定させること。
+- **2.2**: 生成は `cargo run -p app-shell --bin generate-bindings` の 1 コマンドで `src/ipc/bindings.ts` を書く（開発用バイナリ。**配布物には含まれない** — Tauri が同梱するのは `src-tauri` のバイナリだけ）。`render_bindings()` は `Result<String, ts_rs::ExportError>` を返す純粋関数で、ファイルを書かない。出力は**バイト決定的**（固定ベクタを型名でソート、絶対パス・時刻・環境変数を含まない。実行・環境・cwd を変えても同一 sha256 を実測）。
+- **2.2**: `bindings.ts` は `IpcResult<T, E>`（ジェネリック）と `WindowContextResult = IpcResult<WindowContext, IpcError>`（ペイロード型を名指しする具体形）を含む。**ジェネリック宣言はペイロード型を名指ししない**という 2.1 の申し送りに対応するのがこの具体形で、2.4 のラッパはこれを使う。
+- **2.2**: 生成物を検査するときの注意（2.1 と同じ）: コメントを除去してからトークン境界で照合する。`bindings.ts` には JSDoc が入るので全文一致は偽陽性を生む。
 
 - **2.1**: 境界の型は `crates/app-shell/src/ipc/` の 2 ファイルにある。`IpcResult<T, E>`（`#[serde(tag = "status")]` + 変種 `ok` / `error`）と `IpcError`（`#[serde(tag = "kind", content = "detail")]` + 構造体変種 Settings / Sidecar / Window が `message` を持つ）。**design.md の serde 属性はそのまま成立する** — 「隣接タグ付けは構造体変種を取れない」という制約は存在せず、制約があるのは内部タグ付け＋タプル変種の方である（serde 1.0.229 で実測）。ts-rs の derive を付けてよいのは **`src/ipc/` 配下だけ**。
 - **2.1**: 識別子は `WindowLabel(String)` + `#[ts(type = "string")]`（TS では `string`）。**64 ビット整数を境界に出さない**。`WindowContext { window: WindowLabel }` が呼び出し元ウィンドウを表す境界ペイロードで、**7.1 はこれを再定義せず `app_shell::ipc::WindowContext` を使うこと**（要件 4.2 の単一定義）。今後追加するドキュメント／行の識別子も同じ文字列規則に従う。
