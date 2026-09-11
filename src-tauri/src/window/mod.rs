@@ -36,8 +36,9 @@
 //! （タスクのパニックは非同期ランタイムが隔離し、返った `JoinHandle` を捨てているため外へ
 //! 出ない）。強制的に失敗させる検証用の入口は [`force_creation_failure`] にある。
 //!
-//! 子モジュール [`close`]（終了拒否の仲介 / タスク 7.6）と [`geometry`]（位置とサイズの
-//! 記憶 / タスク 6.3）は 1.3 が置いた骨組みのままである。
+//! 子モジュール [`close`]（終了拒否の仲介 / タスク 7.6）は 1.3 が置いた骨組みのままである。
+//! [`geometry`]（位置とサイズの記憶 / 要件 2.7 / タスク 6.3）は生成の初期値（[`build_window`]）
+//! と破棄の通知（[`on_window_event`]）の 2 箇所に結線されている。
 
 mod close;
 mod geometry;
@@ -151,11 +152,26 @@ fn spawn_creation<R: Runtime>(app: AppHandle<R>, state: WindowState) {
 ///
 /// ここは必ず [`tauri::async_runtime::spawn`] のタスク（イベントループのスレッドではない）から
 /// 呼ばれる。同期の文脈から直接呼ぶと Windows でデッドロックする（モジュール doc を参照）。
+///
+/// **直近に閉じられたウィンドウの位置とサイズを初期値に使う**（要件 2.7、タスク 6.3）。
+/// 復元の判断は [`geometry::initial_geometry`] が行う（保存値が無い・壊れている・画面外の
+/// 位置はどれも生成側の既定値に落ちる）。生成が済んだら、その形状を最初の観測として
+/// [`geometry::remember_created`] に渡す（移動・拡大縮小の通知が届かないうちに閉じられても、
+/// 少なくとも生成時の形状を次のウィンドウへ引き継げるようにする）。
 fn build_window<R: Runtime>(app: &AppHandle<R>, label: &str) -> tauri::Result<WebviewWindow<R>> {
-    WebviewWindowBuilder::new(app, label, WebviewUrl::default())
+    let initial = geometry::initial_geometry(app);
+    let (width, height) = initial.size().unwrap_or(DEFAULT_WINDOW_SIZE);
+    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::default())
         .title(WINDOW_TITLE)
-        .inner_size(DEFAULT_WINDOW_SIZE.0, DEFAULT_WINDOW_SIZE.1)
-        .build()
+        .inner_size(width, height);
+    // 位置は復元できたときだけ指定する（指定しなければウィンドウマネージャの既定の配置に
+    // 任せる）。
+    if let Some((x, y)) = initial.position() {
+        builder = builder.position(x, y);
+    }
+    let window = builder.build()?;
+    geometry::remember_created(&window);
+    Ok(window)
 }
 
 /// ウィンドウを復元して前面に出す。失敗は記録に残すだけで、呼び出し元の処理を妨げない。
@@ -168,11 +184,17 @@ pub fn focus<R: Runtime>(window: &WebviewWindow<R>) {
     }
 }
 
-/// ウィンドウの破棄をレジストリに反映する（`Builder::on_window_event` に結線する）。
+/// ウィンドウのイベントを処理する（`Builder::on_window_event` に結線する）。
 ///
-/// 登録は生成の前に済んでいるため、**破棄の通知は必ず登録を見つける**（登録が漏れない）。
-/// 破棄はウィンドウが閉じられた後に届くので、ここで取り除いた登録はもう使われない。
+/// 行うことは 2 つである:
+///
+/// 1. **位置とサイズの記憶**（要件 2.7、タスク 6.3）。[`geometry::observe`] が移動・
+///    拡大縮小を観測し、**破棄の通知で設定ストアへ保存する**（終了イベントを待たない）。
+/// 2. **破棄の通知をレジストリに反映する**。登録は生成の前に済んでいるため、**破棄の通知は
+///    必ず登録を見つける**（登録が漏れない）。破棄はウィンドウが閉じられた後に届くので、
+///    ここで取り除いた登録はもう使われない。
 pub fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
+    geometry::observe(window, event);
     if !matches!(event, WindowEvent::Destroyed) {
         return;
     }

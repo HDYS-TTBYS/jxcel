@@ -47,6 +47,13 @@ tauri = { version = "2.11.3", features = [] }
 # 設定ストア・診断の保存先の解決（要件 7.2、8.1）でこれを呼ぶ。逆方向の依存は持たない。
 app-shell = { path = "../crates/app-shell" }
 
+# 設定値の形の直列化（タスク 6.3）。`window.geometry` は design.md「Logical Data Model」が
+# **オブジェクト**と定めているため、位置とサイズの 4 フィールドを持つ構造体を derive で
+# そのまま載せる（`SettingsStore::get/set` は `serde` の型を要求する）。**新しいクレートでは
+# ない** — `app-shell` と `tauri` が既に同じ版（1.0.229）を解決しており、本クレートから直接
+# 参照するだけである（`Cargo.lock` に新しいパッケージは増えない）。
+serde = { version = "1.0", features = ["derive"] }
+
 # 二重起動の制御（要件 1.5）。登録はタスク 5.1 が起動順序の先頭で行う。
 # 下限 2.4.3 は macOS のスレッドブロック不具合の修正版（tech.md「Dependency Floors」）。
 tauri-plugin-single-instance = "2.4.3"
