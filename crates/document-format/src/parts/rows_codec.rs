@@ -196,8 +196,13 @@ impl RowsCodec {
                 });
             }
             for (column, value) in columns.iter().zip(values) {
-                let cell_location = format!("{location} line {line}: column {column}");
-                cells.push(to_raw_value(value, &cell_location)?);
+                // セル単位の位置は失敗したときにだけ組み立てる。成功経路で組み立てると
+                // 10 万行 × 30 列で 300 万回の文字列確保になる（要件 8.2 の予算を圧迫する）。
+                // 符号化は入力だけで決まるので、同じセルをやり直せば同じ失敗が位置付きで返る。
+                let cell = to_raw_value(value, &location).or_else(|_| {
+                    to_raw_value(value, &format!("{location} line {line}: column {column}"))
+                })?;
+                cells.push(cell);
             }
         }
         let records: Vec<RowRecord<'_>> = rows
