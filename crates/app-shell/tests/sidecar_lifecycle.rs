@@ -153,6 +153,15 @@ fn sidecar_spec(executable: &Path) -> SidecarSpec {
     }
 }
 
+/// さらに孫プロセスを 1 つ起動する補助プロセスの仕様。`--spawn-grandchild` は検証専用の
+/// オプションであり、`crates/sidecar-smoke` の実用的な機能ではない（tasks.md 3.3 の完了状態を
+/// 実プロセスで確かめるためだけに存在する）。
+fn grandchild_spec(executable: &Path) -> SidecarSpec {
+    let mut spec = sidecar_spec(executable);
+    spec.args.push("--spawn-grandchild".to_string());
+    spec
+}
+
 // ---------------------------------------------------------------------------
 // OS からのプロセス数の取得
 // ---------------------------------------------------------------------------
@@ -272,6 +281,91 @@ fn count_settled_sidecars(handles: &[SidecarHandle], context: &str) -> usize {
             eprintln!(
                 "{context}: OS 上の sidecar-smoke プロセス数 = {count}（期限切れ、ハンドルの PID 数 {expected_processes}）"
             );
+            return count;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// OS 上で実行中の `sidecar-smoke` の総数を返す（親子関係を問わない）。
+///
+/// 孫ありの終了保証（tasks.md 3.3 の完了状態）を確かめるには、直接の子だけでなく孫の消滅まで
+/// 見る必要がある。**親子関係で絞ってはならない**: 直接の子を終了した時点で孫は再親付けされ、
+/// 「テストの子孫」ではなくなるため、ツリーをたどる方式では生存している孫を数え落とす。
+/// このファイルのテストは直列化されており、実行中に `sidecar-smoke` を起動するのはテスト自身
+/// だけなので、名前で数えても同一性は保たれる。
+#[cfg(target_os = "linux")]
+fn count_live_sidecars() -> usize {
+    let stem = SidecarKind::Smoke.as_str();
+    let mut count = 0usize;
+    let entries = match fs::read_dir("/proc") {
+        Ok(entries) => entries,
+        Err(_) => return 0,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.parse::<u32>().is_err() {
+            continue;
+        }
+        let cmdline = match fs::read(entry.path().join("cmdline")) {
+            Ok(cmdline) => cmdline,
+            Err(_) => continue,
+        };
+        // ゾンビは `cmdline` が空なので数えない（= 「実行中」だけを数える）。
+        if !cmdline.is_empty() && String::from_utf8_lossy(&cmdline).contains(stem) {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// macOS には `/proc` が無いため `pgrep -f` でコマンドライン全体に一致させる。`-P` は付けない —
+/// 孫は直接の子ではないため、親を限定すると数え落とす。テストは直列化されているので、
+/// 同時に補助プロセスを起動する他のテストは無い。
+#[cfg(target_os = "macos")]
+fn count_live_sidecars() -> usize {
+    let output = Command::new("pgrep")
+        .arg("-f")
+        .arg(SidecarKind::Smoke.as_str())
+        .output()
+        .expect("pgrep を実行できる");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+}
+
+/// Windows の `tasklist` はイメージ名で全プロセスを列挙する。親子で絞らない点が、ここで
+/// 必要とする数え方そのものである。
+#[cfg(windows)]
+fn count_live_sidecars() -> usize {
+    count_running_sidecars()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn count_live_sidecars() -> usize {
+    panic!("この OS では補助プロセスの数を数える経路を持たない（対象は Linux / macOS / Windows）")
+}
+
+/// 実行中の `sidecar-smoke` の数が `expected` に安定するまで待ってから返す。孫の起動（0→2）と
+/// 終了（2→0）のどちらにも使う。`expected` に到達した瞬間では打ち切らず、一回間を置いて
+/// 再サンプルし、同数で安定したときだけ確定する。
+fn wait_for_sidecar_count(expected: usize, timeout: Duration, context: &str) -> usize {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let count = count_live_sidecars();
+        if count == expected {
+            thread::sleep(Duration::from_millis(25));
+            let settled = count_live_sidecars();
+            if settled == expected {
+                eprintln!("{context}: OS 上の実行中 sidecar-smoke 数 = {settled}");
+                return settled;
+            }
+        }
+        if Instant::now() >= deadline {
+            let count = count_live_sidecars();
+            eprintln!("{context}: OS 上の実行中 sidecar-smoke 数 = {count}（期限切れ、期待 {expected}）");
             return count;
         }
         thread::sleep(Duration::from_millis(5));
@@ -692,4 +786,226 @@ fn failed_spawn_is_reported_distinctly() {
         "Spawn を期待したが {error:?} だった"
     );
     assert_eq!(count_running_sidecars(), 0, "起動していないはずである");
+}
+
+// ---------------------------------------------------------------------------
+// 終了保証: 孫を含めて残さない（要件 5.6、tasks.md 3.3 の完了状態）
+// ---------------------------------------------------------------------------
+
+/// 子がさらに孫を起動している状態で `shutdown_all` を呼んでも、**孫を含めて**残らない
+/// （tasks.md 3.3 の完了状態）。API の戻り値ではなく OS から見たプロセス数で確認する。
+///
+/// Unix はプロセスグループ宛の終了、Windows は Job Object の終了が孫に届くことを、
+/// 実プロセスで固定する。
+#[test]
+fn shutdown_all_reaps_child_and_grandchild() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("shutdown_all_reaps_child_and_grandchild");
+        return;
+    };
+
+    let supervisor = Supervisor::new().with_grace(Duration::from_millis(200));
+    let handle = supervisor
+        .ensure(&grandchild_spec(&executable))
+        .expect("子と孫を起動できる");
+    let _guard = SidecarGuard::new(handle.clone());
+
+    // 子（1）と孫（1）の両方が OS から見えるまで待つ。ここで 2 に到達しないなら、そもそも
+    // 孫が起動していないので、以降の主張は意味を持たない。
+    let before = wait_for_sidecar_count(2, Duration::from_secs(10), "終了処理の前");
+    assert_eq!(
+        before, 2,
+        "子と孫が起動しているはずである（OS 上の子孫数 {before}）"
+    );
+
+    supervisor
+        .shutdown_all()
+        .expect("子も孫も残さず終了できる");
+
+    // API を信じず、OS から見て子孫が消えたことを確かめる。
+    let after = wait_for_sidecar_count(0, Duration::from_secs(10), "終了処理の後");
+    assert_eq!(
+        after, 0,
+        "終了処理の後に子または孫が残っている（OS 上の子孫数 {after}）"
+    );
+    assert!(
+        supervisor.get(SidecarKind::Smoke).is_none(),
+        "終了処理の後に登録簿が空になっていない"
+    );
+}
+
+/// 直接の子だけを終了しても孫は残る — したがってグループ / ジョブ宛の終了が**必要**である。
+///
+/// これは終了保証の負荷証明を恒久的な回帰テストにしたものである。[`SidecarHandle::kill`] は
+/// 直接の子にしか届かないため、孫は生存し続ける。グループ宛の `shutdown_all` が孫を終わらせる。
+#[test]
+fn direct_kill_leaves_the_grandchild_until_group_termination() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("direct_kill_leaves_the_grandchild_until_group_termination");
+        return;
+    };
+
+    let supervisor = Supervisor::new().with_grace(Duration::from_millis(200));
+    let handle = supervisor
+        .ensure(&grandchild_spec(&executable))
+        .expect("子と孫を起動できる");
+    let _guard = SidecarGuard::new(handle.clone());
+
+    let before = wait_for_sidecar_count(2, Duration::from_secs(10), "直接終了の前");
+    assert_eq!(before, 2, "子と孫が起動しているはずである（OS 上の子孫数 {before}）");
+
+    // 直接の子だけを強制終了する（グループ / ジョブ宛ではない）。
+    handle.kill().expect("直接の子を強制終了できる");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match handle.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => panic!("強制終了した直接の子が期限内に終了しない"),
+            Err(error) => panic!("直接の子の終了状態を取得できない: {error}"),
+        }
+    }
+
+    let after_direct = wait_for_sidecar_count(1, Duration::from_secs(5), "直接の子だけを終了した後");
+    assert_eq!(
+        after_direct, 1,
+        "孫が直接の子の終了に巻き込まれてはならない（グループ / ジョブ宛の終了が必要である証拠。OS 上の子孫数 {after_direct}）"
+    );
+
+    // グループ / ジョブ宛の終了は、直接の子が既に死んでいても孫まで届く。
+    supervisor.shutdown_all().expect("登録簿から孫を終了できる");
+    let after_group = wait_for_sidecar_count(0, Duration::from_secs(10), "グループ宛の終了の後");
+    assert_eq!(
+        after_group, 0,
+        "グループ / ジョブ宛の終了でも孫が残った（OS 上の子孫数 {after_group}）"
+    );
+}
+
+/// 猶予段が先に走り、猶予信号を無視する子は強制段で終了する（tasks.md 3.3 の猶予→強制の段階）。
+///
+/// 補助プロセスは `--ignore-term`（検証専用）で猶予信号を無視する。`shutdown_all` は猶予時間を
+/// 待ってから強制段へ移るため、経過時間は猶予時間以上になる。実装が猶予段を飛ばして即座に
+/// 強制していたら経過時間が猶予を下回ってこのテストが落ち、猶予段だけ送って終わらせていれば
+/// 子が生存したままになって落ちる。
+#[test]
+fn shutdown_all_graceful_stage_precedes_forced_kill() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("shutdown_all_graceful_stage_precedes_forced_kill");
+        return;
+    };
+
+    let grace = Duration::from_millis(300);
+    let supervisor = Supervisor::new().with_grace(grace);
+
+    let mut spec = sidecar_spec(&executable);
+    spec.args.push("--ignore-term".to_string());
+    let handle = supervisor.ensure(&spec).expect("起動できる");
+    let _guard = SidecarGuard::new(handle.clone());
+
+    let started_count = count_settled_sidecars(&[handle.clone()], "猶予段の検証の前");
+    assert_eq!(
+        started_count, 1,
+        "猶予信号を無視する子が起動しているはずである（OS 上のプロセス数 {started_count}）"
+    );
+
+    let started = Instant::now();
+    supervisor
+        .shutdown_all()
+        .expect("猶予信号を無視する子も強制段で終了できる");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= grace,
+        "猶予段を経ずに強制終了した（経過 {elapsed:?} < 猶予 {grace:?}）"
+    );
+    let after = wait_for_sidecar_count(0, Duration::from_secs(10), "強制段の後");
+    assert_eq!(
+        after, 0,
+        "猶予信号を無視した子が強制段で終了していない（OS 上のプロセス数 {after}）"
+    );
+    match handle.try_wait() {
+        Ok(Some(_)) => {}
+        other => panic!("子が回収されていない: {other:?}"),
+    }
+}
+
+/// `shutdown_all` は冪等であり、登録簿を空に保つ（tasks.md 3.3「2 回呼んでも安全」）。
+///
+/// 2 回目は登録簿が空であるため、猶予時間を待たずに即座に成功する。起動が 1 度も無い監督でも
+/// 成功する。
+#[test]
+fn shutdown_all_is_idempotent_and_clears_the_registry() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("shutdown_all_is_idempotent_and_clears_the_registry");
+        return;
+    };
+
+    let supervisor = Supervisor::new().with_grace(Duration::from_millis(100));
+    let handle = supervisor.ensure(&sidecar_spec(&executable)).expect("起動できる");
+    let _guard = SidecarGuard::new(handle.clone());
+
+    supervisor.shutdown_all().expect("1 回目の終了処理");
+    assert!(
+        supervisor.get(SidecarKind::Smoke).is_none(),
+        "1 回目の終了処理の後に登録簿が空になっていない"
+    );
+
+    let started = Instant::now();
+    supervisor.shutdown_all().expect("2 回目の終了処理");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "2 回目の終了処理が待たされた（冪等でない）"
+    );
+
+    // 起動が一度も無い監督でも成功する。
+    let empty = Supervisor::new().with_grace(Duration::from_millis(100));
+    empty.shutdown_all().expect("起動が無くても成功する");
+
+    assert_eq!(count_running_sidecars(), 0, "起動していないはずである");
+}
+
+/// 子が既に終了しているときに `shutdown_all` を呼んでもハングしない（tasks.md 3.3
+/// 「既に終了した子でハングしない」）。
+///
+/// 5 秒の猶予を与えておく。実装が猶予を無条件に消費するならこのテストが落ちる。
+#[test]
+fn shutdown_all_returns_promptly_when_the_child_is_already_dead() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("shutdown_all_returns_promptly_when_the_child_is_already_dead");
+        return;
+    };
+
+    let grace = Duration::from_secs(5);
+    let supervisor = Supervisor::new().with_grace(grace);
+    let handle = supervisor.ensure(&sidecar_spec(&executable)).expect("起動できる");
+    let _guard = SidecarGuard::new(handle.clone());
+
+    handle.kill().expect("子を強制終了できる");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match handle.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => panic!("強制終了した子が期限内に終了しない"),
+            Err(error) => panic!("子の終了状態を取得できない: {error}"),
+        }
+    }
+
+    let started = Instant::now();
+    supervisor
+        .shutdown_all()
+        .expect("既に終了した子でも成功する");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "既に終了した子に猶予 {grace:?} を消費した（ハングしない要件に反する）"
+    );
+    assert!(
+        supervisor.get(SidecarKind::Smoke).is_none(),
+        "終了処理の後に登録簿が空になっていない"
+    );
 }

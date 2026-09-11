@@ -112,7 +112,7 @@
   - _Boundary: SidecarSupervisor_
   - _Depends: 1.2, 1.6_
 
-- [ ] 3.3 プラットフォーム別の終了保証を実装する
+- [x] 3.3 プラットフォーム別の終了保証を実装する
   - Windows は仕事オブジェクトを用い、親が閉じたら子も終了する設定を与える。**これは中核が強制するため、アプリ側が異常終了した後にも有効な唯一の機構である**
   - Unix はプロセスグループを作り、グループ宛に終了を送る。孫プロセスまで届くようにする
   - 猶予を与えてから強制終了へ移行する段階を設ける
@@ -479,6 +479,12 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **3.3**: Unix は spawn 時に `pre_exec` + `setpgid(0,0)` で**子を独自のプロセスグループに入れ**、終了は `killpg` でグループ宛に `SIGTERM` → 猶予 → `SIGKILL`。pid 宛の `kill` に退行すると孫が残る（レビューで実測: `killpg` を `kill` に変えると孫が生存してテストが落ちる）。Windows は Job Object に `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` を設定して spawn 直後に割り当て、強制段は `TerminateJobObject`。**カーネルが強制するのでアプリの異常終了後も有効な唯一の機構**である（design の根拠）。
+- **3.3**: `shutdown_all()` を追加（`ShutdownError`、`DEFAULT_GRACE = 3s`、テストは `with_grace` で短縮）。冪等・有界・登録表を空にする。`sweep_orphans` は 3.5 のまま未実装。
+- **3.3（既知の制約・Windows 実行は未検証）**: ①Windows の穏当段 `CTRL_BREAK_EVENT` は**コンソールを持たない GUI アプリの子には実質 no-op** であり、Windows では毎回猶予 3 秒を消費してから強制に移る。5.6 の保証は満たすが、終了時の体感遅延になる（短縮するなら「穏当段が届かない環境では猶予を待たない」判断が要る）。②`Group::exists()` は `QueryInformationJobObject` 失敗時に false を返すため、`child_exited && !exists()` の腕で `TerminateJobObject` を飛ばし、ハンドル close の backstop に委ねる経路がある。
+- **3.3**: `crates/sidecar-smoke` に**検証専用**の `--spawn-grandchild` / `--ignore-term` / `--idle` を追加した（孫の存在と猶予段の検証、および 10.7 のため。実用的な機能は持たせない方針は維持）。**このクレートを変更したら `bash scripts/stage-sidecars.sh` を再実行して配置物のダイジェストを更新する**（3.1 の build.rs が追随する）。
+- **3.3**: テストの孫の残存確認は**親を辿る方法ではなく、生きている `sidecar-smoke` プロセスを数える方法**にする（孫は再親化して親子関係が切れるため）。`/proc/<pid>/cmdline` を走査し、`before == 2` の事前条件で計測の感度を自己検証している。
 
 - **3.2**: 監督の中核は `crates/app-shell/src/sidecar/supervisor.rs`。**起動は 1 回に収める**という不変条件は「登録表の mutex を、生存確認 → 整合性検査 → spawn → 登録 の全体にわたって保持する」ことで守る。`ensure` は**spawn の前に `integrity::verify` を通す**（要件 5.3 の順序を構造的に保証）。`get` は死んだ登録を除去して返さない。`ensure` にも「登録済みだが死んでいる」腕があり、除去して spawn し直す。
 - **3.2**: `SpawnError` は `NotFound` / `NotExecutable` / `IntegrityMismatch { path, source: IntegrityError }` / `Spawn` の 4 種。**`IntegrityError::Unregistered`（期待値が未登録）は `IntegrityMismatch` の `source` として報告**し、決して黙って通さない（design の `{ path }` に対する加算的な逸脱だが、5.3 が要求する「検出して報告」を満たすため）。バリアントだけを見る呼び出し元は「整合性検査に失敗した」と解釈するが、それは事実に反しない。

@@ -1,9 +1,11 @@
-//! 補助プロセスの起動・共有・再起動と、起動失敗の区別（要件 5.4、5.5、5.8）。
+//! 補助プロセスの起動・共有・再起動と、起動失敗の区別、プラットフォーム別の終了保証
+//! （要件 5.4、5.5、5.6、5.8）。
 //!
 //! 種類ごとに高々 1 つのプロセスを保持し、要求が重なっても起動を 1 回に収める。予期せず終了して
 //! いた場合は次に必要になった時点で改めて起動を試みる。起動失敗は原因を区別できる列挙として
-//! 返す。終了保証（プロセスグループ / Job Object）と残留の掃除は後続タスク（3.3 / 3.5）、
-//! 出力の行単位の取得と終了の通知は 3.4 が所有する。
+//! 返す。終了は [`Supervisor::shutdown_all`] が担い、猶予を与えてから強制へ移る段階を経て、
+//! 孫プロセスまで残さない（要件 5.6）。残留の掃除は 3.5、出力の行単位の取得と終了の通知は
+//! 3.4 が所有する。
 //!
 //! # 不変条件と、それを成立させている箇所
 //!
@@ -21,10 +23,9 @@
 //!
 //! # 後続タスクへの申し送り
 //!
-//! - **3.3 / 3.5**: [`SidecarSupervisor`] は意図的に `ensure` と `get` だけを宣言している。
-//!   `shutdown_all`（3.3）と `sweep_orphans`（3.5）は後続タスクがこの trait に追加する —
-//!   ここに空のスタブを置くと「実装済み」と誤認されるため置かない。実装 [`Supervisor`] は
-//!   同じ trait を実装し続ける。終了保証は `group_unix` / `job_windows` が持つ。
+//! - **3.5**: [`SidecarSupervisor`] は `ensure` / `get` / `shutdown_all` を宣言している。
+//!   `sweep_orphans`（残留の掃除）は 3.5 がこの trait に追加する — ここに空のスタブを置くと
+//!   「実装済み」と誤認されるため置かない。終了保証は `group_unix` / `job_windows` が持つ。
 //! - **3.4**: 標準出力・標準エラーは [`Stdio::piped`] で作ってあり、[`SidecarHandle`] の
 //!   [`take_stdout`](SidecarHandle::take_stdout) / [`take_stderr`](SidecarHandle::take_stderr) から
 //!   取り出せる。本タスクでは読まない。3.4 が読み取りを張るまでに子がパイプの容量
@@ -36,9 +37,31 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::integrity::{self, IntegrityError};
 use super::SidecarKind;
+
+/// プラットフォーム別の終了保証。Unix はプロセスグループ、Windows は Job Object。
+#[cfg(unix)]
+use super::group_unix as platform;
+#[cfg(windows)]
+use super::job_windows as platform;
+
+/// 猶予段で強制段へ移るまでに待つ既定時間。
+///
+/// 穏やかな終了通知を受けた補助プロセスが、書きかけの出力を流し、資源を閉じて自ら終了するには
+/// 十分な長さでありながら、アプリ終了を目に見えて遅らせない上限である。通常は補助プロセスが
+/// もっと早く終了するため、この上限まで待つのは「猶予信号を無視した」場合だけである。テストは
+/// [`Supervisor::with_grace`] で短い値を与える。
+pub const DEFAULT_GRACE: Duration = Duration::from_secs(3);
+
+/// 終了段の待ち合わせで状態を確かめる間隔。
+const TERMINATION_POLL: Duration = Duration::from_millis(10);
+
+/// 強制段の後に直接の子を回収する上限。これを超えても待ち続けない（無限に待たない）。
+const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 起動する補助プロセスの仕様（design.md「SidecarSupervisor」の `SidecarSpec`）。
 ///
@@ -83,6 +106,20 @@ pub enum SpawnError {
     Spawn { message: String },
 }
 
+/// 補助プロセスの終了に失敗した理由（design.md「SidecarSupervisor」の `ShutdownError`）。
+///
+/// 終了処理は冪等であり、既に終了した子・存在しないグループへの信号は成功として扱う。したがって
+/// ここへ到達するのは、強制段の信号そのものが失敗した場合（権限など）に限られる。登録簿は
+/// 失敗の有無にかかわらず空にするため、呼び出しを繰り返しても状態は一貫する。
+#[derive(Debug, thiserror::Error)]
+#[error("補助プロセス {kind} の終了に失敗した: {message}")]
+pub struct ShutdownError {
+    /// 終了できなかった補助プロセスの種類。
+    pub kind: SidecarKind,
+    /// 失敗の内容（`Display` 済みの理由）。
+    pub message: String,
+}
+
 /// 整合性検査の差し替え口。
 pub type IntegrityVerifier =
     dyn Fn(SidecarKind, &Path) -> Result<(), IntegrityError> + Send + Sync;
@@ -96,13 +133,17 @@ pub type IntegrityVerifier =
 pub struct SidecarHandle {
     kind: SidecarKind,
     child: Arc<Mutex<Child>>,
+    /// プラットフォーム別の終了保証の対象（Unix はプロセスグループ、Windows は Job Object）。
+    /// `Arc` で共有し、最後の参照が消えた時点で Windows のジョブハンドルが閉じる。
+    platform: Arc<platform::Group>,
 }
 
 impl SidecarHandle {
-    fn new(kind: SidecarKind, child: Child) -> Self {
+    fn new(kind: SidecarKind, child: Child, platform: platform::Group) -> Self {
         SidecarHandle {
             kind,
             child: Arc::new(Mutex::new(child)),
+            platform: Arc::new(platform),
         }
     }
 
@@ -124,9 +165,9 @@ impl SidecarHandle {
 
     /// 直接の子だけを強制終了する。
     ///
-    /// プロセスグループ / Job Object 単位の猶予付き終了（要件 5.6）はタスク 3.3 が
-    /// `group_unix` / `job_windows` に実装する。ここは直接の子に限った強制終了であり、
-    /// 本番の終了経路は 3.3 のものに置き換わる。
+    /// 補助プロセスがさらに孫を起動している場合、これだけでは孫に届かない。本番の終了経路は
+    /// [`SidecarSupervisor::shutdown_all`]（プロセスグループ / Job Object 宛）であり、こちらは
+    /// テストの後始末など、直接の子だけを対象にした低水準の操作である。
     pub fn kill(&self) -> io::Result<()> {
         self.lock().kill()
     }
@@ -158,10 +199,8 @@ impl SidecarHandle {
 
 /// 補助プロセスの監督（design.md「SidecarSupervisor」の Service Interface）。
 ///
-/// **意図的に部分的な定義である。** design.md の一覧は `shutdown_all`（タスク 3.3）と
-/// `sweep_orphans`（タスク 3.5）も含むが、それらは後続タスクが所有する実体である。ここに
-/// 空のスタブを置くと「実装済み」と誤認されるため宣言しない。3.3 / 3.5 がこの trait に
-/// メソッドを追加し、実装 [`Supervisor`] を拡張する。
+/// `sweep_orphans`（残留の掃除）はタスク 3.5 がこの trait に追加する。ここに空のスタブを置くと
+/// 「実装済み」と誤認されるため宣言しない。
 pub trait SidecarSupervisor {
     /// 起動済みなら既存のハンドルを返し、未起動なら起動する。予期せず終了していた場合はこの
     /// 呼び出しで改めて起動を試みる（要件 5.8）。
@@ -169,6 +208,16 @@ pub trait SidecarSupervisor {
 
     /// 起動しているものだけを返す。起動はしない。終了済みは `None` を返す。
     fn get(&self, kind: SidecarKind) -> Option<SidecarHandle>;
+
+    /// 起動したすべての補助プロセスを終了させる（要件 5.6）。
+    ///
+    /// 種類ごとに、まずグループ / ジョブ宛の穏やかな終了を送り、[`DEFAULT_GRACE`]（テストでは
+    /// [`Supervisor::with_grace`] が与える値）だけ待ってから強制終了へ移る。**直接の子だけでなく
+    /// 孫プロセスまで対象にする**（Unix は `killpg`、Windows は `TerminateJobObject`）。
+    ///
+    /// 冪等である: 登録簿はこの呼び出しで空になり、既に終了した子・存在しないグループへの信号は
+    /// 成功として扱う。したがって 2 回目は何も待たずに成功し、既に死んだ子でハングしない。
+    fn shutdown_all(&self) -> Result<(), ShutdownError>;
 }
 
 /// アプリ全体で 1 実体の監督。
@@ -183,6 +232,9 @@ pub struct Supervisor {
     /// [`SidecarSupervisor::ensure`] がロックを保持してこの不変条件を守る。
     registry: Arc<Mutex<HashMap<SidecarKind, SidecarHandle>>>,
     verify: Arc<IntegrityVerifier>,
+    /// 猶予段で強制段へ移るまでに待つ時間。本番は [`DEFAULT_GRACE`]、テストは
+    /// [`Supervisor::with_grace`] が短い値を与える。
+    grace: Duration,
 }
 
 impl Supervisor {
@@ -192,6 +244,7 @@ impl Supervisor {
         Supervisor {
             registry: Arc::new(Mutex::new(HashMap::new())),
             verify,
+            grace: DEFAULT_GRACE,
         }
     }
 
@@ -208,7 +261,17 @@ impl Supervisor {
         Supervisor {
             registry: Arc::new(Mutex::new(HashMap::new())),
             verify,
+            grace: DEFAULT_GRACE,
         }
+    }
+
+    /// 猶予時間を差し替える（テスト seam）。
+    ///
+    /// テストは短い値（数百ミリ秒）を与えて、猶予段と強制段の段階を現実的な時間で観測する。
+    /// 本番は [`DEFAULT_GRACE`] のまま使う。
+    pub fn with_grace(mut self, grace: Duration) -> Self {
+        self.grace = grace;
+        self
     }
 
     fn registry(&self) -> MutexGuard<'_, HashMap<SidecarKind, SidecarHandle>> {
@@ -260,6 +323,75 @@ impl SidecarSupervisor for Supervisor {
             None
         }
     }
+
+    fn shutdown_all(&self) -> Result<(), ShutdownError> {
+        // 登録簿のロックを終了処理の全体にわたって保持する。終了中に `ensure` が新しい子を
+        // 登録して「終了したはずの補助プロセス」が増えることを防ぎ、戻った時点で登録簿が空で
+        // あることを保証する。ロックの取得順は `ensure` と同じ（登録簿 → 子）なので循環しない。
+        let mut registry = self.registry();
+        let handles: Vec<SidecarHandle> = registry.values().cloned().collect();
+
+        let mut first_error: Option<ShutdownError> = None;
+        for handle in &handles {
+            if let Err(error) = terminate(handle, self.grace) {
+                first_error.get_or_insert(error);
+            }
+        }
+
+        // 強制段が失敗しても登録簿は空にする。これにより 2 回目の呼び出しは何もせず成功し、
+        // 状態が一貫する（タスク 3.3 の冪等性）。
+        registry.clear();
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+/// 1 つの補助プロセスを、猶予段 → 強制段の順にグループ / ジョブ宛で終了させる。
+///
+/// 猶予段ではグループ宛に穏やかな終了を送り、直接の子が終了してグループ / ジョブが空になるか、
+/// 猶予時間が尽きるまで待つ。尽きたら強制段でグループ / ジョブ全体を強制終了し、直接の子を
+/// 回収する（ゾンビを残さない）。既に終了している子に対しては、待たずに成功する。
+fn terminate(handle: &SidecarHandle, grace: Duration) -> Result<(), ShutdownError> {
+    let group = handle.platform.as_ref();
+
+    // 猶予段。既にグループが空ならこの信号は ESRCH になり、成功として扱われる。
+    // 穏やかな終了通知が届かないプラットフォーム（コンソールを持たない Windows など）でも
+    // 失敗を無視して強制段へ進む。
+    let _ = group.signal_graceful();
+
+    let deadline = Instant::now() + grace;
+    loop {
+        let child_exited = matches!(handle.try_wait(), Ok(Some(_)));
+        if child_exited && !group.exists() {
+            // 直接の子も孫も残っていない。待つ必要は無い。
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(TERMINATION_POLL);
+    }
+
+    // 強制段。猶予内に消えなかった（孫が猶予信号を無視した等）ため、グループ / ジョブ全体を
+    // 強制終了する。
+    group.signal_force().map_err(|error| ShutdownError {
+        kind: handle.kind,
+        message: error.to_string(),
+    })?;
+
+    // 直接の子を回収してゾンビを残さない。期限付きで、届かなければ待ち続けない。
+    let reap_deadline = Instant::now() + REAP_TIMEOUT;
+    loop {
+        match handle.try_wait() {
+            Ok(Some(_)) | Err(_) => break,
+            Ok(None) if Instant::now() >= reap_deadline => break,
+            Ok(None) => thread::sleep(TERMINATION_POLL),
+        }
+    }
+    Ok(())
 }
 
 /// 実プロセスを起動する。
@@ -275,17 +407,35 @@ fn spawn(spec: &SidecarSpec, verify: &IntegrityVerifier) -> Result<SidecarHandle
         source,
     })?;
 
-    let child = Command::new(&spec.executable)
+    let mut command = Command::new(&spec.executable);
+    command
         .args(&spec.args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| SpawnError::Spawn {
-            message: error.to_string(),
-        })?;
+        .stderr(Stdio::piped());
+    // 終了保証の対象になるよう、プラットフォーム別の起動設定を与える（Unix は新しい
+    // プロセスグループのリーダーにする `setpgid`、Windows は新しいプロセスグループを作る
+    // 作成フラグ）。これにより、この後に子が起動する孫も同じグループ / ジョブに入る。
+    platform::configure(&mut command);
 
-    Ok(SidecarHandle::new(spec.kind, child))
+    let mut child = command.spawn().map_err(|error| SpawnError::Spawn {
+        message: error.to_string(),
+    })?;
+
+    // 起動した子を終了保証の対象へ割り当てる（Unix は PID = PGID、Windows は Job Object）。
+    // 割り当てに失敗した子は終了保証の外にあるため、起動を成功として返さず、子を始末して報告する。
+    let group = match platform::Group::attach(&child) {
+        Ok(group) => group,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(SpawnError::Spawn {
+                message: format!("終了保証の対象へ割り当てられない: {error}"),
+            });
+        }
+    };
+
+    Ok(SidecarHandle::new(spec.kind, child, group))
 }
 
 /// 起動対象として妥当かを、整合性検査より前に確かめる。

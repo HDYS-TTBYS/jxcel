@@ -50,12 +50,20 @@ sha2 = "0.10"
 # Job Object と `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` によるサイドカーの終了保証
 # （要件 5.6、research.md 決定 5）。features は Job Object API に必要な最小集合である:
 #   - Win32_System_JobObjects: CreateJobObjectW / SetInformationJobObject /
-#     AssignProcessToJobObject / TerminateJobObject と JOBOBJECT_* 型
+#     AssignProcessToJobObject / TerminateJobObject / QueryInformationJobObject と JOBOBJECT_* 型
+#   - Win32_System_Threading: CREATE_NEW_PROCESS_GROUP（穏やかな終了の宛先になる
+#     プロセスグループを作る作成フラグ）
+#   - Win32_System_Console: GenerateConsoleCtrlEvent / CTRL_BREAK_EVENT（猶予段の穏やかな終了）
 #   - Win32_Security: CreateJobObjectW が取る SECURITY_ATTRIBUTES
 # `Win32_System_JobObjects` は Win32_System → Win32 → Win32_Foundation を引き込むため、
 # HANDLE / CloseHandle のために Foundation を明示する必要はない（0.61.2 の feature 依存を
 # windows-sys の Cargo.toml で確認した）。
-windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_System_JobObjects"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [target.'cfg(unix)'.dependencies]
 # プロセスグループと killpg によるサイドカーの終了保証（要件 5.6、research.md 決定 5）。

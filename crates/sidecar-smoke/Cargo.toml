@@ -36,4 +36,10 @@ libc = "0.2"
 # features は必要な最小集合である:
 #   - Win32_Foundation: HANDLE / CloseHandle / WAIT_OBJECT_0 / WAIT_TIMEOUT
 #   - Win32_System_Threading: OpenProcess / WaitForSingleObject / PROCESS_SYNCHRONIZE
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+#   - Win32_System_Console: SetConsoleCtrlHandler / BOOL（`--ignore-term` の検証専用オプション。
+#     猶予段の CTRL_BREAK_EVENT を無視し、強制段でのみ終了することを確かめるために使う）
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }
