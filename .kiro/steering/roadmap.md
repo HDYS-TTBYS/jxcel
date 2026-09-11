@@ -6,7 +6,7 @@ JSON をファイル実体とする、データベースとして運用可能な
 設計上の最大の判断は「関数はマクロに統合する」ことにある。閉じた式言語を持たず、すべての計算を JS/TS マクロとして表現し、その上に高機能な標準マクロライブラリと LSP 付きのエディタを載せる。これにより、Excel 関数の限界に突き当たった時点で別言語へ逃げる必要がなくなる。さらに、コンポーネントを配置して作った入力フォームをアプリ内蔵の HTTP サーバで LAN 配信し、スキーマを知らない人からも型の正しいデータを集められる。
 
 ## Approach Decision
-- **Chosen**: Rust + Tauri v2。Rust バックエンドに `deno_core`（V8）をマクロランタイムとして埋め込み、`git2-rs`（libgit2）でバージョン管理を行い、`axum` でフォーム配信する。UI は webview 上の Web フロントエンドとし、グリッドは canvas ベースの仮想化グリッド、マクロエディタは Monaco + LSP。Windows / macOS は OS 標準 WebView に乗る真の単一 exe、Linux は WebKitGTK を同梱した AppImage（約 76MB）で自己完結させる。
+- **Chosen**: Rust + Tauri v2。Rust バックエンドに `deno_core`（V8）をマクロランタイムとして埋め込み、`git2-rs`（libgit2）でバージョン管理を行い、`axum` でフォーム配信する。UI は webview 上の Web フロントエンドとし、グリッドは canvas ベースの仮想化グリッド、マクロエディタは Monaco + LSP。Windows / macOS は OS 標準 WebView に乗る真の単一 exe、Linux は WebKitGTK を同梱した AppImage で自己完結させる（WebKitGTK だけで約 76MB、言語サーバを含めると 150〜200MB の見込み）。
 - **Why**: 要件のうち「LSP 付き高機能マクロエディタ」と「10 万行級グリッド」の 2 つは本質的に Web 技術の領域にある。この 2 つを要件に置いた時点で、ネイティブ GUI 案はエディタとグリッドの自作コストが他の全機能を圧迫する。Tauri v2 は単一実行ファイル要件を満たしつつ Monaco と canvas グリッドをそのまま使える唯一の現実解であり、Rust エコシステムは git（libgit2）と xlsx の両方で成熟した選択肢を持つ。
 - **Rejected alternatives**:
   - **Rust ネイティブ GUI（egui / GPUI / Slint）**: 5〜15MB の完全静的バイナリという唯一の優位を持つが、Monaco も CodeMirror も動かないため tree-sitter ベースのエディタと LSP UI の自作が必要になる。しかも LSP サーバはどのみち別プロセスになるため「完全静的」の利点は部分的にしか得られない。
@@ -23,7 +23,7 @@ JSON をファイル実体とする、データベースとして運用可能な
 - **データ規模**: 1 ファイルあたり約 10 万行、全件オンメモリ。この単純化が storage 層のスペックを大幅に軽くしている
 - **対象ユーザー**: 個人・パワーユーザー。マクロのサンドボックスは「敵対的コードに対する硬い境界」ではなく「事故防止」の水準
 - **配布**: 配布物は 1 ファイル。ただし LSP サーバがサブプロセスになるため「実行時プロセスも 1 つ」は達成しない（2026 年時点で技術的に不可能 — tsserver は C-ABI を持たない JS プログラムであり、ライブラリとして埋め込めない）
-- **Linux が最高リスクのターゲット**: WebKitGTK の描画問題（canvas 白画面、ソフトウェアラスタライズへの無言のフォールバック、Monaco の描画劣化）と、AppImage バンドルがサイドカーバイナリを ELF 再リンクで破壊しうる未解決 issue（`tauri-apps/tauri#11898`）を抱える
+- **Linux が最高リスクのターゲット**: WebKitGTK の描画問題（白画面、ソフトウェアラスタライズへの無言のフォールバック、描画劣化）と、AppImage バンドルがサイドカーバイナリを破壊する未解決問題を抱える。**個別の issue 番号は tech.md の Known Risks が実測付きで保持する**（2026-09 時点で当初挙げていたものの多くはクローズ済み、正典は別の issue）
 - **依存の下限**: `git2` ≥ 0.21.0（2026 年に unsoundness advisory 3 件）、`zip` ≥ 2.3.0（RUSTSEC-2025-0168）。CI に `cargo audit` を必須とする
 - **ライセンス**: 全依存が proprietary 配布と両立する。libgit2 は GPL-2.0 + リンク例外のため安全（libgit2 自体を改変した場合のみ改変版ソースの公開義務）
 
@@ -37,8 +37,15 @@ JSON をファイル実体とする、データベースとして運用可能な
   - **form-builder ⇔ form-web-server**: フォームレンダラを共有する。レンダラは Tauri IPC に依存してはならない
   - **app-shell ⇔ macro-editor-lsp**: サイドカー基盤の所有権は app-shell 側。LSP はその利用者
 
+## Progress
+チェックボックスは**実装完了**を表す。仕様だけが先行している状態はここに書く。
+
+- `document-format` — 実装完了（38 サブタスク）
+- `app-shell` — 仕様完了（requirements / design / tasks、56 サブタスク）。実装未着手
+- 他 12 本 — `brief.md` のみ
+
 ## Specs (dependency order)
-- [ ] document-format -- zip + JSON のドキュメント形式と File/Sheet/Schema/Row のドキュメントモデル。Dependencies: none
+- [x] document-format -- zip + JSON のドキュメント形式と File/Sheet/Schema/Row のドキュメントモデル。Dependencies: none
 - [ ] app-shell -- Tauri v2 の器、IPC 境界、サイドカー基盤、3 OS ビルドパイプライン。Dependencies: none
 - [ ] schema-engine -- ネスト可能な型システム、ANY、検証と型強制、スキーマ移行。Dependencies: document-format
 - [ ] data-grid -- 10 万行の仮想化グリッド、型別セルエディタ、共有 undo スタック。Dependencies: app-shell, schema-engine
