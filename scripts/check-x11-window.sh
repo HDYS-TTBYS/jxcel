@@ -62,6 +62,7 @@ pid=""
 # 起動したアプリは必ず片付ける。同じジョブの後続の段に残したままにしない。
 # 子孫を先に終了する: AppImage を展開実行（APPIMAGE_EXTRACT_AND_RUN=1）した場合、
 # ラッパーの子として本体が動くため、ラッパーだけを終了すると本体が残る。
+# shellcheck disable=SC2329 # trap 経由の cleanup から呼ばれる（shellcheck は trap を追えない）
 kill_tree() {
   _tree_pid=$1
   if command -v pgrep >/dev/null 2>&1; then
@@ -72,6 +73,7 @@ kill_tree() {
   kill "$_tree_pid" 2>/dev/null || true
 }
 
+# shellcheck disable=SC2329 # 下の trap から呼ばれる
 cleanup() {
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     kill_tree "$pid"

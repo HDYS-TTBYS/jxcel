@@ -110,8 +110,8 @@ while [ $# -gt 0 ]; do
 done
 
 # --- リポジトリの位置 -------------------------------------------------------
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 
 # --- ターゲットトリプルの決定 -----------------------------------------------
 explicit=''
