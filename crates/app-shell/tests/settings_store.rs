@@ -17,6 +17,9 @@
 //!    ファイルを削除も変更もしない（要件 7.5）。未知の版も同じ経路である
 //! 9. キー空間が閉じている（`SettingsKey` の列挙がカタログの全体であり、任意の名前を持つ鍵を
 //!    作る公開の入口が無い）ことと、ドキュメントの内容を名指しできないこと（要件 7.7）
+//! 10. **完了状態（tasks.md 4.3）**: ある利用者（第三の書き手）が値を変更すると、購読している
+//!     すべての利用者に変更後の値が届き、その時点で新しい値はディスクにも載っている。購読を
+//!     捨てた利用者は他の購読者への配布を妨げない（要件 7.4）
 //!
 //! # 強制終了による原子性の検証
 //!
@@ -48,6 +51,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -55,8 +59,8 @@ use std::time::{Duration, Instant};
 use app_shell::settings::atomic::TEMP_FILE_PREFIX;
 use app_shell::settings::{
     app_data_base_dir, app_data_base_dir_with, app_data_dir, open, OpenReport, RecoveryCause,
-    RecoveredFrom, SettingsError, SettingsKey, SettingsStore, APP_IDENTIFIER, SETTINGS_FILE_NAME,
-    SUPPORTED_SCHEMA_VERSION,
+    RecoveredFrom, SettingsChanged, SettingsError, SettingsKey, SettingsStore, APP_IDENTIFIER,
+    SETTINGS_FILE_NAME, SUPPORTED_SCHEMA_VERSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -756,6 +760,170 @@ fn windows_base_uses_roaming_appdata() {
     })
     .expect("APPDATA がある");
     assert_eq!(resolved, PathBuf::from(r"C:\Users\user\AppData\Roaming"));
+}
+
+// ---------------------------------------------------------------------------
+// 要件 7.4: 設定変更の通知（tasks.md 4.3）
+// ---------------------------------------------------------------------------
+
+/// 通知テストが変更する鍵。カタログの非メタ鍵を使う（キー空間は閉じている）。
+const NOTIFY_KEY: SettingsKey = SettingsKey::AppearanceTheme;
+/// 2 つ目の鍵。通知が変更した鍵を名指しすることを確かめる。
+const NOTIFY_OTHER_KEY: SettingsKey = SettingsKey::DiagnosticsLevel;
+
+/// 通知を期限付きで受け取る。購読者が永久にブロックしないことを保証する（固定の sleep に
+/// 正しさを依存しない。期限は十分に長く、通常は即座に返る）。
+fn recv_bounded(receiver: &Receiver<SettingsChanged>, who: &str) -> SettingsChanged {
+    receiver
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|error| panic!("{who} が通知を受け取れない: {error}"))
+}
+
+/// **完了状態（tasks.md 4.3）**: ある利用者が値を変更すると、購読しているすべての利用者に
+/// 変更後の値が届き、各購読者は通知の後に `get` で新しい値を観測できる（要件 7.4）。
+///
+/// 2 つの購読は独立であり、両方に同じ変更が届く。書き手はどちらの購読でもない第三の利用者
+/// （別ウィンドウに相当する）である。
+#[test]
+fn a_change_reaches_every_subscriber_with_the_new_value() {
+    let scratch = Scratch::new("notify-fanout");
+    let (store, _) = open(scratch.path()).expect("設定ストアを開ける");
+    let first = store.subscribe();
+    let second = store.subscribe();
+
+    // 第三の利用者（別ウィンドウ）が変更する。
+    store.set(&NOTIFY_KEY, &"dark").expect("書ける");
+
+    let first_event = recv_bounded(&first, "1 人目の購読者");
+    let second_event = recv_bounded(&second, "2 人目の購読者");
+    assert_eq!(first_event.key, NOTIFY_KEY, "変更した鍵が届く");
+    assert_eq!(second_event.key, NOTIFY_KEY, "変更した鍵が届く");
+    assert_eq!(first_event.value, serde_json::json!("dark"), "変更後の値が届く");
+    assert_eq!(second_event.value, serde_json::json!("dark"), "変更後の値が届く");
+    // 通知を受けた後に読む値が新しい（要件 7.4 の「他のウィンドウにも変更後の値を反映」）。
+    assert_eq!(store.get::<String>(&NOTIFY_KEY).as_deref(), Some("dark"));
+}
+
+/// 受信側を捨てた購読者は、他の購読者への配布も `set` の成功も妨げない（要件 7.4）。
+///
+/// 送信路は購読者ごとに独立しているため、1 つの受信側が消えても配布は残りへ届く。すべての
+/// 購読が消えても `set` は成功し、後から購読した利用者はその後の変更を受け取れる。
+#[test]
+fn a_dropped_subscriber_does_not_break_publishing_for_others() {
+    let scratch = Scratch::new("notify-independence");
+    let (store, _) = open(scratch.path()).expect("設定ストアを開ける");
+    let doomed = store.subscribe();
+    let live = store.subscribe();
+
+    store.set(&NOTIFY_KEY, &"first").expect("書ける");
+    let _ = recv_bounded(&doomed, "捨てる購読者");
+    let _ = recv_bounded(&live, "残った購読者");
+    // 受信側を破棄する。送信に失敗した購読者は次の配布で購読者表から外れる。
+    drop(doomed);
+
+    store.set(&NOTIFY_KEY, &"second").expect("捨てた購読者がいても書ける");
+    let event = recv_bounded(&live, "残った購読者");
+    assert_eq!(event.value, serde_json::json!("second"), "残った購読者に届かない");
+    assert_eq!(store.get::<String>(&NOTIFY_KEY).as_deref(), Some("second"));
+
+    // すべての購読が消えても `set` は成功し、新しい購読者は以後の変更を受け取れる。
+    drop(live);
+    store.set(&NOTIFY_KEY, &"third").expect("購読者が居なくても書ける");
+    let late = store.subscribe();
+    store.set(&NOTIFY_KEY, &"fourth").expect("書ける");
+    let event = recv_bounded(&late, "後から購読した利用者");
+    assert_eq!(event.value, serde_json::json!("fourth"));
+}
+
+/// 通知を受け取った時点で、新しい値は既にディスクに載っている（要件 7.1、7.4）。
+///
+/// 発行はファイルへの書き込みが成功した後に行う。したがって「通知を受けたのに開き直すと
+/// 古い値が戻る」という窓は無い。
+#[test]
+fn the_new_value_is_durable_before_the_notification() {
+    let scratch = Scratch::new("notify-durable");
+    let (store, _) = open(scratch.path()).expect("設定ストアを開ける");
+    let subscriber = store.subscribe();
+
+    store.set(&NOTIFY_KEY, &"dark").expect("書ける");
+    let event = recv_bounded(&subscriber, "購読者");
+    assert_eq!(event.value, serde_json::json!("dark"));
+
+    // 通知を受け取った後に実体を手放し、ディスクから開き直して読む。
+    drop(store);
+    let (fresh, _) = open(scratch.path()).expect("開き直せる");
+    assert_eq!(
+        fresh.get::<String>(&NOTIFY_KEY).as_deref(),
+        Some("dark"),
+        "通知の時点でディスクに載っていない"
+    );
+}
+
+/// 同じ値の `set` は通知しない（「変更」であって「書き込み」ではない）。ただし書き込み自体は
+/// 行う（4.1 の挙動を変えない）— 判定は「次に届く通知が次の変更のもの」であることで行う。
+#[test]
+fn setting_the_same_value_writes_but_does_not_notify() {
+    let scratch = Scratch::new("notify-noop");
+    let (store, _) = open(scratch.path()).expect("設定ストアを開ける");
+    let subscriber = store.subscribe();
+
+    store.set(&NOTIFY_KEY, &"dark").expect("書ける");
+    assert_eq!(recv_bounded(&subscriber, "購読者").value, serde_json::json!("dark"));
+
+    // 同一値。変更ではないので通知しない。
+    store.set(&NOTIFY_KEY, &"dark").expect("同じ値も書ける");
+    // 続けて別の値へ変える。次に届く通知がこれであれば、同一値の `set` は通知していない。
+    store.set(&NOTIFY_KEY, &"light").expect("書ける");
+    let event = recv_bounded(&subscriber, "購読者");
+    assert_eq!(
+        event.value,
+        serde_json::json!("light"),
+        "同一値の set が通知を挟んだ（変更の意味論になっていない）"
+    );
+    assert_eq!(store.get::<String>(&NOTIFY_KEY).as_deref(), Some("light"));
+}
+
+/// 通知は変更した鍵を名指しする（ワイルドカードではない）。2 つの鍵を続けて変えると、
+/// それぞれの通知が対応する鍵と値を運ぶ。
+#[test]
+fn the_notification_names_the_exact_key_that_changed() {
+    let scratch = Scratch::new("notify-key");
+    let (store, _) = open(scratch.path()).expect("設定ストアを開ける");
+    let subscriber = store.subscribe();
+
+    store.set(&NOTIFY_KEY, &"dark").expect("書ける");
+    store.set(&NOTIFY_OTHER_KEY, &"verbose").expect("書ける");
+
+    let first = recv_bounded(&subscriber, "購読者");
+    let second = recv_bounded(&subscriber, "購読者");
+    assert_eq!(first.key, NOTIFY_KEY, "変更した鍵を名指ししていない");
+    assert_eq!(second.key, NOTIFY_OTHER_KEY, "変更した鍵を名指ししていない");
+    assert_eq!(first.value, serde_json::json!("dark"));
+    assert_eq!(second.value, serde_json::json!("verbose"));
+    // 値は `get` を通さずに通知から読める。
+    assert_eq!(
+        serde_json::from_value::<String>(second.value).expect("通知の値が文字列"),
+        "verbose"
+    );
+}
+
+/// 購読前の変更は再生されない。後から購読した利用者に届く最初の通知は、購読後に起きた変更の
+/// ものである（購読時点の値は `get` で読む）。
+#[test]
+fn a_late_subscriber_receives_no_replay() {
+    let scratch = Scratch::new("notify-late");
+    let (store, _) = open(scratch.path()).expect("設定ストアを開ける");
+
+    store.set(&NOTIFY_KEY, &"dark").expect("購読前の変更");
+    let subscriber = store.subscribe();
+    store.set(&NOTIFY_KEY, &"light").expect("購読後の変更");
+
+    let event = recv_bounded(&subscriber, "遅い購読者");
+    assert_eq!(
+        event.value,
+        serde_json::json!("light"),
+        "購読前の変更が再生された（再生はしない契約）"
+    );
 }
 
 // ---------------------------------------------------------------------------
