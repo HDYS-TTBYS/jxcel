@@ -138,7 +138,7 @@
 
 - [ ] 4. Core: 設定・診断・ショートカット検査（Tauri 非依存）
 
-- [ ] 4.1 (P) 原子的な設定ストアを実装する
+- [x] 4.1 (P) 原子的な設定ストアを実装する
   - 書き込みは同一ディレクトリの一時ファイルへ書き、同期してから置き換える。切り詰めてから書く方式にしない
   - 保存先は各 OS が定める標準のアプリケーションデータ領域とする
   - 複数の利用者が同一の実体を共有する形にし、書き込みを直列化する
@@ -479,6 +479,12 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **4.1**: 書き込みは `settings/atomic.rs::replace` = **同一ディレクトリの一時ファイルを `create_new`（O_EXCL）で作り → `write_all` + `flush` + `sync_all` → `rename` → Unix は親ディレクトリを fsync**。切り詰め経路は存在しない。一時名は prefix + pid + 連番で衝突せず、`TempGuard` が失敗経路で必ず片付ける。**rename 後のディレクトリ fsync 失敗は意図的に握り潰す**（「Err なら対象は不変」という契約を守るため）。
+- **4.1**: 書き込み直列化は `RwLock` の書きロックが**挿入 + serialize + replace の全体**を覆う（load-modify-store）。読み手が破れた中間状態を見ることはない。`open(dir)` は同一ディレクトリで**同一インスタンス**を返す（`REGISTRY` で共有。要件 7.3）。
+- **4.1**: **design からの意図的な逸脱（コード内に文書化済み）**: (1) `SettingsStore` は `get`/`set` がジェネリックなので **object-safe でなく `Arc<dyn SettingsStore>` を作れない**（E0038）。`open` は `Result<(Arc<FileSettingsStore>, OpenReport), SettingsError>` を返す。(2) `OpenReport` は空構造体で、4.2 が埋める seam。(3) 読めるが解釈できないファイルは `open` が `Err(ParseFailed)` を返す（**既定値で起動して事実を返すのは 4.2**）。(4) `schema_version` はまだ書かない／解釈しない（4.2）。
+- **4.1**: OS 標準のアプリケーションデータ領域の解決は `settings::app_data_base_dir_with` / `app_data_base_dir` / `app_data_dir` として**再利用可能な形で公開**する（**4.4 の診断保存先はこれを再利用すること**。Linux は `$XDG_DATA_HOME` → `$HOME/.local/share`、macOS は `$HOME/Library/Application Support`、Windows は `%APPDATA%`）。環境変数が無い場合は panic せずエラー。**`APP_IDENTIFIER` は `src-tauri/tauri.conf.json` の identifier と一致していなければならない**（`app_identifier_matches_the_tauri_identifier` テストが実ファイルを読んで検査する。ずれると別ディレクトリを読み書きする実害が出る）。
+- **4.1（既知のテスト強度）**: `crash_during_write_leaves_a_complete_file` は実プロセスを SIGKILL する本物の検査だが、**最初に一時ファイルを観測した時点で殺すため観測されるのは「直前の完全な内容」側のみ**で、「新しい完全な内容」側は実行では観測されない（レビューで独立に 160 回の harness を回し、A/B いずれかで必ず完全、B 単独でも 12/12 成立することを確認済み）。恒久的に B 側も覆うなら「対象が新内容と一致してから殺す」検査を追加するのが良い（未割当）。
 
 - **3.5**: `sweep_orphans(&self) -> usize` と `orphan_sweep.rs`。列挙は Linux = `/proc`（サブプロセス無し）、macOS = `ps -axo pid=,comm=`、Windows = Toolhelp32 スナップショット + `QueryFullProcessImageNameW` / `TerminateProcess`（`windows-sys` の `Win32_System_Diagnostics` + `Win32_System_Diagnostics_ToolHelp` を追加）。**照合は実行ファイル名と識別子の両方**で行い、**信号を送る直前に実行ファイルを再解決して再確認する**（列挙→kill の間の PID 再利用窓を閉じる）。`with_expected_executables(...)` を設定すると期待パス所属も要求する。自分自身と**現在の登録表が追跡している子**は対象外。冪等・有界（2 回目は 0）。
 - **3.5**: **親監視の結線は監督が行う**。`spawn` が自プロセス id を `--parent-pid` として注入し、呼び出し元が同じフラグを渡しても重複しないよう除去する。種類ごとの opt-in は `SidecarKind::parent_pid_flag()`（将来の種類は `None` を返せば注入されない）。
