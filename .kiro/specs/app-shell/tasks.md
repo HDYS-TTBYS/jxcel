@@ -480,6 +480,9 @@
 
 ## Implementation Notes
 
+- **qlty のルール（ユーザー決定 2026-09-12・以降の全タスクに適用）**: AGENTS.md / CLAUDE.md の「ユーザー追加」に従う。**コミットの前に必ず `qlty fmt`**、**作業を終える前に必ず `qlty check --fix --level=low` を実行し、指摘を直す**。設定は `.qlty/qlty.toml`。**7.2 のコミット（c0b3a83）は `src-tauri/src/commands/mod.rs` を未整形のまま入れており、このルールが守られていない**。次のコミットから必ず実行すること。
+- **qlty（実行上の注意）**: Rust の整形は `qlty fmt` で行う（qlty が同梱する Rust 1.98.1 の rustfmt。edition は `.qlty/configs/rustfmt.toml`）。**cargo シムの podman イメージにもホストの rustup にも rustfmt / clippy は無い**ため、`cargo fmt` は使えない。引数なしの `qlty fmt` / `qlty check` は **origin/main との差分に含まれるファイル**（未 push のコミットと未コミットの変更）を対象にする。全体の状態は `qlty check --all` で見られる。Rust は b8802e6 で一括整形済み（`.git-blame-ignore-revs` に登録）で、2026-09-12 時点で未整形なのは `src-tauri/src/commands/mod.rs` と、編集中の `src-tauri/src/menu.rs` だけ。`qlty check` は clippy を含まない（qlty の clippy は crates/ 配下の指摘を捨てるため無効化してある。`.qlty/qlty.toml` の注記）。
+
 - **7.4**: 登録口は `src-tauri/src/menu.rs` の `MenuRegistry`（managed・1 インスタンス）。`register(app, MenuItemSpec::new(owner, item, path, label, handler).with_accelerator("Ctrl+S"))`。**登録の同一性は (所有者, 項目) の組**（再登録は更新＝冪等）、**項目 id はアプリ全体で一意**（衝突は `ItemIdConflict`）。通知は登録時に渡したハンドラを、**実イベント（`on_menu_event`）とテストが共有する唯一の seam `MenuRegistry::dispatch(item, window)`** が呼ぶ（テスト専用の並行経路は無い）。`MenuModel` / `SubmenuNode` / `MenuNode` により構築結果を GUI 無しで検査でき、順序は決定的。
 - **7.4**: プラットフォーム差は `MenuPlacement` / `PLACEMENT` / `apply` の**1 箇所**。**macOS は `AppHandle::set_menu` でアプリ全体の 1 つ**を構築し、**トップレベルはすべて部分メニュー**（最初の部分メニューはアプリケーションメニューへ畳み込まれる。順序で先頭に固定）。**単独のトップレベル項目は表現自体が不可能**で、`MenuPath::new([])` は `BareTopLevelItem` として**登録時に拒否**する（黙って消えない）。**Linux / Windows はウィンドウ単位**で、`window::build_window` の 1 箇所から `attach_to_window` を呼ぶため**後から作られるウィンドウにも付く**（起動時・受け渡し・Dock すべて）。
 - **7.4**: アクセラレータの一意性検査は**この段で行う**（`with_accelerator` が 4.6 の `Accelerator::parse` で正規化して登録、クロス所有者の衝突は両側を含むエラーで返し状態は不変、同一所有者の再登録は冪等、アクセラレータを外して再登録するとコードが解放される）。**プラットフォームへ渡すのは解決済みの綴り**（4.6 の契約どおり `CmdOrCtrl` は拒否）。7.5 は表示の作り込みとフォーカス先への振り向けを担う。
