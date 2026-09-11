@@ -179,7 +179,9 @@ fn self_exits_when_parent_is_killed() {
         None => {
             let _ = sidecar.kill();
             let _ = sidecar.wait();
-            panic!("親の強制終了から {SELF_EXIT_DEADLINE:?} 以内に補助プロセスが自己終了しなかった");
+            panic!(
+                "親の強制終了から {SELF_EXIT_DEADLINE:?} 以内に補助プロセスが自己終了しなかった"
+            );
         }
     }
 }
@@ -201,7 +203,11 @@ fn exits_promptly_when_parent_is_already_gone() {
     match status {
         Some(status) => {
             println!("死んだ親を渡してから {elapsed:?} で自己終了した（{status}）");
-            assert_eq!(status.code(), Some(0), "自己終了の終了コードは 0 であるべき: {status}");
+            assert_eq!(
+                status.code(),
+                Some(0),
+                "自己終了の終了コードは 0 であるべき: {status}"
+            );
         }
         None => {
             let _ = sidecar.kill();

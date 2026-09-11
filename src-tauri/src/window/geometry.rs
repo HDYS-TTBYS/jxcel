@@ -159,10 +159,7 @@ pub(super) enum RestorePlan {
     /// 位置と大きさの両方を保存値から与える。
     PositionAndSize(StoredGeometry),
     /// 位置は使えない（画面外・モニタ不明）。既定の位置に任せ、大きさだけ保存値から与える。
-    SizeOnly {
-        width: u32,
-        height: u32,
-    },
+    SizeOnly { width: u32, height: u32 },
     /// 復元できる値が無い（未保存・壊れた値）。生成側の既定値のままにする。
     Default,
 }
@@ -236,7 +233,10 @@ fn to_initial(plan: RestorePlan, scale: f64) -> InitialGeometry {
                 logical_signed(geometry.x, scale),
                 logical_signed(geometry.y, scale),
             )),
-            size: Some((logical(geometry.width, scale), logical(geometry.height, scale))),
+            size: Some((
+                logical(geometry.width, scale),
+                logical(geometry.height, scale),
+            )),
         },
     }
 }
@@ -575,7 +575,8 @@ mod tests {
     /// テストごとに独立した設定ディレクトリを用意する（共有実体の登録簿に載らないよう、
     /// テスト名を接頭辞にした一意なパスを使う）。
     fn store_dir(prefix: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("jxcel-geometry-{}-{prefix}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("jxcel-geometry-{}-{prefix}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -601,7 +602,8 @@ mod tests {
 
         // ファイルの実体が **1 つのキー** `window.geometry` の下の**オブジェクト**であること
         // （design.md「Logical Data Model」）。キーがラベルごとに増えていないことも見る。
-        let text = std::fs::read_to_string(dir.join("settings.json")).expect("設定ファイルを読める");
+        let text =
+            std::fs::read_to_string(dir.join("settings.json")).expect("設定ファイルを読める");
         assert!(text.contains("\"window.geometry\""), "{text}");
         assert!(text.contains("\"x\""), "{text}");
         assert!(text.contains("\"y\""), "{text}");

@@ -77,12 +77,10 @@ fn staged_original_path() -> PathBuf {
     } else {
         ""
     };
-    repo_root()
-        .join("sidecars")
-        .join(format!(
-            "{}-{BUILD_TARGET_TRIPLE}{exe}",
-            SidecarKind::Smoke.as_str()
-        ))
+    repo_root().join("sidecars").join(format!(
+        "{}-{BUILD_TARGET_TRIPLE}{exe}",
+        SidecarKind::Smoke.as_str()
+    ))
 }
 
 /// 実プロセスを起動できる原本が使えるときだけ `Some(パス)` を返す。`build.rs` がこのトリプル向けに
@@ -146,7 +144,9 @@ impl Drop for TempDir {
 #[cfg(unix)]
 fn make_executable(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
-    let mut permissions = fs::metadata(path).expect("メタデータを読める").permissions();
+    let mut permissions = fs::metadata(path)
+        .expect("メタデータを読める")
+        .permissions();
     permissions.set_mode(mode);
     fs::set_permissions(path, permissions).expect("権限を設定できる");
 }
@@ -248,7 +248,10 @@ fn count_running_sidecars() -> usize {
         .expect("tasklist を実行できる");
     String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter(|line| line.trim_start_matches('"').starts_with(SidecarKind::Smoke.as_str()))
+        .filter(|line| {
+            line.trim_start_matches('"')
+                .starts_with(SidecarKind::Smoke.as_str())
+        })
         .count()
 }
 
@@ -376,7 +379,9 @@ fn wait_for_sidecar_count(expected: usize, timeout: Duration, context: &str) -> 
         }
         if Instant::now() >= deadline {
             let count = count_live_sidecars();
-            eprintln!("{context}: OS 上の実行中 sidecar-smoke 数 = {count}（期限切れ、期待 {expected}）");
+            eprintln!(
+                "{context}: OS 上の実行中 sidecar-smoke 数 = {count}（期限切れ、期待 {expected}）"
+            );
             return count;
         }
         thread::sleep(Duration::from_millis(5));
@@ -830,9 +835,7 @@ fn shutdown_all_reaps_child_and_grandchild() {
         "子と孫が起動しているはずである（OS 上の子孫数 {before}）"
     );
 
-    supervisor
-        .shutdown_all()
-        .expect("子も孫も残さず終了できる");
+    supervisor.shutdown_all().expect("子も孫も残さず終了できる");
 
     // API を信じず、OS から見て子孫が消えたことを確かめる。
     let after = wait_for_sidecar_count(0, Duration::from_secs(10), "終了処理の後");
@@ -865,7 +868,10 @@ fn direct_kill_leaves_the_grandchild_until_group_termination() {
     let _guard = SidecarGuard::new(handle.clone());
 
     let before = wait_for_sidecar_count(2, Duration::from_secs(10), "直接終了の前");
-    assert_eq!(before, 2, "子と孫が起動しているはずである（OS 上の子孫数 {before}）");
+    assert_eq!(
+        before, 2,
+        "子と孫が起動しているはずである（OS 上の子孫数 {before}）"
+    );
 
     // 直接の子だけを強制終了する（グループ / ジョブ宛ではない）。
     handle.kill().expect("直接の子を強制終了できる");
@@ -879,7 +885,8 @@ fn direct_kill_leaves_the_grandchild_until_group_termination() {
         }
     }
 
-    let after_direct = wait_for_sidecar_count(1, Duration::from_secs(5), "直接の子だけを終了した後");
+    let after_direct =
+        wait_for_sidecar_count(1, Duration::from_secs(5), "直接の子だけを終了した後");
     assert_eq!(
         after_direct, 1,
         "孫が直接の子の終了に巻き込まれてはならない（グループ / ジョブ宛の終了が必要である証拠。OS 上の子孫数 {after_direct}）"
@@ -956,7 +963,9 @@ fn shutdown_all_is_idempotent_and_clears_the_registry() {
     };
 
     let supervisor = Supervisor::new().with_grace(Duration::from_millis(100));
-    let handle = supervisor.ensure(&sidecar_spec(&executable)).expect("起動できる");
+    let handle = supervisor
+        .ensure(&sidecar_spec(&executable))
+        .expect("起動できる");
     let _guard = SidecarGuard::new(handle.clone());
 
     supervisor.shutdown_all().expect("1 回目の終了処理");
@@ -993,7 +1002,9 @@ fn shutdown_all_returns_promptly_when_the_child_is_already_dead() {
 
     let grace = Duration::from_secs(5);
     let supervisor = Supervisor::new().with_grace(grace);
-    let handle = supervisor.ensure(&sidecar_spec(&executable)).expect("起動できる");
+    let handle = supervisor
+        .ensure(&sidecar_spec(&executable))
+        .expect("起動できる");
     let _guard = SidecarGuard::new(handle.clone());
 
     handle.kill().expect("子を強制終了できる");
@@ -1231,7 +1242,10 @@ fn every_output_line_is_delivered_before_the_exit_event() {
         match events.recv_timeout(Duration::from_millis(50)) {
             Ok(SidecarEvent::Output { line, .. }) => {
                 outputs_after_exit += 1;
-                push_tail(&mut tail, format!("Output(after exit) {} バイト", line.len()));
+                push_tail(
+                    &mut tail,
+                    format!("Output(after exit) {} バイト", line.len()),
+                );
             }
             Ok(SidecarEvent::Exited { .. }) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -1374,7 +1388,8 @@ fn stdout_and_stderr_are_captured_with_distinct_streams() {
 
     handle.kill().expect("子を強制終了できる");
     loop {
-        if let SidecarEvent::Exited { .. } = recv_event(&events, Duration::from_secs(10), "終了通知")
+        if let SidecarEvent::Exited { .. } =
+            recv_event(&events, Duration::from_secs(10), "終了通知")
         {
             break;
         }
@@ -1394,7 +1409,10 @@ fn stdout_and_stderr_are_captured_with_distinct_streams() {
                 line,
                 ..
             } => {
-                assert!(!line.trim().is_empty(), "標準エラーの空行は取得対象にならない");
+                assert!(
+                    !line.trim().is_empty(),
+                    "標準エラーの空行は取得対象にならない"
+                );
                 if line.contains("使い方") {
                     saw_stderr = true;
                 }
@@ -1640,7 +1658,10 @@ fn process_is_alive(pid: u32) -> bool {
     let Some((_, rest)) = stat.rsplit_once(')') else {
         return false;
     };
-    !matches!(rest.trim_start().chars().next(), None | Some('Z') | Some('X'))
+    !matches!(
+        rest.trim_start().chars().next(),
+        None | Some('Z') | Some('X')
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -1652,7 +1673,11 @@ fn process_is_alive(pid: u32) -> bool {
     if !output.status.success() {
         return false;
     }
-    match String::from_utf8_lossy(&output.stdout).trim().chars().next() {
+    match String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .chars()
+        .next()
+    {
         Some(state) => !matches!(state, 'Z' | 'X'),
         None => false,
     }
@@ -1977,7 +2002,11 @@ fn sweep_orphans_requires_the_expected_executable_path() {
     let wrong = elsewhere.path().join(file_name_of(&executable));
     fs::write(&wrong, b"").expect("期待値のファイルを作れる");
     let supervisor = Supervisor::new().with_expected_executables([wrong]);
-    assert_eq!(supervisor.sweep_orphans(), 0, "期待するパスに無いのに掃除した");
+    assert_eq!(
+        supervisor.sweep_orphans(),
+        0,
+        "期待するパスに無いのに掃除した"
+    );
     assert!(process_is_alive(pid), "期待するパスに無いのに終了させた");
 
     let supervisor = Supervisor::new().with_expected_executables([executable.clone()]);

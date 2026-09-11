@@ -36,9 +36,9 @@ use document_format::{CellValue, Document, DocumentFormatApi, EntryName, RowId, 
 
 use common::{
     api, assert_same_document, document_view, document_with_sheet, entries_of,
-    entries_with_preserved_fields, fixture_path, sample, sample_minimal, sample_with_unknown_fields,
-    sample_with_unreferenced_attachment, sample_with_values, with_rebuilt_manifest, Scratch,
-    SCHEMA_EMPTY, SCHEMA_WITH_REF,
+    entries_with_preserved_fields, fixture_path, sample, sample_minimal,
+    sample_with_unknown_fields, sample_with_unreferenced_attachment, sample_with_values,
+    with_rebuilt_manifest, Scratch, SCHEMA_EMPTY, SCHEMA_WITH_REF,
 };
 
 /// 全経路で同一性を確かめる標本の一覧。
@@ -49,7 +49,10 @@ fn samples() -> Vec<(&'static str, Document)> {
         ("minimal", sample_minimal()),
         ("multi_sheet", sample()),
         ("values", sample_with_values()),
-        ("unreferenced_attachment", sample_with_unreferenced_attachment()),
+        (
+            "unreferenced_attachment",
+            sample_with_unreferenced_attachment(),
+        ),
         ("unknown_fields", sample_with_unknown_fields("A")),
     ]
 }
@@ -61,10 +64,16 @@ fn samples() -> Vec<(&'static str, Document)> {
 #[test]
 fn the_full_circuit_restores_every_sample_exactly() {
     for (name, before) in samples() {
-        let parts = api().to_parts(&before).expect("標本はパート集合へ取り出せる");
+        let parts = api()
+            .to_parts(&before)
+            .expect("標本はパート集合へ取り出せる");
         let bytes = ContainerCodec::encode(&parts).expect("符号化できる");
         let decoded = ContainerCodec::decode(&bytes).expect("復号できる");
-        assert_eq!(entries_of(&parts), entries_of(&decoded), "{name}: 復号が元の集合と違う");
+        assert_eq!(
+            entries_of(&parts),
+            entries_of(&decoded),
+            "{name}: 復号が元の集合と違う"
+        );
 
         let after = api().from_parts(&decoded).expect("モデルを復元できる");
         assert_same_document(&before, &after);
@@ -75,7 +84,9 @@ fn the_full_circuit_restores_every_sample_exactly() {
 #[test]
 fn the_zip_free_path_restores_every_sample_exactly() {
     for (_name, before) in samples() {
-        let parts = api().to_parts(&before).expect("標本はパート集合へ取り出せる");
+        let parts = api()
+            .to_parts(&before)
+            .expect("標本はパート集合へ取り出せる");
         let after = api().from_parts(&parts).expect("モデルを復元できる");
         assert_same_document(&before, &after);
     }
@@ -87,7 +98,9 @@ fn the_zip_free_path_restores_every_sample_exactly() {
 #[test]
 fn the_zip_path_and_the_zip_free_path_give_the_same_model() {
     for (_name, before) in samples() {
-        let parts = api().to_parts(&before).expect("標本はパート集合へ取り出せる");
+        let parts = api()
+            .to_parts(&before)
+            .expect("標本はパート集合へ取り出せる");
         let zip_free = api().from_parts(&parts).expect("ZIP 非経由で復元できる");
 
         let bytes = ContainerCodec::encode(&parts).expect("符号化できる");
@@ -112,8 +125,14 @@ fn saving_and_reopening_restores_every_sample_exactly() {
 
         let outcome = api().open(&path).expect("保存したファイルは開ける");
         assert_same_document(&before, &outcome.document);
-        assert_eq!(None, outcome.migrated_from, "{name}: 現行版なのに移行元が記録された");
-        assert!(!outcome.beyond_supported_scale, "{name}: 保証対象外とされた");
+        assert_eq!(
+            None, outcome.migrated_from,
+            "{name}: 現行版なのに移行元が記録された"
+        );
+        assert!(
+            !outcome.beyond_supported_scale,
+            "{name}: 保証対象外とされた"
+        );
     }
 }
 
@@ -146,9 +165,14 @@ fn the_committed_golden_fixture_agrees_on_both_paths() {
 #[test]
 fn an_unreferenced_attachment_is_not_dropped_on_any_path() {
     let before = sample_with_unreferenced_attachment();
-    assert!(!before.unreferenced_attachments().is_empty(), "標本に未参照添付が無い");
+    assert!(
+        !before.unreferenced_attachments().is_empty(),
+        "標本に未参照添付が無い"
+    );
 
-    let parts = api().to_parts(&before).expect("標本はパート集合へ取り出せる");
+    let parts = api()
+        .to_parts(&before)
+        .expect("標本はパート集合へ取り出せる");
     let zip_free = api().from_parts(&parts).expect("ZIP 非経由で復元できる");
 
     let bytes = ContainerCodec::encode(&parts).expect("符号化できる");
@@ -189,14 +213,22 @@ fn the_comparison_view_separates_every_observable_aspect() {
     let sheet = named.sheets()[0].id();
     let before_name = document_view(&named).sheets;
     named.rename_sheet(sheet, "改名後").expect("改名できる");
-    assert_ne!(before_name, document_view(&named).sheets, "シート名の差を捉えていない");
+    assert_ne!(
+        before_name,
+        document_view(&named).sheets,
+        "シート名の差を捉えていない"
+    );
 
     // 列順: 同一の文書の列名の順序だけを入れ替える（列名の集合は同じ）。
     let before_columns = document_view(&named).sheets;
     named
         .set_sheet_columns(sheet, vec!["b".to_owned(), "a".to_owned()])
         .expect("列を差し替えられる");
-    assert_ne!(before_columns, document_view(&named).sheets, "列順の差を捉えていない");
+    assert_ne!(
+        before_columns,
+        document_view(&named).sheets,
+        "列順の差を捉えていない"
+    );
 
     // 行順: 同一の行集合を並べ替える（行の内容は変えない）。
     let mut ordered = document_with_sheet(
@@ -205,18 +237,34 @@ fn the_comparison_view_separates_every_observable_aspect() {
         vec![vec![CellValue::Int(1)], vec![CellValue::Int(2)]],
     );
     let sheet = ordered.sheets()[0].id();
-    let ids: Vec<RowId> = ordered.sheets()[0].rows().iter().map(|row| row.id()).collect();
+    let ids: Vec<RowId> = ordered.sheets()[0]
+        .rows()
+        .iter()
+        .map(|row| row.id())
+        .collect();
     let before_order = document_view(&ordered).rows;
-    ordered.reorder_rows(sheet, &[ids[1], ids[0]]).expect("並べ替えできる");
-    assert_ne!(before_order, document_view(&ordered).rows, "行順の差を捉えていない");
+    ordered
+        .reorder_rows(sheet, &[ids[1], ids[0]])
+        .expect("並べ替えできる");
+    assert_ne!(
+        before_order,
+        document_view(&ordered).rows,
+        "行順の差を捉えていない"
+    );
 
     // 行の値: 1 セルだけ変える。
     let mut valued = document_with_sheet(SCHEMA_EMPTY, &["v"], vec![vec![CellValue::Int(1)]]);
     let sheet = valued.sheets()[0].id();
     let row = valued.sheets()[0].rows()[0].id();
     let before_values = document_view(&valued).rows;
-    valued.set_row_values(sheet, row, vec![CellValue::Int(2)]).expect("値は設定できる");
-    assert_ne!(before_values, document_view(&valued).rows, "行の値の差を捉えていない");
+    valued
+        .set_row_values(sheet, row, vec![CellValue::Int(2)])
+        .expect("値は設定できる");
+    assert_ne!(
+        before_values,
+        document_view(&valued).rows,
+        "行の値の差を捉えていない"
+    );
 
     // 型定義ペイロード: 同じ型定義識別子のまま `definition` だけを変える。
     let mut typed = document_with_sheet(SCHEMA_WITH_REF, &[], Vec::new());
@@ -225,13 +273,21 @@ fn the_comparison_view_separates_every_observable_aspect() {
     let other = SchemaPart::parse(&SCHEMA_WITH_REF.replace("\"string\"", "\"number\""))
         .expect("標本は妥当");
     typed.set_root_schema(sheet, other).expect("差し替えできる");
-    assert_ne!(before_schema, document_view(&typed).schemas, "型定義ペイロードの差を捉えていない");
+    assert_ne!(
+        before_schema,
+        document_view(&typed).schemas,
+        "型定義ペイロードの差を捉えていない"
+    );
 
     // 添付バイト列: 別の内容を登録する（識別子もバイト列も変わる）。
     let mut attached = document_with_sheet(SCHEMA_EMPTY, &[], Vec::new());
     let before_attachments = document_view(&attached).attachments;
     attached.add_attachment(vec![1, 2, 3]);
-    assert_ne!(before_attachments, document_view(&attached).attachments, "添付の差を捉えていない");
+    assert_ne!(
+        before_attachments,
+        document_view(&attached).attachments,
+        "添付の差を捉えていない"
+    );
 
     // 未参照添付: 行から参照されない添付を足すと、未参照一覧だけが変わる。
     let mut extras = sample_with_unreferenced_attachment();
@@ -267,17 +323,32 @@ fn the_comparison_view_separates_every_observable_aspect() {
 
     let view_a = document_view(&model_a);
     let view_b = document_view(&model_b);
-    assert_eq!(view_a.document_id, view_b.document_id, "対照が識別子まで変えている");
+    assert_eq!(
+        view_a.document_id, view_b.document_id,
+        "対照が識別子まで変えている"
+    );
     assert_eq!(view_a.sheets, view_b.sheets, "対照がシートまで変えている");
     assert_eq!(view_a.rows, view_b.rows, "対照が行まで変えている");
-    assert_eq!(view_a.schemas, view_b.schemas, "対照がスキーマまで変えている");
-    assert_eq!(view_a.attachments, view_b.attachments, "対照が添付まで変えている");
-    assert_ne!(view_a.parts, view_b.parts, "保持フィールドの差を捉えていない");
+    assert_eq!(
+        view_a.schemas, view_b.schemas,
+        "対照がスキーマまで変えている"
+    );
+    assert_eq!(
+        view_a.attachments, view_b.attachments,
+        "対照が添付まで変えている"
+    );
+    assert_ne!(
+        view_a.parts, view_b.parts,
+        "保持フィールドの差を捉えていない"
+    );
 
     // 差が実際に比較ヘルパを落とすことも確かめる（View の項目が
     // `assert_same_document` の比較へ結線されていることの観測）。
     let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         assert_same_document(&model_a, &model_b);
     }));
-    assert!(rejected.is_err(), "assert_same_document が保持フィールドの差を検出しなかった");
+    assert!(
+        rejected.is_err(),
+        "assert_same_document が保持フィールドの差を検出しなかった"
+    );
 }

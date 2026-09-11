@@ -1,0 +1,6 @@
+# 意味を変えない大量変更（一括整形など）のコミット。git blame はこれらを飛ばす。
+# GitHub の blame 表示は自動で読む。手元の git では一度だけ次を実行する:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# style: rustfmt で Rust コードを一括整形する
+5291210a4ef6d19e38e0e2af4ca26a2d4df5384b

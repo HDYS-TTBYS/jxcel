@@ -265,7 +265,11 @@ impl RowsCodec {
             }
             let id = parse_row_id(&raw.entries[shape.id_position].value, &location, line)?;
             if !seen_ids.insert(id) {
-                return Err(line_error(&location, line, format!("duplicate row identifier {id}")));
+                return Err(line_error(
+                    &location,
+                    line,
+                    format!("duplicate row identifier {id}"),
+                ));
             }
             let mut values = Vec::with_capacity(shape.columns.len());
             for (position, column) in shape.positions.iter().zip(&shape.columns) {
@@ -279,7 +283,11 @@ impl RowsCodec {
         }
         // 0 行のエントリ（0 バイト）は列順を表現できないため、空の列順を返す。
         let columns = shape.map(|shape| shape.columns).unwrap_or_default();
-        Ok(SheetRows { sheet: *sheet, columns, rows })
+        Ok(SheetRows {
+            sheet: *sheet,
+            columns,
+            rows,
+        })
     }
 }
 
@@ -442,11 +450,7 @@ impl RowShape {
     ///
     /// キーの検査はここで 1 行分だけ行えば足りる: 以降の行はキー列の完全一致が要求される
     /// ため（[`RowShape::matches`]）、像外キーは 2 行目以降では一致検査が先に弾く。
-    fn establish(
-        entries: &[RawEntry],
-        location: &str,
-        line: usize,
-    ) -> Result<Self, DocumentError> {
+    fn establish(entries: &[RawEntry], location: &str, line: usize) -> Result<Self, DocumentError> {
         let mut keys: Vec<String> = Vec::with_capacity(entries.len());
         let mut positions: Vec<usize> = Vec::with_capacity(entries.len());
         let mut columns: Vec<String> = Vec::with_capacity(entries.len());
@@ -456,7 +460,11 @@ impl RowShape {
         for (position, entry) in entries.iter().enumerate() {
             if !seen_keys.insert(entry.key.as_str()) {
                 // 同名キーのどちらがデータか決まらない（自己矛盾）。
-                return Err(line_error(location, line, format!("duplicate key `{}`", entry.key)));
+                return Err(line_error(
+                    location,
+                    line,
+                    format!("duplicate key `{}`", entry.key),
+                ));
             }
             if entry.key == ROW_ID_KEY {
                 // 予約キーは完全一致のみ（`$$id` は列名 `$id` になる）。
@@ -490,13 +498,22 @@ impl RowShape {
                 format!("row object has no `{ROW_ID_KEY}` key"),
             ));
         };
-        Ok(Self { id_position, keys, positions, columns })
+        Ok(Self {
+            id_position,
+            keys,
+            positions,
+            columns,
+        })
     }
 
     /// 行のキー列が最初の行と同一か（`$id` + 同一列集合 + 同一順序）。
     fn matches(&self, entries: &[RawEntry]) -> bool {
         self.keys.len() == entries.len()
-            && self.keys.iter().zip(entries).all(|(key, entry)| key.as_str() == entry.key.as_str())
+            && self
+                .keys
+                .iter()
+                .zip(entries)
+                .all(|(key, entry)| key.as_str() == entry.key.as_str())
     }
 }
 
@@ -575,10 +592,18 @@ fn internal(location: &str, reason: &dyn fmt::Display) -> RowsEncodeError {
 /// 外部ツールが書いたものも読み戻せなければならない）。
 fn parse_row_id(value: &RawValue, location: &str, line: usize) -> Result<RowId, DocumentError> {
     let text = serde_json::from_str::<String>(value.get()).map_err(|_| {
-        line_error(location, line, format!("`{ROW_ID_KEY}` is not a JSON string"))
+        line_error(
+            location,
+            line,
+            format!("`{ROW_ID_KEY}` is not a JSON string"),
+        )
     })?;
     text.parse::<RowId>().map_err(|error| {
-        line_error(location, line, format!("`{ROW_ID_KEY}` is not a row: {error}"))
+        line_error(
+            location,
+            line,
+            format!("`{ROW_ID_KEY}` is not a row: {error}"),
+        )
     })
 }
 
@@ -590,19 +615,16 @@ fn keys_of(entries: &[RawEntry]) -> Vec<&str> {
 /// 行に帰属する構造的な失敗を、エントリ名 + 1 始まりの行番号付きのコンテナ不正へ写す
 /// （[`crate::json::read_ndjson`] の診断規約をそのまま延長する）。
 fn line_error(location: &str, line: usize, reason: impl fmt::Display) -> DocumentError {
-    DocumentError::InvalidContainer { entry: format!("{location} line {line}: {reason}") }
+    DocumentError::InvalidContainer {
+        entry: format!("{location} line {line}: {reason}"),
+    }
 }
 
 /// セルの解析失敗を、エントリ名 + 行番号 + 列名付きのコンテナ不正へ写す。
 ///
 /// セル値の解析失敗は [`crate::value`] が `InvalidContainer` の `entry` に
 /// `value: <理由>` として載せる。その理由を捨てずに、どの行のどの列かを前置きする。
-fn cell_error(
-    location: &str,
-    line: usize,
-    column: &str,
-    error: DocumentError,
-) -> DocumentError {
+fn cell_error(location: &str, line: usize, column: &str, error: DocumentError) -> DocumentError {
     match error {
         DocumentError::InvalidContainer { entry } => DocumentError::InvalidContainer {
             entry: format!("{location} line {line}: column {column}: {entry}"),
@@ -613,7 +635,9 @@ fn cell_error(
 
 /// エントリ種別の取り違えなど、エントリ名を文脈にした失敗（復号の入口）。
 fn invalid_entry(entry: &EntryName, reason: impl fmt::Display) -> DocumentError {
-    DocumentError::InvalidContainer { entry: format!("{entry}: {reason}") }
+    DocumentError::InvalidContainer {
+        entry: format!("{entry}: {reason}"),
+    }
 }
 
 #[cfg(test)]
@@ -625,7 +649,10 @@ mod tests {
 
     /// 標本の列名（列順は呼び出し元が与える）。
     fn sample_columns() -> Vec<String> {
-        ["name", "count", "amount", "notes"].iter().map(|name| (*name).to_string()).collect()
+        ["name", "count", "amount", "notes"]
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect()
     }
 
     /// 標本の値（列数 4。`CellValue` の複数変種を混ぜる）。
@@ -676,8 +703,9 @@ mod tests {
             ids.push(id);
             values.push(row_values);
         }
-        let order: Vec<RowId> =
-            (0..ROWS).map(|position| ids[(position * STRIDE) % ROWS]).collect();
+        let order: Vec<RowId> = (0..ROWS)
+            .map(|position| ids[(position * STRIDE) % ROWS])
+            .collect();
         sheet.reorder_rows(&order).expect("並び替え");
 
         let (entry, bytes) = RowsCodec::encode(sheet_id, &columns, sheet.rows()).expect("符号化");
@@ -693,7 +721,11 @@ mod tests {
         assert_eq!(ROWS, decoded.rows().len(), "行数が復号で変わった");
         for (position, row) in decoded.rows().iter().enumerate() {
             let origin = (position * STRIDE) % ROWS;
-            assert_eq!(order[position], row.id(), "行 {position} の識別子が変わった");
+            assert_eq!(
+                order[position],
+                row.id(),
+                "行 {position} の識別子が変わった"
+            );
             assert_eq!(values[origin], row.values(), "行 {position} の値が変わった");
         }
 

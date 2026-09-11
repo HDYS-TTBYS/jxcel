@@ -120,11 +120,26 @@ mod tests {
     /// 2 チャンク / 8 チャンク / 100 チャンク（BLAKE3 のチャンク長は 1024 バイト）を
     /// 跨ぎ、木構造の畳み込み経路の誤りも落ちるようにしてある。
     const OFFICIAL_VECTORS: &[(usize, &str)] = &[
-        (0, "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"),
-        (1024, "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7"),
-        (2048, "e776b6028c7cd22a4d0ba182a8bf62205d2ef576467e838ed6f2529b85fba24a"),
-        (8192, "aae792484c8efe4f19e2ca7d371d8c467ffb10748d8a5a1ae579948f718a2a63"),
-        (102400, "bc3e3d41a1146b069abffad3c0d44860cf664390afce4d9661f7902e7943e085"),
+        (
+            0,
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+        ),
+        (
+            1024,
+            "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7",
+        ),
+        (
+            2048,
+            "e776b6028c7cd22a4d0ba182a8bf62205d2ef576467e838ed6f2529b85fba24a",
+        ),
+        (
+            8192,
+            "aae792484c8efe4f19e2ca7d371d8c467ffb10748d8a5a1ae579948f718a2a63",
+        ),
+        (
+            102400,
+            "bc3e3d41a1146b069abffad3c0d44860cf664390afce4d9661f7902e7943e085",
+        ),
     ];
 
     /// 公式ベクタの入力パターン `byte[i] = (i % 251) as u8`。
@@ -225,10 +240,17 @@ mod tests {
         }
 
         // 1 バイト差（末尾・中程・非 UTF-8）をすべて検出する。
-        assert_ne!(digest_part(&[0x01, 0x02, 0x03]), digest_part(&[0x01, 0x02, 0x04]));
+        assert_ne!(
+            digest_part(&[0x01, 0x02, 0x03]),
+            digest_part(&[0x01, 0x02, 0x04])
+        );
         assert_ne!(digest_part(&[0x00, 0x00]), digest_part(&[0x00, 0x01]));
         assert_ne!(digest_part(&[0xff]), digest_part(&[0xfe]));
-        assert_ne!(digest_part(empty), digest_part(&[0x00]), "空列と 1 バイトが同一");
+        assert_ne!(
+            digest_part(empty),
+            digest_part(&[0x00]),
+            "空列と 1 バイトが同一"
+        );
     }
 
     /// 要件 5.2: 記録値と実際の内容が一致すれば通る（5 形すべて）。
@@ -237,7 +259,10 @@ mod tests {
         for (entry, bytes) in samples() {
             let recorded = digest_part(&bytes);
             let result = verify_part(&entry, &bytes, recorded);
-            assert!(result.is_ok(), "一致時に Ok(()) にならない: {entry}: {result:?}");
+            assert!(
+                result.is_ok(),
+                "一致時に Ok(()) にならない: {entry}: {result:?}"
+            );
         }
     }
 
@@ -264,7 +289,10 @@ mod tests {
 
         // 標本のエントリ形は互いに異なる（固定名の検出）。網羅性の回帰を検出するには
         // 対象が 2 つ以上必要なので、それも固定する。
-        assert!(reported.len() >= 2, "エントリ形が 2 つ以上ないと回帰を検出できない");
+        assert!(
+            reported.len() >= 2,
+            "エントリ形が 2 つ以上ないと回帰を検出できない"
+        );
         for (i, left) in reported.iter().enumerate() {
             for right in &reported[i + 1..] {
                 assert_ne!(left, right, "異なるエントリ名が同じ entry として報告された");
@@ -315,7 +343,10 @@ mod tests {
     fn verify_is_read_only_and_repeatable() {
         for (entry, bytes) in samples() {
             let recorded = digest_part(&bytes);
-            assert!(verify_part(&entry, &bytes, recorded).is_ok(), "一致する入力で Ok にならない: {entry}");
+            assert!(
+                verify_part(&entry, &bytes, recorded).is_ok(),
+                "一致する入力で Ok にならない: {entry}"
+            );
             assert!(
                 verify_part(&entry, &bytes, recorded).is_ok(),
                 "同じ一致入力の 2 回目の照合で結果が変わる: {entry}"
@@ -331,7 +362,11 @@ mod tests {
             assert_eq!(first, second, "同じ不一致入力で報告内容が変わる");
             assert_eq!(before, bytes, "照合が入力バイト列を書き換えた");
             assert_eq!(submitted, tampered, "照合が照合対象を書き換えた");
-            assert_eq!(recorded, digest_part(&bytes), "記録値が再計算で上書きされた");
+            assert_eq!(
+                recorded,
+                digest_part(&bytes),
+                "記録値が再計算で上書きされた"
+            );
         }
     }
 
@@ -344,7 +379,11 @@ mod tests {
         let bytes = painted(LEN);
         let digest = digest_part(&bytes);
 
-        assert_eq!(digest, digest_part(&painted(LEN)), "同一バイト列で結果が変わる");
+        assert_eq!(
+            digest,
+            digest_part(&painted(LEN)),
+            "同一バイト列で結果が変わる"
+        );
         for index in [0, LEN / 2, LEN - 1] {
             let mut changed = painted(LEN);
             changed[index] ^= 0x01;

@@ -316,8 +316,7 @@ pub struct ShutdownError {
 }
 
 /// 整合性検査の差し替え口。
-pub type IntegrityVerifier =
-    dyn Fn(SidecarKind, &Path) -> Result<(), IntegrityError> + Send + Sync;
+pub type IntegrityVerifier = dyn Fn(SidecarKind, &Path) -> Result<(), IntegrityError> + Send + Sync;
 
 /// 子の終了状態。監視スレッドが記録し、監督の生存判定はこれだけを見る。
 ///
@@ -1001,12 +1000,7 @@ fn spawn_monitor(inner: Arc<SidecarInner>, waiter: platform::Waiter, readers: Ve
 /// 上限に達した時点では出さず、**次の内容バイトが来た時点で**出す。行がちょうど上限で終わる
 /// 場合、その断片は終端された 1 断片として出したいからである（先に出すと、行末が空の断片として
 /// 二重に届く）。
-fn push_content(
-    fragment: &mut Vec<u8>,
-    byte: u8,
-    cap: usize,
-    emit: &mut impl FnMut(&[u8], bool),
-) {
+fn push_content(fragment: &mut Vec<u8>, byte: u8, cap: usize, emit: &mut impl FnMut(&[u8], bool)) {
     if fragment.len() >= cap {
         emit(fragment, false);
         fragment.clear();
@@ -1223,7 +1217,10 @@ mod tests {
     /// 改行で行に分かれ、CRLF の `\r` は落ちる。空行は 1 行として残り、行の途中の `\r` は内容。
     #[test]
     fn lines_are_split_on_newlines_and_empty_lines_are_kept() {
-        assert_eq!(lines(&fragments(b"a\r\nbb\n\n", 8, usize::MAX)), ["a", "bb", ""]);
+        assert_eq!(
+            lines(&fragments(b"a\r\nbb\n\n", 8, usize::MAX)),
+            ["a", "bb", ""]
+        );
         // 行の途中の `\r` は内容である（CRLF ではない）。
         assert_eq!(lines(&fragments(b"a\rb\n", 8, usize::MAX)), ["a\rb"]);
         // 改行で終わらない最終行も届く。
@@ -1236,7 +1233,11 @@ mod tests {
     #[test]
     fn lf_lines_at_and_around_the_cap_are_split_exactly() {
         for cap in [4usize, MAX_LINE_BYTES] {
-            assert_eq!(shape(&stream(cap, b"\n", cap, usize::MAX)), [(cap, true)], "cap={cap}");
+            assert_eq!(
+                shape(&stream(cap, b"\n", cap, usize::MAX)),
+                [(cap, true)],
+                "cap={cap}"
+            );
             assert_eq!(
                 shape(&stream(cap - 1, b"\n", cap, usize::MAX)),
                 [(cap - 1, true)],
@@ -1247,7 +1248,10 @@ mod tests {
                 [(cap, false), (1, true)],
                 "cap={cap}"
             );
-            assert_eq!(lines(&stream(cap + 1, b"\n", cap, usize::MAX)), ["x".repeat(cap + 1)]);
+            assert_eq!(
+                lines(&stream(cap + 1, b"\n", cap, usize::MAX)),
+                ["x".repeat(cap + 1)]
+            );
         }
     }
 
@@ -1273,7 +1277,10 @@ mod tests {
                 [(cap, false), (1, true)],
                 "cap={cap}"
             );
-            assert_eq!(lines(&stream(cap, b"\r\n", cap, usize::MAX)), ["x".repeat(cap)]);
+            assert_eq!(
+                lines(&stream(cap, b"\r\n", cap, usize::MAX)),
+                ["x".repeat(cap)]
+            );
             assert_eq!(
                 lines(&stream(cap + 1, b"\r\n", cap, usize::MAX)),
                 ["x".repeat(cap + 1)]
@@ -1328,12 +1335,12 @@ mod tests {
         // 上限の境界に来た場合も落とさない（次の断片の内容になる）。
         for cap in [4usize, MAX_LINE_BYTES] {
             let fragments = stream(cap, b"\r", cap, 1);
+            assert_eq!(shape(&fragments), [(cap, false), (1, false)], "cap={cap}");
             assert_eq!(
-                shape(&fragments),
-                [(cap, false), (1, false)],
+                lines(&fragments),
+                [format!("{}\r", "x".repeat(cap))],
                 "cap={cap}"
             );
-            assert_eq!(lines(&fragments), [format!("{}\r", "x".repeat(cap))], "cap={cap}");
         }
     }
 

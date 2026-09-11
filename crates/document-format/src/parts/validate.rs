@@ -256,7 +256,12 @@ pub struct IdDeclaration {
 impl IdDeclaration {
     /// 種別・識別子・出現箇所から 1 件を組み立てる（所属シートは未設定）。
     pub fn new(kind: IdKind, id: impl Into<String>, location: impl Into<String>) -> Self {
-        Self { kind, id: id.into(), location: location.into(), sheet: None }
+        Self {
+            kind,
+            id: id.into(),
+            location: location.into(),
+            sheet: None,
+        }
     }
 
     /// 所属シートを与える（ビルダー。[`IdDeclaration::new`] の意味は変えない）。
@@ -288,7 +293,11 @@ pub struct TypeRefDeclaration {
 impl TypeRefDeclaration {
     /// 参照元・参照先・所属シートから 1 件を組み立てる。
     pub fn new(from: impl Into<String>, to: impl Into<String>, sheet: impl Into<String>) -> Self {
-        Self { from: from.into(), to: to.into(), sheet: sheet.into() }
+        Self {
+            from: from.into(),
+            to: to.into(),
+            sheet: sheet.into(),
+        }
     }
 }
 
@@ -308,7 +317,10 @@ pub struct AttachmentRefDeclaration {
 impl AttachmentRefDeclaration {
     /// 参照元と添付識別子から 1 件を組み立てる。
     pub fn new(from: impl Into<String>, id: impl Into<String>) -> Self {
-        Self { from: from.into(), id: id.into() }
+        Self {
+            from: from.into(),
+            id: id.into(),
+        }
     }
 }
 
@@ -329,7 +341,10 @@ pub struct SheetRefDeclaration {
 impl SheetRefDeclaration {
     /// エントリ名と、それが指すシート識別子から 1 件を組み立てる。
     pub fn new(entry: impl Into<String>, sheet: impl Into<String>) -> Self {
-        Self { entry: entry.into(), sheet: sheet.into() }
+        Self {
+            entry: entry.into(),
+            sheet: sheet.into(),
+        }
     }
 }
 
@@ -412,7 +427,10 @@ impl PartInventory {
         let from = from.into();
         let references = &mut self.attachment_refs;
         visit_attachment_references(value, &mut |id| {
-            references.push(AttachmentRefDeclaration { from: from.clone(), id: id.to_string() });
+            references.push(AttachmentRefDeclaration {
+                from: from.clone(),
+                id: id.to_string(),
+            });
         });
     }
 
@@ -509,7 +527,9 @@ impl StructuralValidator {
     ) -> Result<(), DocumentError> {
         for sheet in required_sheets {
             if !schema_sheets.contains(sheet) {
-                return Err(DocumentError::MissingSchema { sheet: sheet.clone() });
+                return Err(DocumentError::MissingSchema {
+                    sheet: sheet.clone(),
+                });
             }
         }
         Ok(())
@@ -530,8 +550,7 @@ impl StructuralValidator {
                     // （`IdDeclaration::with_sheet` の docs）。
                     if let Some(sheet) = declaration.sheet.as_deref() {
                         // 識別子は正準形で比較する（モジュール docs「識別子の解決規約」）。
-                        defined_type_defs
-                            .insert((sheet, canonical_type_def_id(&declaration.id)));
+                        defined_type_defs.insert((sheet, canonical_type_def_id(&declaration.id)));
                     }
                 }
                 IdKind::Attachment => {
@@ -565,8 +584,11 @@ impl StructuralValidator {
 
         // 3. シート参照（要件 4.2。親の裁定）。`document.json` に列挙されたシートに実在する
         //    こと。専用の変種が design に無いため `InvalidContainer` の `entry` に載せる。
-        let known_sheets: BTreeSet<&str> =
-            inventory.required_sheets().iter().map(String::as_str).collect();
+        let known_sheets: BTreeSet<&str> = inventory
+            .required_sheets()
+            .iter()
+            .map(String::as_str)
+            .collect();
         for reference in inventory.sheet_refs() {
             if !known_sheets.contains(reference.sheet.as_str()) {
                 return Err(DocumentError::InvalidContainer {

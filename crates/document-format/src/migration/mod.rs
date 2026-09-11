@@ -217,7 +217,10 @@ impl MigrationChain {
     /// **副作用を持たない**ので、開く経路が「移行が適用されるか」を事前に知るためにも使える。
     pub const fn gate(recorded: FormatVersion) -> VersionVerdict {
         if recorded.major > CURRENT_FORMAT_VERSION.major {
-            VersionVerdict::Unsupported { found: recorded, supported: CURRENT_FORMAT_VERSION }
+            VersionVerdict::Unsupported {
+                found: recorded,
+                supported: CURRENT_FORMAT_VERSION,
+            }
         } else if recorded.major == CURRENT_FORMAT_VERSION.major {
             VersionVerdict::Openable
         } else {
@@ -259,9 +262,7 @@ impl MigrationChain {
             VersionVerdict::Unsupported { found, supported } => {
                 Err(DocumentError::UnsupportedVersion { found, supported })
             }
-            VersionVerdict::NeedsMigration { from } => {
-                Ok(Some(Self::migrate(steps, parts, from)?))
-            }
+            VersionVerdict::NeedsMigration { from } => Ok(Some(Self::migrate(steps, parts, from)?)),
         }
     }
 
@@ -279,10 +280,12 @@ impl MigrationChain {
         // `gate` が `NeedsMigration`（現行より古い major）と判定した集合は必ず 1 段以上を持つ
         // （`plan` は現行 major に到達しない計画を空のまま返さない）。到達しない経路だが
         // `panic` を置かず、「移行先が無い」と同じ中止で報告する。
-        let (first, rest) = plan.split_first().ok_or(DocumentError::UnsupportedVersion {
-            found: recorded,
-            supported: CURRENT_FORMAT_VERSION,
-        })?;
+        let (first, rest) = plan
+            .split_first()
+            .ok_or(DocumentError::UnsupportedVersion {
+                found: recorded,
+                supported: CURRENT_FORMAT_VERSION,
+            })?;
         let mut migrated = first.apply(parts)?.reindex(first.to())?;
         for step in rest {
             migrated = step.apply(&migrated)?.reindex(step.to())?;
@@ -374,14 +377,24 @@ mod tests {
 
     /// 集合の `document.json` のシート名（適用順序の観測点）。
     fn sheet_names(parts: &DocumentParts) -> Vec<String> {
-        let entry = parts.get(&EntryName::Document).expect("集合は document.json を持つ");
+        let entry = parts
+            .get(&EntryName::Document)
+            .expect("集合は document.json を持つ");
         let decoded = DocumentPart::from_json_bytes(&entry.bytes).expect("標本は復号できる");
-        decoded.sheets().iter().map(|meta| meta.name().to_owned()).collect()
+        decoded
+            .sheets()
+            .iter()
+            .map(|meta| meta.name().to_owned())
+            .collect()
     }
 
     /// 集合の 1 パートの実バイト列（観測用）。
     fn part_bytes(parts: &DocumentParts, name: EntryName) -> Vec<u8> {
-        parts.get(&name).expect("標本のパートは実在する").bytes.clone()
+        parts
+            .get(&name)
+            .expect("標本のパートは実在する")
+            .bytes
+            .clone()
     }
 
     /// 集合の索引を復号する（観測用）。
@@ -398,7 +411,10 @@ mod tests {
         match result {
             Err(DocumentError::UnsupportedVersion { found, supported }) => {
                 assert_eq!(recorded, found, "移行前の版が報告されていない");
-                assert_eq!(CURRENT_FORMAT_VERSION, supported, "対応バージョンが報告されていない");
+                assert_eq!(
+                    CURRENT_FORMAT_VERSION, supported,
+                    "対応バージョンが報告されていない"
+                );
             }
             other => panic!("移行先が無い集合が中止されない: {other:?}"),
         }
@@ -407,7 +423,11 @@ mod tests {
     /// 現行版は 1.0 である（golden fixture と既存テストの期待値の源）。
     #[test]
     fn the_current_version_is_one_zero() {
-        assert_eq!(FormatVersion::new(1, 0), CURRENT_FORMAT_VERSION, "現行バージョンが 1.0 でない");
+        assert_eq!(
+            FormatVersion::new(1, 0),
+            CURRENT_FORMAT_VERSION,
+            "現行バージョンが 1.0 でない"
+        );
     }
 
     /// 同一 major は minor の新旧を問わず受理する（受理条件は major の等値だけである。
@@ -469,7 +489,9 @@ mod tests {
         );
         let same_major = synthetic::recorded_at(FormatVersion::new(1, 99), &parts);
         assert!(
-            MigrationChain::apply(&same_major).expect("同一 major は中止しない").is_none(),
+            MigrationChain::apply(&same_major)
+                .expect("同一 major は中止しない")
+                .is_none(),
             "同一 major の集合が移行された"
         );
 
@@ -479,7 +501,10 @@ mod tests {
             match MigrationChain::apply(&parts) {
                 Err(DocumentError::UnsupportedVersion { found, supported }) => {
                     assert_eq!(recorded, found, "要求バージョンが報告されていない");
-                    assert_eq!(CURRENT_FORMAT_VERSION, supported, "対応バージョンが報告されていない");
+                    assert_eq!(
+                        CURRENT_FORMAT_VERSION, supported,
+                        "対応バージョンが報告されていない"
+                    );
                 }
                 other => panic!("{recorded} が中止されない: {other:?}"),
             }
@@ -507,7 +532,11 @@ mod tests {
             .expect("合成表は妥当")
             .expect("古い版は移行される");
 
-        assert_eq!(CURRENT_FORMAT_VERSION, migrated.format_version(), "移行後の版が現行版でない");
+        assert_eq!(
+            CURRENT_FORMAT_VERSION,
+            migrated.format_version(),
+            "移行後の版が現行版でない"
+        );
         assert_eq!(
             vec!["在庫|v0.1|v1.0".to_owned(), "空|v0.1|v1.0".to_owned()],
             sheet_names(&migrated),
@@ -539,16 +568,26 @@ mod tests {
             .expect("合成表は妥当")
             .expect("古い版は移行される");
 
-        assert_eq!(CURRENT_FORMAT_VERSION, migrated.format_version(), "移行後の版が現行版でない");
+        assert_eq!(
+            CURRENT_FORMAT_VERSION,
+            migrated.format_version(),
+            "移行後の版が現行版でない"
+        );
         let manifest = manifest_of(&migrated);
-        assert_eq!(CURRENT_FORMAT_VERSION, manifest.version(), "索引の記録値が現行版でない");
+        assert_eq!(
+            CURRENT_FORMAT_VERSION,
+            manifest.version(),
+            "索引の記録値が現行版でない"
+        );
         assert_eq!(
             migrated.iter().count() - 1,
             manifest.entries().len(),
             "索引が集合の内容と一致しない"
         );
         for entry in manifest.entries() {
-            let part = migrated.get(&entry.name()).expect("索引のエントリは実在する");
+            let part = migrated
+                .get(&entry.name())
+                .expect("索引のエントリは実在する");
             verify_part(&entry.name(), &part.bytes, entry.digest()).unwrap_or_else(|error| {
                 panic!("{} のダイジェストが実体と違う: {error}", entry.name())
             });
@@ -571,12 +610,22 @@ mod tests {
     fn a_broken_step_table_is_rejected() {
         let parts = synthetic::recorded_at(synthetic::OLDEST, &sample_parts());
         // 隙間: 記録値（0.0）から出る段が無い。
-        assert_no_target(MigrationChain::apply_with(synthetic::GAP, &parts), synthetic::OLDEST);
+        assert_no_target(
+            MigrationChain::apply_with(synthetic::GAP, &parts),
+            synthetic::OLDEST,
+        );
         // 現行 major に届かない: 0.1 で止まる（そこから先の段が無い）。
-        assert_no_target(MigrationChain::apply_with(synthetic::SHORT, &parts), synthetic::OLDEST);
+        assert_no_target(
+            MigrationChain::apply_with(synthetic::SHORT, &parts),
+            synthetic::OLDEST,
+        );
         // 前進しない段 / 現行 major を飛び越す段 / 同じ版から 2 段: 表の欠陥
         // （呼び出し元の programming error）。
-        for table in [synthetic::STALLED, synthetic::OVERSHOOT, synthetic::AMBIGUOUS] {
+        for table in [
+            synthetic::STALLED,
+            synthetic::OVERSHOOT,
+            synthetic::AMBIGUOUS,
+        ] {
             match MigrationChain::apply_with(table, &parts) {
                 Err(DocumentError::InvalidContainer { entry }) => {
                     assert!(entry.starts_with("migration:"), "entry が違う: {entry}");
@@ -606,7 +655,11 @@ mod tests {
     #[test]
     fn the_current_version_is_neither_migrated_nor_copied() {
         let parts = sample_parts();
-        assert_eq!(CURRENT_FORMAT_VERSION, parts.format_version(), "標本が現行版でない");
+        assert_eq!(
+            CURRENT_FORMAT_VERSION,
+            parts.format_version(),
+            "標本が現行版でない"
+        );
         assert!(
             MigrationChain::apply_with(synthetic::MULTI_STEP, &parts)
                 .expect("現行版は中止しない")
@@ -655,7 +708,11 @@ mod tests {
         );
 
         // 未知フィールドが既知の値を隠していない（移行後の集合は現行版として一貫している）。
-        assert_eq!(CURRENT_FORMAT_VERSION, migrated.format_version(), "移行後の版が現行版でない");
+        assert_eq!(
+            CURRENT_FORMAT_VERSION,
+            migrated.format_version(),
+            "移行後の版が現行版でない"
+        );
         assert_eq!(
             vec!["在庫|v0.1|v1.0".to_owned(), "空|v0.1|v1.0".to_owned()],
             sheet_names(&migrated),

@@ -336,7 +336,10 @@ pub struct PreservedFields {
 impl PreservedFields {
     /// 空の集合を作る。
     pub const fn new() -> Self {
-        Self { fields: Vec::new(), known_seen: 0 }
+        Self {
+            fields: Vec::new(),
+            known_seen: 0,
+        }
     }
 
     /// 保持している未知フィールドの件数。
@@ -428,7 +431,14 @@ pub struct PreservingObjectWriter<'a, W: Write> {
 impl<'a, W: Write> PreservingObjectWriter<'a, W> {
     /// 未知フィールドの集合を差し戻しながら書くオブジェクトを開始する。
     pub fn new(out: &'a mut W, preserved: &'a PreservedFields) -> Self {
-        Self { out, buffer: vec![b'{'], preserved, next: 0, entries: 0, written: 0 }
+        Self {
+            out,
+            buffer: vec![b'{'],
+            preserved,
+            next: 0,
+            entries: 0,
+            written: 0,
+        }
     }
 
     /// 既知フィールド 1 件を書き出す（**宣言順**に呼ぶこと）。
@@ -616,7 +626,11 @@ mod tests {
             .lines()
             .find_map(|line| line.strip_prefix(PROBE_PREFIX))
             .expect("子プロセスが PROBE= を報告しない（--exact のテスト名が古い可能性）");
-        assert_eq!(hex(&bytes), reported, "プロセスをまたぐと出力バイト列が変わる");
+        assert_eq!(
+            hex(&bytes),
+            reported,
+            "プロセスをまたぐと出力バイト列が変わる"
+        );
     }
 
     // --- (b) 非 ASCII とエスケープ（要件 2.4） -----------------------------------
@@ -656,7 +670,10 @@ mod tests {
         write_json(&mut out, &row).expect("構造体の書き出しが失敗した");
 
         // 宣言順は zulu, alpha, mike。辞書順（alpha, mike, zulu）ではない。
-        assert_eq!("{\"zulu\":7,\"alpha\":\"日本語\",\"mike\":true}", text(&out));
+        assert_eq!(
+            "{\"zulu\":7,\"alpha\":\"日本語\",\"mike\":true}",
+            text(&out)
+        );
     }
 
     #[test]
@@ -682,11 +699,19 @@ mod tests {
         let bool_value = CellValue::Bool(true);
 
         // キーは辞書順（alpha, mike, zeta）ともスキーマの登録順とも異なる並び。
-        let forward = encode_object(&[("zeta", &int), ("alpha", &text_value), ("mike", &bool_value)]);
+        let forward = encode_object(&[
+            ("zeta", &int),
+            ("alpha", &text_value),
+            ("mike", &bool_value),
+        ]);
         assert_eq!("{\"zeta\":1,\"alpha\":\"x\",\"mike\":true}", forward);
 
         // 同じ集合を別の順序で与えれば、出力もその順序に従う（並べ替えない）。
-        let reversed = encode_object(&[("mike", &bool_value), ("alpha", &text_value), ("zeta", &int)]);
+        let reversed = encode_object(&[
+            ("mike", &bool_value),
+            ("alpha", &text_value),
+            ("zeta", &int),
+        ]);
         assert_eq!("{\"mike\":true,\"alpha\":\"x\",\"zeta\":1}", reversed);
     }
 
@@ -706,7 +731,11 @@ mod tests {
         for value in &values {
             let cell = value::to_json_bytes(value, LOC).expect("妥当なセルの書き出しが失敗した");
             let expected = format!("{{\"k\":{}}}", text(&cell));
-            assert_eq!(expected, encode_object(&[("k", value)]), "委譲になっていない");
+            assert_eq!(
+                expected,
+                encode_object(&[("k", value)]),
+                "委譲になっていない"
+            );
         }
     }
 
@@ -715,7 +744,10 @@ mod tests {
     #[test]
     fn negative_zero_is_written_without_a_sign() {
         assert_eq!("0.0", encode_cell(&CellValue::Float(-0.0)));
-        assert_eq!("{\"k\":0.0}", encode_object(&[("k", &CellValue::Float(-0.0))]));
+        assert_eq!(
+            "{\"k\":0.0}",
+            encode_object(&[("k", &CellValue::Float(-0.0))])
+        );
         assert_eq!(
             "{\"price\":0.0}",
             encode_object(&[("price", &CellValue::float(-0.0))]),
@@ -817,7 +849,11 @@ mod tests {
             let Some(version) = version else {
                 return Err(de::Error::custom("part is missing the `version` key"));
             };
-            Ok(ProbePart { version, parts: parts.unwrap_or_default(), preserved })
+            Ok(ProbePart {
+                version,
+                parts: parts.unwrap_or_default(),
+                preserved,
+            })
         }
     }
 
@@ -826,8 +862,12 @@ mod tests {
         let part: ProbePart = serde_json::from_str(input).expect("パートの読み込みが失敗した");
         let mut out = Vec::new();
         let mut writer = PreservingObjectWriter::new(&mut out, &part.preserved);
-        writer.write_known("version", &part.version).expect("既知フィールドの書き出しが失敗した");
-        writer.write_known("parts", &part.parts).expect("既知フィールドの書き出しが失敗した");
+        writer
+            .write_known("version", &part.version)
+            .expect("既知フィールドの書き出しが失敗した");
+        writer
+            .write_known("parts", &part.parts)
+            .expect("既知フィールドの書き出しが失敗した");
         writer.finish().expect("オブジェクトの確定が失敗した");
         (part, out)
     }
@@ -836,14 +876,16 @@ mod tests {
     /// 読み書きでバイト単位の元に戻ること（位置復元の核心。不変条件 1）。
     #[test]
     fn unknown_fields_before_between_and_after_known_fields_round_trip_byte_for_byte() {
-        const INPUT: &str =
-            r#"{"future_a":{"x":1},"version":4,"future_b":[1,2],"parts":["p","q"],"future_c":null}"#;
+        const INPUT: &str = r#"{"future_a":{"x":1},"version":4,"future_b":[1,2],"parts":["p","q"],"future_c":null}"#;
         let (part, out) = rewrite_part(INPUT);
 
         assert_eq!(3, part.preserved.len(), "未知フィールドの件数が一致しない");
         assert_eq!(
             vec!["future_a", "future_b", "future_c"],
-            part.preserved.iter().map(PreservedField::key).collect::<Vec<_>>(),
+            part.preserved
+                .iter()
+                .map(PreservedField::key)
+                .collect::<Vec<_>>(),
             "保持順が原文順でない",
         );
         assert_eq!(
@@ -854,7 +896,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             "既知フィールドに対する元の位置（前方カウント）が記録されていない",
         );
-        assert_eq!(INPUT.as_bytes(), out.as_slice(), "書き戻しがバイト単位で元に戻らない");
+        assert_eq!(
+            INPUT.as_bytes(),
+            out.as_slice(),
+            "書き戻しがバイト単位で元に戻らない"
+        );
     }
 
     /// 未知フィールドの値は**原文のバイト列のまま**出る（`serde_json::Value` を経由して
@@ -866,13 +912,21 @@ mod tests {
         const INPUT: &str = r#"{"weird":{  "a" : [ 1 , 2 ] , "b" : "\u65e5\u672c" },"version":1,"parts":["p"],"big":123456789012345678901234567890,"emoji":"😀","surrogate":"\ud83d\ude00","tab":"\t"}"#;
         let (part, out) = rewrite_part(INPUT);
 
-        let first = part.preserved.iter().next().expect("未知フィールドが保持されていない");
+        let first = part
+            .preserved
+            .iter()
+            .next()
+            .expect("未知フィールドが保持されていない");
         assert_eq!(
             br#"{  "a" : [ 1 , 2 ] , "b" : "\u65e5\u672c" }"#.as_slice(),
             first.value_bytes(),
             "値の生バイト列が原文と異なる（正規化・再直列化された）",
         );
-        assert_eq!(INPUT.as_bytes(), out.as_slice(), "書き戻しで値が再直列化された");
+        assert_eq!(
+            INPUT.as_bytes(),
+            out.as_slice(),
+            "書き戻しで値が再直列化された"
+        );
     }
 
     /// 既知フィールドは未知フィールドの有無に関わらず宣言順で出る（不変条件 3）。
@@ -892,10 +946,20 @@ mod tests {
         const INPUT: &str = r#"{"version":4,"parts":["p"]}"#;
         let (part, out) = rewrite_part(INPUT);
 
-        assert!(part.preserved.is_empty(), "未知フィールドが無いのに保持された");
+        assert!(
+            part.preserved.is_empty(),
+            "未知フィールドが無いのに保持された"
+        );
         assert_eq!(0, part.preserved.len());
-        assert!(part.preserved.iter().next().is_none(), "空の集合が要素を返した");
-        assert_eq!(INPUT.as_bytes(), out.as_slice(), "未知フィールドの無い入力の出力が変わった");
+        assert!(
+            part.preserved.iter().next().is_none(),
+            "空の集合が要素を返した"
+        );
+        assert_eq!(
+            INPUT.as_bytes(),
+            out.as_slice(),
+            "未知フィールドの無い入力の出力が変わった"
+        );
     }
 
     /// 移行チェーンの依存の模擬（不変条件 5。要件 6.2 / 6.3）: 「将来バージョンが足した
@@ -906,10 +970,17 @@ mod tests {
         const FUTURE: &str =
             r#"{"future_meta":{"added_by":"minor","unit":"mm"},"version":4,"parts":["p"]}"#;
         let (part, first) = rewrite_part(FUTURE);
-        assert_eq!(FUTURE.as_bytes(), first.as_slice(), "将来バージョンのフィールドが往復で失われた");
+        assert_eq!(
+            FUTURE.as_bytes(),
+            first.as_slice(),
+            "将来バージョンのフィールドが往復で失われた"
+        );
 
         let (_, second) = rewrite_part(&text(&first));
-        assert_eq!(first, second, "再読込で将来バージョンのフィールドが変化した");
+        assert_eq!(
+            first, second,
+            "再読込で将来バージョンのフィールドが変化した"
+        );
         assert_eq!(1, part.preserved.len());
     }
 
@@ -920,7 +991,11 @@ mod tests {
         const INPUT: &str = r#"{"future_null":null,"version":1,"parts":[]}"#;
         let (part, out) = rewrite_part(INPUT);
 
-        let field = part.preserved.iter().next().expect("null 値の未知フィールドが保持されていない");
+        let field = part
+            .preserved
+            .iter()
+            .next()
+            .expect("null 値の未知フィールドが保持されていない");
         assert_eq!("future_null", field.key());
         assert_eq!(b"null".as_slice(), field.value_bytes());
         assert_eq!(INPUT.as_bytes(), out.as_slice());
@@ -932,7 +1007,9 @@ mod tests {
         let preserved = PreservedFields::new();
         let mut out = Vec::new();
         let mut writer = PreservingObjectWriter::new(&mut out, &preserved);
-        writer.write_known("version", &1u64).expect("既知フィールドの書き出しが失敗した");
+        writer
+            .write_known("version", &1u64)
+            .expect("既知フィールドの書き出しが失敗した");
 
         let err = writer
             .write_known("bad", &CellValue::Float(f64::NAN))

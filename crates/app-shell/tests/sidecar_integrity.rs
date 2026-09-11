@@ -42,9 +42,10 @@ fn staged_original_path() -> PathBuf {
     } else {
         ""
     };
-    repo_root()
-        .join("sidecars")
-        .join(format!("{}-{BUILD_TARGET_TRIPLE}{exe}", SidecarKind::Smoke.as_str()))
+    repo_root().join("sidecars").join(format!(
+        "{}-{BUILD_TARGET_TRIPLE}{exe}",
+        SidecarKind::Smoke.as_str()
+    ))
 }
 
 /// バイト列の SHA-256（独立した実装で期待値を作る）。
@@ -123,10 +124,17 @@ fn one_byte_modification_is_reported_with_both_digests() {
 
     let expected_hex = hex(&expected);
     let actual_hex = hex(&digest32(&modified));
-    assert_ne!(expected_hex, actual_hex, "1 バイト改変でダイジェストは変わる");
+    assert_ne!(
+        expected_hex, actual_hex,
+        "1 バイト改変でダイジェストは変わる"
+    );
 
-    let error = verify_with(&[(SidecarKind::Smoke, expected)], SidecarKind::Smoke, &modified_path)
-        .expect_err("1 バイト改変は不一致になるはずである");
+    let error = verify_with(
+        &[(SidecarKind::Smoke, expected)],
+        SidecarKind::Smoke,
+        &modified_path,
+    )
+    .expect_err("1 バイト改変は不一致になるはずである");
 
     // 報告本文に期待値と実測値の両方が含まれること（起動中止の報告として読める）。
     let text = error.to_string();
@@ -190,7 +198,10 @@ fn missing_file_is_reported_as_unreadable_not_a_panic() {
 
     // 報告（Display）が理由と対象パスを含むこと。起動中止の報告はこの文字列を運ぶ。
     let text = error.to_string();
-    assert!(text.contains("読み取れない"), "報告に理由が含まれない: {text}");
+    assert!(
+        text.contains("読み取れない"),
+        "報告に理由が含まれない: {text}"
+    );
     assert!(
         text.contains(&missing.display().to_string()),
         "報告に対象パスが含まれない: {text}"
@@ -251,7 +262,10 @@ fn fresh_clone_without_a_staged_original_reports_unregistered() {
     }
 
     let dir = TempDir::new("fresh-clone");
-    let path = dir.write("sidecar-smoke", b"readable file, but nothing was registered");
+    let path = dir.write(
+        "sidecar-smoke",
+        b"readable file, but nothing was registered",
+    );
     let error = verify(SidecarKind::Smoke, &path).expect_err("期待値が無いのに成功してはならない");
 
     assert!(

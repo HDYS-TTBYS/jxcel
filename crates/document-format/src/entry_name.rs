@@ -143,13 +143,19 @@ impl EntryName {
             _ => {}
         }
         if let Some(rest) = text.strip_prefix(SCHEMAS_PREFIX) {
-            return match rest.strip_suffix(SCHEMAS_SUFFIX).and_then(parse_canonical_ulid) {
+            return match rest
+                .strip_suffix(SCHEMAS_SUFFIX)
+                .and_then(parse_canonical_ulid)
+            {
                 Some(sheet) => Ok(EntryName::Schema { sheet }),
                 None => Err(invalid_container(text)),
             };
         }
         if let Some(rest) = text.strip_prefix(SHEETS_PREFIX) {
-            if let Some(sheet) = rest.strip_suffix(SHEETS_SUFFIX).and_then(parse_canonical_ulid) {
+            if let Some(sheet) = rest
+                .strip_suffix(SHEETS_SUFFIX)
+                .and_then(parse_canonical_ulid)
+            {
                 return Ok(EntryName::Rows { sheet });
             }
             return Err(invalid_container(text));
@@ -181,8 +187,7 @@ impl EntryName {
                 let mid = SCHEMAS_PREFIX.len() + ulid::ULID_LEN;
                 buf[..SCHEMAS_PREFIX.len()].copy_from_slice(SCHEMAS_PREFIX.as_bytes());
                 buf[SCHEMAS_PREFIX.len()..mid].copy_from_slice(id.as_bytes());
-                buf[mid..mid + SCHEMAS_SUFFIX.len()]
-                    .copy_from_slice(SCHEMAS_SUFFIX.as_bytes());
+                buf[mid..mid + SCHEMAS_SUFFIX.len()].copy_from_slice(SCHEMAS_SUFFIX.as_bytes());
                 ascii(&buf[..mid + SCHEMAS_SUFFIX.len()])
             }
             EntryName::Rows { sheet } => {
@@ -208,11 +213,7 @@ impl EntryName {
 }
 
 /// 先頭 `len` バイトを `text` のバイト列で満たす表示ヘルパー（キーワード形用）。
-fn fixed_copy<'buf>(
-    buf: &'buf mut [u8; MAX_DISPLAY_LEN],
-    text: &[u8],
-    len: usize,
-) -> &'buf str {
+fn fixed_copy<'buf>(buf: &'buf mut [u8; MAX_DISPLAY_LEN], text: &[u8], len: usize) -> &'buf str {
     buf[..len].copy_from_slice(text);
     ascii(&buf[..len])
 }
@@ -244,11 +245,7 @@ fn parse_canonical_ulid(text: &str) -> Option<SheetId> {
 /// `Display` 正準形）のみ受理。`AttachmentId::from_hex` は大文字も通すが、
 /// 上の ULID と同じ決定により大文字 hex は一致検査の前に拒否する。
 fn parse_canonical_hex(text: &str) -> Option<AttachmentId> {
-    if text.len() != HEX_LEN
-        || !text
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    {
+    if text.len() != HEX_LEN || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return None;
     }
     AttachmentId::from_hex(text).ok()
@@ -531,7 +528,11 @@ mod tests {
     fn canonical_text_displays_verbatim() {
         for (text, _) in canonical_forms() {
             let parsed = EntryName::parse(&text).unwrap();
-            assert_eq!(parsed.to_string(), text, "display(parse(s)) が s と一致しない");
+            assert_eq!(
+                parsed.to_string(),
+                text,
+                "display(parse(s)) が s と一致しない"
+            );
         }
     }
 
@@ -598,7 +599,11 @@ mod tests {
             "sheets/",
             "attachments/",
         ];
-        assert_eq!(LAYOUT_FORMS, EXPECTED.as_slice(), "許可リストは 6 形そのもの");
+        assert_eq!(
+            LAYOUT_FORMS,
+            EXPECTED.as_slice(),
+            "許可リストは 6 形そのもの"
+        );
         for form in LAYOUT_FORMS {
             assert!(
                 canonical_forms()

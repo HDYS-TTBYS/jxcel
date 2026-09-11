@@ -75,8 +75,10 @@ fn parts_with_index(
     adjust: impl FnOnce(&mut Vec<ManifestEntry>),
 ) -> DocumentParts {
     let parts = to_parts(&sample()).expect("保存経路");
-    let mut entries: Vec<(EntryName, Vec<u8>)> =
-        parts.iter().map(|part| (part.name, part.bytes.clone())).collect();
+    let mut entries: Vec<(EntryName, Vec<u8>)> = parts
+        .iter()
+        .map(|part| (part.name, part.bytes.clone()))
+        .collect();
     // 呼び出し元が持つ索引は使わず、実体に合わせて組み直す（`adjust` の壊し方が効くように）。
     entries.retain(|(name, _)| *name != MANIFEST_ENTRY);
     let mut index: Vec<ManifestEntry> = entries
@@ -111,16 +113,23 @@ fn the_versioning_surface_is_reachable_from_outside_the_crate() {
     assert_eq!(CURRENT, document_format::migration::CURRENT_FORMAT_VERSION);
     // 現行版は移行されない（集合を複製しない）。
     assert!(
-        Chain::apply(&parts_at(CURRENT)).expect("現行版は中止しない").is_none(),
+        Chain::apply(&parts_at(CURRENT))
+            .expect("現行版は中止しない")
+            .is_none(),
         "現行版が移行された"
     );
     assert_eq!(Verdict::Openable, Chain::gate(CURRENT));
     assert_eq!(
-        Verdict::Unsupported { found: FormatVersion::new(2, 7), supported: CURRENT },
+        Verdict::Unsupported {
+            found: FormatVersion::new(2, 7),
+            supported: CURRENT
+        },
         Chain::gate(FormatVersion::new(2, 7))
     );
     assert_eq!(
-        Verdict::NeedsMigration { from: FormatVersion::new(0, 9) },
+        Verdict::NeedsMigration {
+            from: FormatVersion::new(0, 9)
+        },
         Chain::gate(FormatVersion::new(0, 9))
     );
 }
@@ -129,25 +138,36 @@ fn the_versioning_surface_is_reachable_from_outside_the_crate() {
 #[test]
 fn the_manifest_records_the_current_format_version() {
     let parts = to_parts(&sample()).expect("保存経路");
-    assert_eq!(CURRENT, parts.format_version(), "集合が報告する現行バージョンが違う");
+    assert_eq!(
+        CURRENT,
+        parts.format_version(),
+        "集合が報告する現行バージョンが違う"
+    );
 
     // 記録されているのは索引**そのもの**である（集合の内部値ではなくバイト列から確かめる）。
     let manifest = parts.get(&MANIFEST_ENTRY).expect("集合は索引を持つ");
     let decoded = ManifestPart::from_json_bytes(&manifest.bytes).expect("索引は復号できる");
-    assert_eq!(CURRENT, decoded.version(), "manifest.json に現行バージョンが記録されていない");
+    assert_eq!(
+        CURRENT,
+        decoded.version(),
+        "manifest.json に現行バージョンが記録されていない"
+    );
 }
 
 /// 要件 6.5: 現行より新しい major の集合は、**要求バージョンを含む** `UnsupportedVersion`
 /// として拒否され、部分的なモデルを返さない（要件 5.4）。
 #[test]
 fn a_newer_major_is_rejected_with_the_requested_version() {
-    for recorded in [FormatVersion::new(2, 7), FormatVersion::new(2, 0), FormatVersion::new(9, 9)] {
+    for recorded in [
+        FormatVersion::new(2, 7),
+        FormatVersion::new(2, 0),
+        FormatVersion::new(9, 9),
+    ] {
         match from_parts(&parts_at(recorded)) {
             Err(DocumentError::UnsupportedVersion { found, supported }) => {
                 assert_eq!(recorded, found, "要求バージョンが報告されていない");
                 assert_eq!(CURRENT, supported, "対応バージョンが報告されていない");
-                let text =
-                    DocumentError::UnsupportedVersion { found, supported }.to_string();
+                let text = DocumentError::UnsupportedVersion { found, supported }.to_string();
                 assert!(
                     text.contains(&recorded.to_string()),
                     "Display に要求バージョンが現れない: {text}"
@@ -173,7 +193,10 @@ fn a_same_major_is_accepted_even_with_a_newer_minor() {
     for recorded in [CURRENT, FormatVersion::new(1, 1), FormatVersion::new(1, 99)] {
         let restored = from_parts(&parts_at(recorded))
             .unwrap_or_else(|error| panic!("同一 major の {recorded} が拒否された: {error}"));
-        assert!(restored.sheets().is_empty(), "{recorded} のモデルが標本と違う");
+        assert!(
+            restored.sheets().is_empty(),
+            "{recorded} のモデルが標本と違う"
+        );
     }
 }
 
@@ -254,7 +277,10 @@ fn the_version_gate_runs_before_the_integrity_check() {
         Err(DocumentError::UnsupportedVersion { found, .. }) => {
             assert_eq!(FormatVersion::new(2, 7), found);
         }
-        Ok(document) => panic!("拒否されずモデルが返った（{} シート）", document.sheets().len()),
+        Ok(document) => panic!(
+            "拒否されずモデルが返った（{} シート）",
+            document.sheets().len()
+        ),
         Err(other) => panic!("ゲートが完全性照合より後にある: {other}"),
     }
 }
@@ -267,14 +293,25 @@ fn a_newer_major_survives_the_container_until_the_read_gate() {
     let encoded = ContainerCodec::encode(&parts_at(FormatVersion::new(2, 7))).expect("符号化");
     let decoded =
         ContainerCodec::decode(&encoded).expect("復号は成功する（ゲートは復号の責務ではない）");
-    assert_eq!(FormatVersion::new(2, 7), decoded.format_version(), "復号で記録値が失われた");
+    assert_eq!(
+        FormatVersion::new(2, 7),
+        decoded.format_version(),
+        "復号で記録値が失われた"
+    );
 
     match from_parts(&decoded) {
         Err(DocumentError::UnsupportedVersion { found, supported }) => {
-            assert_eq!(FormatVersion::new(2, 7), found, "要求バージョンが報告されていない");
+            assert_eq!(
+                FormatVersion::new(2, 7),
+                found,
+                "要求バージョンが報告されていない"
+            );
             assert_eq!(CURRENT, supported, "対応バージョンが報告されていない");
         }
-        Ok(document) => panic!("拒否されずモデルが返った（{} シート）", document.sheets().len()),
+        Ok(document) => panic!(
+            "拒否されずモデルが返った（{} シート）",
+            document.sheets().len()
+        ),
         Err(other) => panic!("コンテナ経路の変種が違う: {other}"),
     }
 }
@@ -285,8 +322,7 @@ fn a_newer_major_survives_the_container_until_the_read_gate() {
 /// 記録バージョンで区別する。`the_golden_fixture_directory_for_the_current_version_exists`
 /// の doc「配置・命名」）。
 fn golden_directory(version: FormatVersion) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("tests/fixtures/golden/v{}", version.major))
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/golden/v{}", version.major))
 }
 
 /// ディレクトリ直下の `.jxcel` fixture を名前順で返す（列挙順に依存しない）。
@@ -296,7 +332,10 @@ fn golden_fixtures(directory: &Path) -> Vec<PathBuf> {
     let mut fixtures: Vec<PathBuf> = fs::read_dir(directory)
         .unwrap_or_else(|error| panic!("{} が読めない: {error}", directory.display()))
         .map(|entry| entry.expect("ディレクトリ要素が読める").path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "jxcel"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jxcel")
+        })
         .collect();
     fixtures.sort();
     fixtures
@@ -350,23 +389,36 @@ fn the_current_version_golden_fixture_round_trips_byte_for_byte() {
     let expected =
         fs::read(&path).unwrap_or_else(|error| panic!("{} が読めない: {error}", path.display()));
 
-    let outcome = api().open(&path).expect("現行版の fixture は現行として読める");
-    assert_eq!(None, outcome.migrated_from, "現行版の fixture で移行が起きた");
+    let outcome = api()
+        .open(&path)
+        .expect("現行版の fixture は現行として読める");
+    assert_eq!(
+        None, outcome.migrated_from,
+        "現行版の fixture で移行が起きた"
+    );
 
-    let parts = api().to_parts(&outcome.document).expect("読み込んだ文書は保存できる");
-    assert_eq!(CURRENT, parts.format_version(), "fixture が現行版として読まれていない");
+    let parts = api()
+        .to_parts(&outcome.document)
+        .expect("読み込んだ文書は保存できる");
+    assert_eq!(
+        CURRENT,
+        parts.format_version(),
+        "fixture が現行版として読まれていない"
+    );
     let encoded = ContainerCodec::encode(&parts).expect("符号化");
     assert_eq!(
-        expected,
-        encoded,
+        expected, encoded,
         "現行版の fixture の往復がバイト単位で一致しない（要件 3.1, 6.2）"
     );
 
     // ファイルを経由しない公開契約（`version-control` との唯一の接点）でも同じ文書になる。
     let restored = api().from_parts(&parts).expect("集合からモデルへ戻せる");
-    let reencoded = ContainerCodec::encode(&api().to_parts(&restored).expect("保存経路"))
-        .expect("符号化");
-    assert_eq!(expected, reencoded, "from_parts / to_parts 経由の往復が一致しない");
+    let reencoded =
+        ContainerCodec::encode(&api().to_parts(&restored).expect("保存経路")).expect("符号化");
+    assert_eq!(
+        expected, reencoded,
+        "from_parts / to_parts 経由の往復が一致しない"
+    );
 }
 
 /// 移行チェーンと現行バージョンが要求する全ての版に、ゴールデン fixture が実在する
@@ -405,7 +457,10 @@ fn every_version_in_the_migration_chain_has_a_golden_fixture() {
     versions.push(CURRENT_FORMAT_VERSION);
     versions.sort();
     versions.dedup();
-    assert!(!versions.is_empty(), "現行版が fixture の要求集合へ入っていない");
+    assert!(
+        !versions.is_empty(),
+        "現行版が fixture の要求集合へ入っていない"
+    );
 
     for version in versions {
         let directory = golden_directory(version);
@@ -425,8 +480,8 @@ fn every_version_in_the_migration_chain_has_a_golden_fixture() {
 
         let mut exact = false;
         for path in &fixtures {
-            let bytes =
-                fs::read(path).unwrap_or_else(|error| panic!("{} が読めない: {error}", path.display()));
+            let bytes = fs::read(path)
+                .unwrap_or_else(|error| panic!("{} が読めない: {error}", path.display()));
             let decoded = ContainerCodec::decode(&bytes).unwrap_or_else(|error| {
                 panic!("{} がコンテナとして復号できない: {error}", path.display())
             });

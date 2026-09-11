@@ -287,7 +287,9 @@ fn read_entry(
     let index = archive
         .index_for_name(raw)
         .ok_or_else(|| invalid(raw, "the entry is missing from the archive"))?;
-    let mut entry = archive.by_index(index).map_err(|error| invalid(raw, error))?;
+    let mut entry = archive
+        .by_index(index)
+        .map_err(|error| invalid(raw, error))?;
     let declared = entry.size();
     let mut content = Vec::new();
     // 宣言サイズ + 1 バイトだけ読む（超過を検出できる最小の上限）。
@@ -313,9 +315,8 @@ fn read_entry(
 /// 書き出し側は [`FormatVersion`] の `Display`（= 正準形）で書くため、ここで綴りの揺れを
 /// 許す理由が無い（マーカーは索引の写しであり、写しの綴りが違えば破損として扱う）。
 fn parse_marker(bytes: &[u8]) -> Result<FormatVersion, DocumentError> {
-    let malformed = || {
-        marker_error("the type marker does not have the form `jxcel\\n<major>.<minor>\\n`")
-    };
+    let malformed =
+        || marker_error("the type marker does not have the form `jxcel\\n<major>.<minor>\\n`");
     let body = bytes
         .strip_prefix(MARKER_PREFIX)
         .and_then(|rest| rest.strip_suffix(MARKER_SUFFIX))
@@ -348,7 +349,9 @@ fn le_u16(header: &[u8], offset: usize) -> usize {
 
 /// エントリ名を文脈にした失敗（`<エントリ名>: <理由>`）。
 fn invalid(name: &str, reason: impl fmt::Display) -> DocumentError {
-    DocumentError::InvalidContainer { entry: format!("{name}: {reason}") }
+    DocumentError::InvalidContainer {
+        entry: format!("{name}: {reason}"),
+    }
 }
 
 /// 型マーカーを文脈にした失敗（`jxcel: <理由>`）。
@@ -399,7 +402,10 @@ mod tests {
             .map(|(name, bytes)| ManifestEntry::of_bytes(*name, bytes))
             .collect();
         let manifest = ManifestPart::new(FormatVersion::new(1, 0), index).expect("標本の索引");
-        entries.push((EntryName::Manifest, manifest.to_json_bytes().expect("索引の符号化")));
+        entries.push((
+            EntryName::Manifest,
+            manifest.to_json_bytes().expect("索引の符号化"),
+        ));
         DocumentParts::from_entries(entries).expect("標本は妥当")
     }
 
@@ -410,7 +416,10 @@ mod tests {
                 EntryName::Document,
                 br#"{"document_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","sheets":[]}"#.to_vec(),
             ),
-            (EntryName::Schema { sheet: sheet() }, br#"{"root":null,"types":[]}"#.to_vec()),
+            (
+                EntryName::Schema { sheet: sheet() },
+                br#"{"root":null,"types":[]}"#.to_vec(),
+            ),
             (EntryName::Rows { sheet: sheet() }, b"".to_vec()),
         ])
     }
@@ -453,7 +462,9 @@ mod tests {
             write_marker(&mut writer);
         }
         for part in parts.iter() {
-            writer.start_file(part.name.to_string(), options).expect("エントリの開始");
+            writer
+                .start_file(part.name.to_string(), options)
+                .expect("エントリの開始");
             writer.write_all(&part.bytes).expect("書き込み");
         }
         if marker_last {
@@ -479,7 +490,10 @@ mod tests {
             entry.starts_with(ARCHIVE_ENTRY),
             "アーカイブ全体の失敗が擬似名 `{ARCHIVE_ENTRY}` で報告されない: {entry:?}"
         );
-        assert!(entry.len() > ARCHIVE_ENTRY.len(), "理由が添えられていない: {entry:?}");
+        assert!(
+            entry.len() > ARCHIVE_ENTRY.len(),
+            "理由が添えられていない: {entry:?}"
+        );
     }
 
     /// 許可リスト外・ルート外を指す名前を持つアーカイブを拒否し、該当エントリ名をそのまま
@@ -579,11 +593,11 @@ mod tests {
         let cases: [&[u8]; 7] = [
             b"",
             b"nope",
-            b"jxcel\n",       // バージョンが無い
-            b"jxcel\n1.0",    // 末尾の LF が無い
-            b"jxcel\n1\n",    // minor が無い
-            b"jxcel\n01.0\n", // 正準形でない（先頭ゼロ）
-            b"jxcel\n1.0.2\n" // 構成要素が多い
+            b"jxcel\n",        // バージョンが無い
+            b"jxcel\n1.0",     // 末尾の LF が無い
+            b"jxcel\n1\n",     // minor が無い
+            b"jxcel\n01.0\n",  // 正準形でない（先頭ゼロ）
+            b"jxcel\n1.0.2\n", // 構成要素が多い
         ];
         for content in cases {
             let bytes = archive_bytes(
@@ -658,7 +672,11 @@ mod tests {
         for (label, parts) in samples {
             let bytes = ContainerCodec::encode(&parts).expect("符号化");
             let decoded = ContainerCodec::decode(&bytes).expect("復号");
-            assert_eq!(named(&parts), named(&decoded), "{label}: 往復で集合が変わった");
+            assert_eq!(
+                named(&parts),
+                named(&decoded),
+                "{label}: 往復で集合が変わった"
+            );
             assert_eq!(
                 parts.format_version(),
                 decoded.format_version(),
@@ -676,9 +694,11 @@ mod tests {
     /// 有界読みは圧縮ストリームの EOF に達しないため、CRC は照合されない。
     #[test]
     fn decode_rejects_a_size_that_exceeds_the_declaration() {
-        let mut bytes =
-            ContainerCodec::encode(&parts_with(vec![(EntryName::Document, repetitive(1 << 12))]))
-                .expect("符号化");
+        let mut bytes = ContainerCodec::encode(&parts_with(vec![(
+            EntryName::Document,
+            repetitive(1 << 12),
+        )]))
+        .expect("符号化");
         patch_declared_size(&mut bytes, "document.json", 100);
 
         assert_eq!(
@@ -694,9 +714,11 @@ mod tests {
     /// 宣言 + 1 なので、報告される展開長は真の値 4096 である。
     #[test]
     fn decode_rejects_a_size_that_is_shorter_than_the_declaration() {
-        let mut bytes =
-            ContainerCodec::encode(&parts_with(vec![(EntryName::Document, repetitive(1 << 12))]))
-                .expect("符号化");
+        let mut bytes = ContainerCodec::encode(&parts_with(vec![(
+            EntryName::Document,
+            repetitive(1 << 12),
+        )]))
+        .expect("符号化");
         patch_declared_size(&mut bytes, "document.json", 100_000);
 
         assert_eq!(
@@ -811,9 +833,9 @@ mod tests {
     fn corrupt_entry_payload(bytes: &mut [u8], name: &str) {
         let mut offset = 0;
         while bytes[offset..offset + 4] == *b"PK\x03\x04" {
-            let compressed = u32::from_le_bytes(
-                bytes[offset + 18..offset + 22].try_into().expect("固定長"),
-            ) as usize;
+            let compressed =
+                u32::from_le_bytes(bytes[offset + 18..offset + 22].try_into().expect("固定長"))
+                    as usize;
             let name_length =
                 u16::from_le_bytes(bytes[offset + 26..offset + 28].try_into().expect("固定長"))
                     as usize;

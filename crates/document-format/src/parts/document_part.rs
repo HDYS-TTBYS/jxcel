@@ -327,8 +327,9 @@ impl DocumentPart {
         // raw 値として差し込む（`RawValue` が verbatim の唯一の経路）。`from_string` は
         // 本クレートが生成した妥当な JSON 配列を 1 回検証するだけで、値の再解釈はしない。
         let sheets = self.sheets_json_bytes()?;
-        let sheets_raw = RawValue::from_string(String::from_utf8(sheets).map_err(invalid_document)?)
-            .map_err(invalid_document)?;
+        let sheets_raw =
+            RawValue::from_string(String::from_utf8(sheets).map_err(invalid_document)?)
+                .map_err(invalid_document)?;
 
         let mut out = Vec::new();
         {
@@ -436,8 +437,9 @@ impl DocumentPart {
             }
         }
 
-        if let Some((id, positions)) =
-            occurrences.iter().find(|(_, positions)| positions.len() > 1)
+        if let Some((id, positions)) = occurrences
+            .iter()
+            .find(|(_, positions)| positions.len() > 1)
         {
             let locations = positions
                 .iter()
@@ -610,7 +612,9 @@ impl<'de> Visitor<'de> for RawDocumentVisitor {
 fn parse_canonical_document_id(text: &str) -> Result<DocumentId, DocumentError> {
     match text.parse::<DocumentId>() {
         Ok(id) if id.to_string() == text => Ok(id),
-        _ => Err(invalid_document(format!("invalid document identifier `{text}`"))),
+        _ => Err(invalid_document(format!(
+            "invalid document identifier `{text}`"
+        ))),
     }
 }
 
@@ -618,7 +622,9 @@ fn parse_canonical_document_id(text: &str) -> Result<DocumentId, DocumentError> 
 fn parse_canonical_sheet_id(text: &str) -> Result<SheetId, DocumentError> {
     match text.parse::<SheetId>() {
         Ok(id) if id.to_string() == text => Ok(id),
-        _ => Err(invalid_document(format!("invalid sheet identifier `{text}`"))),
+        _ => Err(invalid_document(format!(
+            "invalid sheet identifier `{text}`"
+        ))),
     }
 }
 
@@ -680,14 +686,16 @@ mod tests {
         match index % 3 {
             0 => ["a", "b"].iter().map(|name| (*name).to_string()).collect(),
             1 => Vec::new(),
-            _ => ["量", "$id", "notes"].iter().map(|name| (*name).to_string()).collect(),
+            _ => ["量", "$id", "notes"]
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
         }
     }
 
     /// 標本のシートのメタデータ 1 件。
     fn sheet(index: usize) -> SheetMeta {
-        SheetMeta::new(sheet_id(index), SHEET_NAMES[index].to_owned())
-            .with_columns(columns(index))
+        SheetMeta::new(sheet_id(index), SHEET_NAMES[index].to_owned()).with_columns(columns(index))
     }
 
     /// 標本のシートのメタデータを `order` の添字順に並べる。
@@ -715,7 +723,11 @@ mod tests {
             part.sheets()
                 .iter()
                 .map(|sheet| {
-                    (sheet.sheet_id(), sheet.name().to_owned(), sheet.columns().to_vec())
+                    (
+                        sheet.sheet_id(),
+                        sheet.name().to_owned(),
+                        sheet.columns().to_vec(),
+                    )
                 })
                 .collect(),
         )
@@ -726,7 +738,10 @@ mod tests {
     }
 
     fn names(part: &DocumentPart) -> Vec<String> {
-        part.sheets().iter().map(|sheet| sheet.name().to_owned()).collect()
+        part.sheets()
+            .iter()
+            .map(|sheet| sheet.name().to_owned())
+            .collect()
     }
 
     /// 確定形のシート要素 1 件（キー名と順序をテスト側の定数で組み立てる。
@@ -737,9 +752,7 @@ mod tests {
         let columns_key = SHEET_KEYS[2];
         let quoted = serde_json::to_string(name).expect("シート名のエスケープ");
         let encoded = serde_json::to_string(columns).expect("列名のエスケープ");
-        format!(
-            r#"{{"{id_key}":"{id_text}","{name_key}":{quoted},"{columns_key}":{encoded}}}"#
-        )
+        format!(r#"{{"{id_key}":"{id_text}","{name_key}":{quoted},"{columns_key}":{encoded}}}"#)
     }
 
     /// 確定形の全体（キー `document_id` → `sheets` の順、要素は与えられた順のまま）。
@@ -750,7 +763,10 @@ mod tests {
             .iter()
             .map(|&index| element_json(SHEET_IDS[index], SHEET_NAMES[index], &columns(index)))
             .collect();
-        format!(r#"{{"{id_key}":"{id_text}","{sheets_key}":[{}]}}"#, elements.join(","))
+        format!(
+            r#"{{"{id_key}":"{id_text}","{sheets_key}":[{}]}}"#,
+            elements.join(",")
+        )
     }
 
     /// 往復同一: `DocumentPart` → JSON → `DocumentPart` が内容一致し、バイト列も変わらない。
@@ -774,10 +790,16 @@ mod tests {
             );
 
             let decoded = DocumentPart::from_json_bytes(&bytes).expect("復号");
-            assert_eq!(fingerprint(&part), fingerprint(&decoded), "復号で内容が変わった");
+            assert_eq!(
+                fingerprint(&part),
+                fingerprint(&decoded),
+                "復号で内容が変わった"
+            );
             // シート名は正規化もサニタイズもされない（空文字列・前後の空白・制御文字）
-            let expected_names: Vec<String> =
-                order.iter().map(|&index| SHEET_NAMES[index].to_owned()).collect();
+            let expected_names: Vec<String> = order
+                .iter()
+                .map(|&index| SHEET_NAMES[index].to_owned())
+                .collect();
             assert_eq!(expected_names, names(&decoded), "シート名が書き換わった");
             assert_eq!(
                 bytes,
@@ -804,16 +826,29 @@ mod tests {
             indices.sort_by_key(|&index| SHEET_NAMES[index]);
             indices
         };
-        assert_ne!(ascending, by_name, "標本の識別子順とシート名の辞書順が一致している");
+        assert_ne!(
+            ascending, by_name,
+            "標本の識別子順とシート名の辞書順が一致している"
+        );
         let mut encodings = Vec::new();
 
         for order in &orders {
-            assert_ne!(ascending, *order, "標本の入力順が既に ULID 昇順で、順序の検証にならない");
-            assert_ne!(by_name, *order, "標本の入力順がシート名の辞書順と一致し、順序の検証にならない");
+            assert_ne!(
+                ascending, *order,
+                "標本の入力順が既に ULID 昇順で、順序の検証にならない"
+            );
+            assert_ne!(
+                by_name, *order,
+                "標本の入力順がシート名の辞書順と一致し、順序の検証にならない"
+            );
             let expected_ids: Vec<SheetId> = order.iter().map(|&index| sheet_id(index)).collect();
 
             let part = part(order);
-            assert_eq!(expected_ids, ids(&part), "シート順序が入力順と違う（並べ替えられた）");
+            assert_eq!(
+                expected_ids,
+                ids(&part),
+                "シート順序が入力順と違う（並べ替えられた）"
+            );
 
             let bytes = part.to_json_bytes().expect("符号化");
             let decoded = DocumentPart::from_json_bytes(&bytes).expect("復号");
@@ -842,10 +877,16 @@ mod tests {
         // 実時刻を進める（ミリ秒の桁が変わるまで待つ）。保存時刻のような揮発値を
         // 出力へ混ぜていれば、ここで差分が出る。
         std::thread::sleep(Duration::from_millis(2));
-        assert!(SystemTime::now() > before, "時刻が進んでおらず、時刻依存の検証になっていない");
+        assert!(
+            SystemTime::now() > before,
+            "時刻が進んでおらず、時刻依存の検証になっていない"
+        );
 
         let second = part.to_json_bytes().expect("符号化");
-        assert_eq!(first, second, "時刻を進めたら出力が変わった（時刻が漏れている）");
+        assert_eq!(
+            first, second,
+            "時刻を進めたら出力が変わった（時刻が漏れている）"
+        );
         assert_eq!(
             expected_json(DOC_ID_TEXT, &order).as_bytes(),
             first.as_slice(),
@@ -862,10 +903,7 @@ mod tests {
     fn wire_form_is_the_documented_confirmed_shape() {
         let part = DocumentPart::new(
             document_id(),
-            vec![
-                SheetMeta::new(sheet_id(0), "在庫".to_owned()),
-                sheet(1),
-            ],
+            vec![SheetMeta::new(sheet_id(0), "在庫".to_owned()), sheet(1)],
         )
         .expect("標本は妥当");
         let text = String::from_utf8(part.to_json_bytes().expect("符号化")).expect("UTF-8");
@@ -884,8 +922,7 @@ mod tests {
         let empty = DocumentPart::new(document_id(), Vec::new()).expect("空のシート列は正当");
         let text = String::from_utf8(empty.to_json_bytes().expect("符号化")).expect("UTF-8");
         assert_eq!(
-            r#"{"document_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","sheets":[]}"#,
-            text,
+            r#"{"document_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","sheets":[]}"#, text,
             "空のシート列の確定形が変わっている"
         );
         let decoded = DocumentPart::from_json_bytes(text.as_bytes()).expect("復号");
@@ -901,18 +938,33 @@ mod tests {
     fn columns_are_mandatory_and_preserved_verbatim() {
         let expected = vec![
             ("01K4ANRRG004HMASW9NF6YY093", Vec::new()),
-            ("01K4ANRSF804HMASW9QKFG04HM", vec!["zone".to_owned(), "a".to_owned()]),
-            ("01K4ANRTEG04HMASW9SQR128T5", vec!["$id".to_owned(), "量".to_owned()]),
+            (
+                "01K4ANRSF804HMASW9QKFG04HM",
+                vec!["zone".to_owned(), "a".to_owned()],
+            ),
+            (
+                "01K4ANRTEG04HMASW9SQR128T5",
+                vec!["$id".to_owned(), "量".to_owned()],
+            ),
         ];
         let part = DocumentPart::new(
             document_id(),
             vec![
-                SheetMeta::new(expected[0].0.parse().expect("標本は正準 ULID"), "空".to_owned())
-                    .with_columns(expected[0].1.clone()),
-                SheetMeta::new(expected[1].0.parse().expect("標本は正準 ULID"), "在庫".to_owned())
-                    .with_columns(expected[1].1.clone()),
-                SheetMeta::new(expected[2].0.parse().expect("標本は正準 ULID"), "予約".to_owned())
-                    .with_columns(expected[2].1.clone()),
+                SheetMeta::new(
+                    expected[0].0.parse().expect("標本は正準 ULID"),
+                    "空".to_owned(),
+                )
+                .with_columns(expected[0].1.clone()),
+                SheetMeta::new(
+                    expected[1].0.parse().expect("標本は正準 ULID"),
+                    "在庫".to_owned(),
+                )
+                .with_columns(expected[1].1.clone()),
+                SheetMeta::new(
+                    expected[2].0.parse().expect("標本は正準 ULID"),
+                    "予約".to_owned(),
+                )
+                .with_columns(expected[2].1.clone()),
             ],
         )
         .expect("標本は妥当");
@@ -933,18 +985,30 @@ mod tests {
 
         // 列名が往復で保たれ（順序も含む）、要素ごとに取り違えられない。
         let decoded = DocumentPart::from_json_bytes(&bytes).expect("復号");
-        let observed: Vec<Vec<String>> =
-            decoded.sheets().iter().map(|sheet| sheet.columns().to_vec()).collect();
-        let wanted: Vec<Vec<String>> = expected.iter().map(|(_, columns)| columns.clone()).collect();
+        let observed: Vec<Vec<String>> = decoded
+            .sheets()
+            .iter()
+            .map(|sheet| sheet.columns().to_vec())
+            .collect();
+        let wanted: Vec<Vec<String>> = expected
+            .iter()
+            .map(|(_, columns)| columns.clone())
+            .collect();
         assert_eq!(wanted, observed, "列名が往復で変わった");
         assert_eq!(bytes, decoded.to_json_bytes().expect("再符号化"));
 
         // `columns` の欠落は確定形の逸脱として拒否する（空列として黙って受け入れない）。
         let without_columns = text.replace(r#","columns":[]"#, "");
-        assert_ne!(text, without_columns, "標本に空の列名が無く、欠落の検証にならない");
+        assert_ne!(
+            text, without_columns,
+            "標本に空の列名が無く、欠落の検証にならない"
+        );
         match DocumentPart::from_json_bytes(without_columns.as_bytes()) {
             Err(DocumentError::InvalidContainer { entry }) => {
-                assert!(entry.starts_with("document.json: "), "entry が違う: {entry}");
+                assert!(
+                    entry.starts_with("document.json: "),
+                    "entry が違う: {entry}"
+                );
             }
             other => panic!("列名の欠落が拒否されない: {other:?}"),
         }
@@ -978,7 +1042,11 @@ mod tests {
         for input in cases {
             let decoded = DocumentPart::from_json_bytes(input.as_bytes()).expect("復号");
             assert_eq!(document_id(), decoded.document_id());
-            assert_eq!(2, decoded.sheets().len(), "未知キーが既知フィールドを隠している");
+            assert_eq!(
+                2,
+                decoded.sheets().len(),
+                "未知キーが既知フィールドを隠している"
+            );
             let written = decoded.to_json_bytes().expect("再符号化");
             assert_eq!(
                 input.as_bytes(),
@@ -1060,16 +1128,34 @@ mod tests {
             ("トップレベルが空", String::new()),
             ("document_id 欠落", format!(r#"{{"sheets":[{element}]}}"#)),
             ("sheets 欠落", format!(r#"{{"document_id":"{id}"}}"#)),
-            ("document_id が数値", format!(r#"{{"document_id":7,"sheets":[]}}"#)),
-            ("document_id が null", format!(r#"{{"document_id":null,"sheets":[]}}"#)),
-            ("document_id が ULID でない", format!(r#"{{"document_id":"{not_ulid}","sheets":[]}}"#)),
-            ("document_id が 25 文字", format!(r#"{{"document_id":"{short_id}","sheets":[]}}"#)),
-            ("document_id が小文字表記", format!(r#"{{"document_id":"{lowercase_id}","sheets":[]}}"#)),
+            (
+                "document_id が数値",
+                format!(r#"{{"document_id":7,"sheets":[]}}"#),
+            ),
+            (
+                "document_id が null",
+                format!(r#"{{"document_id":null,"sheets":[]}}"#),
+            ),
+            (
+                "document_id が ULID でない",
+                format!(r#"{{"document_id":"{not_ulid}","sheets":[]}}"#),
+            ),
+            (
+                "document_id が 25 文字",
+                format!(r#"{{"document_id":"{short_id}","sheets":[]}}"#),
+            ),
+            (
+                "document_id が小文字表記",
+                format!(r#"{{"document_id":"{lowercase_id}","sheets":[]}}"#),
+            ),
             (
                 "sheets が配列でない",
                 format!(r#"{{"document_id":"{id}","sheets":{{}}}}"#),
             ),
-            ("sheets が null", format!(r#"{{"document_id":"{id}","sheets":null}}"#)),
+            (
+                "sheets が null",
+                format!(r#"{{"document_id":"{id}","sheets":null}}"#),
+            ),
             (
                 "シート要素がオブジェクトでない",
                 format!(r#"{{"document_id":"{id}","sheets":["{a}"]}}"#),
@@ -1088,9 +1174,7 @@ mod tests {
             ),
             (
                 "シート要素に columns が無い（必須キー）",
-                format!(
-                    r#"{{"document_id":"{id}","sheets":[{{"sheet_id":"{a}","name":"x"}}]}}"#
-                ),
+                format!(r#"{{"document_id":"{id}","sheets":[{{"sheet_id":"{a}","name":"x"}}]}}"#),
             ),
             (
                 "columns が配列でない",

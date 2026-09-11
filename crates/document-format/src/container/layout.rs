@@ -154,10 +154,10 @@ mod tests {
             "a\0b.json",              // NUL
             "sheets/",                // ディレクトリエントリ（末尾 `/`）
             "schemas/",
-            "attachments/",           // ディレクトリエントリ（許可プレフィックスのみ）
-            "evil.json",              // 未知の名前
+            "attachments/", // ディレクトリエントリ（許可プレフィックスのみ）
+            "evil.json",    // 未知の名前
             "README",
-            "Manifest.json",          // 大文字小文字の変種
+            "Manifest.json", // 大文字小文字の変種
             "MANIFEST.JSON",
             "schemas/01arz3ndektsv4rrffq69g5fav.json", // ULID の小文字
             "attachments/0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef.bin",
@@ -204,7 +204,10 @@ mod tests {
     fn admit_accepts_distinct_paths() {
         let allowed = allowed_names();
         let names: Vec<&str> = allowed.iter().map(|(name, _)| name.as_str()).collect();
-        assert!(duplicate_path(&names).is_none(), "異なる名前が重複と判定された");
+        assert!(
+            duplicate_path(&names).is_none(),
+            "異なる名前が重複と判定された"
+        );
         assert_eq!(
             names.len(),
             admit(&names).expect("異なる名前は受理される").len()

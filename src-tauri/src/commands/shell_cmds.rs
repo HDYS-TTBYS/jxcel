@@ -67,7 +67,10 @@ pub fn settings_get(
 ) -> IpcResult<SettingsResponse, IpcError> {
     let command = command_names::SETTINGS_GET;
     let context = caller_context(&window);
-    log::info!("{command}: 呼び出し元ウィンドウ = {}", context.window.as_str());
+    log::info!(
+        "{command}: 呼び出し元ウィンドウ = {}",
+        context.window.as_str()
+    );
 
     let key = match catalog_key(command, &request.key) {
         Ok(key) => key,
@@ -100,7 +103,10 @@ pub fn settings_set(
 ) -> IpcResult<SettingsResponse, IpcError> {
     let command = command_names::SETTINGS_SET;
     let context = caller_context(&window);
-    log::info!("{command}: 呼び出し元ウィンドウ = {}", context.window.as_str());
+    log::info!(
+        "{command}: 呼び出し元ウィンドウ = {}",
+        context.window.as_str()
+    );
 
     let key = match catalog_key(command, &request.key) {
         Ok(key) => key,
@@ -109,9 +115,14 @@ pub fn settings_set(
     // 記録に値は書かない（モジュール doc「記録に何を書くか」）。
     let value = request.value;
     if let Err(error) = settings.set::<SettingsValue>(&key, &value) {
-        log::warn!("{command}: 設定を書き込めない（キー: {}）: {error}", key.as_str());
+        log::warn!(
+            "{command}: 設定を書き込めない（キー: {}）: {error}",
+            key.as_str()
+        );
         return IpcResult::Err {
-            error: IpcError::Settings { message: error.to_string() },
+            error: IpcError::Settings {
+                message: error.to_string(),
+            },
         };
     }
     IpcResult::Ok {
@@ -128,7 +139,9 @@ pub fn settings_set(
 /// **境界の型を新設しない。** `app_shell::ipc::WindowContext` / `WindowLabel` をそのまま使う
 /// （tasks.md 2.1 / 6.2 の申し送り。3 つ目の識別子を作らない）。
 fn caller_context(window: &WebviewWindow) -> WindowContext {
-    WindowContext { window: WindowLabel::new(window.label()) }
+    WindowContext {
+        window: WindowLabel::new(window.label()),
+    }
 }
 
 /// 要求された鍵を閉じたカタログ（[`SettingsKey`]）へ解決する（要件 7.7）。
@@ -138,7 +151,9 @@ fn caller_context(window: &WebviewWindow) -> WindowContext {
 fn catalog_key(command: &str, requested: &str) -> Result<SettingsKey, IpcError> {
     SettingsKey::from_name(requested).ok_or_else(|| {
         log::warn!("{command}: カタログに無い設定キー: {requested}");
-        IpcError::Settings { message: format!("カタログに無い設定キー: {requested}") }
+        IpcError::Settings {
+            message: format!("カタログに無い設定キー: {requested}"),
+        }
     })
 }
 

@@ -203,7 +203,10 @@ static KEY_ALIASES: &[(&str, &[&str])] = &[
     ("Numpad7", &["Numpad7", "Num7"]),
     ("Numpad8", &["Numpad8", "Num8"]),
     ("Numpad9", &["Numpad9", "Num9"]),
-    ("NumpadAdd", &["NumpadAdd", "NumAdd", "NumpadPlus", "NumPlus"]),
+    (
+        "NumpadAdd",
+        &["NumpadAdd", "NumAdd", "NumpadPlus", "NumPlus"],
+    ),
     ("NumpadDecimal", &["NumpadDecimal", "NumDecimal"]),
     ("NumpadDivide", &["NumpadDivide", "NumDivide"]),
     ("NumpadEnter", &["NumpadEnter", "NumEnter"]),
@@ -315,10 +318,11 @@ impl Accelerator {
             }
         }
 
-        let key = canonical_key(key_token).ok_or_else(|| AcceleratorParseError::UnsupportedKey {
-            input: input.to_string(),
-            token: key_token.to_string(),
-        })?;
+        let key =
+            canonical_key(key_token).ok_or_else(|| AcceleratorParseError::UnsupportedKey {
+                input: input.to_string(),
+                token: key_token.to_string(),
+            })?;
 
         // 正準形の並び順へ。すべての正準トークンは MODIFIER_ORDER にあるので position は必ず Some。
         modifiers.sort_unstable_by_key(|name| {

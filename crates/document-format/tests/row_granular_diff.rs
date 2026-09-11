@@ -104,7 +104,9 @@ const POSITION_ROWS: usize = 1_000;
 
 /// 大量シートの列名（`c00` … `c29`）。行オブジェクトのキー順になる。
 fn big_columns() -> Vec<String> {
-    (0..COLUMN_COUNT).map(|index| format!("c{index:02}")).collect()
+    (0..COLUMN_COUNT)
+        .map(|index| format!("c{index:02}"))
+        .collect()
 }
 
 /// 大量シートの行エントリのバイト列を、決定的な整数値で組み立てる。
@@ -139,7 +141,9 @@ fn skeleton() -> Document {
     let mut document = Document::new();
 
     let big = document.add_sheet("大量");
-    document.set_sheet_columns(big, big_columns()).expect("標本のシートは実在する");
+    document
+        .set_sheet_columns(big, big_columns())
+        .expect("標本のシートは実在する");
     document
         .set_root_schema(big, SchemaPart::parse(SCHEMA_EMPTY).expect("標本は妥当"))
         .expect("標本のシートは実在する");
@@ -149,7 +153,10 @@ fn skeleton() -> Document {
         .set_sheet_columns(small, vec!["name".to_owned(), "blob".to_owned()])
         .expect("標本のシートは実在する");
     document
-        .set_root_schema(small, SchemaPart::parse(SCHEMA_WITH_REF).expect("標本は妥当"))
+        .set_root_schema(
+            small,
+            SchemaPart::parse(SCHEMA_WITH_REF).expect("標本は妥当"),
+        )
         .expect("標本のシートは実在する");
     let attachment = document.add_attachment(vec![0xff, 0x00, b'j', 0x80]);
     for name in ["一", "二"] {
@@ -158,7 +165,10 @@ fn skeleton() -> Document {
             .set_row_values(
                 small,
                 row,
-                vec![CellValue::Text(name.to_owned()), CellValue::Attachment(attachment)],
+                vec![
+                    CellValue::Text(name.to_owned()),
+                    CellValue::Attachment(attachment),
+                ],
             )
             .expect("標本の行は実在する");
     }
@@ -185,7 +195,9 @@ fn document_with_rows(row_count: usize) -> Document {
     // 索引を実体から組み直してから復元する（from_parts が extend_rows の一括経路を使う）。
     let parts = DocumentParts::from_entries(with_rebuilt_manifest(version, entries))
         .expect("行を差し替えた集合は妥当");
-    api().from_parts(&parts).expect("行を差し替えた集合は復元できる")
+    api()
+        .from_parts(&parts)
+        .expect("行を差し替えた集合は復元できる")
 }
 
 /// 保存されたコンテナのバイト列からパート集合を露出させ、（エントリ名, バイト列）へ写す。
@@ -206,15 +218,25 @@ fn text_lines(bytes: &[u8]) -> Vec<&[u8]> {
     if bytes.is_empty() {
         return Vec::new();
     }
-    assert!(bytes.ends_with(b"\n"), "NDJSON は各レコードを LF で終端する");
-    bytes[..bytes.len() - 1].split(|byte| *byte == b'\n').collect()
+    assert!(
+        bytes.ends_with(b"\n"),
+        "NDJSON は各レコードを LF で終端する"
+    );
+    bytes[..bytes.len() - 1]
+        .split(|byte| *byte == b'\n')
+        .collect()
 }
 
 /// 行オブジェクトの `$id` 値（先頭キー。26 文字 ULID テキスト）を取り出す。
 fn line_id(line: &[u8]) -> &[u8] {
     const PREFIX: &[u8] = b"{\"$id\":\"";
-    let rest = line.strip_prefix(PREFIX).expect("行は $id を先頭キーに持つ");
-    let end = rest.iter().position(|byte| *byte == b'"').expect("$id は文字列である");
+    let rest = line
+        .strip_prefix(PREFIX)
+        .expect("行は $id を先頭キーに持つ");
+    let end = rest
+        .iter()
+        .position(|byte| *byte == b'"')
+        .expect("$id は文字列である");
     &rest[..end]
 }
 
@@ -235,7 +257,11 @@ fn assert_only_the_matching_line_changed(
     let names_before: Vec<String> = before.iter().map(|(name, _)| name.to_string()).collect();
     let names_after: Vec<String> = after.iter().map(|(name, _)| name.to_string()).collect();
     assert_eq!(names_before, names_after, "エントリ名の集合が変わった");
-    assert!(before.len() >= 6, "比較対象のエントリが少なすぎる: {}", before.len());
+    assert!(
+        before.len() >= 6,
+        "比較対象のエントリが少なすぎる: {}",
+        before.len()
+    );
 
     // 2. バイト列が変化したエントリは行エントリと manifest.json だけである。
     let mut changed: Vec<String> = before
@@ -268,10 +294,20 @@ fn assert_only_the_matching_line_changed(
     let after_lines = text_lines(&after_rows_bytes);
 
     // 3. テキスト行数 == 行数（要件 3.4）で、変更前後で不変。
-    assert_eq!(before_lines.len(), expected_rows, "1 行 = 1 テキスト行になっていない（要件 3.4）");
-    assert_eq!(before_lines.len(), after_lines.len(), "行エントリのテキスト行数が変わった");
+    assert_eq!(
+        before_lines.len(),
+        expected_rows,
+        "1 行 = 1 テキスト行になっていない（要件 3.4）"
+    );
+    assert_eq!(
+        before_lines.len(),
+        after_lines.len(),
+        "行エントリのテキスト行数が変わった"
+    );
     assert!(
-        before_lines.iter().all(|line| line.starts_with(b"{\"$id\":\"")),
+        before_lines
+            .iter()
+            .all(|line| line.starts_with(b"{\"$id\":\"")),
         "行エントリの行が行オブジェクトの形をしていない"
     );
 
@@ -280,7 +316,8 @@ fn assert_only_the_matching_line_changed(
         .filter(|&index| before_lines[index] != after_lines[index])
         .collect();
     assert_eq!(
-        differing, vec![target],
+        differing,
+        vec![target],
         "変化したテキスト行がちょうど 1 行でないか、位置が変更した行と一致しない \
          （変更した行位置 {target}。要件 3.5）"
     );
@@ -290,7 +327,10 @@ fn assert_only_the_matching_line_changed(
     let old_pair = format!("\"{column}\":{old_token}");
     let new_pair = format!("\"{column}\":-1");
     let before_line = std::str::from_utf8(before_lines[target]).expect("行は UTF-8");
-    assert!(before_line.contains(&old_pair), "変更前の行に期待したセルが無い: {before_line}");
+    assert!(
+        before_line.contains(&old_pair),
+        "変更前の行に期待したセルが無い: {before_line}"
+    );
     let expected_line = before_line.replacen(&old_pair, &new_pair, 1);
     let after_line = std::str::from_utf8(after_lines[target]).expect("行は UTF-8");
     assert_eq!(
@@ -301,7 +341,10 @@ fn assert_only_the_matching_line_changed(
     // 6. 行の順序が同一（`$id` の列が前後で一致 = 差分は「移動」ではなく「置換」）。
     let ids_before: Vec<&[u8]> = before_lines.iter().map(|line| line_id(line)).collect();
     let ids_after: Vec<&[u8]> = after_lines.iter().map(|line| line_id(line)).collect();
-    assert_eq!(ids_before, ids_after, "行の順序が変わった（差分が移動として現れている）");
+    assert_eq!(
+        ids_before, ids_after,
+        "行の順序が変わった（差分が移動として現れている）"
+    );
 }
 
 /// 対象行の 1 セルを変更して保存し、保存出力の差分を検証する一連の手順（テスト本体の共通部）。
@@ -327,10 +370,14 @@ fn change_one_cell_and_check(
 
     let mut values = original.clone();
     values[MODIFIED_COLUMN] = CellValue::Int(-1);
-    modified.set_row_values(sheet, row_id, values).expect("変更対象の行は実在する");
+    modified
+        .set_row_values(sheet, row_id, values)
+        .expect("変更対象の行は実在する");
 
     let after_path = scratch.file(&format!("after_{row_count}_{target}.jxcel"));
-    api().save(modified, &after_path).expect("変更した文書は保存できる");
+    api()
+        .save(modified, &after_path)
+        .expect("変更した文書は保存できる");
     let after = decoded_entries(&after_path);
     assert_only_the_matching_line_changed(
         before,
@@ -342,7 +389,9 @@ fn change_one_cell_and_check(
     );
 
     // 次の位置を試すため元のセル値へ戻す（比較の基準を 1 つに保つ）。
-    modified.set_row_values(sheet, row_id, original).expect("変更を戻せる");
+    modified
+        .set_row_values(sheet, row_id, original)
+        .expect("変更を戻せる");
 }
 
 /// 1 行のデータが出力テキスト上で独立した 1 行として現れる（要件 3.4）。
@@ -362,17 +411,26 @@ fn one_data_row_is_always_exactly_one_text_line() {
         .expect("標本のシートは実在する");
 
     let row_values = [
-        vec![CellValue::Text("一行目\n二行目".to_owned()), CellValue::Text("a\r\nb".to_owned())],
+        vec![
+            CellValue::Text("一行目\n二行目".to_owned()),
+            CellValue::Text("a\r\nb".to_owned()),
+        ],
         vec![CellValue::Int(1), CellValue::Text("plain".to_owned())],
     ];
     for values in row_values {
         let row = document.add_row(sheet).expect("標本のシートは実在する");
-        document.set_row_values(sheet, row, values).expect("標本の行は実在する");
+        document
+            .set_row_values(sheet, row, values)
+            .expect("標本の行は実在する");
     }
 
     let parts = to_parts(&document).expect("標本はパート集合へ取り出せる");
     let entry = EntryName::Rows { sheet };
-    let bytes = parts.get(&entry).expect("標本は行エントリを持つ").bytes.clone();
+    let bytes = parts
+        .get(&entry)
+        .expect("標本は行エントリを持つ")
+        .bytes
+        .clone();
 
     let lines = text_lines(&bytes);
     assert_eq!(
@@ -387,21 +445,37 @@ fn one_data_row_is_always_exactly_one_text_line() {
         2,
         "生の LF が行区切り以外にある"
     );
-    assert_eq!(bytes.iter().filter(|byte| **byte == b'\r').count(), 0, "CR が生のまま出力された");
+    assert_eq!(
+        bytes.iter().filter(|byte| **byte == b'\r').count(),
+        0,
+        "CR が生のまま出力された"
+    );
     assert!(
         lines.iter().all(|line| line.starts_with(b"{\"$id\":\"")),
         "行が行オブジェクトの形をしていない"
     );
 
     let text = String::from_utf8(bytes.clone()).expect("行エントリは UTF-8");
-    assert!(text.contains(r#"一行目\n二行目"#), "LF がエスケープされていない: {text}");
-    assert!(text.contains(r#"a\r\nb"#), "CRLF がエスケープされていない: {text}");
+    assert!(
+        text.contains(r#"一行目\n二行目"#),
+        "LF がエスケープされていない: {text}"
+    );
+    assert!(
+        text.contains(r#"a\r\nb"#),
+        "CRLF がエスケープされていない: {text}"
+    );
 
     // 復号すると値の中の改行がそのまま戻る（エスケープは wire の都合でデータを変えない）。
     let decoded = RowsCodec::decode(&entry, &bytes).expect("行エントリは復号できる");
     assert_eq!(decoded.rows().len(), 2);
-    assert_eq!(decoded.rows()[0].values()[0], CellValue::Text("一行目\n二行目".to_owned()));
-    assert_eq!(decoded.rows()[0].values()[1], CellValue::Text("a\r\nb".to_owned()));
+    assert_eq!(
+        decoded.rows()[0].values()[0],
+        CellValue::Text("一行目\n二行目".to_owned())
+    );
+    assert_eq!(
+        decoded.rows()[0].values()[1],
+        CellValue::Text("a\r\nb".to_owned())
+    );
 
     // 保存 → 開き直しでも値が変わらない（経路全体での確認）。
     let scratch = Scratch::new("row_granular_diff_newline");
@@ -424,18 +498,34 @@ fn one_data_row_is_always_exactly_one_text_line() {
 fn changing_one_cell_in_a_large_document_changes_only_the_matching_text_line() {
     let document = document_with_rows(BIG_ROWS);
     let sheet = document.sheets()[0].id();
-    assert_eq!(document.sheets()[0].rows().len(), BIG_ROWS, "10 万行の文書を組み立てられていない");
+    assert_eq!(
+        document.sheets()[0].rows().len(),
+        BIG_ROWS,
+        "10 万行の文書を組み立てられていない"
+    );
 
     let scratch = Scratch::new("row_granular_diff_large");
     let before_path = scratch.file("before.jxcel");
-    api().save(&document, &before_path).expect("10 万行の文書は保存できる");
+    api()
+        .save(&document, &before_path)
+        .expect("10 万行の文書は保存できる");
     let before = decoded_entries(&before_path);
 
     // 同じ識別子を持つ文書を開き直してから変更する（新規構築では ULID が変わる。
     // モジュール docs「同じ識別子の文書を open してから変更する理由」）。
-    let mut modified = api().open(&before_path).expect("保存した文書は開ける").document;
+    let mut modified = api()
+        .open(&before_path)
+        .expect("保存した文書は開ける")
+        .document;
 
-    change_one_cell_and_check(&scratch, BIG_ROWS, BIG_ROWS / 2, &before, &mut modified, sheet);
+    change_one_cell_and_check(
+        &scratch,
+        BIG_ROWS,
+        BIG_ROWS / 2,
+        &before,
+        &mut modified,
+        sheet,
+    );
 }
 
 /// 変更する行の位置に応じて、変化するテキスト行がその位置へ移る（要件 3.5）。
@@ -452,12 +542,24 @@ fn the_changed_text_line_follows_the_changed_row_position() {
 
     let scratch = Scratch::new("row_granular_diff_positions");
     let before_path = scratch.file("before.jxcel");
-    api().save(&document, &before_path).expect("標本は保存できる");
+    api()
+        .save(&document, &before_path)
+        .expect("標本は保存できる");
     let before = decoded_entries(&before_path);
 
-    let mut modified = api().open(&before_path).expect("保存した文書は開ける").document;
+    let mut modified = api()
+        .open(&before_path)
+        .expect("保存した文書は開ける")
+        .document;
 
     for target in [0, POSITION_ROWS / 2, POSITION_ROWS - 1] {
-        change_one_cell_and_check(&scratch, POSITION_ROWS, target, &before, &mut modified, sheet);
+        change_one_cell_and_check(
+            &scratch,
+            POSITION_ROWS,
+            target,
+            &before,
+            &mut modified,
+            sheet,
+        );
     }
 }

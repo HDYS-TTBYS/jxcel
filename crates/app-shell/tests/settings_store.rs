@@ -58,8 +58,8 @@ use std::time::{Duration, Instant};
 
 use app_shell::settings::atomic::TEMP_FILE_PREFIX;
 use app_shell::settings::{
-    app_data_base_dir, app_data_base_dir_with, app_data_dir, open, OpenReport, RecoveryCause,
-    RecoveredFrom, SettingsChanged, SettingsError, SettingsKey, SettingsStore, APP_IDENTIFIER,
+    app_data_base_dir, app_data_base_dir_with, app_data_dir, open, OpenReport, RecoveredFrom,
+    RecoveryCause, SettingsChanged, SettingsError, SettingsKey, SettingsStore, APP_IDENTIFIER,
     SETTINGS_FILE_NAME, SUPPORTED_SCHEMA_VERSION,
 };
 
@@ -127,7 +127,13 @@ impl Drop for Scratch {
 fn entry_names(directory: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(directory)
         .expect("一時ディレクトリを読める")
-        .map(|entry| entry.expect("エントリを読める").file_name().to_string_lossy().into_owned())
+        .map(|entry| {
+            entry
+                .expect("エントリを読める")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     names.sort();
     names
@@ -162,10 +168,16 @@ fn assert_only_settings_file(directory: &Path) {
 fn set_then_get_round_trips_across_a_fresh_open() {
     let scratch = Scratch::new("round-trip");
     let (store, report) = open(scratch.path()).expect("設定ストアを開ける");
-    assert_eq!(report, OpenReport::default(), "4.1 の open は復旧の事実を返さない");
+    assert_eq!(
+        report,
+        OpenReport::default(),
+        "4.1 の open は復旧の事実を返さない"
+    );
 
     store.set(&TEST_KEY, &"文字列").expect("書ける");
-    store.set(&COUNT_KEY, &SUPPORTED_SCHEMA_VERSION).expect("書ける");
+    store
+        .set(&COUNT_KEY, &SUPPORTED_SCHEMA_VERSION)
+        .expect("書ける");
     store
         .set(&OBJECT_KEY, &serde_json::json!({"a": [1, 2, 3]}))
         .expect("書ける");
@@ -176,7 +188,11 @@ fn set_then_get_round_trips_across_a_fresh_open() {
         store.get::<serde_json::Value>(&OBJECT_KEY),
         Some(serde_json::json!({"a": [1, 2, 3]}))
     );
-    assert_eq!(store.get::<u32>(&MISSING_KEY), None, "存在しないキーは None");
+    assert_eq!(
+        store.get::<u32>(&MISSING_KEY),
+        None,
+        "存在しないキーは None"
+    );
     assert_eq!(store.get::<u32>(&TEST_KEY), None, "型の合わない値は None");
 
     // 実体を手放してから開き直す。共有の登録簿が空になるため、必ずディスクから読む。
@@ -199,7 +215,10 @@ fn open_creates_a_missing_directory() {
     let (store, _) = open(&nested).expect("無いディレクトリを作って開ける");
     store.set(&TEST_KEY, &"value").expect("書ける");
 
-    assert!(nested.join(SETTINGS_FILE_NAME).is_file(), "設定ファイルが作られていない");
+    assert!(
+        nested.join(SETTINGS_FILE_NAME).is_file(),
+        "設定ファイルが作られていない"
+    );
 }
 
 /// ディレクトリを用意できないときはパニックせず、原因を区別できるエラーを返す。
@@ -255,12 +274,18 @@ fn failed_write_removes_the_temporary_file_and_rolls_back() {
     // メモリには値を持たせない。対象パスをディレクトリで塞いでから書く。
     fs::create_dir(scratch.target()).expect("対象パスを塞げる");
 
-    let error = store.set(&BLOCKER_KEY, &"value").err().expect("置換は失敗するはず");
+    let error = store
+        .set(&BLOCKER_KEY, &"value")
+        .err()
+        .expect("置換は失敗するはず");
     assert!(
         matches!(error, SettingsError::WriteFailed { .. }),
         "書き込みの失敗として返らない: {error:?}"
     );
-    assert!(temp_file_names(scratch.path()).is_empty(), "失敗した書き込みが一時ファイルを残した");
+    assert!(
+        temp_file_names(scratch.path()).is_empty(),
+        "失敗した書き込みが一時ファイルを残した"
+    );
     assert_eq!(
         store.get::<String>(&BLOCKER_KEY),
         None,
@@ -281,11 +306,17 @@ fn open_shares_one_instance_per_directory() {
     let scratch = Scratch::new("sharing");
     let (first, _) = open(scratch.path()).expect("1 回目を開ける");
     let (second, _) = open(scratch.path()).expect("2 回目を開ける");
-    assert!(Arc::ptr_eq(&first, &second), "同じディレクトリで別の実体が返った");
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "同じディレクトリで別の実体が返った"
+    );
 
     let dotted = scratch.path().join(".");
     let (third, _) = open(&dotted).expect("別綴りで開ける");
-    assert!(Arc::ptr_eq(&first, &third), "同じディレクトリの別綴りで別の実体が返った");
+    assert!(
+        Arc::ptr_eq(&first, &third),
+        "同じディレクトリの別綴りで別の実体が返った"
+    );
 
     first.set(&TEST_KEY, &"from-first").expect("書ける");
     assert_eq!(
@@ -295,7 +326,10 @@ fn open_shares_one_instance_per_directory() {
     );
 
     second.set(&TEST_KEY, &"from-second").expect("書ける");
-    assert_eq!(first.get::<String>(&TEST_KEY).as_deref(), Some("from-second"));
+    assert_eq!(
+        first.get::<String>(&TEST_KEY).as_deref(),
+        Some("from-second")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -340,7 +374,9 @@ fn concurrent_writes_do_not_lose_updates() {
     for thread_index in 0..CONCURRENT_THREADS {
         let expected = format!("{thread_index}:{}", CONCURRENT_WRITES_PER_THREAD - 1);
         assert_eq!(
-            store.get::<String>(&CONCURRENT_KEYS[thread_index]).as_deref(),
+            store
+                .get::<String>(&CONCURRENT_KEYS[thread_index])
+                .as_deref(),
             Some(expected.as_str()),
             "スレッド {thread_index} の書き込みが見えない"
         );
@@ -352,7 +388,9 @@ fn concurrent_writes_do_not_lose_updates() {
     for thread_index in 0..CONCURRENT_THREADS {
         let expected = format!("{thread_index}:{}", CONCURRENT_WRITES_PER_THREAD - 1);
         assert_eq!(
-            fresh.get::<String>(&CONCURRENT_KEYS[thread_index]).as_deref(),
+            fresh
+                .get::<String>(&CONCURRENT_KEYS[thread_index])
+                .as_deref(),
             Some(expected.as_str()),
             "スレッド {thread_index} の書き込みがディスクに残っていない（失われた更新）"
         );
@@ -365,7 +403,9 @@ fn concurrent_writes_do_not_lose_updates() {
 
 /// 既定値で起動した事実を取り出す（無ければ失敗する）。
 fn recovered(report: &OpenReport) -> &RecoveredFrom {
-    report.recovered_from().expect("復旧の事実が報告されていない")
+    report
+        .recovered_from()
+        .expect("復旧の事実が報告されていない")
 }
 
 /// 未知のキー（入れ子のオブジェクトを含む）は読み書きの往復で失われない（要件 7.6）。
@@ -383,22 +423,42 @@ fn unknown_keys_survive_a_read_modify_write() {
         "future.layout": {"sidebar": {"width": 240, "pinned": true}, "tabs": ["a", "b"]},
         "legacy.widgets": [1, 2, {"nested": null}],
     });
-    fs::write(scratch.target(), serde_json::to_vec(&original).expect("直列化できる"))
-        .expect("設定ファイルを置ける");
+    fs::write(
+        scratch.target(),
+        serde_json::to_vec(&original).expect("直列化できる"),
+    )
+    .expect("設定ファイルを置ける");
 
     let (store, report) = open(scratch.path()).expect("設定ストアを開ける");
-    assert!(report.recovered_from().is_none(), "現行版のファイルを復旧として扱った");
+    assert!(
+        report.recovered_from().is_none(),
+        "現行版のファイルを復旧として扱った"
+    );
     assert_eq!(store.get::<String>(&TEST_KEY).as_deref(), Some("dark"));
 
     // 既知の鍵を書き換える。未知の鍵は値の形を変えずに残らなければならない。
     store.set(&TEST_KEY, &"light").expect("書ける");
 
     let after: serde_json::Value =
-        serde_json::from_slice(&fs::read(scratch.target()).expect("対象を読める")).expect("完全な JSON");
-    assert_eq!(after["appearance.theme"], serde_json::json!("light"), "既知の鍵が更新されていない");
-    assert_eq!(after["future.layout"], original["future.layout"], "未知のキーが失われた");
-    assert_eq!(after["legacy.widgets"], original["legacy.widgets"], "未知の入れ子が失われた");
-    assert_eq!(after["schema_version"], original["schema_version"], "版が失われた");
+        serde_json::from_slice(&fs::read(scratch.target()).expect("対象を読める"))
+            .expect("完全な JSON");
+    assert_eq!(
+        after["appearance.theme"],
+        serde_json::json!("light"),
+        "既知の鍵が更新されていない"
+    );
+    assert_eq!(
+        after["future.layout"], original["future.layout"],
+        "未知のキーが失われた"
+    );
+    assert_eq!(
+        after["legacy.widgets"], original["legacy.widgets"],
+        "未知の入れ子が失われた"
+    );
+    assert_eq!(
+        after["schema_version"], original["schema_version"],
+        "版が失われた"
+    );
 
     // 開き直しても未知のキーは残る。
     drop(store);
@@ -406,9 +466,16 @@ fn unknown_keys_survive_a_read_modify_write() {
     assert!(reopened.recovered_from().is_none());
     assert_eq!(fresh.get::<String>(&TEST_KEY).as_deref(), Some("light"));
     let after_reopen: serde_json::Value =
-        serde_json::from_slice(&fs::read(scratch.target()).expect("対象を読める")).expect("完全な JSON");
-    assert_eq!(after_reopen["future.layout"], original["future.layout"], "開き直しで失われた");
-    assert_eq!(after_reopen["legacy.widgets"], original["legacy.widgets"], "開き直しで失われた");
+        serde_json::from_slice(&fs::read(scratch.target()).expect("対象を読める"))
+            .expect("完全な JSON");
+    assert_eq!(
+        after_reopen["future.layout"], original["future.layout"],
+        "開き直しで失われた"
+    );
+    assert_eq!(
+        after_reopen["legacy.widgets"], original["legacy.widgets"],
+        "開き直しで失われた"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -433,9 +500,14 @@ fn corrupt_settings_start_from_defaults_and_preserve_the_file() {
         let scratch = Scratch::new("corrupt");
         fs::write(scratch.target(), &contents).expect("壊れた内容を置ける");
 
-        let (store, report) = open(scratch.path())
-            .unwrap_or_else(|error| panic!("{label}: 壊れていても起動できなければならない: {error}"));
-        assert_eq!(store.get::<String>(&TEST_KEY), None, "{label}: 既定値で起動していない");
+        let (store, report) = open(scratch.path()).unwrap_or_else(|error| {
+            panic!("{label}: 壊れていても起動できなければならない: {error}")
+        });
+        assert_eq!(
+            store.get::<String>(&TEST_KEY),
+            None,
+            "{label}: 既定値で起動していない"
+        );
         assert_eq!(
             store.get::<serde_json::Value>(&OBJECT_KEY),
             None,
@@ -448,13 +520,24 @@ fn corrupt_settings_start_from_defaults_and_preserve_the_file() {
             "{label}: 原因が違う: {:?}",
             fact.cause
         );
-        assert_eq!(fs::read(scratch.target()).expect("読める"), contents, "{label}: ファイルを変更した");
+        assert_eq!(
+            fs::read(scratch.target()).expect("読める"),
+            contents,
+            "{label}: ファイルを変更した"
+        );
 
         // 実体を手放して開き直す（登録簿が空になり、必ずディスクから読み直す）。
         drop(store);
         let (reopened, second) = open(scratch.path()).expect("開き直せる");
-        assert!(second.recovered_from().is_some(), "{label}: 2 回目の open が復旧を報告しない");
-        assert_eq!(reopened.get::<String>(&TEST_KEY), None, "{label}: 開き直しで既定値でない");
+        assert!(
+            second.recovered_from().is_some(),
+            "{label}: 2 回目の open が復旧を報告しない"
+        );
+        assert_eq!(
+            reopened.get::<String>(&TEST_KEY),
+            None,
+            "{label}: 開き直しで既定値でない"
+        );
         assert_eq!(
             fs::read(scratch.target()).expect("読める"),
             contents,
@@ -473,7 +556,11 @@ fn unreadable_settings_path_starts_from_defaults_and_preserves_it() {
     fs::create_dir(scratch.target()).expect("設定パスをディレクトリで塞げる");
 
     let (store, report) = open(scratch.path()).expect("読めなくても起動できなければならない");
-    assert_eq!(store.get::<String>(&TEST_KEY), None, "既定値で起動していない");
+    assert_eq!(
+        store.get::<String>(&TEST_KEY),
+        None,
+        "既定値で起動していない"
+    );
     let fact = recovered(&report);
     assert_eq!(fact.path, scratch.target());
     assert!(
@@ -481,11 +568,17 @@ fn unreadable_settings_path_starts_from_defaults_and_preserves_it() {
         "原因が違う: {:?}",
         fact.cause
     );
-    assert!(scratch.target().is_dir(), "読めなかったパスを消した／置き換えた");
+    assert!(
+        scratch.target().is_dir(),
+        "読めなかったパスを消した／置き換えた"
+    );
 
     drop(store);
     let (_, second) = open(scratch.path()).expect("開き直せる");
-    assert!(second.recovered_from().is_some(), "2 回目の open が復旧を報告しない");
+    assert!(
+        second.recovered_from().is_some(),
+        "2 回目の open が復旧を報告しない"
+    );
     assert!(scratch.target().is_dir(), "開き直しでパスが変わった");
 }
 
@@ -502,7 +595,8 @@ fn recovery_reports_the_callers_spelling_not_the_resolved_path() {
     let scratch = Scratch::new("symlinked");
     let real = scratch.path().join("real");
     fs::create_dir(&real).expect("実体のディレクトリを作れる");
-    fs::write(real.join(SETTINGS_FILE_NAME), b"{\"appearance.theme\":").expect("壊れた内容を置ける");
+    fs::write(real.join(SETTINGS_FILE_NAME), b"{\"appearance.theme\":")
+        .expect("壊れた内容を置ける");
     let link = scratch.path().join("link");
     std::os::unix::fs::symlink(&real, &link).expect("シンボリックリンクを作れる");
 
@@ -513,7 +607,11 @@ fn recovery_reports_the_callers_spelling_not_the_resolved_path() {
         link.join(SETTINGS_FILE_NAME),
         "復旧の報告が呼び出し側の綴りでない（シンボリックリンクを解決した綴りを報告している）"
     );
-    assert!(matches!(fact.cause, RecoveryCause::Malformed), "原因が違う: {:?}", fact.cause);
+    assert!(
+        matches!(fact.cause, RecoveryCause::Malformed),
+        "原因が違う: {:?}",
+        fact.cause
+    );
 }
 
 /// 未知の `schema_version` を持つファイルは解釈せず、既定値で起動して事実を報告する
@@ -535,12 +633,22 @@ fn unknown_schema_version_starts_from_defaults_and_reports_it() {
     fs::write(scratch.target(), &bytes).expect("設定ファイルを置ける");
 
     let (store, report) = open(scratch.path()).expect("未知の版でも起動できなければならない");
-    assert_eq!(store.get::<String>(&TEST_KEY), None, "未知の版の値を解釈した");
+    assert_eq!(
+        store.get::<String>(&TEST_KEY),
+        None,
+        "未知の版の値を解釈した"
+    );
     assert_eq!(
         recovered(&report).cause,
-        RecoveryCause::UnsupportedSchemaVersion { found: Some(i64::from(future)) }
+        RecoveryCause::UnsupportedSchemaVersion {
+            found: Some(i64::from(future))
+        }
     );
-    assert_eq!(fs::read(scratch.target()).expect("読める"), bytes, "ファイルを変更した");
+    assert_eq!(
+        fs::read(scratch.target()).expect("読める"),
+        bytes,
+        "ファイルを変更した"
+    );
 
     // 整数として読めない版。
     let scratch = Scratch::new("non-integer-version");
@@ -552,12 +660,20 @@ fn unknown_schema_version_starts_from_defaults_and_reports_it() {
     fs::write(scratch.target(), &bytes).expect("設定ファイルを置ける");
 
     let (store, report) = open(scratch.path()).expect("整数でない版でも起動できなければならない");
-    assert_eq!(store.get::<String>(&TEST_KEY), None, "未知の版の値を解釈した");
+    assert_eq!(
+        store.get::<String>(&TEST_KEY),
+        None,
+        "未知の版の値を解釈した"
+    );
     assert_eq!(
         recovered(&report).cause,
         RecoveryCause::UnsupportedSchemaVersion { found: None }
     );
-    assert_eq!(fs::read(scratch.target()).expect("読める"), bytes, "ファイルを変更した");
+    assert_eq!(
+        fs::read(scratch.target()).expect("読める"),
+        bytes,
+        "ファイルを変更した"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -586,10 +702,18 @@ fn shell_key_catalog_round_trips_and_is_closed() {
     }
 
     // カタログは重複の無い 5 鍵であり、名前と往復する。
-    assert_eq!(SettingsKey::ALL.len(), 5, "カタログの数が design.md の表と違う");
+    assert_eq!(
+        SettingsKey::ALL.len(),
+        5,
+        "カタログの数が design.md の表と違う"
+    );
     for (index, key) in SettingsKey::ALL.iter().copied().enumerate() {
         assert_eq!(key.as_str(), catalog_name(key), "名前がカタログと違う");
-        assert_eq!(SettingsKey::from_name(key.as_str()), Some(key), "名前から鍵を引けない");
+        assert_eq!(
+            SettingsKey::from_name(key.as_str()),
+            Some(key),
+            "名前から鍵を引けない"
+        );
         assert!(
             !SettingsKey::ALL[..index].contains(&key),
             "カタログに同じ鍵が二度現れる: {key}"
@@ -597,8 +721,18 @@ fn shell_key_catalog_round_trips_and_is_closed() {
     }
 
     // カタログ外の名前は鍵にならない（文字列からの入口は閉じている）。
-    for outside in ["", "test.value", "window.geometry.x", "appearance", "document.cells"] {
-        assert_eq!(SettingsKey::from_name(outside), None, "カタログ外の名前が鍵になった: {outside}");
+    for outside in [
+        "",
+        "test.value",
+        "window.geometry.x",
+        "appearance",
+        "document.cells",
+    ] {
+        assert_eq!(
+            SettingsKey::from_name(outside),
+            None,
+            "カタログ外の名前が鍵になった: {outside}"
+        );
     }
 
     // 各鍵は保存して読み戻せる（型は design.md の表に合わせる）。
@@ -618,10 +752,10 @@ fn shell_key_catalog_round_trips_and_is_closed() {
 
     for key in SettingsKey::ALL {
         let read = match key {
-            SettingsKey::SchemaVersion => {
-                store.get::<u32>(&key) == Some(SUPPORTED_SCHEMA_VERSION)
+            SettingsKey::SchemaVersion => store.get::<u32>(&key) == Some(SUPPORTED_SCHEMA_VERSION),
+            SettingsKey::WindowGeometry => {
+                store.get::<serde_json::Value>(&key) == Some(geometry.clone())
             }
-            SettingsKey::WindowGeometry => store.get::<serde_json::Value>(&key) == Some(geometry.clone()),
             SettingsKey::AppearanceTheme => store.get::<String>(&key).as_deref() == Some("dark"),
             SettingsKey::DiagnosticsLevel => store.get::<String>(&key).as_deref() == Some("debug"),
             SettingsKey::RenderFallback => store.get::<bool>(&key) == Some(true),
@@ -659,13 +793,18 @@ fn no_document_content_can_be_named_as_a_setting() {
     // 書けるのはカタログの鍵だけで、ファイルに載るのもそれだけである。
     let scratch = Scratch::new("no-document");
     let (store, _) = open(scratch.path()).expect("設定ストアを開ける");
-    store.set(&SettingsKey::RenderFallback, &false).expect("書ける");
+    store
+        .set(&SettingsKey::RenderFallback, &false)
+        .expect("書ける");
 
     let raw: serde_json::Value =
         serde_json::from_slice(&fs::read(scratch.target()).expect("読める")).expect("完全な JSON");
     let object = raw.as_object().expect("オブジェクトである");
     assert_eq!(object.len(), 1, "カタログ外の鍵が保存された");
-    assert_eq!(object[SettingsKey::RenderFallback.as_str()], serde_json::json!(false));
+    assert_eq!(
+        object[SettingsKey::RenderFallback.as_str()],
+        serde_json::json!(false)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -679,7 +818,10 @@ fn no_document_content_can_be_named_as_a_setting() {
 #[test]
 fn app_identifier_matches_the_tauri_identifier() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest.ancestors().nth(2).expect("リポジトリルートを解決できる");
+    let repo_root = manifest
+        .ancestors()
+        .nth(2)
+        .expect("リポジトリルートを解決できる");
     let conf = fs::read_to_string(repo_root.join("src-tauri").join("tauri.conf.json"))
         .expect("tauri.conf.json を読める");
     let parsed: serde_json::Value = serde_json::from_str(&conf).expect("JSON として読める");
@@ -700,7 +842,9 @@ fn app_data_dir_appends_the_identifier_to_the_platform_base() {
         "識別子が付いていない"
     );
     assert!(
-        app_data_dir().expect("解決できる").ends_with(APP_IDENTIFIER),
+        app_data_dir()
+            .expect("解決できる")
+            .ends_with(APP_IDENTIFIER),
         "保存先が識別子で終わらない"
     );
 }
@@ -711,7 +855,10 @@ fn app_data_dir_appends_the_identifier_to_the_platform_base() {
 #[test]
 fn app_data_base_reports_a_missing_environment() {
     let missing = app_data_base_dir_with(&|_name: &str| None);
-    assert!(missing.is_err(), "環境変数が無いのに解決できた: {missing:?}");
+    assert!(
+        missing.is_err(),
+        "環境変数が無いのに解決できた: {missing:?}"
+    );
 
     let empty = app_data_base_dir_with(&|_name: &str| Some(OsString::new()));
     assert!(empty.is_err(), "空の値を設定済みとして扱った: {empty:?}");
@@ -759,7 +906,11 @@ fn linux_base_prefers_xdg_data_home_then_home() {
         })
         .expect("空の XDG は未設定として HOME を使う")
     };
-    assert_eq!(empty_xdg, home.join(".local").join("share"), "空の XDG を設定済みとして扱った");
+    assert_eq!(
+        empty_xdg,
+        home.join(".local").join("share"),
+        "空の XDG を設定済みとして扱った"
+    );
 }
 
 /// macOS は `$HOME/Library/Application Support` を使う。
@@ -773,7 +924,9 @@ fn macos_base_uses_home_library_application_support() {
     .expect("HOME がある");
     assert_eq!(
         resolved,
-        PathBuf::from("/Users/user").join("Library").join("Application Support")
+        PathBuf::from("/Users/user")
+            .join("Library")
+            .join("Application Support")
     );
 }
 
@@ -825,8 +978,16 @@ fn a_change_reaches_every_subscriber_with_the_new_value() {
     let second_event = recv_bounded(&second, "2 人目の購読者");
     assert_eq!(first_event.key, NOTIFY_KEY, "変更した鍵が届く");
     assert_eq!(second_event.key, NOTIFY_KEY, "変更した鍵が届く");
-    assert_eq!(first_event.value, serde_json::json!("dark"), "変更後の値が届く");
-    assert_eq!(second_event.value, serde_json::json!("dark"), "変更後の値が届く");
+    assert_eq!(
+        first_event.value,
+        serde_json::json!("dark"),
+        "変更後の値が届く"
+    );
+    assert_eq!(
+        second_event.value,
+        serde_json::json!("dark"),
+        "変更後の値が届く"
+    );
     // 通知を受けた後に読む値が新しい（要件 7.4 の「他のウィンドウにも変更後の値を反映」）。
     assert_eq!(store.get::<String>(&NOTIFY_KEY).as_deref(), Some("dark"));
 }
@@ -848,14 +1009,22 @@ fn a_dropped_subscriber_does_not_break_publishing_for_others() {
     // 受信側を破棄する。送信に失敗した購読者は次の配布で購読者表から外れる。
     drop(doomed);
 
-    store.set(&NOTIFY_KEY, &"second").expect("捨てた購読者がいても書ける");
+    store
+        .set(&NOTIFY_KEY, &"second")
+        .expect("捨てた購読者がいても書ける");
     let event = recv_bounded(&live, "残った購読者");
-    assert_eq!(event.value, serde_json::json!("second"), "残った購読者に届かない");
+    assert_eq!(
+        event.value,
+        serde_json::json!("second"),
+        "残った購読者に届かない"
+    );
     assert_eq!(store.get::<String>(&NOTIFY_KEY).as_deref(), Some("second"));
 
     // すべての購読が消えても `set` は成功し、新しい購読者は以後の変更を受け取れる。
     drop(live);
-    store.set(&NOTIFY_KEY, &"third").expect("購読者が居なくても書ける");
+    store
+        .set(&NOTIFY_KEY, &"third")
+        .expect("購読者が居なくても書ける");
     let late = store.subscribe();
     store.set(&NOTIFY_KEY, &"fourth").expect("書ける");
     let event = recv_bounded(&late, "後から購読した利用者");
@@ -895,7 +1064,10 @@ fn setting_the_same_value_writes_but_does_not_notify() {
     let subscriber = store.subscribe();
 
     store.set(&NOTIFY_KEY, &"dark").expect("書ける");
-    assert_eq!(recv_bounded(&subscriber, "購読者").value, serde_json::json!("dark"));
+    assert_eq!(
+        recv_bounded(&subscriber, "購読者").value,
+        serde_json::json!("dark")
+    );
 
     // 同一値。変更ではないので通知しない。
     store.set(&NOTIFY_KEY, &"dark").expect("同じ値も書ける");
@@ -1011,9 +1183,13 @@ fn crash_writer() {
         return;
     }
     let directory = PathBuf::from(
-        std::env::var(CRASH_DIR_ENV).unwrap_or_else(|error| panic!("{CRASH_DIR_ENV} が無い: {error}")),
+        std::env::var(CRASH_DIR_ENV)
+            .unwrap_or_else(|error| panic!("{CRASH_DIR_ENV} が無い: {error}")),
     );
-    assert!(directory.is_absolute(), "作業ディレクトリは絶対パスでなければならない");
+    assert!(
+        directory.is_absolute(),
+        "作業ディレクトリは絶対パスでなければならない"
+    );
 
     let (store, _) = open(&directory).expect("設定ストアを開ける");
     // 親に「書き込みを始められる」ことを知らせる。親はここから書き込みの窓を観測する。
@@ -1076,18 +1252,29 @@ struct Attempt {
 
 /// 対象の内容が状態 A か状態 B のどちらかに**完全に**一致することを確かめ、どちらだったかを返す。
 fn assert_complete_state(target: &Path, context: &str) -> char {
-    let bytes = fs::read(target).unwrap_or_else(|error| panic!("{context}: 対象を読めない: {error}"));
+    let bytes =
+        fs::read(target).unwrap_or_else(|error| panic!("{context}: 対象を読めない: {error}"));
     let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-        panic!("{context}: 対象が完全な JSON でない（{} バイト）: {error}", bytes.len())
+        panic!(
+            "{context}: 対象が完全な JSON でない（{} バイト）: {error}",
+            bytes.len()
+        )
     });
     let value = parsed
         .get(CRASH_KEY.as_str())
         .and_then(serde_json::Value::as_str)
         .unwrap_or_else(|| panic!("{context}: キーが無い"));
-    assert_eq!(value.len(), CRASH_VALUE_BYTES, "{context}: 内容の長さが違う");
+    assert_eq!(
+        value.len(),
+        CRASH_VALUE_BYTES,
+        "{context}: 内容の長さが違う"
+    );
     let first = value.chars().next().expect("空でない");
     assert!(first == 'A' || first == 'B', "{context}: 未知の内容");
-    assert!(value.chars().all(|character| character == first), "{context}: 内容が混ざっている");
+    assert!(
+        value.chars().all(|character| character == first),
+        "{context}: 内容が混ざっている"
+    );
     assert_eq!(
         bytes.len(),
         crash_document('A').len(),
@@ -1126,7 +1313,12 @@ fn observe_and_kill(
     let mut child_exited_early = false;
 
     loop {
-        if writer.child_mut().try_wait().expect("子の状態を観測できる").is_some() {
+        if writer
+            .child_mut()
+            .try_wait()
+            .expect("子の状態を観測できる")
+            .is_some()
+        {
             child_exited_early = true;
             reason = "child-exited";
             break;
@@ -1136,7 +1328,9 @@ fn observe_and_kill(
             reason = "temp-file";
             break;
         }
-        let length_changed = fs::metadata(target).map(|meta| meta.len() != complete_len).unwrap_or(true);
+        let length_changed = fs::metadata(target)
+            .map(|meta| meta.len() != complete_len)
+            .unwrap_or(true);
         if length_changed {
             reason = "target-size";
             break;
@@ -1149,7 +1343,10 @@ fn observe_and_kill(
     }
 
     let status = writer.kill_and_wait();
-    assert!(!child_exited_early, "ワーカーが親に落とされる前に終了した（根拠: {reason}）");
+    assert!(
+        !child_exited_early,
+        "ワーカーが親に落とされる前に終了した（根拠: {reason}）"
+    );
     assert!(!status.success(), "ワーカーを落とせていない: {status:?}");
 
     Attempt {
@@ -1237,7 +1434,9 @@ fn crash_during_write_leaves_a_complete_file() {
     // 以上、置換はまだ成立しておらず、対象は状態 A のままであるはずである。これが無いと、
     // 置換が先に成立してから落としている（= 書き込みの窓に入っていない）可能性を排除できない。
     assert!(
-        attempts.iter().any(|attempt| attempt.observed_state == Some('A')),
+        attempts
+            .iter()
+            .any(|attempt| attempt.observed_state == Some('A')),
         "直前の完全な内容が残る場合を 1 度も観測できていない: {summary:?}"
     );
     // 落とされる直前までワーカーが書き続けていたこと（早期終了は実装の不具合）。

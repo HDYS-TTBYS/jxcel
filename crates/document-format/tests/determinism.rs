@@ -80,7 +80,10 @@ fn samples() -> Vec<(&'static str, Document)> {
         ("minimal", sample_minimal()),
         ("multi_sheet", sample()),
         ("values", sample_with_values()),
-        ("unreferenced_attachment", sample_with_unreferenced_attachment()),
+        (
+            "unreferenced_attachment",
+            sample_with_unreferenced_attachment(),
+        ),
         ("unknown_fields", sample_with_unknown_fields("A")),
     ]
 }
@@ -132,7 +135,9 @@ fn the_committed_anchor_bytes_are_reproduced_across_time_and_directories() {
 
     let early = Scratch::new("determinism_anchor_early");
     let early_path = early.file("anchor.jxcel");
-    api().save(&document, &early_path).expect("1 度目は保存できる");
+    api()
+        .save(&document, &early_path)
+        .expect("1 度目は保存できる");
     assert_same_bytes(
         &expected,
         &fs::read(&early_path).expect("1 度目の出力が読める"),
@@ -144,7 +149,9 @@ fn the_committed_anchor_bytes_are_reproduced_across_time_and_directories() {
 
     let late = Scratch::new("determinism_anchor_late");
     let late_path = late.file("anchor-with-a-much-longer-name.jxcel");
-    api().save(&document, &late_path).expect("2 度目は保存できる");
+    api()
+        .save(&document, &late_path)
+        .expect("2 度目は保存できる");
     assert_same_bytes(
         &expected,
         &fs::read(&late_path).expect("2 度目の出力が読める"),
@@ -181,7 +188,10 @@ fn saving_the_same_document_twice_gives_identical_bytes() {
             "{name}: 保存されたファイルが空である（比較が空振りする）"
         );
         if left_bytes != right_bytes {
-            let mismatch = left_bytes.iter().zip(&right_bytes).position(|(a, b)| a != b);
+            let mismatch = left_bytes
+                .iter()
+                .zip(&right_bytes)
+                .position(|(a, b)| a != b);
             panic!(
                 "{name}: 別パス・別ディレクトリへの 2 回保存でバイト列が違う（要件 3.1）。\n\
                  1 度目 {} バイト / 2 度目 {} バイト / 最初に相違した位置 {mismatch:?}",
@@ -236,12 +246,17 @@ fn save_and_the_container_encoding_path_agree() {
 #[test]
 fn saved_bytes_fix_every_determinism_relevant_zip_parameter() {
     let scratch = Scratch::new("determinism_headers");
-    let document = api().open(&fixture_path()).expect("アンカーは開ける").document;
+    let document = api()
+        .open(&fixture_path())
+        .expect("アンカーは開ける")
+        .document;
     let path = scratch.file("anchor.jxcel");
     api().save(&document, &path).expect("アンカーは保存できる");
     let bytes = fs::read(&path).expect("保存されたファイルが読める");
 
-    let parts = api().to_parts(&document).expect("アンカーはパート集合へ取り出せる");
+    let parts = api()
+        .to_parts(&document)
+        .expect("アンカーはパート集合へ取り出せる");
     let expected_names: Vec<String> = std::iter::once("jxcel".to_owned())
         .chain(parts.iter().map(|part| part.name.to_string()))
         .collect();
@@ -268,9 +283,16 @@ fn saved_bytes_fix_every_determinism_relevant_zip_parameter() {
             header.name
         );
     }
-    assert_eq!(0, local[0].compression_method, "型マーカーが無圧縮（Stored）でない");
+    assert_eq!(
+        0, local[0].compression_method,
+        "型マーカーが無圧縮（Stored）でない"
+    );
     for header in local.iter().skip(1) {
-        assert_eq!(8, header.compression_method, "Deflate でない: {}", header.name);
+        assert_eq!(
+            8, header.compression_method,
+            "Deflate でない: {}",
+            header.name
+        );
     }
 
     // 型マーカーの内容は確定形（`jxcel\n<major>.<minor>\n`。`Stored` なので展開せずに読める）。
@@ -283,7 +305,10 @@ fn saved_bytes_fix_every_determinism_relevant_zip_parameter() {
 
     let central = central_headers(&bytes);
     let central_names: Vec<String> = central.iter().map(|header| header.name.clone()).collect();
-    assert_eq!(local_names, central_names, "中央ディレクトリの順序がローカルヘッダと違う");
+    assert_eq!(
+        local_names, central_names,
+        "中央ディレクトリの順序がローカルヘッダと違う"
+    );
     for header in &central {
         assert_eq!(
             (0x0000u16, 0x0021u16),
@@ -304,10 +329,15 @@ fn saved_bytes_fix_every_determinism_relevant_zip_parameter() {
             header.name
         );
     }
-    assert_eq!(0, central[0].compression_method, "型マーカーが無圧縮（Stored）でない");
+    assert_eq!(
+        0, central[0].compression_method,
+        "型マーカーが無圧縮（Stored）でない"
+    );
     for header in central.iter().skip(1) {
-        assert_eq!(8, header.compression_method, "Deflate でない: {}", header.name);
+        assert_eq!(
+            8, header.compression_method,
+            "Deflate でない: {}",
+            header.name
+        );
     }
 }
-
-

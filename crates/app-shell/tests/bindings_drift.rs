@@ -147,14 +147,24 @@ fn compare(path: &Path, committed: &[u8], generated: &[u8]) -> Result<(), String
     let generated_line = line_number(generated, offset);
 
     let mut message = String::new();
-    message.push_str("生成物のドリフトを検出した: 追跡済みの TypeScript が生成結果と一致しない。\n");
+    message
+        .push_str("生成物のドリフトを検出した: 追跡済みの TypeScript が生成結果と一致しない。\n");
     message.push('\n');
     message.push_str(&format!("  追跡ファイル: {}\n", path.display()));
-    message.push_str(&format!("  リポジトリルートからの相対: {BINDINGS_RELATIVE}\n"));
-    message.push_str(&format!("  再生成コマンド: {REGENERATE_BINDINGS_COMMAND}\n"));
-    message.push_str("  （リポジトリルートで実行し、書き換わった内容をそのまま追跡対象としてコミットする）\n");
+    message.push_str(&format!(
+        "  リポジトリルートからの相対: {BINDINGS_RELATIVE}\n"
+    ));
+    message.push_str(&format!(
+        "  再生成コマンド: {REGENERATE_BINDINGS_COMMAND}\n"
+    ));
+    message.push_str(
+        "  （リポジトリルートで実行し、書き換わった内容をそのまま追跡対象としてコミットする）\n",
+    );
     message.push('\n');
-    message.push_str(&format!("  追跡ファイルの長さ: {} バイト\n", committed.len()));
+    message.push_str(&format!(
+        "  追跡ファイルの長さ: {} バイト\n",
+        committed.len()
+    ));
     message.push_str(&format!("  生成結果の長さ: {} バイト\n", generated.len()));
     message.push_str(&format!(
         "  最初に食い違う位置: バイトオフセット {offset}（追跡側 {committed_line} 行目 / 生成側 {generated_line} 行目）\n"
@@ -175,11 +185,9 @@ fn compare(path: &Path, committed: &[u8], generated: &[u8]) -> Result<(), String
 #[test]
 fn committed_bindings_match_the_generator() {
     let path = committed_bindings_path();
-    let committed = std::fs::read(&path).unwrap_or_else(|error| {
-        panic!("追跡済みの生成物を読めない: {} ({error})", path.display())
-    });
-    let generated =
-        render_bindings().expect("境界の型から TypeScript を生成できなければならない");
+    let committed = std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("追跡済みの生成物を読めない: {} ({error})", path.display()));
+    let generated = render_bindings().expect("境界の型から TypeScript を生成できなければならない");
 
     if let Err(message) = compare(&path, &committed, generated.as_bytes()) {
         panic!("{message}");
@@ -207,7 +215,8 @@ fn comparison_accepts_identical_bytes() {
 #[test]
 fn comparison_reports_mismatch_with_the_regeneration_command_and_location() {
     let path = Path::new("src/ipc/bindings.ts");
-    let committed = b"export type WindowLabel = string;\nexport type WindowContext = { window: string, };\n";
+    let committed =
+        b"export type WindowLabel = string;\nexport type WindowContext = { window: string, };\n";
     let generated =
         b"export type WindowLabel = string;\nexport type WindowContext = { window: string, label: string, };\n";
 
@@ -266,8 +275,7 @@ fn comparison_detects_a_length_only_difference() {
     let shorter = b"export type WindowLabel = string;\n";
     let longer = b"export type WindowLabel = string;\nexport const COMMAND_NAMES = [];\n";
 
-    let message = compare(path, shorter, longer)
-        .expect_err("末尾への追記を看過してはならない");
+    let message = compare(path, shorter, longer).expect_err("末尾への追記を看過してはならない");
     assert!(
         message.contains("最初に食い違う位置: バイトオフセット 34"),
         "接頭辞の一致を長さの違いとして報告していない:\n{message}"

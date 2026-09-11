@@ -111,14 +111,19 @@ fn crash_worker() {
     fs::write(&size_file, encoded.len().to_string()).expect("期待サイズを書ける");
 
     // ここで親が落とす。落とされなければ保存は完了し、通常終了する。
-    api().save(&document, &target).expect("中断されなければ保存できる");
+    api()
+        .save(&document, &target)
+        .expect("中断されなければ保存できる");
 }
 
 /// 環境変数を絶対パスとして読む（相対パスは親の意図に反するため弾く）。
 fn absolute_env(name: &str) -> PathBuf {
     let value = std::env::var(name).unwrap_or_else(|err| panic!("{name} が無い: {err}"));
     let path = PathBuf::from(&value);
-    assert!(path.is_absolute(), "{name} は絶対パスでなければならない: {value}");
+    assert!(
+        path.is_absolute(),
+        "{name} は絶対パスでなければならない: {value}"
+    );
     path
 }
 
@@ -228,12 +233,21 @@ fn an_uninterrupted_save_completes_the_replacement() {
     let size_file = scratch.file(SIZE_FILE_NAME);
     let mut child = spawn_worker(&target, &size_file);
     let status = child.wait().expect("ワーカーを回収できる");
-    assert!(status.success(), "中断しなければ保存は成功するはず: {status:?}");
+    assert!(
+        status.success(),
+        "中断しなければ保存は成功するはず: {status:?}"
+    );
 
     let after = fs::read(&target).expect("対象が読める");
-    assert_ne!(seed, after, "対象が置換されていない（何も書かない実装でも通ってしまう）");
+    assert_ne!(
+        seed, after,
+        "対象が置換されていない（何も書かない実装でも通ってしまう）"
+    );
     api().open(&target).expect("置換後の内容は開ける");
-    assert!(temporary_files(scratch.path()).is_empty(), "完了した保存が一時ファイルを残した");
+    assert!(
+        temporary_files(scratch.path()).is_empty(),
+        "完了した保存が一時ファイルを残した"
+    );
 }
 
 /// 要件 5.6 の中核: 置換前にプロセスを落とすと、対象は保存前の内容のまま残る。
@@ -293,7 +307,10 @@ fn an_interrupted_save_leaves_the_previous_content_in_place() {
                 attempt.ino_unchanged && attempt.mtime_unchanged && attempt.len_unchanged,
                 "置換が起きている（inode/mtime/長さが変化）: {attempt:?}"
             );
-            assert!(attempt.target_openable, "保存前の内容が open できない: {attempt:?}");
+            assert!(
+                attempt.target_openable,
+                "保存前の内容が open できない: {attempt:?}"
+            );
         }
         assert!(
             attempt.interrupted || attempt.replaced,
@@ -301,20 +318,31 @@ fn an_interrupted_save_leaves_the_previous_content_in_place() {
         );
     }
 
-    let interrupted = attempts.iter().filter(|attempt| attempt.interrupted).count();
-    assert!(interrupted >= 1, "中断された試行が 1 回も無い: {attempts:#?}");
+    let interrupted = attempts
+        .iter()
+        .filter(|attempt| attempt.interrupted)
+        .count();
+    assert!(
+        interrupted >= 1,
+        "中断された試行が 1 回も無い: {attempts:#?}"
+    );
     assert!(
         count_full_write_interrupted(&attempts) >= 1,
         "「書き切った後に落ちた」試行が 1 回も無い: {attempts:#?}"
     );
     assert!(
-        attempts.iter().any(|attempt| killed_by_sigkill(&attempt.status)),
+        attempts
+            .iter()
+            .any(|attempt| killed_by_sigkill(&attempt.status)),
         "SIGKILL で落ちた試行が 1 回も無い: {attempts:#?}"
     );
 
     // 残骸を片付ける（`Scratch` の `Drop` でも消えるが、テスト内で消えたことを明示する）。
     clean_scratch(scratch.path());
-    assert!(temporary_files(scratch.path()).is_empty(), "一時ファイルの残骸が残った");
+    assert!(
+        temporary_files(scratch.path()).is_empty(),
+        "一時ファイルの残骸が残った"
+    );
 }
 
 /// 試行を 1 回行う。対象を `seed` へ戻し、子を起動し、方針に従って落として観測する。
@@ -326,8 +354,14 @@ fn attempt(scratch: &Scratch, target: &Path, seed: &[u8], policy: KillPolicy) ->
     let size_file = scratch.file(SIZE_FILE_NAME);
     let mut child = spawn_worker(target, &size_file);
     let expected_bytes = wait_for_expected_size(&mut child, &size_file);
-    let observation =
-        observe_and_kill(&mut child, scratch.path(), target, seed, expected_bytes, policy);
+    let observation = observe_and_kill(
+        &mut child,
+        scratch.path(),
+        target,
+        seed,
+        expected_bytes,
+        policy,
+    );
     let status = child.wait().expect("ワーカーを回収できる");
 
     let temp_present = !temporary_files(scratch.path()).is_empty();
@@ -341,7 +375,9 @@ fn attempt(scratch: &Scratch, target: &Path, seed: &[u8], policy: KillPolicy) ->
     let anomaly = if temp_present && !target_untouched {
         Some("一時ファイルが残っているのに対象が変わっている".to_owned())
     } else if !interrupted && !replaced {
-        Some(format!("落ちた後に対象が保存前のままでも置換でもない（status={status:?}）"))
+        Some(format!(
+            "落ちた後に対象が保存前のままでも置換でもない（status={status:?}）"
+        ))
     } else {
         None
     };
@@ -409,23 +445,37 @@ fn observe_and_kill(
             };
             if should_kill {
                 let _ = child.kill();
-                return Observation { temp_bytes: last_bytes, full_write };
+                return Observation {
+                    temp_bytes: last_bytes,
+                    full_write,
+                };
             }
             if first_seen.elapsed() >= WINDOW_TIMEOUT {
                 let _ = child.kill();
-                return Observation { temp_bytes: last_bytes, full_write };
+                return Observation {
+                    temp_bytes: last_bytes,
+                    full_write,
+                };
             }
             // 一時ファイルが現れた後は窓が狭いので、譲りながら密にポーリングする。
             thread::yield_now();
         } else {
             if child.try_wait().expect("子を観測できる").is_some() {
                 // 置換が成立した（一時ファイルが消えた）か、保存が失敗して終了した。
-                let full_write = last_bytes.map(|bytes| bytes >= expected_bytes).unwrap_or(false);
-                return Observation { temp_bytes: last_bytes, full_write };
+                let full_write = last_bytes
+                    .map(|bytes| bytes >= expected_bytes)
+                    .unwrap_or(false);
+                return Observation {
+                    temp_bytes: last_bytes,
+                    full_write,
+                };
             }
             if Instant::now() >= sighting_deadline {
                 let _ = child.kill();
-                return Observation { temp_bytes: None, full_write: false };
+                return Observation {
+                    temp_bytes: None,
+                    full_write: false,
+                };
             }
             // 一時ファイルが現れる前はエンコードに時間がかかるため、粗く待つ。
             thread::sleep(Duration::from_micros(100));
@@ -459,7 +509,13 @@ fn spawn_worker(target: &Path, size_file: &Path) -> Child {
 fn temporary_files(directory: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(directory)
         .expect("作業ディレクトリが読める")
-        .map(|entry| entry.expect("要素が読める").file_name().to_string_lossy().into_owned())
+        .map(|entry| {
+            entry
+                .expect("要素が読める")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .filter(|name| name.starts_with(TEMP_FILE_PREFIX))
         .collect();
     names.sort();
@@ -470,7 +526,11 @@ fn temporary_files(directory: &Path) -> Vec<String> {
 fn temporary_file_bytes(directory: &Path) -> Option<u64> {
     for entry in fs::read_dir(directory).expect("作業ディレクトリが読める") {
         let entry = entry.expect("要素が読める");
-        if entry.file_name().to_string_lossy().starts_with(TEMP_FILE_PREFIX) {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(TEMP_FILE_PREFIX)
+        {
             return entry.metadata().ok().map(|metadata| metadata.len());
         }
     }
@@ -492,5 +552,8 @@ fn killed_by_sigkill(status: &ExitStatus) -> bool {
 
 /// 「書き切った後に落ちた」試行の数。
 fn count_full_write_interrupted(attempts: &[Attempt]) -> usize {
-    attempts.iter().filter(|attempt| attempt.interrupted && attempt.full_write_observed).count()
+    attempts
+        .iter()
+        .filter(|attempt| attempt.interrupted && attempt.full_write_observed)
+        .count()
 }

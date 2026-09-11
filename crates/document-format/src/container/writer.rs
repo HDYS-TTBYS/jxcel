@@ -235,7 +235,10 @@ fn zip_error(error: ZipError) -> DocumentError {
 /// I/O エラーを [`DocumentError::Io`] へ写す（`retried` は常に `false`。
 /// 再試行の枯渇を表す `true` は保存経路 `AtomicWriter` だけが立てる）。
 fn io_error(source: std::io::Error) -> DocumentError {
-    DocumentError::Io { source, retried: false }
+    DocumentError::Io {
+        source,
+        retried: false,
+    }
 }
 
 #[cfg(test)]
@@ -245,13 +248,15 @@ mod tests {
     use zip::ZipArchive;
 
     use super::*;
-    use crate::migration::FormatVersion;
     use crate::ids::{AttachmentId, SheetId};
+    use crate::migration::FormatVersion;
     use crate::parts::{DocumentParts, ManifestEntry, ManifestPart};
 
     /// 標本のシート識別子（固定の正準形。発行器を使わない = 時刻に依存しない）。
     fn sample_sheet() -> SheetId {
-        "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().expect("標本の識別子は正準形")
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+            .parse()
+            .expect("標本の識別子は正準形")
     }
 
     /// 標本のパート集合: 与えられた本体パートに、そこから算出した索引を足して組み立てる。
@@ -263,7 +268,10 @@ mod tests {
             .collect();
         let manifest =
             ManifestPart::new(FormatVersion::new(1, 0), index).expect("標本の索引は妥当");
-        entries.push((EntryName::Manifest, manifest.to_json_bytes().expect("符号化")));
+        entries.push((
+            EntryName::Manifest,
+            manifest.to_json_bytes().expect("符号化"),
+        ));
         DocumentParts::from_entries(entries).expect("標本は妥当")
     }
 
@@ -297,10 +305,17 @@ mod tests {
                 sample_parts(vec![
                     (EntryName::Document, b"{\"probe\":1}".to_vec()),
                     (
-                        EntryName::Schema { sheet: sample_sheet() },
+                        EntryName::Schema {
+                            sheet: sample_sheet(),
+                        },
                         b"{\"root\":null}".to_vec(),
                     ),
-                    (EntryName::Rows { sheet: sample_sheet() }, Vec::new()),
+                    (
+                        EntryName::Rows {
+                            sheet: sample_sheet(),
+                        },
+                        Vec::new(),
+                    ),
                 ]),
             ),
         ]
@@ -382,7 +397,10 @@ mod tests {
                 );
                 let mut contents = Vec::new();
                 entry.read_to_end(&mut contents).expect("展開");
-                assert_eq!(part.bytes, contents, "{label}: 展開後のバイト列がパートと違う");
+                assert_eq!(
+                    part.bytes, contents,
+                    "{label}: 展開後のバイト列がパートと違う"
+                );
             }
         }
     }
@@ -397,7 +415,12 @@ mod tests {
     fn the_type_marker_carries_the_manifest_format_version() {
         let parts = sample_parts(vec![
             (EntryName::Document, b"{}".to_vec()),
-            (EntryName::Rows { sheet: sample_sheet() }, Vec::new()),
+            (
+                EntryName::Rows {
+                    sheet: sample_sheet(),
+                },
+                Vec::new(),
+            ),
         ]);
         let bytes = ContainerCodec::encode(&parts).expect("符号化");
         let mut archive = ZipArchive::new(Cursor::new(&bytes)).expect("標準的な ZIP として開ける");
@@ -415,7 +438,9 @@ mod tests {
             .read_to_end(&mut manifest)
             .expect("展開");
 
-        let recorded = ManifestPart::from_json_bytes(&manifest).expect("索引の復号").version();
+        let recorded = ManifestPart::from_json_bytes(&manifest)
+            .expect("索引の復号")
+            .version();
         assert_eq!(
             parts.format_version(),
             recorded,
@@ -427,7 +452,9 @@ mod tests {
             .strip_prefix("jxcel\n")
             .and_then(|rest| rest.strip_suffix("\n"))
             .expect("型マーカーが `jxcel\\n<major>.<minor>\\n` 形でない");
-        let (major, minor) = embedded.split_once('.').expect("バージョンが `major.minor` 形でない");
+        let (major, minor) = embedded
+            .split_once('.')
+            .expect("バージョンが `major.minor` 形でない");
         let embedded = FormatVersion::new(
             major.parse().expect("major が数値でない"),
             minor.parse().expect("minor が数値でない"),
@@ -444,7 +471,12 @@ mod tests {
     fn encode_does_not_index_the_type_marker() {
         let parts = sample_parts(vec![
             (EntryName::Document, b"{\"probe\":1}".to_vec()),
-            (EntryName::Rows { sheet: sample_sheet() }, Vec::new()),
+            (
+                EntryName::Rows {
+                    sheet: sample_sheet(),
+                },
+                Vec::new(),
+            ),
         ]);
         let bytes = ContainerCodec::encode(&parts).expect("符号化");
         let mut archive = ZipArchive::new(Cursor::new(&bytes)).expect("標準的な ZIP として開ける");
@@ -457,11 +489,17 @@ mod tests {
             .expect("展開");
 
         let held = parts.get(&EntryName::Manifest).expect("集合が索引を持つ");
-        assert_eq!(held.bytes, manifest_bytes, "コンテナ層が索引を書き換えている");
+        assert_eq!(
+            held.bytes, manifest_bytes,
+            "コンテナ層が索引を書き換えている"
+        );
 
         let decoded = ManifestPart::from_json_bytes(&manifest_bytes).expect("索引の復号");
         assert!(
-            decoded.entries().iter().all(|entry| entry.name() != EntryName::Marker),
+            decoded
+                .entries()
+                .iter()
+                .all(|entry| entry.name() != EntryName::Marker),
             "型マーカーが索引に載っている（`jxcel` は論理エントリ集合の一部ではない）"
         );
         // 索引は自分自身を載せない（`parts` 層の不変条件）ため、集合から `manifest.json` を
@@ -479,7 +517,8 @@ mod tests {
     /// 保存経路の rename リトライ枯渇だけが `true`）。
     #[test]
     fn zip_write_failures_are_reported_as_unretried_io_errors() {
-        let DocumentError::Io { source, retried } = zip_error(ZipError::UnsupportedArchive("probe"))
+        let DocumentError::Io { source, retried } =
+            zip_error(ZipError::UnsupportedArchive("probe"))
         else {
             panic!("ZipError が DocumentError::Io へ写されていない");
         };

@@ -78,7 +78,10 @@ where
     let directory = parent_dir(target)?;
     let (temp_path, mut file) = create_temp(directory)?;
     // 以降の失敗経路（書き込み・同期・置換のいずれか）で一時ファイルを残さない。
-    let mut guard = TempGuard { path: temp_path.clone(), armed: true };
+    let mut guard = TempGuard {
+        path: temp_path.clone(),
+        armed: true,
+    };
 
     write(&mut file)?;
     // `File` に対する `flush` は実質的に何もしないが、「書き切ってから同期する」という

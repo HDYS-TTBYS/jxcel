@@ -177,8 +177,8 @@ pub fn read_ndjson<T: DeserializeOwned>(
         if is_blank(line) {
             return Err(line_error(location, line_number, &BLANK_LINE_REASON));
         }
-        let record: T = serde_json::from_slice(line)
-            .map_err(|err| line_error(location, line_number, &err))?;
+        let record: T =
+            serde_json::from_slice(line).map_err(|err| line_error(location, line_number, &err))?;
         records.push(record);
     }
     Ok(records)
@@ -189,7 +189,8 @@ pub fn read_ndjson<T: DeserializeOwned>(
 /// 行は `\n` で分割済みなので LF は現れないが、判定は JSON の空白の定義
 /// （space / tab / LF / CR）をそのまま写す。
 fn is_blank(line: &[u8]) -> bool {
-    line.iter().all(|&byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+    line.iter()
+        .all(|&byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
 }
 
 /// 行の失敗を [`DocumentError::InvalidContainer`] へ写す。
@@ -268,7 +269,11 @@ mod tests {
     /// （不変条件 1・2）。行数は `\n` の個数で数える。
     #[test]
     fn every_record_is_one_line_and_the_last_line_is_terminated() {
-        let records = [record("01", "a", 1), record("02", "b", 2), record("03", "c", 3)];
+        let records = [
+            record("01", "a", 1),
+            record("02", "b", 2),
+            record("03", "c", 3),
+        ];
         let bytes = encode(&records);
 
         // 行末は常に `\n`（最後の行も終端する）。`\r` も BOM も付かない。
@@ -284,7 +289,11 @@ mod tests {
             "レコード数と `\\n` の個数が一致しない",
         );
         assert!(!bytes.contains(&b'\r'), "出力に `\\r` が含まれる");
-        assert_eq!(Some(&b'{'), bytes.first(), "先頭に BOM など余分なバイトが付いている");
+        assert_eq!(
+            Some(&b'{'),
+            bytes.first(),
+            "先頭に BOM など余分なバイトが付いている"
+        );
 
         // 各行はそれ自身が単一の JSON オブジェクトである（前後の行に依存しない）。
         let encoded = text(&bytes);
@@ -298,7 +307,10 @@ mod tests {
     #[test]
     fn newlines_in_values_never_split_a_record() {
         let nested = CellValue::Nested(NestedValue::Object(vec![
-            ("z".into(), CellValue::Text("改行\nと\rと\u{2028}と\u{2029}".into())),
+            (
+                "z".into(),
+                CellValue::Text("改行\nと\rと\u{2028}と\u{2029}".into()),
+            ),
             ("a".into(), CellValue::Text("x\ry".into())),
         ]));
         let records = [
@@ -316,15 +328,25 @@ mod tests {
         let bytes = encode(&records);
         let encoded = text(&bytes);
 
-        assert_eq!(records.len(), bytes.iter().filter(|&&byte| byte == b'\n').count());
+        assert_eq!(
+            records.len(),
+            bytes.iter().filter(|&&byte| byte == b'\n').count()
+        );
         assert_eq!(records.len() + 1, lines(&encoded).len());
-        assert!(!bytes.contains(&b'\r'), "生の `\\r` が出力された（エスケープされていない）");
+        assert!(
+            !bytes.contains(&b'\r'),
+            "生の `\\r` が出力された（エスケープされていない）"
+        );
         // 改行・`\r` はエスケープとして現れ、U+2028 / U+2029 は生の UTF-8 で出る。
         assert!(
             encoded.contains("a\\nb\\r\\n c\u{2028}d"),
             "改行がエスケープされていない: {encoded}",
         );
-        assert_eq!(records.to_vec(), decode(&bytes), "行が割れて復元できなかった");
+        assert_eq!(
+            records.to_vec(),
+            decode(&bytes),
+            "行が割れて復元できなかった"
+        );
     }
 
     // --- 順序（不変条件 3: 出力順 = 入力順） ------------------------------------
@@ -345,10 +367,18 @@ mod tests {
 
         for (label, records) in [
             ("逆順", ascending.iter().cloned().rev().collect::<Vec<_>>()),
-            ("シャッフル順", [3, 0, 4, 1, 2].map(|index| ascending[index].clone()).to_vec()),
+            (
+                "シャッフル順",
+                [3, 0, 4, 1, 2]
+                    .map(|index| ascending[index].clone())
+                    .to_vec(),
+            ),
         ] {
             let input_ids: Vec<&str> = records.iter().map(|row| row.id.as_str()).collect();
-            assert_ne!(ascending_ids, input_ids, "{label}: 入力が ULID 昇順のまま（検証が空振りする）");
+            assert_ne!(
+                ascending_ids, input_ids,
+                "{label}: 入力が ULID 昇順のまま（検証が空振りする）"
+            );
 
             let bytes = encode(&records);
             // 行のテキストそのものが入力順であること（行ごとの符号化の連結 = 出力全体）。
@@ -435,10 +465,19 @@ mod tests {
             let after_text = text(&encode(&changed));
             let after = lines(&after_text);
 
-            assert_eq!(before.len(), after.len(), "レコード数が同じなのに行数が変わった");
-            let differing: Vec<usize> =
-                (0..before.len()).filter(|&i| before[i] != after[i]).collect();
-            assert_eq!(vec![index], differing, "1 セルの変更が現れた行（対象 {index}）");
+            assert_eq!(
+                before.len(),
+                after.len(),
+                "レコード数が同じなのに行数が変わった"
+            );
+            let differing: Vec<usize> = (0..before.len())
+                .filter(|&i| before[i] != after[i])
+                .collect();
+            assert_eq!(
+                vec![index],
+                differing,
+                "1 セルの変更が現れた行（対象 {index}）"
+            );
             assert_eq!(
                 encoded_line(&changed[index]),
                 after[index],
@@ -453,7 +492,10 @@ mod tests {
     #[test]
     fn empty_input_is_zero_records() {
         let empty: Vec<ProbeRecord> = Vec::new();
-        assert!(encode(&empty).is_empty(), "0 レコードで 1 バイト書き出された");
+        assert!(
+            encode(&empty).is_empty(),
+            "0 レコードで 1 バイト書き出された"
+        );
         assert_eq!(empty, decode(b""));
     }
 
@@ -465,7 +507,10 @@ mod tests {
         let unterminated = b"{\"id\":\"01\",\"label\":\"a\",\"amount\":1}\n\
                              {\"id\":\"02\",\"label\":\"b\",\"amount\":2}";
 
-        assert_eq!(vec![record("01", "a", 1), record("02", "b", 2)], decode(terminated));
+        assert_eq!(
+            vec![record("01", "a", 1), record("02", "b", 2)],
+            decode(terminated)
+        );
         assert_eq!(decode(terminated), decode(unterminated));
     }
 
@@ -508,11 +553,15 @@ mod tests {
             // 1 行目から不正な場合も行番号は 1 である。
             ("{\"id\":".to_string(), 1),
         ] {
-            let err = read_ndjson::<ProbeRecord>(input.as_bytes(), LOC).expect_err("不正な行が通った");
+            let err =
+                read_ndjson::<ProbeRecord>(input.as_bytes(), LOC).expect_err("不正な行が通った");
             match err {
                 DocumentError::InvalidContainer { entry } => {
                     let prefix = format!("{LOC} line {line}: ");
-                    assert!(entry.starts_with(&prefix), "行番号と文脈が entry に無い: {entry}");
+                    assert!(
+                        entry.starts_with(&prefix),
+                        "行番号と文脈が entry に無い: {entry}"
+                    );
                     assert!(entry.len() > prefix.len(), "理由が entry に無い: {entry}");
                 }
                 other => panic!("{other:?} は InvalidContainer ではない"),
@@ -529,11 +578,16 @@ mod tests {
         let lf = "{\"id\":\"01\",\"label\":\"a\",\"amount\":1}\n\
                   {\"id\":\"02\",\"label\":\"b\",\"amount\":2}\n";
         let crlf = lf.replace('\n', "\r\n");
-        assert_eq!(decode(lf.as_bytes()), decode(crlf.as_bytes()), "CRLF 入力が読めない");
+        assert_eq!(
+            decode(lf.as_bytes()),
+            decode(crlf.as_bytes()),
+            "CRLF 入力が読めない"
+        );
 
         // 文字列の中の生の `\r`（不正な制御文字）は拒否される。
         let raw_cr = "{\"id\":\"01\",\"label\":\"a\rb\",\"amount\":1}\n";
-        let err = read_ndjson::<ProbeRecord>(raw_cr.as_bytes(), LOC).expect_err("生の `\\r` が通った");
+        let err =
+            read_ndjson::<ProbeRecord>(raw_cr.as_bytes(), LOC).expect_err("生の `\\r` が通った");
         match err {
             DocumentError::InvalidContainer { entry } => {
                 assert!(entry.starts_with(&format!("{LOC} line 1: ")), "{entry}");
@@ -554,7 +608,11 @@ mod tests {
             (
                 1usize,
                 vec![
-                    ProbeRecord { id: "01".into(), label: nan.clone(), amount: CellValue::Null },
+                    ProbeRecord {
+                        id: "01".into(),
+                        label: nan.clone(),
+                        amount: CellValue::Null,
+                    },
                     record("02", "b", 2),
                 ],
             ),
@@ -574,13 +632,24 @@ mod tests {
 
         for (line, records) in cases {
             let mut out = Vec::new();
-            let err = write_ndjson(&mut out, LOC, &records).expect_err("非有限値の書き出しが成功した");
-            assert!(out.is_empty(), "失敗時に部分的な出力が残った（{} バイト）", out.len());
+            let err =
+                write_ndjson(&mut out, LOC, &records).expect_err("非有限値の書き出しが成功した");
+            assert!(
+                out.is_empty(),
+                "失敗時に部分的な出力が残った（{} バイト）",
+                out.len()
+            );
             match err {
                 DocumentError::InvalidContainer { entry } => {
                     let prefix = format!("{LOC} line {line}: ");
-                    assert!(entry.starts_with(&prefix), "行番号と文脈が entry に無い: {entry}");
-                    assert!(entry.contains("NonRepresentableNumber"), "理由に変種名が無い: {entry}");
+                    assert!(
+                        entry.starts_with(&prefix),
+                        "行番号と文脈が entry に無い: {entry}"
+                    );
+                    assert!(
+                        entry.contains("NonRepresentableNumber"),
+                        "理由に変種名が無い: {entry}"
+                    );
                 }
                 other => panic!("{other:?} は InvalidContainer ではない"),
             }

@@ -164,7 +164,10 @@ pub(crate) fn resolve_executable(pid: u32) -> Option<PathBuf> {
 #[cfg(target_os = "macos")]
 pub(crate) fn resolve_executable(pid: u32) -> Option<PathBuf> {
     let stdout = ps(&["-p", &pid.to_string(), "-o", "comm="])?;
-    let name = stdout.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let name = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
     Some(PathBuf::from(name))
 }
 
@@ -212,7 +215,10 @@ pub(crate) fn is_alive(pid: u32) -> bool {
     let Some((_, rest)) = stat.rsplit_once(')') else {
         return false;
     };
-    !matches!(rest.trim_start().chars().next(), None | Some('Z') | Some('X'))
+    !matches!(
+        rest.trim_start().chars().next(),
+        None | Some('Z') | Some('X')
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -291,9 +297,7 @@ pub(crate) fn terminate_force(pid: u32) -> std::io::Result<()> {
 #[cfg(windows)]
 fn terminate(pid: u32) -> std::io::Result<()> {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
-    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 
     let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
     if handle.is_null() {
@@ -350,7 +354,10 @@ fn is_named_as(name: &str, stem: &str) -> bool {
 /// Windows の UTF-16（NUL 終端）を `String` へ変換する。不正な並びは置換文字にする。
 #[cfg(windows)]
 fn wide_to_string(wide: &[u16]) -> String {
-    let end = wide.iter().position(|unit| *unit == 0).unwrap_or(wide.len());
+    let end = wide
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(wide.len());
     String::from_utf16_lossy(&wide[..end])
 }
 

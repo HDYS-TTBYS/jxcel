@@ -118,7 +118,9 @@ pub fn log_dir() -> Result<PathBuf, DiagnosticsError> {
 /// そのまま再利用する（規約が一致する唯一の OS である）。macOS / Windows のログ領域は
 /// アプリケーションデータ領域と別であるため、それぞれ [`macos_log_dir_with`] /
 /// [`windows_log_dir_with`] が明示的に解決する。
-pub fn log_dir_with(lookup: &dyn Fn(&str) -> Option<OsString>) -> Result<PathBuf, DiagnosticsError> {
+pub fn log_dir_with(
+    lookup: &dyn Fn(&str) -> Option<OsString>,
+) -> Result<PathBuf, DiagnosticsError> {
     #[cfg(target_os = "linux")]
     {
         return linux_log_dir(lookup);
@@ -149,8 +151,11 @@ pub fn log_dir_with(lookup: &dyn Fn(&str) -> Option<OsString>) -> Result<PathBuf
 /// 再利用する（識別子の足し方も 4.1 の設定ディレクトリと同じ形である）。
 #[cfg(target_os = "linux")]
 fn linux_log_dir(lookup: &dyn Fn(&str) -> Option<OsString>) -> Result<PathBuf, DiagnosticsError> {
-    let base = settings::app_data_base_dir_with(lookup)
-        .map_err(|source| DiagnosticsError::LogDirUnavailable { reason: source.to_string() })?;
+    let base = settings::app_data_base_dir_with(lookup).map_err(|source| {
+        DiagnosticsError::LogDirUnavailable {
+            reason: source.to_string(),
+        }
+    })?;
     Ok(base.join(APP_IDENTIFIER).join(LOG_DIR_NAME))
 }
 
@@ -167,7 +172,9 @@ pub fn macos_log_dir_with(
     lookup: &dyn Fn(&str) -> Option<OsString>,
 ) -> Result<PathBuf, DiagnosticsError> {
     let home = settings::non_empty_env(lookup, "HOME").ok_or_else(|| {
-        DiagnosticsError::LogDirUnavailable { reason: "HOME が設定されていない".to_owned() }
+        DiagnosticsError::LogDirUnavailable {
+            reason: "HOME が設定されていない".to_owned(),
+        }
     })?;
     Ok(home.join("Library").join("Logs").join(APP_IDENTIFIER))
 }
@@ -240,7 +247,9 @@ impl DiagnosticsLevel {
     /// と同じ精神であり、呼び出し側はパニックも `Err` も扱わなくてよい。この関数は保存された
     /// 値を書き戻さない（解釈できない値もそのまま残る）。
     pub fn from_store(store: &impl SettingsStore) -> Self {
-        store.get::<DiagnosticsLevel>(&SettingsKey::DiagnosticsLevel).unwrap_or_default()
+        store
+            .get::<DiagnosticsLevel>(&SettingsKey::DiagnosticsLevel)
+            .unwrap_or_default()
     }
 
     /// 詳細度を設定へ書く（要件 8.7）。
@@ -365,7 +374,13 @@ fn export_records(directory: &Path, destination: &Path) -> Result<ExportReport, 
     let mut source_failure: Option<DiagnosticsError> = None;
 
     let outcome = atomic::replace_with(destination, |file| {
-        merge_records(directory, &files, file, &mut source_failure, &mut bytes_written)
+        merge_records(
+            directory,
+            &files,
+            file,
+            &mut source_failure,
+            &mut bytes_written,
+        )
     });
 
     match outcome {
@@ -397,7 +412,10 @@ fn record_files(directory: &Path, destination: &Path) -> Result<Vec<PathBuf>, Di
         // 記録機構がまだ登録されていなければディレクトリは無い。空として扱う。
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(source) => {
-            return Err(DiagnosticsError::RecordsUnreadable { path: directory.to_path_buf(), source });
+            return Err(DiagnosticsError::RecordsUnreadable {
+                path: directory.to_path_buf(),
+                source,
+            });
         }
     };
 
@@ -411,10 +429,13 @@ fn record_files(directory: &Path, destination: &Path) -> Result<Vec<PathBuf>, Di
         if path.as_path() == destination {
             continue;
         }
-        let file_type = entry.file_type().map_err(|source| DiagnosticsError::RecordsUnreadable {
-            path: path.clone(),
-            source,
-        })?;
+        let file_type =
+            entry
+                .file_type()
+                .map_err(|source| DiagnosticsError::RecordsUnreadable {
+                    path: path.clone(),
+                    source,
+                })?;
         if !file_type.is_file() {
             continue;
         }
@@ -475,8 +496,10 @@ fn merge_records<W: Write>(
         write_counted(writer, marker.as_bytes(), bytes_written)?;
 
         let mut file = File::open(path).map_err(|source| {
-            *source_failure =
-                Some(DiagnosticsError::RecordsUnreadable { path: path.clone(), source });
+            *source_failure = Some(DiagnosticsError::RecordsUnreadable {
+                path: path.clone(),
+                source,
+            });
             interrupted()
         })?;
 
@@ -484,8 +507,10 @@ fn merge_records<W: Write>(
         let mut last_byte: Option<u8> = None;
         loop {
             let read = file.read(&mut buffer).map_err(|source| {
-                *source_failure =
-                    Some(DiagnosticsError::RecordsUnreadable { path: path.clone(), source });
+                *source_failure = Some(DiagnosticsError::RecordsUnreadable {
+                    path: path.clone(),
+                    source,
+                });
                 interrupted()
             })?;
             if read == 0 {
@@ -646,7 +671,10 @@ mod tests {
     fn redacted_value_renders_only_the_placeholder() {
         let rendered = recorded_value(&Redacted::new(SENTINEL));
         assert_eq!(rendered, REDACTION_PLACEHOLDER);
-        assert!(!rendered.contains(SENTINEL), "秘匿された値が記録の表現に現れた: {rendered}");
+        assert!(
+            !rendered.contains(SENTINEL),
+            "秘匿された値が記録の表現に現れた: {rendered}"
+        );
     }
 
     #[test]
@@ -661,9 +689,17 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_convention_prefers_xdg_data_home() {
-        let dir = log_dir_with(&lookup(&[("XDG_DATA_HOME", "/xdg/data"), ("HOME", "/home/user")]))
-            .expect("XDG_DATA_HOME があるので解決できる");
-        assert_eq!(dir, Path::new("/xdg/data").join(APP_IDENTIFIER).join(LOG_DIR_NAME));
+        let dir = log_dir_with(&lookup(&[
+            ("XDG_DATA_HOME", "/xdg/data"),
+            ("HOME", "/home/user"),
+        ]))
+        .expect("XDG_DATA_HOME があるので解決できる");
+        assert_eq!(
+            dir,
+            Path::new("/xdg/data")
+                .join(APP_IDENTIFIER)
+                .join(LOG_DIR_NAME)
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -703,7 +739,10 @@ mod tests {
     fn macos_convention_uses_home_library_logs() {
         let dir = macos_log_dir_with(&lookup(&[("HOME", "/Users/tester")]))
             .expect("HOME があるので解決できる");
-        let expected = Path::new("/Users/tester").join("Library").join("Logs").join(APP_IDENTIFIER);
+        let expected = Path::new("/Users/tester")
+            .join("Library")
+            .join("Logs")
+            .join(APP_IDENTIFIER);
         assert_eq!(dir, expected);
         // 設定のデータ領域（`Library/Application Support`）とは別の場所である。
         assert!(!dir.to_string_lossy().contains("Application Support"));
@@ -719,7 +758,10 @@ mod tests {
         let local = r"C:\Users\tester\AppData\Local";
         let dir =
             windows_log_dir_with(&lookup(&[("LOCALAPPDATA", local)])).expect("LOCALAPPDATA がある");
-        assert_eq!(dir, PathBuf::from(local).join(APP_IDENTIFIER).join(LOG_DIR_NAME));
+        assert_eq!(
+            dir,
+            PathBuf::from(local).join(APP_IDENTIFIER).join(LOG_DIR_NAME)
+        );
         // ローミングの `APPDATA`（設定のデータ領域）は読まない。
         let roaming = r"C:\Users\tester\AppData\Roaming";
         assert!(windows_log_dir_with(&lookup(&[("APPDATA", roaming)])).is_err());
@@ -741,9 +783,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_convention_is_the_current_one() {
-        let resolved = log_dir_with(&lookup(&[("HOME", "/Users/tester")]))
-            .expect("HOME があるので解決できる");
-        let expected = Path::new("/Users/tester").join("Library").join("Logs").join(APP_IDENTIFIER);
+        let resolved =
+            log_dir_with(&lookup(&[("HOME", "/Users/tester")])).expect("HOME があるので解決できる");
+        let expected = Path::new("/Users/tester")
+            .join("Library")
+            .join("Logs")
+            .join(APP_IDENTIFIER);
         assert_eq!(resolved, expected);
     }
 
@@ -753,7 +798,10 @@ mod tests {
         let local = r"C:\Users\tester\AppData\Local";
         let resolved =
             log_dir_with(&lookup(&[("LOCALAPPDATA", local)])).expect("LOCALAPPDATA がある");
-        assert_eq!(resolved, PathBuf::from(local).join(APP_IDENTIFIER).join(LOG_DIR_NAME));
+        assert_eq!(
+            resolved,
+            PathBuf::from(local).join(APP_IDENTIFIER).join(LOG_DIR_NAME)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -763,7 +811,10 @@ mod tests {
     #[test]
     fn retention_cap_is_50_megabytes() {
         assert_eq!(MAX_TOTAL_LOG_BYTES, 50_000_000);
-        assert!(MAX_TOTAL_LOG_BYTES <= 50_000_000, "十進の 50 MB を超えてはならない");
+        assert!(
+            MAX_TOTAL_LOG_BYTES <= 50_000_000,
+            "十進の 50 MB を超えてはならない"
+        );
     }
 
     #[test]
@@ -856,7 +907,13 @@ mod tests {
     fn entry_names(directory: &Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(directory)
             .expect("ディレクトリを読める")
-            .map(|entry| entry.expect("エントリを読める").file_name().to_string_lossy().into_owned())
+            .map(|entry| {
+                entry
+                    .expect("エントリを読める")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         names.sort();
         names
@@ -864,9 +921,14 @@ mod tests {
 
     /// 一時ファイル（[`TEMP_FILE_PREFIX`] で始まる名前）がディレクトリに残っていない。
     fn assert_no_temporary_files(directory: &Path) {
-        let leftovers: Vec<String> =
-            entry_names(directory).into_iter().filter(|name| name.starts_with(TEMP_FILE_PREFIX)).collect();
-        assert!(leftovers.is_empty(), "一時ファイルが残っている: {leftovers:?}");
+        let leftovers: Vec<String> = entry_names(directory)
+            .into_iter()
+            .filter(|name| name.starts_with(TEMP_FILE_PREFIX))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "一時ファイルが残っている: {leftovers:?}"
+        );
     }
 
     /// 記録の区切り行を、実装と同じ書式で組み立てる。
@@ -913,17 +975,38 @@ mod tests {
         );
 
         let merged = fs::read_to_string(&destination).expect("読める");
-        assert!(merged.starts_with(EXPORT_HEADER_PREFIX), "見出しが無い: {merged}");
+        assert!(
+            merged.starts_with(EXPORT_HEADER_PREFIX),
+            "見出しが無い: {merged}"
+        );
         assert!(merged.contains("# ファイル数: 3"), "件数が無い: {merged}");
-        assert!(merged.contains(&marker("c.log")), "c.log の区切りが無い: {merged}");
-        assert!(merged.contains(&marker("a.log")), "a.log の区切りが無い: {merged}");
-        assert!(merged.contains(&marker("b.log")), "b.log の区切りが無い: {merged}");
+        assert!(
+            merged.contains(&marker("c.log")),
+            "c.log の区切りが無い: {merged}"
+        );
+        assert!(
+            merged.contains(&marker("a.log")),
+            "a.log の区切りが無い: {merged}"
+        );
+        assert!(
+            merged.contains(&marker("b.log")),
+            "b.log の区切りが無い: {merged}"
+        );
         let first = merged.find("記録C: 最初").expect("C が無い");
         let second = merged.find("記録A: 二番目").expect("A が無い");
         let third = merged.find("記録B: 三番目").expect("B が無い");
-        assert!(first < second && second < third, "更新時刻の昇順になっていない: {merged}");
-        assert!(!merged.contains("記録ではない"), "記録でないファイルを取り込んだ: {merged}");
-        assert!(!merged.contains("入れ子"), "入れ子のファイルを取り込んだ: {merged}");
+        assert!(
+            first < second && second < third,
+            "更新時刻の昇順になっていない: {merged}"
+        );
+        assert!(
+            !merged.contains("記録ではない"),
+            "記録でないファイルを取り込んだ: {merged}"
+        );
+        assert!(
+            !merged.contains("入れ子"),
+            "入れ子のファイルを取り込んだ: {merged}"
+        );
         assert_no_temporary_files(&output_dir);
     }
 
@@ -943,7 +1026,10 @@ mod tests {
         assert_eq!(entry_names(&output_dir), vec!["empty.txt".to_owned()]);
         let merged = fs::read_to_string(&destination).expect("1 つのファイルは作られる");
         assert!(merged.starts_with(EXPORT_HEADER_PREFIX));
-        assert!(merged.contains(EXPORT_EMPTY_NOTICE), "記録が無いことが分からない: {merged}");
+        assert!(
+            merged.contains(EXPORT_EMPTY_NOTICE),
+            "記録が無いことが分からない: {merged}"
+        );
     }
 
     #[test]
@@ -976,7 +1062,10 @@ mod tests {
         assert_eq!(report.files_merged, 1);
         let merged = fs::read_to_string(&destination).expect("読める");
         assert!(merged.contains("新しい記録"));
-        assert!(!merged.contains("古い内容"), "古い内容が残っている: {merged}");
+        assert!(
+            !merged.contains("古い内容"),
+            "古い内容が残っている: {merged}"
+        );
         assert_no_temporary_files(scratch.path());
     }
 
@@ -997,7 +1086,10 @@ mod tests {
 
         let error = export_with(&lookup, &destination).expect_err("書けないはず");
 
-        assert!(matches!(error, DiagnosticsError::ExportFailed { .. }), "原因: {error:?}");
+        assert!(
+            matches!(error, DiagnosticsError::ExportFailed { .. }),
+            "原因: {error:?}"
+        );
         assert!(blocker.is_file(), "宛先の親が壊された");
         assert_eq!(fs::read_to_string(&blocker).expect("読める"), "ファイル");
     }
@@ -1015,9 +1107,19 @@ mod tests {
 
         let error = export_with(&lookup, &destination).expect_err("置き換えられない");
 
-        assert!(matches!(error, DiagnosticsError::ExportFailed { .. }), "原因: {error:?}");
-        assert_eq!(entry_names(&destination), vec!["kept.txt".to_owned()], "宛先が変わった");
-        assert_eq!(fs::read_to_string(destination.join("kept.txt")).expect("読める"), "残す");
+        assert!(
+            matches!(error, DiagnosticsError::ExportFailed { .. }),
+            "原因: {error:?}"
+        );
+        assert_eq!(
+            entry_names(&destination),
+            vec!["kept.txt".to_owned()],
+            "宛先が変わった"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("kept.txt")).expect("読める"),
+            "残す"
+        );
         assert_no_temporary_files(scratch.path());
     }
 
@@ -1047,9 +1149,11 @@ mod tests {
 
         let error = export_with(&lookup, &destination).expect_err("書けないはず");
 
-        fs::set_permissions(&output_dir, fs::Permissions::from_mode(0o755))
-            .expect("権限を戻せる");
-        assert!(matches!(error, DiagnosticsError::ExportFailed { .. }), "原因: {error:?}");
+        fs::set_permissions(&output_dir, fs::Permissions::from_mode(0o755)).expect("権限を戻せる");
+        assert!(
+            matches!(error, DiagnosticsError::ExportFailed { .. }),
+            "原因: {error:?}"
+        );
         assert_eq!(
             fs::read_to_string(&destination).expect("読める"),
             "以前の内容",
@@ -1082,7 +1186,11 @@ mod tests {
                 if bytes.len() > self.cap {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("1 回の書き込みが上限を超えた: {} > {}", bytes.len(), self.cap),
+                        format!(
+                            "1 回の書き込みが上限を超えた: {} > {}",
+                            bytes.len(),
+                            self.cap
+                        ),
                     ));
                 }
                 self.largest_write = self.largest_write.max(bytes.len());
@@ -1105,17 +1213,33 @@ mod tests {
         let files = record_files(&log_dir, &destination).expect("列挙できる");
         assert_eq!(files.len(), 2);
 
-        let mut writer =
-            ChunkCapWriter { cap: EXPORT_CHUNK_BYTES, written: Vec::new(), largest_write: 0 };
+        let mut writer = ChunkCapWriter {
+            cap: EXPORT_CHUNK_BYTES,
+            written: Vec::new(),
+            largest_write: 0,
+        };
         let mut failure = None;
         let mut bytes_written = 0u64;
-        merge_records(&log_dir, &files, &mut writer, &mut failure, &mut bytes_written)
-            .expect("上限内の書き込みだけで連結できる");
+        merge_records(
+            &log_dir,
+            &files,
+            &mut writer,
+            &mut failure,
+            &mut bytes_written,
+        )
+        .expect("上限内の書き込みだけで連結できる");
 
         assert!(failure.is_none());
-        assert!(writer.largest_write <= EXPORT_CHUNK_BYTES, "チャンク上限を超えた");
+        assert!(
+            writer.largest_write <= EXPORT_CHUNK_BYTES,
+            "チャンク上限を超えた"
+        );
         assert!(writer.largest_write > 0);
-        assert_eq!(writer.written.len() as u64, bytes_written, "報告したバイト数が違う");
+        assert_eq!(
+            writer.written.len() as u64,
+            bytes_written,
+            "報告したバイト数が違う"
+        );
         let rendered = String::from_utf8(writer.written).expect("UTF-8");
         assert!(rendered.contains(&big), "大きい記録が欠けた");
         assert!(rendered.contains(&medium), "中くらいの記録が欠けた");
@@ -1128,7 +1252,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn recv_event(receiver: &Receiver<SettingsChanged>) -> SettingsChanged {
-        receiver.recv_timeout(Duration::from_secs(5)).expect("通知が届く")
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("通知が届く")
     }
 
     #[test]
@@ -1146,7 +1272,10 @@ mod tests {
             .iter()
             .zip(["off", "error", "warn", "info", "debug", "trace"])
         {
-            assert_eq!(serde_json::to_value(level).expect("直列化できる"), serde_json::json!(name));
+            assert_eq!(
+                serde_json::to_value(level).expect("直列化できる"),
+                serde_json::json!(name)
+            );
         }
         for pair in levels.windows(2) {
             assert!(
@@ -1162,7 +1291,10 @@ mod tests {
     fn an_unset_level_reads_the_default() {
         let scratch = Scratch::new("level-default");
         let (store, _) = open(scratch.path()).expect("設定ストアを開ける");
-        assert_eq!(DiagnosticsLevel::from_store(&*store), DiagnosticsLevel::Info);
+        assert_eq!(
+            DiagnosticsLevel::from_store(&*store),
+            DiagnosticsLevel::Info
+        );
     }
 
     #[test]
@@ -1170,17 +1302,27 @@ mod tests {
         let scratch = Scratch::new("level-persist");
         let (store, _) = open(scratch.path()).expect("設定ストアを開ける");
         DiagnosticsLevel::Debug.write_to(&*store).expect("書ける");
-        assert_eq!(DiagnosticsLevel::from_store(&*store), DiagnosticsLevel::Debug);
+        assert_eq!(
+            DiagnosticsLevel::from_store(&*store),
+            DiagnosticsLevel::Debug
+        );
 
         // 実体を手放してから開き直す（4.1 の往復テストと同じ方法。必ずディスクから読む）。
         drop(store);
         let (fresh, _) = open(scratch.path()).expect("開き直せる");
-        assert_eq!(DiagnosticsLevel::from_store(&*fresh), DiagnosticsLevel::Debug);
+        assert_eq!(
+            DiagnosticsLevel::from_store(&*fresh),
+            DiagnosticsLevel::Debug
+        );
 
-        let raw: serde_json::Value =
-            serde_json::from_slice(&fs::read(scratch.path().join(SETTINGS_FILE_NAME)).expect("読める"))
-                .expect("JSON として読める");
-        assert_eq!(raw[SettingsKey::DiagnosticsLevel.as_str()], serde_json::json!("debug"));
+        let raw: serde_json::Value = serde_json::from_slice(
+            &fs::read(scratch.path().join(SETTINGS_FILE_NAME)).expect("読める"),
+        )
+        .expect("JSON として読める");
+        assert_eq!(
+            raw[SettingsKey::DiagnosticsLevel.as_str()],
+            serde_json::json!("debug")
+        );
     }
 
     #[test]
@@ -1188,11 +1330,23 @@ mod tests {
         let scratch = Scratch::new("level-garbage");
         let (store, _) = open(scratch.path()).expect("設定ストアを開ける");
 
-        store.set(&SettingsKey::DiagnosticsLevel, &"とても詳しく").expect("書ける");
-        assert_eq!(DiagnosticsLevel::from_store(&*store), DiagnosticsLevel::Info, "未知の名前");
+        store
+            .set(&SettingsKey::DiagnosticsLevel, &"とても詳しく")
+            .expect("書ける");
+        assert_eq!(
+            DiagnosticsLevel::from_store(&*store),
+            DiagnosticsLevel::Info,
+            "未知の名前"
+        );
 
-        store.set(&SettingsKey::DiagnosticsLevel, &7).expect("書ける");
-        assert_eq!(DiagnosticsLevel::from_store(&*store), DiagnosticsLevel::Info, "別の型");
+        store
+            .set(&SettingsKey::DiagnosticsLevel, &7)
+            .expect("書ける");
+        assert_eq!(
+            DiagnosticsLevel::from_store(&*store),
+            DiagnosticsLevel::Info,
+            "別の型"
+        );
 
         // 解釈できない値でも保存されたものを消さない（4.2 の復旧と同じ精神）。
         assert_eq!(
@@ -1212,6 +1366,9 @@ mod tests {
         let event = recv_event(&receiver);
         assert_eq!(event.key, SettingsKey::DiagnosticsLevel);
         assert_eq!(event.value, serde_json::json!("trace"));
-        assert_eq!(DiagnosticsLevel::from_store(&*store), DiagnosticsLevel::Trace);
+        assert_eq!(
+            DiagnosticsLevel::from_store(&*store),
+            DiagnosticsLevel::Trace
+        );
     }
 }
