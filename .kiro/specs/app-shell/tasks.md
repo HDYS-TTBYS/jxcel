@@ -300,7 +300,7 @@
   - _Boundary: MenuSurface_
   - _Depends: 1.3, 4.6_
 
-- [ ] 7.5 ショートカットの割当と操作対象ウィンドウへの振り向けを実装する
+- [x] 7.5 ショートカットの割当と操作対象ウィンドウへの振り向けを実装する
   - メニュー項目にショートカットを割り当て、割り当てた組み合わせをメニュー上に表示する
   - 登録時に一意性検査を通す。競合は登録元へ報告する
   - ウィンドウ単位のメニューを持てる環境では発生元ウィンドウとともにイベントを受け取る。**アプリ全体のメニューしか持てない環境では、現在フォーカスされているウィンドウへ振り向ける**
@@ -480,8 +480,17 @@
 
 ## Implementation Notes
 
+- **7.5（重要・基盤の限界）**: **tauri 2.11.5 のメニューイベントは項目 id のみを運び、発生元ウィンドウを渡す API は存在しない**（`MenuEvent { id }`、`tauri/src/app.rs` が全リスナへ配る。`Window::on_menu_event` も「自分の」ウィンドウとともに全イベントで呼ばれるだけ）。**したがってウィンドウ単位の環境でも、発生元は活性化時点のフォーカスから復元している**（メニューバーのショートカットはフォーカスを持つウィンドウでしか発火しない性質に依拠）。`menu.rs` の `activation_target` / `routed_target` / `select_focused`（決定的）が唯一の解決点で、`PerWindow` は発生元、`ApplicationWide` は活性化時点のフォーカス（古い値は決して勝たない）。design.md の該当行にこの逸脱を注記済み。**10.6 が 3 OS で実キー入力により作用先＝フォーカス中ウィンドウを確認する**。
+- **7.5**: 対象が無いときも選択は通知され、`MenuSelection::window()` は `None`（ログは「対象ウィンドウ=(対象なし)」）。有効・無効の計算も同じ解決を使う。**再計算の起動点は `menu::refresh`** で、(1) `on_window_event` の `Focused(_)`（出入り両方）、(2) `Destroyed`、(3) ウィンドウ生成完了直後。メニューバーは組み直さず項目の状態のみ更新する。
+- **7.5**: ショートカットは `with_accelerator(解決済みの綴り)` を 4.6 の正準形（`ctrl+KeyQ` 等）のまま `MenuItemBuilder::accelerator` へ渡す（**表示用の別文字列を発明しない**。muda が GTK のアクセラレータラベルとして描くのが要件 3.3 の表示）。終了項目には `Ctrl+Q`（非 macOS）/ `Cmd+Q`（macOS）。
+- **7.5（このホストの駆動方法・重要）**: **XTEST はこの環境のツールキットに届かない**。実キーを送るには `XSendEvent`（`event_mask=0`）を使う。フォーカス移動は `XSetInputFocus`。2 ウィンドウ（起動時 `empty-1` ＋ 受け渡しで開く `doc-1`）で `Ctrl+Shift+J` → ログの対象ウィンドウがフォーカスに追随し、`Ctrl+Q` → `request_exit` → 終了コード 0 を実測。ショートカット表示はポップアップを開いた画素で確認できる（アクセラレータ付き項目はラベル右にインク塊、無しは 0 画素）。
+- **7.5**: 検証専用のメニュー項目（`verification.probe`、`verification.document-only`）は `verification-triggers` feature の下にのみ登録され、**既定ビルドのバイナリには識別子が 1 つも入らない**（`strings -a` で確認）。10.6 は同じ feature を使って 3 OS を確認する。
+
 - **qlty のルール（ユーザー決定 2026-09-12・以降の全タスクに適用）**: AGENTS.md / CLAUDE.md の「ユーザー追加」に従う。**コミットの前に必ず `qlty fmt`**、**作業を終える前に必ず `qlty check --fix --level=low` を実行し、指摘を直す**。設定は `.qlty/qlty.toml`。**7.2 のコミット（c0b3a83）は `src-tauri/src/commands/mod.rs` を未整形のまま入れており、このルールが守られていない**。次のコミットから必ず実行すること。
-- **qlty（実行上の注意）**: Rust の整形は `qlty fmt` で行う（qlty が同梱する Rust 1.98.1 の rustfmt。edition は `.qlty/configs/rustfmt.toml`）。**cargo シムの podman イメージにもホストの rustup にも rustfmt / clippy は無い**ため、`cargo fmt` は使えない。引数なしの `qlty fmt` / `qlty check` は **origin/main との差分に含まれるファイル**（未 push のコミットと未コミットの変更）を対象にする。全体の状態は `qlty check --all` で見られる。Rust は b8802e6 で一括整形済み（`.git-blame-ignore-revs` に登録）で、2026-09-12 時点で未整形なのは `src-tauri/src/commands/mod.rs` と、編集中の `src-tauri/src/menu.rs` だけ。`qlty check` は clippy を含まない（qlty の clippy は crates/ 配下の指摘を捨てるため無効化してある。`.qlty/qlty.toml` の注記）。
+- **qlty（実行上の注意）**: Rust の整形は `qlty fmt` で行う（qlty が同梱する Rust 1.98.1 の rustfmt。edition は `.qlty/configs/rustfmt.toml`）。**cargo シムの podman イメージにもホストの rustup にも rustfmt / clippy は無い**ため、`cargo fmt` は使えない。引数なしの `qlty fmt` / `qlty check` は **origin/main との差分に含まれるファイル**（未 push のコミットと未コミットの変更）を対象にする。全体の状態は `qlty check --all` で見られる。Rust は b8802e6 で一括整形済み（`.git-blame-ignore-revs` に登録）。
+- **qlty（引数なしは rustfmt が落ちる・重要）**: 差分を対象にすると **rustfmt は変更ファイルだけを一時領域へ置くため `mod close;` / `mod shell_cmds;` を解決できずにエラー終了する**（`.qlty/out/invoke-*.yaml`。整形自体は他ファイルに効くが exit は非 0）。**ディレクトリを渡すと解決できる**: `qlty fmt src-tauri/src` と `qlty check --level=low src-tauri/src crates`（後者は `✔ No issues`）。コミット前はこの形で実行すること。
+- **clippy はホストのツールチェーンで走らせる（重要）**: シムのコンテナにもホストの rustup 既定にも `cargo-clippy` が無いが、**ホストの stable ツールチェーンの実体にはある**。`~/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo clippy --workspace --all-targets --message-format=short` が 26 秒程度（増分）で完走する（`cargo` シムではなく絶対パスで起動するのが要点）。`rustup component add clippy` をシム経由で呼んでも効かない。
+- **clippy の残件（10.1 の静的ゲートが直面する・重要）**: 2026-09-12 時点で **`crates/app-shell`（lib と結合テスト）と `crates/document-format` に既存の警告が多数ある**（`unneeded return`、`err().expect()`、`useless vec!`、`assert` の定数条件、`type_complexity` など。`assert!` の定数条件はテストの意味に関わるので機械的に消さないこと）。`src-tauri` 側は 7.5 の時点で **警告 0**。**10.1 は `-D warnings` を機械的に有効にできず、許容基準（既存警告の baseline・level・対象クレート）を決める必要がある。** qlty の clippy は crates/ の指摘を捨てるため使えない（`.qlty/qlty.toml` の注記どおり）。
 
 - **7.4**: 登録口は `src-tauri/src/menu.rs` の `MenuRegistry`（managed・1 インスタンス）。`register(app, MenuItemSpec::new(owner, item, path, label, handler).with_accelerator("Ctrl+S"))`。**登録の同一性は (所有者, 項目) の組**（再登録は更新＝冪等）、**項目 id はアプリ全体で一意**（衝突は `ItemIdConflict`）。通知は登録時に渡したハンドラを、**実イベント（`on_menu_event`）とテストが共有する唯一の seam `MenuRegistry::dispatch(item, window)`** が呼ぶ（テスト専用の並行経路は無い）。`MenuModel` / `SubmenuNode` / `MenuNode` により構築結果を GUI 無しで検査でき、順序は決定的。
 - **7.4**: プラットフォーム差は `MenuPlacement` / `PLACEMENT` / `apply` の**1 箇所**。**macOS は `AppHandle::set_menu` でアプリ全体の 1 つ**を構築し、**トップレベルはすべて部分メニュー**（最初の部分メニューはアプリケーションメニューへ畳み込まれる。順序で先頭に固定）。**単独のトップレベル項目は表現自体が不可能**で、`MenuPath::new([])` は `BareTopLevelItem` として**登録時に拒否**する（黙って消えない）。**Linux / Windows はウィンドウ単位**で、`window::build_window` の 1 箇所から `attach_to_window` を呼ぶため**後から作られるウィンドウにも付く**（起動時・受け渡し・Dock すべて）。

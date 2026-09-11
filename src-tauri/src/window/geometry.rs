@@ -460,12 +460,15 @@ fn persist<R: Runtime>(window: &Window<R>) {
     save(window.app_handle(), &geometry);
 }
 
+/// 枠の位置とクライアント領域の大きさ（どちらも物理ピクセル。読めない項目は `None`）。
+type GeometryReading = (Option<(i32, i32)>, Option<(u32, u32)>);
+
 /// 形状を読めるウィンドウ（`Window` と `WebviewWindow` の両方から読むための小さな抽象）。
 trait GeometryRead {
     /// このウィンドウのラベル。
     fn geometry_label(&self) -> &str;
     /// 枠の位置とクライアント領域の大きさ（どちらも物理ピクセル。読めない項目は `None`）。
-    fn read_geometry(&self) -> (Option<(i32, i32)>, Option<(u32, u32)>);
+    fn read_geometry(&self) -> GeometryReading;
 }
 
 impl<R: Runtime> GeometryRead for Window<R> {

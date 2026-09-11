@@ -132,6 +132,10 @@ fn spawn_creation<R: Runtime>(app: AppHandle<R>, state: WindowState) {
                         describe_document(state.document()),
                         registry.describe(),
                     );
+                    // **ウィンドウの集合が変わった**ので、メニューの有効・無効を計算し直す
+                    // （要件 3.5。タスク 7.5）。アプリ全体のメニューしか持てない環境では、
+                    // 新しいウィンドウが対象になると状態が変わる。
+                    crate::menu::refresh(&app);
                 } else {
                     // 生成の完了前に破棄の通知が届いていた（登録は既に無い）。取り消し済みなので
                     // 登録をやり直さない。
@@ -193,15 +197,24 @@ pub fn focus<R: Runtime>(window: &WebviewWindow<R>) {
 
 /// ウィンドウのイベントを処理する（`Builder::on_window_event` に結線する）。
 ///
-/// 行うことは 2 つである:
+/// 行うことは 3 つである:
 ///
 /// 1. **位置とサイズの記憶**（要件 2.7、タスク 6.3）。[`geometry::observe`] が移動・
 ///    拡大縮小を観測し、**破棄の通知で設定ストアへ保存する**（終了イベントを待たない）。
-/// 2. **破棄の通知をレジストリに反映する**。登録は生成の前に済んでいるため、**破棄の通知は
+/// 2. **メニューの有効・無効の更新**（要件 3.5、タスク 7.5）。**フォーカスが移るたび**に
+///    [`crate::menu::refresh`] を呼ぶ（アプリ全体のメニューしか持てない環境では、メニューが
+///    ウィンドウごとの状態を持てないため、対象ウィンドウを解決し直す必要がある）。
+/// 3. **破棄の通知をレジストリに反映する**。登録は生成の前に済んでいるため、**破棄の通知は
 ///    必ず登録を見つける**（登録が漏れない）。破棄はウィンドウが閉じられた後に届くので、
-///    ここで取り除いた登録はもう使われない。
+///    ここで取り除いた登録はもう使われない。**ウィンドウの集合が変わった**ので、ここでも
+///    メニューの有効・無効を計算し直す（対象ウィンドウが消えると対象が無くなる）。
 pub fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
     geometry::observe(window, event);
+    // フォーカスの出入りの両方で更新する（アプリ全体のメニューでは、フォーカスを失ったときに
+    // 対象が無くなることが状態に現れる）。
+    if matches!(event, WindowEvent::Focused(_)) {
+        crate::menu::refresh(window.app_handle());
+    }
     if !matches!(event, WindowEvent::Destroyed) {
         return;
     }
@@ -212,6 +225,7 @@ pub fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
             describe_document(state.document()),
         );
     }
+    crate::menu::refresh(window.app_handle());
 }
 
 /// **検証専用**: 生成の失敗経路（要件 2.10）を実測する。
@@ -493,6 +507,18 @@ impl WindowRegistry {
             .values()
             .find(|state| state.phase == WindowPhase::Ready)
             .map(|state| state.label.clone())
+    }
+
+    /// ラベルに関連付けられたドキュメントを引く（未登録・関連付け無しはどちらも `None`）。
+    ///
+    /// メニュー項目の有効・無効は**対象ウィンドウの状態**で決まる（要件 3.5。タスク 7.5）ので、
+    /// メニュー側（[`crate::menu`]）がここから対象ウィンドウの関連付けを読む。**写像を二重に
+    /// 持たない**ための入口である。
+    pub fn document_of(&self, label: &str) -> Option<PathBuf> {
+        self.lock()
+            .windows
+            .get(label)
+            .and_then(|state| state.document.clone())
     }
 
     /// 記録に出すための 1 行（ラベル・関連付け・生成中の印の一覧）。

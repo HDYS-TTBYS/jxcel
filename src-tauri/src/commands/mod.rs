@@ -118,7 +118,10 @@ mod tests {
             REGISTERED_HANDLER_PATHS.len(),
             "名前とハンドラの数が食い違っている"
         );
-        for (name, handler) in REGISTERED_COMMAND_NAMES.iter().zip(REGISTERED_HANDLER_PATHS) {
+        for (name, handler) in REGISTERED_COMMAND_NAMES
+            .iter()
+            .zip(REGISTERED_HANDLER_PATHS)
+        {
             let function = handler
                 .rsplit("::")
                 .next()

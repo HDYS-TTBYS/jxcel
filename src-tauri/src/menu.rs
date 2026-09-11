@@ -40,27 +40,44 @@
 //! 個々の項目を持たない** — 持つのは登録口・モデルの組み立て・配置先の吸収だけである。
 //! 組み込み項目も「終了」の 1 つだけで、それも同じ登録口を通る。
 //!
-//! # 7.5 への申し送り
+//! # タスク 7.5 が加えたもの（割当と表示・振り向け・有効無効の更新）
 //!
-//! - **キーの振り向け**（要件 3.5）と、**フォーカス移動のたびの有効・無効の更新**は 7.5 が
-//!   所有する。本モジュールは [`MenuModel`] を公開しており、7.5 はそこから項目を引いて状態を
-//!   変えたうえで [`apply`] を呼び直す。
-//! - **ショートカットの表示**（`Ctrl+Shift+S` のようなプラットフォームの表記）も 7.5 が担う。
-//!   本モジュールは 4.6 の正準形（`ctrl+shift+KeyS`）をそのまま基盤へ渡す — 基盤はそれを
-//!   受理し、プラットフォームの表記で提示する。
-//! - 組み込みの「終了」項目のショートカットは 7.5 が与える（5.4 の申し送り）。
+//! 6. **ショートカットの割当と表示**（要件 3.3）。項目は [`MenuItemSpec::with_accelerator`] で
+//!    組み合わせを持ち、[`build_native_item`] が**4.6 の正準形をそのまま**基盤へ渡す。表示は
+//!    基盤（muda → GTK / NSMenu / Win32）が行い、正準形はそのままプラットフォームの表記
+//!    （`Ctrl+Q`、`⌘Q` など）としてメニュー上に描かれる。**別の表示用文字列を発明しない** —
+//!    表示は割り当てられた組み合わせそのものであり、二重に持つと食い違いの余地ができる。
+//!    組み込みの「終了」項目には慣習的な組み合わせ（非 macOS は `Ctrl+Q`、macOS は `Cmd`=`Super`
+//!    の `Q`）を割り当てる（5.4 の申し送り）。
+//! 7. **操作対象ウィンドウへの振り向け**（要件 3.5）。活性化の入口 [`on_menu_event`] は
+//!    [`routed_target`] で対象を決め、[`MenuRegistry::dispatch`] へ渡す。プラットフォーム差は
+//!    [`PLACEMENT`] の 1 箇所で扱う（`cfg` を散らさない）。
+//! 8. **有効・無効の再計算**（要件 3.5）。項目は [`MenuItemSpec::with_enablement`] で
+//!    **対象ウィンドウに対する述語**を宣言でき、[`refresh`] が対象を解決し直して状態を計算し、
+//!    基盤の項目へ反映する。呼ぶのは**フォーカスが移るたび**と**ウィンドウの集合が変わったとき**
+//!    である（`crate::window::on_window_event` の `Focused` / `Destroyed` と、生成の完了）。
 //!
-//! # 選択の通知に発生元が付かない理由
+//! # 対象ウィンドウの決め方（要件 3.5 と 2.6）
 //!
-//! Tauri 2.11.5 のメニューイベント（`MenuEvent`）は**項目の識別子しか運ばない**。ウィンドウ単位の
-//! メニューでもアプリ全体のメニューでも同じであり、基盤から「どのウィンドウのメニューが押された
-//! か」は得られない（research.md「メニューとキーボードショートカット」。ウィンドウ単位のイベント
-//! リスナも全イベントに対して呼ばれる）。したがって [`on_menu_event`] は**現在フォーカスされて
-//! いるウィンドウ**を手掛かりとして渡す。これは 7.5 が refine する暫定であり、判定そのものは
-//! 登録元に委ねる（`None` もありうる）。
+//! - **ウィンドウ単位のメニューを持つ環境**（Windows / Linux）: メニューはウィンドウごとに 1 つ
+//!   なので、対象は**そのメニューを所有するウィンドウ（活性化の発生元）**である。
+//! - **アプリ全体のメニューしか持てない環境**（macOS）: メニューが 1 つしかないため活性化に
+//!   発生元は無い。**活性化の時点で**フォーカスされているウィンドウへ振り向ける。
+//!
+//! **基盤のイベントは発生元のウィンドウを運ばない。** Tauri 2.11.5 のメニューイベント
+//! （`MenuEvent`）は項目の識別子しか持たず、`tauri/src/app.rs` は `EventLoopMessage::MenuEvent`
+//! を**登録されている全リスナへ同じ値で配る**（ウィンドウ単位のイベントリスナも全イベントに
+//! 対して呼ばれる。research.md「メニューとキーボードショートカット」）。したがってウィンドウ単位
+//! の環境での発生元は、**メニューバーのアクセラレータはキーボードフォーカスを持つウィンドウで
+//! しか発火しない**という性質を使って、活性化の時点のフォーカスから観測する
+//! （[`activation_target`]。両者は同じウィンドウを指す）。
+//!
+//! **対象ウィンドウが 1 枚も無いとき**（どのウィンドウもフォーカスされていない）は `None` であり、
+//! 登録元の処理は [`MenuSelection::window`] に `None` を受け取る（選択そのものは通知される）。
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use app_shell::accelerator::{
@@ -69,10 +86,13 @@ use app_shell::accelerator::{
 };
 use app_shell::ipc::WindowLabel;
 use tauri::menu::{
-    IsMenuItem, Menu, MenuBuilder, MenuEvent, MenuItem, MenuItemBuilder, Submenu, SubmenuBuilder,
+    IsMenuItem, Menu, MenuBuilder, MenuEvent, MenuItem, MenuItemBuilder, MenuItemKind, Submenu,
+    SubmenuBuilder,
 };
 use tauri::{AppHandle, Manager, Runtime, WebviewWindow};
 use tauri_plugin_log::log;
+
+use crate::window::WindowRegistry;
 
 // ---------------------------------------------------------------------------
 // 配置先（プラットフォーム差が存在する唯一の場所）
@@ -133,6 +153,31 @@ const BUILTIN_OWNER: &str = "app-shell";
 /// 運ばないため、同じ識別子が 2 つあると選択を登録元へ振り分けられない。登録口がこれを検査する
 /// （[`MenuRegistrationError::ItemIdConflict`]）。
 const QUIT_ITEM_ID: &str = "app-shell.quit";
+
+/// 組み込みの終了項目のショートカット。**プラットフォーム解決済みの綴りで与える**（4.6 の構文
+/// 契約。`CmdOrCtrl` は受理されない）。
+///
+/// 慣習に合わせる: 非 macOS（Windows / Linux）は `Ctrl+Q`、macOS は `Cmd`（=`Super`）の `Q`
+/// （メニュー上は `⌘Q`）。
+#[cfg(target_os = "macos")]
+const QUIT_ACCELERATOR_SPELLING: &str = "Cmd+Q";
+
+/// 組み込みの終了項目のショートカット（非 macOS。`Ctrl+Q`）。
+#[cfg(not(target_os = "macos"))]
+const QUIT_ACCELERATOR_SPELLING: &str = "Ctrl+Q";
+
+/// 検証専用の項目の登録元（[`BUILTIN_OWNER`] と分けるのは、検証用の項目が配布物の登録元と
+/// 混ざらないようにするため）。**`verification-triggers` feature でのみ使う。**
+#[cfg(feature = "verification-triggers")]
+const VERIFICATION_OWNER: &str = "app-shell.verification";
+
+/// 検証専用の項目（対象ウィンドウの記録）のショートカット。**プラットフォーム解決済み。**
+#[cfg(all(feature = "verification-triggers", target_os = "macos"))]
+const VERIFICATION_PROBE_ACCELERATOR: &str = "Cmd+Shift+J";
+
+/// 検証専用の項目（対象ウィンドウの記録）のショートカット（非 macOS）。
+#[cfg(all(feature = "verification-triggers", not(target_os = "macos")))]
+const VERIFICATION_PROBE_ACCELERATOR: &str = "Ctrl+Shift+J";
 
 // ---------------------------------------------------------------------------
 // 位置（部分メニューの並び）
@@ -367,6 +412,68 @@ fn top_level_sort_key(label: &str) -> (u8, u8, String) {
 }
 
 // ---------------------------------------------------------------------------
+// 対象ウィンドウ（振り向けと有効・無効の判定の対象）
+// ---------------------------------------------------------------------------
+
+/// **操作対象のウィンドウ**（要件 3.5）。割り当てられたショートカットの振り向け先であり、
+/// 項目の有効・無効を判定する対象でもある。
+///
+/// 対象ウィンドウの状態（関連付けたドキュメント）は**6.1 のウィンドウ登録簿から引く**
+/// （ここで独自の写像を持たない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuTarget {
+    /// 対象のウィンドウ。`None` は**どのウィンドウもフォーカスされていない**ことを表す。
+    window: Option<WindowLabel>,
+    /// 対象ウィンドウが関連付けたドキュメント（無ければ `None`）。
+    document: Option<PathBuf>,
+}
+
+impl MenuTarget {
+    /// 対象ウィンドウと、そのウィンドウの状態を解決する。
+    fn resolve<R: Runtime>(app: &AppHandle<R>, window: Option<WindowLabel>) -> Self {
+        let document = window
+            .as_ref()
+            .and_then(|label| app.state::<WindowRegistry>().document_of(label.as_str()));
+        Self { window, document }
+    }
+
+    /// 対象のウィンドウ（無ければ `None`）。
+    pub fn window(&self) -> Option<&WindowLabel> {
+        self.window.as_ref()
+    }
+
+    /// 対象ウィンドウが関連付けたドキュメント（無ければ `None`）。
+    ///
+    /// 述語（[`MenuItemSpec::with_enablement`]）が「ドキュメントを開いているときだけ有効」を
+    /// 表すには `target.document().is_some()` を書く。
+    pub fn document(&self) -> Option<&Path> {
+        self.document.as_deref()
+    }
+
+    /// 記録に出す 1 行（対象が無いことも明示する）。
+    fn describe(&self) -> String {
+        match self.window() {
+            Some(label) => format!(
+                "{}{}",
+                label.as_str(),
+                match self.document() {
+                    Some(path) => format!("（ドキュメント={}）", path.display()),
+                    None => "（ドキュメントなし）".to_owned(),
+                },
+            ),
+            None => "(対象ウィンドウなし)".to_owned(),
+        }
+    }
+}
+
+/// 項目の有効・無効を**対象ウィンドウ**に対して決める述語（要件 3.5）。
+///
+/// アプリ全体のメニューしか持てない環境では、メニューがウィンドウごとの状態を持てない。したがって
+/// この述語は**フォーカスが移るたび**（とウィンドウの集合が変わったとき）に評価し直される
+/// （[`refresh`]）。述語を渡していない項目は常に有効である。
+pub type EnablementPredicate = Arc<dyn Fn(&MenuTarget) -> bool + Send + Sync + 'static>;
+
+// ---------------------------------------------------------------------------
 // 登録（登録元の識別と選択の通知）
 // ---------------------------------------------------------------------------
 
@@ -378,8 +485,10 @@ pub struct MenuSelection {
     owner: AcceleratorOwner,
     /// 選択された項目の識別子。
     item: MenuItemId,
-    /// 発生元の手掛かり（分かれば）。**基盤のイベントはウィンドウを運ばない**ため、現在
-    /// フォーカスされているウィンドウである（module doc「選択の通知に発生元が付かない理由」）。
+    /// **操作対象のウィンドウ**（要件 3.5）。ウィンドウ単位のメニューでは活性化の発生元、
+    /// アプリ全体のメニューでは活性化の時点でフォーカスされているウィンドウである
+    /// （module doc「対象ウィンドウの決め方」）。`None` はどのウィンドウも対象にならないこと
+    /// （どのウィンドウもフォーカスされていない）を表す。
     window: Option<WindowLabel>,
 }
 
@@ -395,7 +504,7 @@ impl MenuSelection {
         &self.item
     }
 
-    /// 発生元の手掛かり（分からなければ `None`）。
+    /// **操作対象のウィンドウ**（分からなければ `None`）。
     pub fn window(&self) -> Option<&WindowLabel> {
         self.window.as_ref()
     }
@@ -417,6 +526,8 @@ struct RegisteredItem {
     label: String,
     /// 正規化済みの組み合わせ（無ければ `None`）。
     accelerator: Option<Accelerator>,
+    /// 有効・無効を対象ウィンドウで決める述語（無ければ常に有効）。
+    enablement: Option<EnablementPredicate>,
     /// 選択を受け取る処理。
     handler: MenuHandler,
 }
@@ -434,6 +545,8 @@ pub struct MenuItemSpec {
     label: String,
     /// 割り当てる組み合わせの綴り（**プラットフォーム解決済み**。登録時に解釈する）。
     accelerator: Option<String>,
+    /// 有効・無効を対象ウィンドウで決める述語。
+    enablement: Option<EnablementPredicate>,
     /// 選択を受け取る処理。
     handler: MenuHandler,
 }
@@ -457,6 +570,7 @@ impl MenuItemSpec {
             path,
             label: label.into(),
             accelerator: None,
+            enablement: None,
             handler: Arc::new(handler),
         }
     }
@@ -465,10 +579,23 @@ impl MenuItemSpec {
     /// （4.6 の構文契約。非 macOS は `Ctrl`、macOS は `Cmd` / `Super`）。
     ///
     /// 解釈できない綴り（`CmdOrCtrl` など）と、ほかの登録と競合する組み合わせは、登録時に
-    /// [`MenuRegistrationError`] として登録元へ返る。
-    #[allow(dead_code)] // 7.5 とテストが使う seam（組み込みの項目はまだショートカットを持たない）。
+    /// [`MenuRegistrationError`] として登録元へ返る。割り当てた組み合わせは**そのままメニュー上に
+    /// 表示される**（表示は基盤が行う。module doc「タスク 7.5 が加えたもの」）。
     pub fn with_accelerator(mut self, spelling: impl Into<String>) -> Self {
         self.accelerator = Some(spelling.into());
+        self
+    }
+
+    /// 有効・無効を**対象ウィンドウ**で決める述語を宣言する（要件 3.5）。
+    ///
+    /// 渡さなければ常に有効である。述語は[対象ウィンドウが変わるたび](refresh)に評価し直される
+    /// ので、**アプリ全体のメニューでも項目の状態がフォーカスに追随する**。
+    #[allow(dead_code)] // 下流スペック（9.5 の項目）と検証専用の項目が使う seam。
+    pub fn with_enablement(
+        mut self,
+        predicate: impl Fn(&MenuTarget) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.enablement = Some(Arc::new(predicate));
         self
     }
 }
@@ -493,7 +620,10 @@ pub enum MenuRegistrationError {
     },
     /// ショートカットがほかの登録と競合した（要件 3.4）。**競合した両方の登録を運ぶ。**
     /// この項目は登録されず、既存の登録も変わらない。
-    Accelerator(AcceleratorConflict),
+    ///
+    /// 中身は箱に入れる — この種の失敗は呼び出しのたびには起きないので、**成功経路の値の大きさを
+    /// 競合の詳細で膨らませない**（`clippy::result_large_err`）。
+    Accelerator(Box<AcceleratorConflict>),
     /// メニューを基盤へ配置できなかった。**登録そのものは成立している**（登録簿には入り、
     /// 次の再構築で再び配置を試みる）。
     Placement {
@@ -510,7 +640,10 @@ impl fmt::Display for MenuRegistrationError {
                 "メニュー項目の識別子 \"{item}\" はほかの登録元が既に使っている",
             ),
             Self::AcceleratorSyntax { item, source } => {
-                write!(f, "メニュー項目 \"{item}\" のショートカットを解釈できない: {source}")
+                write!(
+                    f,
+                    "メニュー項目 \"{item}\" のショートカットを解釈できない: {source}"
+                )
             }
             Self::Accelerator(conflict) => write!(f, "{conflict}"),
             Self::Placement { message } => {
@@ -524,7 +657,7 @@ impl std::error::Error for MenuRegistrationError {}
 
 impl From<AcceleratorConflict> for MenuRegistrationError {
     fn from(conflict: AcceleratorConflict) -> Self {
-        Self::Accelerator(conflict)
+        Self::Accelerator(Box::new(conflict))
     }
 }
 
@@ -592,6 +725,7 @@ impl MenuRegistry {
             path,
             label,
             accelerator,
+            enablement,
             handler,
         } = spec;
 
@@ -633,6 +767,7 @@ impl MenuRegistry {
                 path,
                 label,
                 accelerator: chord,
+                enablement,
                 handler,
             },
         );
@@ -677,14 +812,12 @@ impl MenuRegistry {
         for ((owner, item), registered) in &inner.items {
             let segments = registered.path.segments();
             let root = roots.entry(segments[0].clone()).or_default();
-            slot(root, &segments[1..])
-                .items
-                .push(MenuItemNode {
-                    owner: owner.clone(),
-                    item: item.clone(),
-                    label: registered.label.clone(),
-                    accelerator: registered.accelerator.clone(),
-                });
+            slot(root, &segments[1..]).items.push(MenuItemNode {
+                owner: owner.clone(),
+                item: item.clone(),
+                label: registered.label.clone(),
+                accelerator: registered.accelerator.clone(),
+            });
         }
         let mut top: Vec<SubmenuNode> = roots
             .into_iter()
@@ -697,42 +830,67 @@ impl MenuRegistry {
     /// **選択の通知の唯一の経路（活性化の seam）。** 項目の識別子から登録を引き、登録元が
     /// 渡した処理へ [`MenuSelection`] を渡す。本番では [`on_menu_event`] がこれを呼ぶ。
     ///
+    /// `target` は**操作対象のウィンドウ**（[`activation_target`] が決める。要件 3.5）。`None` は
+    /// 対象が無いこと（どのウィンドウもフォーカスされていない）を表し、その場合も**選択の事実は
+    /// 登録元へ届く**（処理は `MenuSelection::window()` に `None` を受け取る）。
+    ///
     /// 戻り値は「通知先が見つかって呼んだ」かどうかである。未登録の識別子（基盤が古いメニューを
     /// 保持している、など）は記録に残して `false` を返す — **panic しない**（イベントループの
     /// 中で走るため）。
     ///
     /// **処理はロックの外で呼ぶ。** 処理が [`register`](Self::register) を呼び返しても
     /// デッドロックしない。
-    pub fn dispatch(&self, item: &MenuItemId, window: Option<WindowLabel>) -> bool {
-        let target = {
-            let inner = self.lock();
-            inner
-                .items
-                .iter()
-                .find(|((_, id), _)| id == item)
-                .map(|((owner, id), registered)| {
-                    (owner.clone(), id.clone(), Arc::clone(&registered.handler))
-                })
-        };
-        let Some((owner, item, handler)) = target else {
+    pub fn dispatch(&self, item: &MenuItemId, target: Option<WindowLabel>) -> bool {
+        let registration =
+            {
+                let inner = self.lock();
+                inner.items.iter().find(|((_, id), _)| id == item).map(
+                    |((owner, id), registered)| {
+                        (owner.clone(), id.clone(), Arc::clone(&registered.handler))
+                    },
+                )
+            };
+        let Some((owner, item, handler)) = registration else {
             log::warn!("未登録のメニュー項目が選択された: {item}");
             return false;
         };
-        // 選択の事実を記録に残す（**どの登録元へ通知したか**が運用時に追える。GUI 実行での
-        // 検証もこの行で観測できる）。
+        // 選択の事実を記録に残す（**どの登録元へ、どのウィンドウを対象として通知したか**が
+        // 運用時に追える。GUI 実行での検証もこの行で観測できる）。
         log::info!(
-            "メニュー項目が選択された: 登録元={owner} 項目={item} ウィンドウ={}",
-            window
+            "メニュー項目が選択された: 登録元={owner} 項目={item} 対象ウィンドウ={}",
+            target
                 .as_ref()
                 .map(WindowLabel::as_str)
-                .unwrap_or("(不明)"),
+                .unwrap_or("(対象なし)"),
         );
         handler(&MenuSelection {
             owner,
             item,
-            window,
+            window: target,
         });
         true
+    }
+
+    /// **有効・無効の再計算（要件 3.5）。** 対象ウィンドウに対する各項目の状態を計算する。
+    ///
+    /// 述語（[`MenuItemSpec::with_enablement`]）を持たない項目は常に有効である。**登録簿を読む
+    /// だけで基盤にもウィンドウにも触れない**ので、GUI 無しでテストできる。
+    ///
+    /// ここが計算の唯一の実装であり、メニューの組み立て（[`build_native_menu`]）と再計算
+    /// （[`refresh`]）の両方がこれを呼ぶ — **同じ状態を 2 通りの式で作らない**。
+    fn enabled_state(&self, target: &MenuTarget) -> BTreeMap<MenuItemId, bool> {
+        let inner = self.lock();
+        inner
+            .items
+            .iter()
+            .map(|((_, item), registered)| {
+                let enabled = registered
+                    .enablement
+                    .as_ref()
+                    .is_none_or(|predicate| predicate(target));
+                (item.clone(), enabled)
+            })
+            .collect()
     }
 }
 
@@ -747,7 +905,8 @@ impl MenuRegistry {
 /// （[`MenuRegistry::register`]）を通す。選択時の処理は 5.4 の唯一の終了入口
 /// [`crate::lifecycle::request_exit`] を呼ぶ — 常駐の拒否を解除してから `app.exit(0)` するので、
 /// **どのプラットフォームでも確実にプロセスが終わる**（要件 2.9 の「明示的な終了操作を必ず
-/// 用意する」）。ショートカットの割り当てと表示は 7.5 が与える。
+/// 用意する」）。**ショートカットは慣習的な組み合わせを割り当て、メニュー上に表示される**
+/// （要件 3.3。5.4 の申し送り）。
 ///
 /// この時点ではウィンドウが 1 枚も無い（起動時のウィンドウは `RunEvent::Ready` が作る）ため、
 /// Windows / Linux の配置はこの呼び出しでは空振りする。起動時のウィンドウは生成時に
@@ -765,9 +924,72 @@ pub fn install(app: &AppHandle) {
             QUIT_LABEL,
             move |_selection| crate::lifecycle::request_exit(&app),
         )
+        .with_accelerator(QUIT_ACCELERATOR_SPELLING)
     };
     if let Err(error) = registry.register(app, quit) {
         log::error!("組み込みの終了メニュー項目を登録できなかった: {error}");
+    }
+    #[cfg(feature = "verification-triggers")]
+    install_verification_items(app, &registry);
+}
+
+/// **検証専用**: 振り向け（要件 3.5）と有効・無効の再計算（要件 3.5）を実画面で観測するための
+/// 項目を、個別機能と同じ登録口から登録する。
+///
+/// 観測したいのは次の 2 つである。
+///
+/// 1. **振り向け**: ショートカットを押すと、作用した**対象ウィンドウ**が記録に残る
+///    （`[検証] ショートカットが作用した対象ウィンドウ=…`）。
+/// 2. **有効・無効の再計算**: **ドキュメントを持つウィンドウを対象にしたときだけ有効**になる
+///    項目を置く。フォーカスが移ると [`refresh`] が状態を計算し直すので、その変化（どの項目が
+///    無効か）が記録に現れる。
+///
+/// # 既定のビルドには存在しない
+///
+/// **この関数は `verification-triggers` feature でのみコンパイルされる**（tasks.md 5.4 の
+/// 申し送り。配布物に検証専用の項目を入れない）。
+#[cfg(feature = "verification-triggers")]
+fn install_verification_items(app: &AppHandle, registry: &MenuRegistry) {
+    // 1. 対象ウィンドウを記録するだけの項目。**常に有効**（振り向けの観測が目的だから、対象に
+    //    よって無効にならない方がよい）。
+    let probe = MenuItemSpec::new(
+        VERIFICATION_OWNER,
+        "verification.probe",
+        builtin_quit_path(),
+        "検証: 対象ウィンドウを記録",
+        |selection: &MenuSelection| {
+            log::info!(
+                "[検証] ショートカットが作用した対象ウィンドウ={}",
+                selection
+                    .window()
+                    .map(WindowLabel::as_str)
+                    .unwrap_or("(対象なし)"),
+            );
+        },
+    )
+    .with_accelerator(VERIFICATION_PROBE_ACCELERATOR);
+    // 2. 対象ウィンドウがドキュメントを持つときだけ有効になる項目（フォーカス移動での更新を
+    //    観測する）。
+    let document_only = MenuItemSpec::new(
+        VERIFICATION_OWNER,
+        "verification.document-only",
+        builtin_quit_path(),
+        "検証: ドキュメント付きのみ",
+        |selection: &MenuSelection| {
+            log::info!(
+                "[検証] ドキュメント付きの項目が作用した: 対象ウィンドウ={}",
+                selection
+                    .window()
+                    .map(WindowLabel::as_str)
+                    .unwrap_or("(対象なし)"),
+            );
+        },
+    )
+    .with_enablement(|target: &MenuTarget| target.document().is_some());
+    for spec in [probe, document_only] {
+        if let Err(error) = registry.register(app, spec) {
+            log::error!("[検証] 検証用のメニュー項目を登録できなかった: {error}");
+        }
     }
 }
 
@@ -795,6 +1017,9 @@ fn builtin_quit_path() -> MenuPath {
 /// が付く**。メニューを 1 つしか持てないプラットフォーム（macOS）では何もしない — アプリ全体の
 /// メニューは [`install`] が設定済みであり、ウィンドウ単位の設定は基盤が非対応である。
 ///
+/// **ウィンドウごとにメニューを組み立てる**（1 つ作って複製しない）。メニューはウィンドウごとに
+/// 1 つなので、有効・無効は**そのウィンドウ自身**の状態で決まる（要件 3.5）。
+///
 /// 失敗は記録に残して**生成を妨げない**（メニューの欠落でウィンドウが開かなくなる方が悪い）。
 pub fn attach_to_window<R: Runtime>(window: &WebviewWindow<R>) {
     if PLACEMENT != MenuPlacement::PerWindow {
@@ -802,8 +1027,7 @@ pub fn attach_to_window<R: Runtime>(window: &WebviewWindow<R>) {
     }
     let app = window.app_handle();
     let model = app.state::<MenuRegistry>().model();
-    let result = build_native_menu(app, &model).and_then(|menu| window.set_menu(menu).map(|_| ()));
-    match result {
+    match apply_to_window(app, window, &model) {
         Ok(()) => log::info!(
             "ウィンドウへメニューを付けた: label={} トップレベル={} 項目={}",
             window.label(),
@@ -820,27 +1044,113 @@ pub fn attach_to_window<R: Runtime>(window: &WebviewWindow<R>) {
 /// **メニュー選択の実際の入口。**`Builder::on_menu_event` へ結線する（1 本だけ）。
 ///
 /// 判断は [`MenuRegistry::dispatch`] に委ねる。ここが行うのは「基盤のイベントを登録の識別子へ
-/// 写す」ことと「発生元の手掛かりを集める」ことだけである（後者の限界は module doc を参照）。
-/// ウィンドウ単位のメニューでもアプリ全体のメニューでも、基盤は選択をこのハンドラへ届ける
-/// （tauri 2.11.5 のグローバルなイベントリスナはすべてのメニューイベントに対して呼ばれる）。
+/// 写す」ことと「**活性化の時点で**対象ウィンドウを決める」ことだけである（あとがきは module doc
+/// 「対象ウィンドウの決め方」）。ウィンドウ単位のメニューでもアプリ全体のメニューでも、基盤は
+/// 選択をこのハンドラへ届ける（tauri 2.11.5 のグローバルなイベントリスナはすべてのメニュー
+/// イベントに対して呼ばれる）。
 pub fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     let item = MenuItemId::new(event.id().0.as_str());
-    // 基盤のメニューイベントはウィンドウを運ばないので、現在フォーカスされているウィンドウを
-    // 手掛かりにする（module doc「選択の通知に発生元が付かない理由」）。
-    let window = app
-        .webview_windows()
-        .values()
-        .find(|window| window.is_focused().unwrap_or(false))
-        .map(|window| WindowLabel::new(window.label()));
+    // **起動時ではなく活性化の時点で**対象を決める（古いフォーカスを使わない）。
+    let window = activation_target(app);
     app.state::<MenuRegistry>().dispatch(&item, window);
 }
 
+// ---------------------------------------------------------------------------
+// 対象ウィンドウの解決（振り向け。要件 3.5）
+// ---------------------------------------------------------------------------
+
+/// **対象ウィンドウの決定（7.5 のルーティング）。プラットフォーム差はここで扱う。**
+///
+/// - [`MenuPlacement::PerWindow`]（Windows / Linux）: メニューはウィンドウごとに 1 つなので、
+///   対象は**そのメニューを所有するウィンドウ（活性化の発生元）**である（`origin`）。
+/// - [`MenuPlacement::ApplicationWide`]（macOS）: メニューはアプリ全体で 1 つしかなく、活性化に
+///   「発生元のウィンドウ」は無い。**活性化の時点で**フォーカスされているウィンドウ（`focused`）
+///   へ振り向ける。`origin` は使わない — 以前に捕まえた値は古くなりうる。
+///
+/// どちらの腕も `None` を返しうる（対象ウィンドウが無い）。そのとき登録元の処理は
+/// [`MenuSelection::window`] に `None` を受け取る。
+///
+/// **純粋関数である** — 実行中のウィンドウの観測（[`activation_target`]）と分けてあるので、
+/// 「フォーカス中のウィンドウが他のどのウィンドウより優先されること」「フォーカスが移ると対象が
+/// 変わること」を GUI 無しで固定できる。
+fn routed_target(
+    placement: MenuPlacement,
+    origin: Option<WindowLabel>,
+    focused: Option<WindowLabel>,
+) -> Option<WindowLabel> {
+    match placement {
+        MenuPlacement::PerWindow => origin.or(focused),
+        MenuPlacement::ApplicationWide => focused,
+    }
+}
+
+/// 候補のうち**フォーカスされている**ウィンドウを 1 つ選ぶ（**純粋関数**）。
+///
+/// `app.webview_windows()` の列挙順は決定的でないため、ラベルの辞書順で先に来るものを選ぶ —
+/// 同じ観測からは常に同じ結果になる。フォーカスされているものが無ければ `None`。
+fn select_focused<I>(candidates: I) -> Option<WindowLabel>
+where
+    I: IntoIterator<Item = (WindowLabel, bool)>,
+{
+    let mut focused: Vec<WindowLabel> = candidates
+        .into_iter()
+        .filter(|(_, is_focused)| *is_focused)
+        .map(|(label, _)| label)
+        .collect();
+    focused.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    focused.into_iter().next()
+}
+
+/// 現在フォーカスされているウィンドウを**その時点で**観測する。
+///
+/// [`select_focused`]（選び方の唯一の実装）に実行中のウィンドウを渡すだけである。
+fn focused_window<R: Runtime>(app: &AppHandle<R>) -> Option<WindowLabel> {
+    select_focused(app.webview_windows().values().map(|window| {
+        (
+            WindowLabel::new(window.label()),
+            window.is_focused().unwrap_or(false),
+        )
+    }))
+}
+
+/// **活性化の時点の対象ウィンドウ**（[`on_menu_event`] と構築・再計算が呼ぶ）。
+///
+/// フォーカスは**この呼び出しの中で観測する**（起動時などに捕まえた値を保持しない）。
+/// ウィンドウ単位のメニューでの発生元は次の理由でフォーカスと一致する: アクセラレータは各
+/// ウィンドウのメニューバーが所有し、**メニューバーのアクセラレータはそのウィンドウがキーボード
+/// フォーカスを持つときだけ発火する**（基盤はイベントにウィンドウを付けない。module doc
+/// 「対象ウィンドウの決め方」）。
+fn activation_target<R: Runtime>(app: &AppHandle<R>) -> Option<WindowLabel> {
+    let focused = focused_window(app);
+    let origin = match PLACEMENT {
+        MenuPlacement::PerWindow => focused.clone(),
+        MenuPlacement::ApplicationWide => None,
+    };
+    routed_target(PLACEMENT, origin, focused)
+}
+
+/// 今の対象ウィンドウを解決する（メニューの組み立て・有効無効の再計算が使う）。
+fn resolve_target<R: Runtime>(app: &AppHandle<R>) -> MenuTarget {
+    MenuTarget::resolve(app, activation_target(app))
+}
+
+// ---------------------------------------------------------------------------
+// メニューの組み立てと配置（プラットフォーム差の吸収）
+// ---------------------------------------------------------------------------
+
 /// モデルを基盤のメニューへ組み立てる。**トップレベルはすべて部分メニューである**
 /// （[`MenuModel::top`] の型が保証する）。
-fn build_native_menu<R: Runtime>(app: &AppHandle<R>, model: &MenuModel) -> tauri::Result<Menu<R>> {
+///
+/// `enabled` は項目ごとの有効・無効（[`MenuRegistry::enabled_state`] の結果）。**組み立てと
+/// 再計算が同じ計算を使う**ので、メニューを作る時点とフォーカスが移った後で状態が食い違わない。
+fn build_native_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    model: &MenuModel,
+    enabled: &BTreeMap<MenuItemId, bool>,
+) -> tauri::Result<Menu<R>> {
     let mut submenus: Vec<Submenu<R>> = Vec::with_capacity(model.top().len());
     for submenu in model.top() {
-        submenus.push(build_native_submenu(app, submenu)?);
+        submenus.push(build_native_submenu(app, submenu, enabled)?);
     }
     let items: Vec<&dyn IsMenuItem<R>> = submenus
         .iter()
@@ -853,13 +1163,14 @@ fn build_native_menu<R: Runtime>(app: &AppHandle<R>, model: &MenuModel) -> tauri
 fn build_native_submenu<R: Runtime>(
     app: &AppHandle<R>,
     node: &SubmenuNode,
+    enabled: &BTreeMap<MenuItemId, bool>,
 ) -> tauri::Result<Submenu<R>> {
     let mut children: Vec<Box<dyn IsMenuItem<R>>> = Vec::with_capacity(node.children().len());
     for child in node.children() {
         match child {
-            MenuNode::Item(item) => children.push(Box::new(build_native_item(app, item)?)),
+            MenuNode::Item(item) => children.push(Box::new(build_native_item(app, item, enabled)?)),
             MenuNode::Submenu(nested) => {
-                children.push(Box::new(build_native_submenu(app, nested)?));
+                children.push(Box::new(build_native_submenu(app, nested, enabled)?));
             }
         }
     }
@@ -868,16 +1179,59 @@ fn build_native_submenu<R: Runtime>(
 }
 
 /// 項目 1 つを組み立てる。**割り当てられた組み合わせは 4.6 の正準形をそのまま渡す** —
-/// 基盤はそれを受理し、プラットフォームの表記で提示する。
+/// 基盤（muda）がそれを解析し、**プラットフォームの表記でメニュー上に描く**（要件 3.3）。
 fn build_native_item<R: Runtime>(
     app: &AppHandle<R>,
     item: &MenuItemNode,
+    enabled: &BTreeMap<MenuItemId, bool>,
 ) -> tauri::Result<MenuItem<R>> {
-    let mut builder = MenuItemBuilder::new(item.label()).id(item.item().as_str());
+    let is_enabled = enabled.get(item.item()).copied().unwrap_or(true);
+    let mut builder = MenuItemBuilder::new(item.label())
+        .id(item.item().as_str())
+        .enabled(is_enabled);
     if let Some(chord) = item.accelerator() {
         builder = builder.accelerator(chord.as_str());
     }
-    builder.build(app)
+    let item_native = builder.build(app)?;
+    // **解決済みの綴りが基盤の項目へ渡ったこと**を記録に残す（表示は基盤が行うので、ここで
+    // 観測できるのは「渡した綴り」まで。GUI 実行での検証もこの行で追える）。
+    log::debug!(
+        "メニュー項目を組み立てた: 項目={} 表示={} ショートカット={} 有効={is_enabled}",
+        item.item(),
+        item.label(),
+        item.accelerator()
+            .map(Accelerator::as_str)
+            .unwrap_or("(なし)"),
+    );
+    Ok(item_native)
+}
+
+/// 1 枚のウィンドウへメニューを配置する（ウィンドウ単位のメニュー）。
+///
+/// **対象はそのウィンドウ自身である** — メニューはウィンドウごとに 1 つなので、有効・無効は
+/// そのウィンドウの状態（関連付けたドキュメント）で決まる。
+fn apply_to_window<R: Runtime>(
+    app: &AppHandle<R>,
+    window: &WebviewWindow<R>,
+    model: &MenuModel,
+) -> tauri::Result<()> {
+    let target = MenuTarget::resolve(app, Some(WindowLabel::new(window.label())));
+    let enabled = app.state::<MenuRegistry>().enabled_state(&target);
+    let menu = build_native_menu(app, model, &enabled)?;
+    let _previous = window.set_menu(menu)?;
+    Ok(())
+}
+
+/// アプリ全体のメニューを配置する（macOS）。
+///
+/// メニューが 1 つしかないので、有効・無効は**フォーカスされているウィンドウ**（活性化と同じ
+/// 解決。起動時に捕まえた値ではない）で決める。
+fn apply_app_wide<R: Runtime>(app: &AppHandle<R>, model: &MenuModel) -> tauri::Result<()> {
+    let target = resolve_target(app);
+    let enabled = app.state::<MenuRegistry>().enabled_state(&target);
+    let menu = build_native_menu(app, model, &enabled)?;
+    let _previous = app.set_menu(menu)?;
+    Ok(())
 }
 
 /// モデルを**プラットフォームの配置先へ配置する。ここが唯一の分岐である。**
@@ -887,30 +1241,139 @@ fn build_native_item<R: Runtime>(
 ///   （research.md「メニューとキーボードショートカット」）ので、並びは
 ///   [`top_level_sort_key`] が固定している。
 /// - [`MenuPlacement::PerWindow`]（Windows / Linux）: 現在の各ウィンドウへ `Window::set_menu`
-///   で付ける。**ここで見えているのは既存のウィンドウだけ**であり、後から作られるウィンドウは
-///   生成時に [`attach_to_window`] が受ける。
+///   で付ける。**ウィンドウごとに組み立てる**ので、有効・無効をウィンドウごとに持てる。
+///   ここで見えているのは既存のウィンドウだけであり、後から作られるウィンドウは生成時に
+///   [`attach_to_window`] が受ける。
 fn apply<R: Runtime>(app: &AppHandle<R>, model: &MenuModel) -> tauri::Result<()> {
-    let menu = build_native_menu(app, model)?;
     match PLACEMENT {
-        MenuPlacement::ApplicationWide => {
-            let _previous = app.set_menu(menu)?;
-        }
+        MenuPlacement::ApplicationWide => apply_app_wide(app, model),
         MenuPlacement::PerWindow => {
             for window in app.webview_windows().values() {
-                let _previous = window.set_menu(menu.clone())?;
+                apply_to_window(app, window, model)?;
             }
+            Ok(())
         }
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// テスト（タスク 7.4）
+// 有効・無効の更新（要件 3.5）
+// ---------------------------------------------------------------------------
+
+/// **有効・無効の再計算と反映。フォーカスが移るたび、およびウィンドウの集合が変わったときに
+/// 呼ぶ**（呼び出し元は `crate::window::on_window_event` の `Focused` と `Destroyed`、および
+/// 生成の完了）。
+///
+/// アプリ全体のメニューしか持てない環境（macOS）では、メニューがウィンドウごとの状態を持てない。
+/// したがって**その時点の対象ウィンドウ**（フォーカスされているウィンドウ）を解決し直し、
+/// 各項目の状態を計算し直して基盤の項目へ反映する。ウィンドウ単位のメニューを持つ環境
+/// （Windows / Linux）では、メニューがウィンドウごとに 1 つあるので**そのウィンドウ自身**の
+/// 状態で計算する。
+///
+/// **対象ウィンドウが無いときは対象が無いまま計算する**（述語は [`MenuTarget::window`] が
+/// `None` の状態を受け取る）。
+///
+/// メニューを組み立て直さないのは、フォーカス移動のたびにメニューバーを作り直すと表示が
+/// ちらつくためである（変えるのは項目の状態だけ）。
+pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
+    match PLACEMENT {
+        MenuPlacement::ApplicationWide => {
+            let Some(menu) = app.menu() else {
+                return;
+            };
+            let target = resolve_target(app);
+            let enabled = app.state::<MenuRegistry>().enabled_state(&target);
+            let changed = apply_enablement(&menu, &enabled);
+            log::info!(
+                "メニューの有効・無効を更新した: 対象={} 変更={changed} 件 無効={}",
+                target.describe(),
+                describe_disabled(&enabled),
+            );
+        }
+        MenuPlacement::PerWindow => {
+            for window in app.webview_windows().values() {
+                let Some(menu) = window.menu() else {
+                    continue;
+                };
+                let target = MenuTarget::resolve(app, Some(WindowLabel::new(window.label())));
+                let enabled = app.state::<MenuRegistry>().enabled_state(&target);
+                let changed = apply_enablement(&menu, &enabled);
+                log::info!(
+                    "メニューの有効・無効を更新した: 対象={} 変更={changed} 件 無効={}",
+                    target.describe(),
+                    describe_disabled(&enabled),
+                );
+            }
+        }
+    }
+}
+
+/// 記録に出す「無効な項目」の一覧。無効が無ければ `(なし)`。
+fn describe_disabled(enabled: &BTreeMap<MenuItemId, bool>) -> String {
+    let disabled: Vec<&str> = enabled
+        .iter()
+        .filter(|(_, is_enabled)| !**is_enabled)
+        .map(|(item, _)| item.as_str())
+        .collect();
+    if disabled.is_empty() {
+        "(なし)".to_owned()
+    } else {
+        disabled.join(", ")
+    }
+}
+
+/// メニュー木を辿り、各項目の有効・無効を今の計算結果へ合わせる。**変更した件数**を返す。
+///
+/// 入れ子の部分メニューまで降りる（基盤の `Menu::get` はトップレベルの項目しか引かないため、
+/// 自分で辿る）。
+fn apply_enablement<R: Runtime>(menu: &Menu<R>, enabled: &BTreeMap<MenuItemId, bool>) -> usize {
+    fn walk<R: Runtime>(
+        items: &[MenuItemKind<R>],
+        enabled: &BTreeMap<MenuItemId, bool>,
+        changed: &mut usize,
+    ) {
+        for kind in items {
+            match kind {
+                MenuItemKind::Submenu(submenu) => match submenu.items() {
+                    Ok(children) => walk(&children, enabled, changed),
+                    Err(error) => log::warn!("部分メニューの項目を取得できなかった: {error}"),
+                },
+                MenuItemKind::MenuItem(item) => {
+                    let Some(wanted) = enabled.get(&MenuItemId::new(item.id().0.as_str())) else {
+                        continue;
+                    };
+                    match item.is_enabled() {
+                        Ok(current) if current == *wanted => {}
+                        Ok(_) => match item.set_enabled(*wanted) {
+                            Ok(()) => *changed += 1,
+                            Err(error) => {
+                                log::warn!("メニュー項目の有効・無効を変えられなかった: {error}");
+                            }
+                        },
+                        Err(error) => log::warn!("メニュー項目の状態を取得できなかった: {error}"),
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut changed = 0;
+    match menu.items() {
+        Ok(items) => walk(&items, enabled, &mut changed),
+        Err(error) => log::warn!("メニューの項目を取得できなかった: {error}"),
+    }
+    changed
+}
+
+// ---------------------------------------------------------------------------
+// テスト（タスク 7.4 / 7.5）
 //
-// GUI を必要としない部分（登録の受理・拒否、モデルの組み立て、選択の通知）を固定する。
-// **ネットワークもイベントループも要らない** — 通知は登録元が渡した処理を直接呼ぶためである。
-// 実際のメニューの描画（GTK のメニューバー、macOS のアプリケーションメニュー）と、
-// 基盤のイベントから [`on_menu_event`] が呼ばれることは、ホスト側の GUI 実行でしか検証できない。
+// GUI を必要にしない部分（登録の受理・拒否、モデルの組み立て、選択の通知、対象ウィンドウの
+// 選び方、有効・無効の再計算）を固定する。**ネットワークもイベントループも要らない** — 通知は
+// 登録元が渡した処理を直接呼び、対象の解決と有効・無効の計算は純粋関数だからである。
+// 実際のメニューの描画（GTK のメニューバー、macOS のアプリケーションメニュー）と、基盤の
+// イベントから [`on_menu_event`] が呼ばれることは、ホスト側の GUI 実行でしか検証できない。
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -950,6 +1413,14 @@ mod tests {
         MenuPath::new(segments.iter().copied()).expect("テストの位置は空でない")
     }
 
+    /// 対象ウィンドウ（`MenuTarget` は非公開のフィールドを持つので、テストはここで組み立てる）。
+    fn target(window: Option<&str>, document: Option<&str>) -> MenuTarget {
+        MenuTarget {
+            window: window.map(WindowLabel::new),
+            document: document.map(PathBuf::from),
+        }
+    }
+
     #[test]
     fn a_registered_item_appears_at_the_requested_position() {
         let registry = MenuRegistry::new();
@@ -957,8 +1428,14 @@ mod tests {
 
         registry
             .enroll(
-                MenuItemSpec::new("document", "save", path(&["ファイル"]), "保存", recorder.handler())
-                    .with_accelerator("Ctrl+S"),
+                MenuItemSpec::new(
+                    "document",
+                    "save",
+                    path(&["ファイル"]),
+                    "保存",
+                    recorder.handler(),
+                )
+                .with_accelerator("Ctrl+S"),
             )
             .expect("登録できる");
         registry
@@ -1029,14 +1506,36 @@ mod tests {
 
         let seen = recorder.seen();
         assert_eq!(seen.len(), 1);
-        // **登録元が処理を振り分けられるだけの識別が届く**（登録元・項目・発生元）。
+        // **登録元が処理を振り分けられるだけの識別が届く**（登録元・項目・対象ウィンドウ）。
         assert_eq!(seen[0].owner().as_str(), "document");
         assert_eq!(seen[0].item().as_str(), "save");
         assert_eq!(
             seen[0].window().map(WindowLabel::as_str),
             Some("doc-1"),
-            "発生元の手掛かりが届く（無い場合は None）"
+            "対象ウィンドウが届く（無い場合は None）"
         );
+    }
+
+    #[test]
+    fn an_activation_without_a_target_still_notifies_with_no_window() {
+        // **どのウィンドウもフォーカスされていないとき**も選択の事実は登録元へ届き、対象は
+        // `None` である（対象が無いことをどう扱うかは登録元が決める）。
+        let registry = MenuRegistry::new();
+        let recorder = Recorder::default();
+        registry
+            .enroll(MenuItemSpec::new(
+                "document",
+                "save",
+                path(&["ファイル"]),
+                "保存",
+                recorder.handler(),
+            ))
+            .expect("登録できる");
+
+        assert!(registry.dispatch(&MenuItemId::new("save"), None));
+        let seen = recorder.seen();
+        assert_eq!(seen.len(), 1, "対象が無くても通知は届く");
+        assert_eq!(seen[0].window(), None);
     }
 
     #[test]
@@ -1054,7 +1553,10 @@ mod tests {
             .expect("登録できる");
 
         assert!(!registry.dispatch(&MenuItemId::new("存在しない"), None));
-        assert!(recorder.seen().is_empty(), "未登録の項目では誰にも通知しない");
+        assert!(
+            recorder.seen().is_empty(),
+            "未登録の項目では誰にも通知しない"
+        );
     }
 
     #[test]
@@ -1063,8 +1565,14 @@ mod tests {
         let recorder = Recorder::default();
         registry
             .enroll(
-                MenuItemSpec::new("document", "save", path(&["ファイル"]), "保存", recorder.handler())
-                    .with_accelerator("Ctrl+S"),
+                MenuItemSpec::new(
+                    "document",
+                    "save",
+                    path(&["ファイル"]),
+                    "保存",
+                    recorder.handler(),
+                )
+                .with_accelerator("Ctrl+S"),
             )
             .expect("先の登録は成功する");
 
@@ -1106,8 +1614,14 @@ mod tests {
         let registry = MenuRegistry::new();
         let recorder = Recorder::default();
         let spec = || {
-            MenuItemSpec::new("document", "save", path(&["ファイル"]), "保存", recorder.handler())
-                .with_accelerator("Ctrl+S")
+            MenuItemSpec::new(
+                "document",
+                "save",
+                path(&["ファイル"]),
+                "保存",
+                recorder.handler(),
+            )
+            .with_accelerator("Ctrl+S")
         };
         registry.enroll(spec()).expect("1 回目は成功する");
         // メニューは再構築されるので、同じ登録が何度も来る（4.6 の冪等性）。
@@ -1116,7 +1630,11 @@ mod tests {
 
         let model = registry.model();
         assert_eq!(model.items().len(), 1, "同じ項目が増えない");
-        assert_eq!(registry.lock().accelerators.len(), 1, "組み合わせも 1 つだけ");
+        assert_eq!(
+            registry.lock().accelerators.len(),
+            1,
+            "組み合わせも 1 つだけ"
+        );
     }
 
     #[test]
@@ -1125,22 +1643,40 @@ mod tests {
         let recorder = Recorder::default();
         registry
             .enroll(
-                MenuItemSpec::new("document", "save", path(&["ファイル"]), "保存", recorder.handler())
-                    .with_accelerator("Ctrl+S"),
+                MenuItemSpec::new(
+                    "document",
+                    "save",
+                    path(&["ファイル"]),
+                    "保存",
+                    recorder.handler(),
+                )
+                .with_accelerator("Ctrl+S"),
             )
             .expect("登録できる");
         registry
             .enroll(
-                MenuItemSpec::new("document", "save", path(&["ファイル"]), "保存", recorder.handler())
-                    .with_accelerator("Ctrl+O"),
+                MenuItemSpec::new(
+                    "document",
+                    "save",
+                    path(&["ファイル"]),
+                    "保存",
+                    recorder.handler(),
+                )
+                .with_accelerator("Ctrl+O"),
             )
             .expect("同じ項目の組み合わせの更新として成功する");
 
         // 解放された組み合わせは別の登録元が使える（使われない組み合わせを残さない）。
         registry
             .enroll(
-                MenuItemSpec::new("macro", "open", path(&["ファイル"]), "開く", recorder.handler())
-                    .with_accelerator("Ctrl+S"),
+                MenuItemSpec::new(
+                    "macro",
+                    "open",
+                    path(&["ファイル"]),
+                    "開く",
+                    recorder.handler(),
+                )
+                .with_accelerator("Ctrl+S"),
             )
             .expect("解放済みの組み合わせは競合しない");
         assert_eq!(registry.lock().accelerators.len(), 2);
@@ -1153,8 +1689,14 @@ mod tests {
         // `CmdOrCtrl` はプラットフォーム依存なので 4.6 が受理しない。**この項目は登録されない。**
         let error = registry
             .enroll(
-                MenuItemSpec::new("document", "save", path(&["ファイル"]), "保存", recorder.handler())
-                    .with_accelerator("CmdOrCtrl+S"),
+                MenuItemSpec::new(
+                    "document",
+                    "save",
+                    path(&["ファイル"]),
+                    "保存",
+                    recorder.handler(),
+                )
+                .with_accelerator("CmdOrCtrl+S"),
             )
             .expect_err("解釈できない綴りは登録時に拒否する");
         match error {
@@ -1183,7 +1725,10 @@ mod tests {
             Err(MenuPathError::BareTopLevelItem)
         );
         assert_eq!(MenuPath::new([""]), Err(MenuPathError::EmptySegment));
-        assert_eq!(MenuPath::new(["ファイル", " "]), Err(MenuPathError::EmptySegment));
+        assert_eq!(
+            MenuPath::new(["ファイル", " "]),
+            Err(MenuPathError::EmptySegment)
+        );
     }
 
     #[test]
@@ -1217,10 +1762,12 @@ mod tests {
         // 項目はすべて部分メニューの下にあり、トップレベルには現れない。
         for item in model.items() {
             assert!(model.top().iter().any(|submenu| {
-                submenu.children().iter().any(|child| matches!(
-                    child,
-                    MenuNode::Item(node) if node.item() == item.item()
-                ))
+                submenu.children().iter().any(|child| {
+                    matches!(
+                        child,
+                        MenuNode::Item(node) if node.item() == item.item()
+                    )
+                })
             }));
         }
     }
@@ -1276,6 +1823,232 @@ mod tests {
         assert_eq!(quit.top_level(), APPLICATION_MENU_LABEL);
         #[cfg(not(target_os = "macos"))]
         assert_eq!(quit.top_level(), FILE_MENU_LABEL);
-        assert!(quit.segments().len() >= 1);
+        assert!(!quit.segments().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // タスク 7.5: ショートカットの割当（要件 3.3）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_builtin_quit_shortcut_is_platform_resolved_and_conventional() {
+        // **プラットフォームで意味が変わらない綴りを与える**（`CmdOrCtrl` は 4.6 が拒否する）。
+        let chord = Accelerator::parse(QUIT_ACCELERATOR_SPELLING).expect("解決済みの綴りである");
+        #[cfg(target_os = "macos")]
+        let expected = "super+KeyQ";
+        #[cfg(not(target_os = "macos"))]
+        let expected = "ctrl+KeyQ";
+        assert_eq!(
+            chord.as_str(),
+            expected,
+            "正準形へ畳まれる（表示は基盤が行う）"
+        );
+        // 組み込みの項目も同じ登録口を通る。割り当てた組み合わせはメニューのモデルに現れ、
+        // 基盤へはこの正準形がそのまま渡る（[`build_native_item`]）。
+        let registry = MenuRegistry::new();
+        let recorder = Recorder::default();
+        registry
+            .enroll(
+                MenuItemSpec::new(
+                    BUILTIN_OWNER,
+                    QUIT_ITEM_ID,
+                    builtin_quit_path(),
+                    QUIT_LABEL,
+                    recorder.handler(),
+                )
+                .with_accelerator(QUIT_ACCELERATOR_SPELLING),
+            )
+            .expect("終了項目を登録できる");
+        let model = registry.model();
+        let quit = model
+            .items()
+            .into_iter()
+            .find(|item| item.item().as_str() == QUIT_ITEM_ID)
+            .expect("モデルに終了項目がある");
+        assert_eq!(
+            quit.accelerator().map(Accelerator::as_str),
+            Some(expected),
+            "表示される組み合わせが項目に載っている"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // タスク 7.5: 対象ウィンドウへの振り向け（要件 3.5）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_per_window_activation_targets_the_originating_window() {
+        // ウィンドウ単位のメニューでは**活性化の発生元**が対象である。ほかのウィンドウが
+        // フォーカスされていても、メニューを所有する側が対象になる。
+        assert_eq!(
+            routed_target(
+                MenuPlacement::PerWindow,
+                Some(WindowLabel::new("doc-1")),
+                Some(WindowLabel::new("empty-1")),
+            )
+            .map(|label| label.as_str().to_owned()),
+            Some("doc-1".to_owned()),
+        );
+    }
+
+    #[test]
+    fn an_app_wide_activation_targets_the_focused_window() {
+        // アプリ全体のメニューではメニューが 1 つしかないので、**活性化の時点でフォーカスされて
+        // いるウィンドウ**が対象である。以前の（古くなりうる）値を第 2 引数に混ぜても、それが
+        // 勝つことはない。
+        assert_eq!(
+            routed_target(
+                MenuPlacement::ApplicationWide,
+                Some(WindowLabel::new("empty-1")),
+                Some(WindowLabel::new("doc-1")),
+            )
+            .map(|label| label.as_str().to_owned()),
+            Some("doc-1".to_owned()),
+            "フォーカス中のウィンドウが他のどのウィンドウより優先される"
+        );
+        // 手掛かりが無くてもフォーカスだけで決まる。
+        assert_eq!(
+            routed_target(
+                MenuPlacement::ApplicationWide,
+                None,
+                Some(WindowLabel::new("empty-1")),
+            )
+            .map(|label| label.as_str().to_owned()),
+            Some("empty-1".to_owned()),
+        );
+    }
+
+    #[test]
+    fn nothing_focused_yields_no_target() {
+        // **どのウィンドウもフォーカスされていないとき**は対象が無い。登録元の処理は
+        // `MenuSelection::window()` に `None` を受け取る（選択そのものは通知される）。
+        for placement in [MenuPlacement::PerWindow, MenuPlacement::ApplicationWide] {
+            assert_eq!(routed_target(placement, None, None), None, "{placement:?}");
+        }
+        assert_eq!(select_focused(Vec::<(WindowLabel, bool)>::new()), None);
+        assert_eq!(
+            select_focused([
+                (WindowLabel::new("doc-1"), false),
+                (WindowLabel::new("empty-1"), false),
+            ]),
+            None,
+            "登録はあるがフォーカスされていない場合は対象にしない"
+        );
+    }
+
+    #[test]
+    fn the_target_follows_the_focus_between_activations() {
+        // **フォーカスが移ると対象も移る。** 解決は状態を持たない（起動時に捕まえた値を使わない）
+        // ので、同じ関数を再度呼ぶだけで新しいフォーカスが反映される。
+        let first = routed_target(
+            MenuPlacement::ApplicationWide,
+            None,
+            Some(WindowLabel::new("empty-1")),
+        );
+        let second = routed_target(
+            MenuPlacement::ApplicationWide,
+            None,
+            Some(WindowLabel::new("doc-1")),
+        );
+        assert_ne!(first, second);
+        assert_eq!(
+            second.map(|label| label.as_str().to_owned()),
+            Some("doc-1".to_owned()),
+        );
+    }
+
+    #[test]
+    fn the_focused_window_is_selected_deterministically() {
+        // **フォーカス中のウィンドウを選ぶ**（他の候補は選ばない）。列挙の順序には依存せず、
+        // 複数が同時にフォーカスを報告してもラベルの辞書順で決まる。
+        assert_eq!(
+            select_focused([
+                (WindowLabel::new("doc-2"), false),
+                (WindowLabel::new("doc-1"), true),
+                (WindowLabel::new("empty-1"), false),
+            ])
+            .map(|label| label.as_str().to_owned()),
+            Some("doc-1".to_owned()),
+        );
+        assert_eq!(
+            select_focused([
+                (WindowLabel::new("doc-2"), true),
+                (WindowLabel::new("doc-1"), true),
+            ])
+            .map(|label| label.as_str().to_owned()),
+            Some("doc-1".to_owned()),
+            "同時に複数が報告しても結果が実行ごとに変わらない"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // タスク 7.5: 有効・無効の再計算（要件 3.5）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn enablement_is_recomputed_for_each_target_window() {
+        // **述語は対象ウィンドウで評価される**（アプリ全体のメニューがウィンドウごとの状態を
+        // 持てないことへの答え）。ドキュメントを持つウィンドウを対象にしたときだけ有効になる。
+        let registry = MenuRegistry::new();
+        let recorder = Recorder::default();
+        registry
+            .enroll(
+                MenuItemSpec::new(
+                    "document",
+                    "save",
+                    path(&["ファイル"]),
+                    "保存",
+                    recorder.handler(),
+                )
+                .with_enablement(|target: &MenuTarget| target.document().is_some()),
+            )
+            .expect("登録できる");
+        registry
+            .enroll(MenuItemSpec::new(
+                "app",
+                "quit-like",
+                path(&["ファイル"]),
+                "常に有効",
+                recorder.handler(),
+            ))
+            .expect("述語を渡さない項目は常に有効である");
+
+        // ドキュメントを持つウィンドウが対象なら有効。
+        let with_document = registry.enabled_state(&target(Some("doc-1"), Some("/tmp/one.csv")));
+        assert_eq!(with_document.get(&MenuItemId::new("save")), Some(&true));
+        assert_eq!(
+            with_document.get(&MenuItemId::new("quit-like")),
+            Some(&true)
+        );
+
+        // **フォーカスが移って対象が変わると無効になる**（同じ登録でも対象しだい）。
+        let without_document = registry.enabled_state(&target(Some("empty-1"), None));
+        assert_eq!(without_document.get(&MenuItemId::new("save")), Some(&false));
+        assert_eq!(
+            without_document.get(&MenuItemId::new("quit-like")),
+            Some(&true),
+            "述語の無い項目は対象に依存しない"
+        );
+        assert_eq!(describe_disabled(&without_document), "save");
+
+        // **対象ウィンドウが無いとき**も述語は評価される（対象が無いことを受け取る）。
+        let no_target = registry.enabled_state(&target(None, None));
+        assert_eq!(no_target.get(&MenuItemId::new("save")), Some(&false));
+        assert_eq!(no_target.get(&MenuItemId::new("quit-like")), Some(&true));
+        assert_eq!(describe_disabled(&no_target), "save");
+    }
+
+    #[test]
+    fn the_target_description_names_the_window_and_its_document() {
+        // 記録に出す 1 行（GUI 実行での観測はこの行と `refresh` の行で行う）。
+        assert_eq!(
+            target(Some("doc-1"), Some("/tmp/one.csv")).describe(),
+            "doc-1（ドキュメント=/tmp/one.csv）"
+        );
+        assert_eq!(
+            target(Some("empty-1"), None).describe(),
+            "empty-1（ドキュメントなし）"
+        );
+        assert_eq!(target(None, None).describe(), "(対象ウィンドウなし)");
     }
 }
