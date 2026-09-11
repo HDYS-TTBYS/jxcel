@@ -356,7 +356,7 @@
 
 - [ ] 9. Integration: フロントエンドのシェル
 
-- [ ] 9.1 レイアウト領域と遷移を実装する
+- [x] 9.1 レイアウト領域と遷移を実装する
   - 個別機能の画面が差し込まれる領域を定義する
   - 画面間の遷移を単一の仕組みで扱い、現在表示されている画面を識別できるようにする
   - **完了状態**: 仮の画面を 2 つ差し込んで領域に表示され、遷移すると現在の画面の識別が変わることが確認できる
@@ -479,6 +479,13 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **9.1（シェルの形・重要）**: 遷移の仕組みは `src/shell/router.tsx` の **`useShellRouter(registry)` 1 つだけ**で、現在画面の状態（`useState`）と変更の入口（`navigate`）を単独で持つ。画面は **`SHELL_SCREEN_REGISTRY` の `screens` と `initial`** で登録し、画面が受け取るのは **`ScreenProps { screenId, navigate }` だけ**（`ScreenDefinition.component` は `ComponentType<ScreenProps>`）。**画面が自前のレイアウト・遷移を作る余地は型で塞いである。**`history` / `window.location` / react-router の類は `src/` に 1 つも無い（grep で確認）。
+- **9.1（現在画面の識別・重要）**: 領域の要素 `[data-testid="jxcel-shell-region"]` に **`data-shell-screen={screen.id}`** が付く（同じ値が `aria-label` と `[data-testid="jxcel-shell-screen-title"]` にも出る）。**外から 1 式で読める**（10.4 の 3 OS 確認はこれを使える）。`ScreenId = string` だが、登録簿が一意性・空文字・初期画面の存在を検査し、`navigate` は未知の id で**例外を投げる**（黙って別画面へ落ちない）。
+- **9.1（受け入れの再現手順）**: `npm run dev`（`http://localhost:1420`）を起動し、ブラウザで開き、**一時的な画面 2 つを登録簿に差し込んで**遷移を押す。実測（レビュー担当が再現）: 遷移前 `data-shell-screen="tmp.a"` かつ領域に `tmp-screen-a` のみ、遷移後 `"tmp.b"` かつ `tmp-screen-b` のみ、`tmp.a → tmp.b → tmp.a → tmp.b` の双方向で識別・内容・aria・見出しが追随。**一時的な画面は証拠を取った後に撤去する**（テスト用の足場を追跡対象に残さない。9.7 のスモーク画面が同じ経路を通る）。
+- **9.1**: `src/shell/theme.ts` と `src/shell/ScreenBoundary.tsx` は**この段ではコメント（適用先の記述）だけ**を変えた。**9.3 の境界が包むのは領域の中の `<Screen …/>` の 1 式だけ**（クロームや領域そのものを包むとアプリ全体が止まる）。**9.2 の外観が適用されるのはシェル自身のクローム**（`[data-testid="jxcel-shell"]` の背景と `[data-testid="jxcel-shell-chrome"]` のヘッダ帯）で、個別画面は自前の配色を持たずシェルの配色に従う。**10.4 の画素検査の目印であるアクセント色 `#c2185b`（`INITIAL_SCREEN_ACCENT_COLOR`）はクロームに残っている。**
+- **9.1（プロセスの申し送り）**: このタスクの実装担当は **`yield` に null を渡して 2 回とも報告を返さなかった**（作業は完了していた）。レビュー担当が作業ツリーから直接すべてを再検証して承認している。**同じ症状が出たら、報告の再要求ではなく、レビュー担当に独立再現させる方が速い。**
+
 
 - **8.3（機構・重要）**: 読みと適用は起動順序の手順 1（`reserve_render_fallback_point`）で行う。**設定ストアを自前で開き**（`init_diagnostics` と同じ実体を `Weak` レジストリ経由で共有するので二重には開かない）、印を読み、**`Builder::build` より前＝GTK/WebKit のコードが動く前に `std::env::set_var` で適用する**。失敗しても起動は続く（`FallbackOutcome::unreadable()`）。**記録は手順 4.8**（記録器が存在した後）。単一インスタンスの登録位置と残留掃除の位置は 5.1 のまま動かしていない。**起動順序はこの形で固定**。
 - **8.3（Decision 7 の遵守・重要）**: **特定の変数に賭けない。**採用する並びは `crates/app-shell/src/render_fallback.rs` の `LINUX_POLICY`（現在は `WEBKIT_DISABLE_DMABUF_RENDERER=1` の 1 件）だけが決め、候補と費用の対照は同じファイルの `CANDIDATES` にある（DMA-BUF の高速経路を捨てる／ハードウェア支援を切る／性能を落とさないという報告がある、の 3 種）。**差し替えは `LINUX_POLICY` を書き換えるだけ**で機構も記録形式も変えなくてよい。Windows / macOS では何も適用しない（`RenderPlatform` で分岐）。
