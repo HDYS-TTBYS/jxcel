@@ -1,11 +1,20 @@
-# CI パイプライン（tasks.md 1.1 / 1.5 / Requirements 3.2, 6.2, 6.3, 8.3）
-#   - test : Linux / macOS / Windows の 3 OS マトリクスでビルドとテストを実行する
-#     （決定的シリアライズは OS を跨いだバイト同一性を要求するため 3 OS 必須）。
+# CI パイプライン（tasks.md 1.1 / 1.5 / Requirements 3.2, 6.1, 6.2, 6.3, 6.7, 8.3）
+#
+#   - test : Linux / macOS / Windows の 3 OS マトリクスでビルドとテストを実行し、
+#     さらに 3 プラットフォーム分の配布物（バンドル）を生成して、起動とウィンドウの表示を
+#     確認し、成果物として保存する（tasks.md 1.5。要件 6.1, 6.7）。
 #     本スペックはこの既存マトリクスを拡張する。**プラットフォーム別のワークフローを
-#     新設しない**（要件 6.2）。
+#     新設しない**（要件 6.2）。ジョブも増やさない（`test` は 1 つのまま）。
+#     （決定的シリアライズは OS を跨いだバイト同一性を要求するため 3 OS 必須）。
 #   - audit: cargo audit をゲートとして組み込む。非 0 終了で即パイプライン失敗
 #     （例外・スキップ・エラー無視の設定は一切許可しない）。Tauri の依存集合を
 #     加えた状態でも本ゲートが走り続けることを確認する（要件 6.3）。
+#
+# Linux のランナーは**最も古い対象環境**（Ubuntu 22.04 / Debian 12）に固定する。
+# 新しい環境でビルドすると、配布物に同梱される低レベルライブラリ（libwayland / Mesa /
+# libxkbcommon など）が古い環境で動かない（design.md「BuildPipeline」Batch / Job Contract、
+# research.md「AppImage の自己完結性とサイズ」）。`ubuntu-latest`（= 24.04）へ戻してはならない。
+#
 # zip >= 2.3.0 の下限（RUSTSEC-2025-0168、design.md Security Considerations）は
 # scripts/check-zip-floor.sh が Cargo.lock の解決版を機械検査する（両ジョブで実行）。
 name: CI
@@ -21,7 +30,30 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Linux だけ最も古い対象環境に固定する（上記）。macOS / Windows は OS 標準の
+        # WebView にリンクするため、追加のシステム依存を要さない。
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+        include:
+          # OS ごとの配布物の形式（要件 6.1）。`bundle.targets` を tauri.conf.json に
+          # 置くと単一の値しか持てず他の OS でバンドルに失敗するため、ここから
+          # `npx tauri build --bundles` へ渡す。
+          #   Linux   : `appimage`（単一ファイルの配布物。要件 1.1）/ `deb`
+          #   macOS   : `app`（起動検証の対象）/ `dmg`
+          #   Windows : `nsis`（インストーラ。起動検証はこれで導入した実行ファイルに対して行う）
+          - os: ubuntu-22.04
+            bundles: appimage,deb
+            artifact_paths: |
+              target/release/bundle/appimage/*.AppImage
+              target/release/bundle/deb/*.deb
+          - os: macos-latest
+            bundles: app,dmg
+            artifact_paths: |
+              target/release/bundle/macos/*.app
+              target/release/bundle/dmg/*.dmg
+          - os: windows-latest
+            bundles: nsis
+            artifact_paths: |
+              target/release/bundle/nsis/*.exe
     steps:
       - uses: actions/checkout@v4
 
@@ -42,8 +74,13 @@ jobs:
       #     パッケージ一覧には現れないが、既定 feature のビルドには必須である。
       #   - pkg-config                   : 上記の解決機構そのもの
       #   - patchelf                     : AppImage バンドル時の実行ファイル書き換え（タスク 1.5）
-      #   - xvfb                         : 仮想ディスプレイ。ウィンドウ表示を伴う検証
-      #     （タスク 1.5 の起動・描画確認）は GUI の無いランナーではこの上で走らせる。
+      #   - xvfb                         : 仮想ディスプレイ。GUI の無いランナーで
+      #     配布物を起動しウィンドウの表示を確認するために使う（タスク 1.5。design.md
+      #     「BuildPipeline」が省略できない前提としている）
+      #   - x11-utils                    : `xwininfo`。ウィンドウツリーの走査に使う
+      #   - libfuse2                     : Tauri が生成する AppImage のランタイムが FUSE 2 を
+      #     dlopen する版に対応する。FUSE が使えない環境では
+      #     `APPIMAGE_EXTRACT_AND_RUN=1` で展開実行へ切り替えられる
       # macOS / Windows は OS 標準の WebView を使うため追加パッケージを要さない。
       - name: Install Linux system dependencies (Tauri v2)
         if: runner.os == 'Linux'
@@ -59,21 +96,27 @@ jobs:
             libdbus-1-dev \
             pkg-config \
             patchelf \
-            xvfb
+            xvfb \
+            x11-utils \
+            libfuse2
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       # フロントエンドのツールチェーン（React + Vite + TypeScript。tasks.md 1.4 / 1.5）。
       # 本スペックのフロントエンドは `src/` にあり、ビルドは Node 側で行う。Rust の
-      # ビルドより先に入れておくことで、後続タスクが追加する `npm ci` / `tsc --noEmit` の
-      # 段が同じジョブに載る（ジョブを新設しない = 要件 6.2）。
-      # なお package-lock.json はタスク 1.4 が追加するため、`cache: npm` は指定しない
-      # （lock ファイル不在時に actions/setup-node が失敗するため）。
+      # ビルドより先に入れておくことで、後続タスクが追加する `tsc --noEmit` の段が
+      # 同じジョブに載る（ジョブを新設しない = 要件 6.2）。
+      # `package-lock.json` が追跡対象になった（タスク 1.4）ため `cache: npm` を有効にし、
+      # 依存解決は `npm ci`（ロックファイルどおりの固定解決）で行う。
       - name: Install Node.js frontend toolchain
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -100,6 +143,150 @@ jobs:
       - name: zip floor check (>= 2.3.0)
         shell: bash
         run: bash scripts/check-zip-floor.sh Cargo.lock
+
+      # 配布物の生成（要件 6.1）。**必ず Tauri CLI 経由で生成する**（タスク 1.4 の申し送り）。
+      # 素の `cargo build` は `devUrl` があるため `frontendDist` を埋め込まず、
+      # 配布物が白いウィンドウになる。`npx tauri build` は `beforeBuildCommand`
+      # （`npm run build`）でフロントエンドを生成してから release ビルドとバンドルを行う。
+      # 形式はマトリクスの `bundles` で OS ごとに指定する（上記の include を参照）。
+      - name: Build platform bundle
+        run: npx tauri build --bundles ${{ matrix.bundles }}
+
+      # 起動の検証（tasks.md 1.5 の完了状態）。プロセスの起動ではなく、**ウィンドウが
+      # 現れること**を確認する。GUI を持たないランナーでは仮想ディスプレイ（Xvfb）上で
+      # 起動する（design.md「BuildPipeline」の前提）。
+      # 検査本体は POSIX sh の `scripts/check-x11-window.sh`（ローカルでも同じものを実行できる）。
+      # 対象は生成した AppImage（`target/release/bundle/appimage/*.AppImage`）。
+      # FUSE が使えないランナーでは `APPIMAGE_EXTRACT_AND_RUN=1`（展開実行）へ退避する。
+      - name: Verify bundle opens a window (Linux / Xvfb)
+        if: runner.os == 'Linux'
+        run: |
+          set -- target/release/bundle/appimage/*.AppImage
+          appimage=$1
+          if ! xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+               sh scripts/check-x11-window.sh "$appimage" jxcel 60; then
+            echo "FUSE 経由で起動できなかったため、APPIMAGE_EXTRACT_AND_RUN=1 で再試行します" >&2
+            export APPIMAGE_EXTRACT_AND_RUN=1
+            xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+              sh scripts/check-x11-window.sh "$appimage" jxcel 60
+          fi
+
+      # 起動の検証（macOS）。**追加のランナー設定は不要**だが、Apple Silicon では
+      # コード署名が必須であるため、`tauri.conf.json` の
+      # `bundle.macOS.signingIdentity` に疑似 identity `-`（ad-hoc 署名）を設定してある
+      # （Tauri 公式ドキュメント「macOS Code Signing → Ad-Hoc Signing」）。これが無いと
+      # tauri-bundler は署名自体を省略し（app.rs の分岐）、配布物が起動できない可能性がある。
+      # ランナー自体はウィンドウサーバを持つ VM で、GUI アプリの起動とウィンドウの観測が
+      # できる（GitHub-hosted macOS ランナー上での GUI アプリ起動の実例がある）。
+      # 観測は CoreGraphics の `CGWindowListCopyWindowInfo` で行う。画面収録の許可を
+      # 要する情報（ウィンドウ名）は使わず、所有者 pid・レイヤー・寸法だけで判定する。
+      - name: Verify bundle opens a window (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="target/release/bundle/macos/jxcel.app/Contents/MacOS/jxcel"
+          SPIKE="$RUNNER_TEMP/check-window.swift"
+          LOG="$RUNNER_TEMP/jxcel-macos.log"
+          if [ ! -x "$APP" ]; then
+            echo "NG: 配布物の実行ファイルがありません: $APP" >&2
+            exit 1
+          fi
+          cat > "$SPIKE" <<'SWIFT'
+          import CoreGraphics
+          import Darwin
+          import Foundation
+
+          // 起動したアプリの pid を引き、そのプロセスが所有する通常レイヤー（0）の
+          // 100x100 以上のウィンドウが現れるまで最大 60 秒待つ。
+          let pid = Int32(CommandLine.arguments[1])!
+          let deadline = Date().addingTimeInterval(60)
+          while Date() < deadline {
+              if kill(pid, 0) != 0 {
+                  FileHandle.standardError.write("NG: アプリがウィンドウを出す前に終了しました\n".data(using: .utf8)!)
+                  exit(1)
+              }
+              if let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] {
+                  for w in list {
+                      guard let owner = w[kCGWindowOwnerPID as String] as? Int, owner == Int(pid) else { continue }
+                      guard let layer = w[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
+                      guard let b = w[kCGWindowBounds as String] as? [String: Any],
+                            let width = b["Width"] as? Double, let height = b["Height"] as? Double,
+                            width >= 100, height >= 100 else { continue }
+                      print("OK: ウィンドウ \(Int(width))x\(Int(height)) が現れました (pid=\(pid))")
+                      exit(0)
+                  }
+              }
+              Thread.sleep(forTimeInterval: 1.0)
+          }
+          FileHandle.standardError.write("NG: 60 秒以内にウィンドウが現れませんでした\n".data(using: .utf8)!)
+          exit(1)
+          SWIFT
+          nohup "$APP" >"$LOG" 2>&1 &
+          pid=$!
+          status=0
+          swift "$SPIKE" "$pid" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "--- アプリの出力 ---" >&2
+            cat "$LOG" >&2 || true
+          fi
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          exit "$status"
+
+      # 起動の検証（Windows）。**仮想ディスプレイのような追加設定は不要**である。
+      # ウィンドウの有無は .NET の `Process.MainWindowHandle` で判定する。これは
+      # 呼び出し元と同じデスクトップ上のトップレベルウィンドウを列挙するため、
+      # ランナーの子プロセスとして起動したアプリに対して成立する（デスクトップが
+      # 可視かどうかに依存しない）。
+      # 検証対象は配布物（NSIS インストーラ `target/release/bundle/nsis/*-setup.exe`）を
+      # `/S` で無人インストールして得られる実行ファイルである。既定の installMode は
+      # `currentUser` なので導入先は `%LOCALAPPDATA%\jxcel\jxcel.exe` になる。
+      # WebView2 ランタイムが導入されていない場合は、インストーラが bootstrapper を
+      # 取得して `/silent /install` で導入する（既定の downloadBootstrapper）。
+      - name: Verify bundle opens a window (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem "target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          if (-not $setup) { throw "NSIS インストーラが見つかりません" }
+          Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait
+
+          $exe = Join-Path $env:LOCALAPPDATA "jxcel\jxcel.exe"
+          if (-not (Test-Path $exe)) {
+            $found = Get-ChildItem -Path $env:LOCALAPPDATA -Filter "jxcel.exe" -Recurse -Depth 3 -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($found) { $exe = $found.FullName }
+          }
+          if (-not (Test-Path $exe)) { throw "導入された実行ファイルが見つかりません" }
+
+          $p = Start-Process -FilePath $exe -PassThru
+          $deadline = (Get-Date).AddSeconds(60)
+          $title = $null
+          while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 500
+            if ($p.HasExited) { throw "アプリがウィンドウを出す前に終了しました (exit=$($p.ExitCode))" }
+            $p.Refresh()
+            if ($p.MainWindowHandle -ne 0) { $title = $p.MainWindowTitle; break }
+          }
+          if (-not $title) { throw "60 秒以内にウィンドウが現れませんでした" }
+          if ($title -notmatch "jxcel") { throw "予期しないウィンドウタイトル: $title" }
+          Write-Host "OK: ウィンドウ '$title' が現れました (pid=$($p.Id))"
+          Stop-Process -Id $p.Id -Force
+
+      # 成果物の保存（要件 6.7）。名前は `jxcel-bundle-<runner os>` で安定させ、1 回の
+      # 実行で 3 プラットフォーム分を取得できるようにする。`if-no-files-found: error`
+      # により、バンドルが生成されていなければこの段でパイプラインを落とす。
+      # 失敗した段があっても成果物を取得できるよう `if: !cancelled()` を付ける。
+      # 注意: GitHub の成果物はファイルの実行権限を保持しない。ダウンロードした
+      # AppImage / `.app` を実行する場合は権限の復元（`chmod +x` など）が必要である。
+      - name: Upload platform bundles
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: jxcel-bundle-${{ matrix.os }}
+          path: ${{ matrix.artifact_paths }}
+          if-no-files-found: error
 
   audit:
     name: Security audit (cargo audit)

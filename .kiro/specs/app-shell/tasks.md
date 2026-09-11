@@ -35,7 +35,7 @@
   - _Requirements: 1.1, 1.2_
   - _Depends: 1.3_
 
-- [ ] 1.5 CI に 3 OS の Tauri ビルド段と画面環境を追加する
+- [x] 1.5 CI に 3 OS の Tauri ビルド段と画面環境を追加する
   - 既存のマトリクスを拡張して 3 プラットフォームの配布物を生成する。**プラットフォーム別のワークフローを新設しない**
   - Linux のビルドは最も古い対象環境で行う。新しい環境でビルドすると同梱した低レベルライブラリが古い環境で動かない
   - 起動を伴う検証のために Linux へ仮想ディスプレイを用意する。これなしには配布物の起動検証が成立しない
@@ -479,6 +479,13 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **1.5**: 配布物は `npx tauri build --bundles <OS 別>` で作る（Linux `appimage,deb` / macOS `app,dmg` / Windows `nsis`）。ローカル実測: **AppImage 76 MB（79,559,160 B）**、deb 2.8 MB、素の release バイナリ 11 MB。research.md の「WebKitGTK 同梱で約 76 MB」と一致。CI の Linux は**最古の対象環境 `ubuntu-22.04`** に固定した（1.1 の `ubuntu-latest` から変更）。
+- **1.5**: **`actions/upload-artifact` は実行権限を保持しない。** 10.2 が配布物から補助プロセスや実行ファイルを取り出す際は権限の復元が要る。1.7 の Linux 配置検証でも同じ前提に立つこと。
+- **1.5**: macOS は `bundle.macOS.signingIdentity: "-"`（ad-hoc 署名）を設定している。未設定だと tauri-bundler が `codesign` 自体を飛ばして `.app` が未封緘のまま残る。ad-hoc は Gatekeeper / 公証を満たさず、署名配布は本スペックの非目標（要件 1.2 の意味は変わらない）。
+- **1.5**: bundle identifier `com.jxcel.app` は Tauri CLI が「`.app` で終わると macOS のバンドル拡張子と衝突する」と助言警告を出すが、**変更しない**。逆 DNS として妥当であり、identifier から導出されるパス（アプリデータ／ログ領域）と single-instance の D-Bus 名・ミューテックス名が 4.x / 5.1 の前提になるため、ここで動かすと後戻りが大きい。
+- **1.5**: ウィンドウ出現の検証は `scripts/check-x11-window.sh`（POSIX sh、`xwininfo -root -tree` を解析し最小寸法で helper ウィンドウを除外、EXIT トラップで子孫を終了）。ローカルで**正例（実 AppImage で exit 0）と負例（存在しないタイトルで exit 1）を実測済み**なので、CI の Linux 段だけでなく手元の GUI 検証にもそのまま使える。macOS 段は `CGWindowListCopyWindowInfo` を Swift でポーリング、Windows 段は NSIS を `/S` 導入して `MainWindowHandle` を検証する（**どちらもこの環境では実行できず、静的評価のみ**）。
+- **1.5**: アイコン一式は `src-tauri/icons/app-icon.png`（1024x1024 RGBA、PIL で決定的に生成）を原図に `npx tauri icon` で生成し、`bundle.icon` に 32/128/128@2x/icns/ico を列挙する。**この原図と生成物はビルド入力なのでコミットする**（`target/` ではない）。
 
 - **1.3**: `tauri-plugin-dialog` は `tauri-plugin-fs` を**非 optional の通常依存**として全リリースで持つ（crates.io の依存データで確認）。したがって 1.3 の「fs/shell プラグインを依存に入れない」という制約と design.md Technology Stack の dialog 採用は両立しない。1.3 は dialog を宣言せず、競合を `src-tauri/Cargo.toml` と `src-tauri/src/dialog.rs` に記録して 7.7 へ送った。7.7 は (a) dialog を宣言して推移的 `tauri-plugin-fs` クレートを許容する（未登録かつ `fs:*` 権限なしなので要件 4.7 の到達経路は生じず、7.3/10.1 の機械検査は capability JSON を見るため影響しない）か、(b) `rfd` を直接使う（`AsyncFileDialog::set_parent`）かを選ぶこと。要件 2.4 はどちらでも満たせる。
 - **1.3**: `tauri::generate_context!()` は `build.frontendDist` のパスが存在しないとコンパイル時に panic する（`devUrl` を設定していない場合）。このため 1.3 は最小の `src/index.html` を追跡対象で置き、`frontendDist` を `../src` に向けていた。**1.4 で `devUrl` を設定したためこの panic 条件は解消済み**で、`frontendDist` は `../dist` を指している。
