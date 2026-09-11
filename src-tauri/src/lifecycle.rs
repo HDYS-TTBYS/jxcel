@@ -46,21 +46,34 @@
 //! [`vetoes_exit`] の doc）。Dock アイコンのクリック（`RunEvent::Reopen`）は `handle_reopen`
 //! が扱う（macOS のみ。ウィンドウのレジストリ 6.1 が入るまでの seam）。
 //!
+//! タスク 5.5 が加えたのは**異常終了の記録**である（要件 8.2）。パニックフックを診断の初期化
+//! （手順 3）で設置し、パニックした事実・メッセージ・位置・スレッドを方針の保存先の
+//! [`CRASH_RECORD_FILE_NAME`] へ**同期して置換書き込み**する（一時ファイル → `sync_all` →
+//! `rename`。4.5 と同じ [`settings::atomic`]）。記録機構の非同期な書き込みやそのファイル
+//! ハンドルに依存しないため、プロセスが直後に死んでも記録は完全な形で残る。ドキュメントの
+//! 内容は記録しない（要件 8.4。扱うのはパニックのペイロードと発生位置だけである）。設置は
+//! [`install_crash_recorder`]、記録の組み立ては [`CrashRecord`]、書式は [`format_crash_record`]
+//! が担う。**異常終了の引き金は 5.4 の検証専用の環境変数に統合した**（[`VERIFY_EXIT_ENV`] の
+//! 値が `panic:<ミリ秒>` のとき意図的にパニックする。片付けは 1 箇所のままである）。
+//!
 //! 本ファイルがまだ持たないもの（各タスクがここへ書き込む）:
 //!
 //! - タスク 7.4 / 7.5: メニューの「終了」項目。[`request_exit`] を呼ぶこと。
-//! - タスク 5.5: 異常終了の記録（要件 8.2）。
 //! - タスク 8.3: 描画の代替経路の判定と適用（要件 10.3）。
 //!   [`reserve_render_fallback_point`] の中身を埋める。
 //! - タスク 6.1 / 9.6: 引き継いだ起動要求と、ウィンドウおよびドキュメントの対応付け。
 //!   [`present_window_for_request`] が seam である。
 
+use std::backtrace::{Backtrace, BacktraceStatus};
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
+use std::io::{self, Write};
+use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use app_shell::diagnostics::{self, DiagnosticsLevel};
 use app_shell::settings::{self, FileSettingsStore, RecoveredFrom, SettingsStore};
@@ -97,6 +110,29 @@ const STARTUP_FAILURE_FILE_NAME: &str = "jxcel-startup-error.log";
 /// 4.4 の書き出し（`diagnostics::export`）は拡張子 `log` のファイルだけを連結するので、
 /// この名前はその対象（`jxcel.log` / `jxcel_*.log`）に含まれる。
 const LOG_FILE_STEM: &str = "jxcel";
+
+/// 異常終了の記録を残すファイルの名前。方針の保存先（[`diagnostics::log_dir`]）の直下に置く。
+///
+/// **記録機構の記録中のファイル（`{`[`LOG_FILE_STEM`]`}.log`）とは別のファイルにする。**理由は
+/// [`record_abnormal_termination`] の doc にある。名前は記録機構のローテーションの対象外で
+/// ありながら（`RotatingFile::remove_old_files` が消すのは `{語幹}_{日時}.log` だけである）、
+/// 4.4 の書き出し（`diagnostics::export`）の対象（拡張子 `log`）には含まれる。
+const CRASH_RECORD_FILE_NAME: &str = "jxcel-crash.log";
+
+/// 異常終了の記録 1 件の上限（バイト）。
+///
+/// 記録は**追記ではなく置換**なので（[`record_abnormal_termination`]）、このファイルは常に
+/// この大きさ以下である。値は方針の余裕（`MAX_TOTAL_LOG_BYTES - MAX_RETAINED_LOG_BYTES` = 2 MB）
+/// をほとんど食わない大きさに選ぶ（下のコンパイル時検査）。1 件のパニックのメッセージと
+/// スタックトレースには 64 KiB で十分であり、これを超える分は文字境界で切り詰める。
+const MAX_CRASH_RECORD_BYTES: usize = 64 * 1024;
+
+/// 異常終了の記録ファイルを足しても保持合計が方針の合計上限を超えないことをコンパイル時に固定する
+/// （要件 8.5。記録機構の保持上限 + このファイルの上限 ≦ 合計上限）。
+const _: () = assert!(
+    diagnostics::MAX_RETAINED_LOG_BYTES + MAX_CRASH_RECORD_BYTES as u64
+        <= diagnostics::MAX_TOTAL_LOG_BYTES
+);
 
 // ---------------------------------------------------------------------------
 // 起動の順序（要件 1.2, 1.4, 1.5）
@@ -143,6 +179,11 @@ pub fn run() -> Result<(), StartupError> {
     //   無言で終了しない）。**破損した設定はここで中止しない**（要件 7.5）。
     let startup = init_diagnostics()?;
 
+    // 異常終了の記録先（要件 8.2。タスク 5.5）。フックの設置は `init_diagnostics`（手順 3）が
+    // 済ませており、ここで組み立てるのは起動行に出すための同じ値である。**組み立ては
+    // `crash_record_path` の 1 箇所だけ**なので、フックへ渡した値と起動行の値は食い違わない。
+    let crash_record = crash_record_path(startup.log_dir());
+
     // 記録機構の実効設定（要件 8.1、8.5、8.7）。**4.4 の方針値をそのまま使い、プラグインの
     // 既定（40 KB / `KeepOne`）を明示的に上書きする。**詳細度は 5.1 が開いた設定ストアから
     // 読む（同じディレクトリのストアを 2 つ開かない。要件 7.3）。
@@ -176,6 +217,16 @@ pub fn run() -> Result<(), StartupError> {
     // 手順 4.6: 実効の `connect-src` を起動行として記録し、検査を再度通す（要件 1.6、8.3。
     //   タスク 5.3）。ロガーは手順 4 で取り付けられたため、この行は方針の保存先へ残る。
     confirm_effective_csp(&csp)?;
+
+    // 手順 4.7: 異常終了の記録フックが設置済みであることを起動行に残す（要件 8.2。タスク 5.5）。
+    //   フック自体は手順 3 で保存先を用意できた直後に設置する — アプリが利用者のコードを
+    //   動かす前であり、かつ記録先が書き込み可能であることを確かめた後である。この行が
+    //   ロガー取り付け後の最初の「設置済み」の記録であり、保守担当は記録先を確認できる。
+    log::info!(
+        "異常終了の記録フックを設置済み（記録先: {} / 1 件の上限: {} B）",
+        crash_record.display(),
+        MAX_CRASH_RECORD_BYTES,
+    );
 
     // 手順 5: 残留プロセスの掃除（要件 5.6、タスク 3.5）。前回の実行が終了処理を走らせられずに
     //   残した補助プロセスを終了させる。
@@ -297,6 +348,15 @@ fn init_diagnostics() -> Result<StartupState, StartupError> {
             format!("{}: {error}", log_dir.display()),
         )
     })?;
+
+    // 手順 3 のうちでも早い位置で異常終了のフックを設置する（要件 8.2。タスク 5.5）。設置点の
+    // 根拠は 2 つある: (1) アプリが利用者のコード（ウィンドウの読み込み・コマンド・イベント）を
+    // 動かす前である — それにはウィンドウを作る `RunEvent::Ready` より前で足り、手順 4 の
+    // 構築より前でもある。(2) 記録先のディレクトリが存在し書き込み可能であることを
+    // `prepare_log_directory` で確かめた後である（記録の失敗を「場所が無い」で作り込まない）。
+    // 設置の後に起きたパニックだけが記録の対象である（それ以前のパニックは設定ストアの
+    // 解決など起動の前提そのものの失敗であり、5.1 の前提不成立の経路が扱う）。
+    install_crash_recorder(&log_dir);
 
     Ok(StartupState { settings, log_dir, recovered })
 }
@@ -522,6 +582,280 @@ fn to_level_filter(level: DiagnosticsLevel) -> LevelFilter {
 }
 
 // ---------------------------------------------------------------------------
+// 異常終了の記録（要件 8.2。タスク 5.5）
+// ---------------------------------------------------------------------------
+
+/// 異常終了の記録 1 件。**方針の保存先のファイルへ書く唯一の内容であり、ドキュメントの
+/// 内容を含まない**（要件 8.4）。
+///
+/// ここに持つのはパニックが運んできた値（`panic!` に渡されたメッセージ）と、パニック機構が
+/// 付ける位置・スレッド・バックトレースだけである。ドキュメントのセル値やスキーマの内容を
+/// 記録経路へ渡す唯一の入口は 4.4 の `Redacted` / `recorded_value` であり、この経路はそれを
+/// 迂回しない — **そもそもこの構造体へドキュメントの内容を入れる呼び出し元が存在しない**
+/// （入力は [`CrashRecord::from_panic`] の `&PanicHookInfo` だけである）。
+struct CrashRecord {
+    /// 記録の時刻（UNIX epoch 秒）。`SystemTime` が epoch より前を指す環境では 0。
+    ///
+    /// 人が読む日時への整形には依存を足す必要があるため、数値のまま残す。記録機構の行が
+    /// 持つ現地時刻の書式と合わせて読む。
+    epoch_seconds: u64,
+    /// アプリケーションのバージョン（`Cargo.toml` の `version`）。
+    version: &'static str,
+    /// パニックしたスレッド（名前と `ThreadId`）。名前の無いスレッドは `(無名)`。
+    thread: String,
+    /// **このパニックでプロセスが異常終了するか**（要件 8.2 の「異常終了した事実」）。
+    ///
+    /// メインスレッドのパニックはプロセスを終わらせる（`panic = "unwind"` なら終了コード 101、
+    /// `panic = "abort"` なら `SIGABRT`）。**メインスレッド以外のパニックはそのスレッドだけを
+    /// 終わらせる**（Tauri の非同期ランタイムの作業スレッドのパニックなど）。どちらでも記録は
+    /// 残すが、**異常終了した事実を主張するのは本当に終了するときだけ**である — 記録は次の
+    /// パニックで置き換わるため、生き続けたパニックを「異常終了」と書くと嘘が残る。
+    process_terminates: bool,
+    /// パニックのメッセージ（`panic!` のペイロード）。改行を含みうる。
+    message: String,
+    /// パニックの発生位置（`file:line:column`）。パニック機構が位置を持たない場合は `(位置不明)`。
+    location: String,
+    /// スタックトレース。**`RUST_BACKTRACE` が要求したときだけ**入る
+    /// （`Backtrace::capture` は要求が無ければ捕捉しない）。既定のフックも同じ条件で
+    /// トレースを出すため、記録と stderr の内容が揃う。
+    backtrace: Option<String>,
+}
+
+impl CrashRecord {
+    /// 進行中のパニックから記録を作る。**入力は `&PanicHookInfo` とメインスレッドの
+    /// [`ThreadId`] だけである**（[`install_crash_recorder`] が設置時に記録した値）。
+    fn from_panic(info: &PanicHookInfo<'_>, main_thread: std::thread::ThreadId) -> Self {
+        // `panic!("…")` のペイロードは `&str`、`panic!("{}", …)` は `String` である。文字列
+        // 以外のペイロード（`panic_any` に構造体を渡した場合）は表示しない — 表示には
+        // `Debug` が要り、そこにドキュメントの内容が混ざりうるためである（要件 8.4 の精神）。
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "(文字列でないペイロード)".to_owned());
+        let location = info
+            .location()
+            .map(|location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            })
+            .unwrap_or_else(|| "(位置不明)".to_owned());
+        let current = std::thread::current();
+        let thread = format!(
+            "{} ({:?})",
+            current.name().unwrap_or("(無名)"),
+            current.id()
+        );
+        // メインスレッドのパニックはプロセスを終わらせる。`panic = "abort"` のビルドでは
+        // どのスレッドのパニックでも中断する（`cfg!` はコンパイル時に畳まれる）。
+        let process_terminates = current.id() == main_thread || cfg!(panic = "abort");
+        let captured = Backtrace::capture();
+        let backtrace =
+            (captured.status() == BacktraceStatus::Captured).then(|| captured.to_string());
+        Self {
+            epoch_seconds: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or(0),
+            version: env!("CARGO_PKG_VERSION"),
+            thread,
+            process_terminates,
+            message,
+            location,
+            backtrace,
+        }
+    }
+}
+
+/// 記録を 1 件のテキストに整形する。**純粋関数**であり、書式をテストで固定する
+/// （`tests::the_crash_record_pins_the_format`）。
+///
+/// 先頭行が「異常終了」という事実を述べ、続けて時刻・バージョン・スレッド・終了の帰結・
+/// メッセージ・位置を 1 行ずつ置く。末尾は常に改行 1 つで終わる（読み手が完全な記録かどうかを
+/// 判断できる）。
+fn format_crash_record(record: &CrashRecord) -> String {
+    let mut text = String::new();
+    text.push_str("===== 異常終了（パニック） =====\n");
+    text.push_str(&format!("時刻 (UNIX epoch 秒): {}\n", record.epoch_seconds));
+    text.push_str(&format!("バージョン: {}\n", record.version));
+    text.push_str(&format!("スレッド: {}\n", record.thread));
+    text.push_str(&format!(
+        "プロセスの終了: {}\n",
+        if record.process_terminates {
+            "このパニックにより異常終了する"
+        } else {
+            "このスレッドだけが終了する（メインスレッド以外のパニック）"
+        }
+    ));
+    text.push_str(&format!("メッセージ: {}\n", record.message));
+    text.push_str(&format!("位置: {}\n", record.location));
+    if let Some(backtrace) = &record.backtrace {
+        text.push_str("バックトレース:\n");
+        text.push_str(backtrace.trim_end());
+        text.push('\n');
+    }
+    text
+}
+
+/// 記録を書き込み先へ書く。**上限を超える分は UTF-8 の文字境界で切り詰め、切り詰めた事実を
+/// 最終行に残す**（巨大なメッセージでも記録そのものを失わない）。
+///
+/// 書き込み先を引数に取るのは、書式と書き込みの両方をファイルなしでテストできるようにする
+/// ためである（`tests::an_oversized_crash_record_is_clamped_at_a_character_boundary`）。
+/// 書き終えたバイト数を返す。
+fn write_crash_record(writer: &mut impl Write, record: &CrashRecord) -> io::Result<usize> {
+    let rendered = format_crash_record(record);
+    let bytes = if rendered.len() <= MAX_CRASH_RECORD_BYTES {
+        rendered.into_bytes()
+    } else {
+        let marker = format!(
+            "\n（記録の上限 {MAX_CRASH_RECORD_BYTES} バイトを超えたため切り詰めた）\n"
+        );
+        let body = clamp_to_char_boundary(&rendered, MAX_CRASH_RECORD_BYTES - marker.len());
+        let mut clamped = Vec::with_capacity(MAX_CRASH_RECORD_BYTES);
+        clamped.extend_from_slice(body.as_bytes());
+        clamped.extend_from_slice(marker.as_bytes());
+        clamped
+    };
+    writer.write_all(&bytes)?;
+    writer.flush()?;
+    Ok(bytes.len())
+}
+
+/// `text` を `limit` バイト以下に切り詰める。**文字境界を割らない**ので結果は常に有効な UTF-8 である。
+fn clamp_to_char_boundary(text: &str, limit: usize) -> &str {
+    if text.len() <= limit {
+        return text;
+    }
+    let mut end = limit;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// 方針の保存先から異常終了の記録ファイルの絶対パスを組み立てる。**唯一の組み立て箇所**である
+/// （フックへ渡す値と起動行に出す値が食い違わないようにするため）。
+fn crash_record_path(log_dir: &Path) -> PathBuf {
+    log_dir.join(CRASH_RECORD_FILE_NAME)
+}
+
+/// 記録中にさらにパニックしたか（再入の防止）。
+///
+/// **これが無いと、記録の途中でパニックしたときにフックが再入して無限に続く。**パニックの
+/// 処理中にフックがパニックすると、ランタイムはフックを呼び直してから実行時エラーで中断する
+/// ため、記録経路に再入しないことが前提になる（[`record_once`] / `record_abnormal_termination`）。
+static ABNORMAL_TERMINATION_RECORDING: AtomicBool = AtomicBool::new(false);
+
+/// 再入を防いで `body` を**初回だけ**走らせる。既に記録中なら `None` を返して `body` を走らせない。
+///
+/// **記録経路がパニックで再入してもここで止まるので、無限に続くことはない。**`body` が
+/// パニックした場合、フラグは立ったままにする（わざと下ろさない）— 記録経路が壊れている
+/// 状況で再入を許すと、まさに無限再帰を作るためである。フラグを下ろすのは `body` が正常に
+/// 戻ったときだけであり、プロセスはその直後に異常終了する。
+///
+/// 単体テスト `tests::the_recording_guard_prevents_reentry` が両方の腕を固定する。
+fn record_once<R>(body: impl FnOnce() -> R) -> Option<R> {
+    if ABNORMAL_TERMINATION_RECORDING.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    let result = body();
+    ABNORMAL_TERMINATION_RECORDING.store(false, Ordering::SeqCst);
+    Some(result)
+}
+
+/// 異常終了の記録フックを設置する（要件 8.2）。**起動時に 1 回だけ呼ぶ。**
+///
+/// 行うことは 2 つである:
+///
+/// 1. `std::panic::take_hook()` で**それまで設置されていたフックを取り出す**（既定のフックでも、
+///    別のライブラリが設置したものでも同じ扱いである）。
+/// 2. 記録してから取り出したフックを呼ぶフックを設置する。**パニックを握り潰さない** —
+///    フックはパニックの伝播そのものに介入できないため、記録の後に元のフックを呼べば、
+///    プロセスは通常どおり（`panic = "unwind"` のビルドでは終了コード 101、`panic = "abort"`
+///    のビルドでは `SIGABRT`）異常終了し、stderr への既定の出力もそのまま残る。
+///
+/// 設置済みのフックが 1 つも無い場合は `take_hook` が既定のフックを返すので、連鎖は常に成立する。
+///
+/// **メインスレッドで呼ぶこと。**この関数を呼んだスレッドを「メインスレッド」として記録し、
+/// 「このパニックでプロセスが異常終了するか」の判断に使う（[`CrashRecord::process_terminates`]）。
+/// 起動順序（`run`）から呼ぶ限りこの前提は満たされる。
+fn install_crash_recorder(log_dir: &Path) {
+    let path = crash_record_path(log_dir);
+    let main_thread = std::thread::current().id();
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        record_abnormal_termination(&path, main_thread, info);
+        // 記録の成否にかかわらず必ず元のフックを呼ぶ（記録側の失敗で既定の出力まで失わない）。
+        previous(info);
+    }));
+}
+
+/// 1 件の異常終了を記録する。**フックの中身であり、パニックを伝播させる責任は呼び出し元が
+/// 負う**（この関数は記録だけを行い、パニックを握り潰さない）。
+///
+/// メインスレッドのパニック（および `panic = "abort"` のビルドでの任意のパニック）は
+/// プロセスを異常終了させるので、記録はその事実を述べる。メインスレッド以外のパニックは
+/// そのスレッドだけを終わらせるため、記録はそう述べる（[`CrashRecord::process_terminates`]）。
+///
+/// # 記録先と、その書き込みが保証される理由
+///
+/// **記録機構（`tauri-plugin-log`）を経由せず、方針の保存先の [`CRASH_RECORD_FILE_NAME`] へ
+/// 直接書く。**理由は 4 つある:
+///
+/// 1. **フックが設置される時点（手順 3）にロガーはまだ存在しない。**ロガーが取り付けられるのは
+///    手順 4 の構築であり、それより前の `log::…!` はどこにも残らない。起動中のパニック
+///    （依存の初期化・プラグインの登録・ウィンドウの生成）も記録したいため、ロガーに依存
+///    できない。
+/// 2. **同期して永続化できる。** [`settings::atomic::replace_with`] が一時ファイル →
+///    `sync_all` → `rename` を行うので、この関数が戻った時点で記録は完全な形でディスクに
+///    ある。記録機構のファイル書き込みはプロセス内のバッファ（`RotatingFile::buffer`）と
+///    プラグイン側のミューテックスに依存し、フックがそこで詰まる可能性を排除できない。
+/// 3. **記録機構のファイルハンドルと競合しない。**同じファイルへ追記すると、プラグインが
+///    数える現在の大きさ（`RotatingFile::current_size`）と実際の内容がずれ、ローテーションの
+///    判断が狂う。別ファイルなら両者が互いを知らずに済む。
+/// 4. **置換なので上限が構造的に守られる。**記録は 1 件だけを保持し（古い記録は消える =
+///    要件 8.5 の「古いものから破棄」）、ファイルは [`MAX_CRASH_RECORD_BYTES`] 以下である。
+///    ローテーション対象外のファイルを足しても、保持合計は方針の合計上限を超えない
+///    （コンパイル時検査）。
+///
+/// # 再入の防止
+///
+/// [`record_once`] を通してから記録する。記録の途中でパニックしてフックが再入しても、
+/// [`ABNORMAL_TERMINATION_RECORDING`] が立っているため**記録経路には入らない**（フックは
+/// 続けて元のフックを呼ぶので、パニックの処理はそのまま進む）。**無限の再帰にはならない。**
+///
+/// # 失敗したとき
+///
+/// 記録を書けないこと（ディレクトリが消えた・読み取り専用になった等）は stderr に 1 行残して
+/// 続行する。**ここでパニックしてはならない**（フックの中であり、記録の失敗をパニックに
+/// 変えると元の異常終了の内容が失われる）。
+fn record_abnormal_termination(
+    path: &Path,
+    main_thread: std::thread::ThreadId,
+    info: &PanicHookInfo<'_>,
+) {
+    let _ = record_once(|| {
+        let record = CrashRecord::from_panic(info, main_thread);
+        let written = settings::atomic::replace_with(path, |file| {
+            write_crash_record(file, &record).map(|_written| ())
+        });
+        if let Err(error) = written {
+            let _ = writeln!(
+                std::io::stderr(),
+                "異常終了の記録を {} へ書けなかった: {error}",
+                path.display()
+            );
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // 外部ネットワーク経路の遮断（要件 1.6, 8.3。タスク 5.3）
 // ---------------------------------------------------------------------------
 
@@ -695,7 +1029,7 @@ pub struct StartupState {
     recovered: Option<RecoveredFrom>,
 }
 
-#[allow(dead_code)] // recovered_from は 5.5（異常終了の記録）などが消費するまでの seam。
+#[allow(dead_code)] // recovered_from は設定のコマンド面（7.x）が消費するまでの seam。
 impl StartupState {
     /// 解決済みの診断の保存先。
     pub fn log_dir(&self) -> &Path {
@@ -947,11 +1281,61 @@ fn focus_window(window: &tauri::WebviewWindow) {
 // 最後のウィンドウと常駐慣習の扱い（要件 2.8, 2.9。タスク 5.4）
 // ---------------------------------------------------------------------------
 
-/// 検証専用の終了の引き金が読む環境変数の名前。
+/// 検証専用の引き金が読む環境変数の名前。
 ///
-/// **通常の利用環境に存在しないことを狙った名前である。**値は整数のミリ秒で、設定されて
-/// いるときだけ [`arm_verification_exit_trigger`] がその時間後に [`request_exit`] を呼ぶ。
+/// **通常の利用環境に存在しないことを狙った名前である。**値の書式は `[<動作>:]<ミリ秒>` で、
+/// 設定されているときだけ [`arm_verification_exit_trigger`] がその時間後に指定された動作を行う。
+///
+/// - `<ミリ秒>` だけ（5.4 から続く書式。例 `1500`）: [`VerificationAction::Exit`]
+/// - `exit:<ミリ秒>`: 同上（明示形）
+/// - `panic:<ミリ秒>`（5.5 が足した形）: [`VerificationAction::Panic`] — **意図的なパニックで
+///   プロセスを異常終了させ、異常終了の記録（要件 8.2）を実測するために使う**
+///
+/// **動作の選択を別の環境変数に分けない。**分けると「検証専用の引き金」の片付けが 2 箇所に
+/// なってしまう。7.4 / 7.5 が片付ける対象はこの 1 つ（+ [`arm_verification_exit_trigger`] と
+/// [`VerificationAction`]）である。
 const VERIFY_EXIT_ENV: &str = "JXCEL_VERIFICATION_EXIT_AFTER_MS";
+
+/// 検証専用の引き金が起こす動作（[`VERIFY_EXIT_ENV`] の `<動作>` 部分）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerificationAction {
+    /// 明示的な終了（5.4 の既存の動作。[`request_exit`] を呼ぶ）。
+    Exit,
+    /// 意図的なパニック（5.5 が足した動作）。**メインスレッドで**起こす。
+    Panic,
+}
+
+impl VerificationAction {
+    /// 環境変数の値に書ける名前を解釈する。解釈できない名前は `None`（無視する）。
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "exit" => Some(Self::Exit),
+            "panic" => Some(Self::Panic),
+            _ => None,
+        }
+    }
+
+    /// 起動行に出す名前。
+    fn name(self) -> &'static str {
+        match self {
+            Self::Exit => "exit",
+            Self::Panic => "panic",
+        }
+    }
+}
+
+/// [`VERIFY_EXIT_ENV`] の値を `(<動作>, <ミリ秒>)` に解釈する。**純粋関数**であり、
+/// 書式をテストで固定する（`tests::the_verification_trigger_...`）。
+///
+/// **動作を書かない値は 5.4 と同じ「明示的な終了」を意味する**（後方互換）。解釈できない値は
+/// `None` を返し、呼び出し元が無視する（**配布物の既定の振る舞いを変えない**）。
+fn parse_verification_trigger(value: &str) -> Option<(VerificationAction, u64)> {
+    let (action, delay) = match value.split_once(':') {
+        Some((action, delay)) => (VerificationAction::parse(action.trim())?, delay),
+        None => (VerificationAction::Exit, value),
+    };
+    Some((action, delay.trim().parse::<u64>().ok()?))
+}
 
 /// プラットフォームが最後のウィンドウを閉じてもアプリを常駐させる慣習を持つか。
 ///
@@ -1090,29 +1474,50 @@ fn handle_reopen(app: &AppHandle, has_visible_windows: bool) {
     present_existing_or_create(app);
 }
 
-/// 明示的な終了（[`request_exit`]）が確実にプロセスを終わらせることを実測するための、
-/// **検証専用**の引き金。
+/// 明示的な終了（[`request_exit`]）または意図的なパニックを、環境変数で実測するための
+/// **検証専用**の引き金（[`VERIFY_EXIT_ENV`]）。
 ///
 /// メニュー項目（7.4 / 7.5）が作られる前は、[`request_exit`] を人手で呼ぶ経路が無い。環境変数
-/// [`VERIFY_EXIT_ENV`] にミリ秒が設定されているときだけ、その時間だけ待ってから
-/// [`request_exit`] を呼ぶ。**環境変数が無い通常の起動では関数の先頭で即座に戻るので何もしない**
-/// （数値として解釈できない値のときも何もしない）。したがって配布物の既定の振る舞いを変えない。
+/// に `<ミリ秒>`（または `exit:<ミリ秒>`）が設定されているときだけ、その時間だけ待ってから
+/// [`request_exit`] を呼ぶ。`panic:<ミリ秒>` のときは代わりに**意図的なパニック**を起こし、
+/// 異常終了の記録（要件 8.2）を実測できるようにする（5.5 が足した形）。**環境変数が無い通常の
+/// 起動では関数の先頭で即座に戻るので何もしない**（解釈できない値のときも何もしない）。
+/// したがって配布物の既定の振る舞いを変えない。
 ///
 /// 7.4 / 7.5 がメニュー項目を結線したら、この引き金は不要になる。残す場合もメニューの経路を
 /// 置き換えてはならない（引き金は環境変数が設定された検証のときだけ働く）。
+///
+/// **名前は 5.4 のままにしてある**（tasks.md の 5.4 の申し送りが片付け対象としてこの名前を
+/// 指しているため）。動作は 2 つを選べるが、仕組みは 1 つのままである。
 fn arm_verification_exit_trigger(app: &AppHandle) {
     let Ok(value) = std::env::var(VERIFY_EXIT_ENV) else {
         return;
     };
-    let Ok(delay_ms) = value.parse::<u64>() else {
-        log::warn!("{VERIFY_EXIT_ENV} を数値として解釈できないので無視する: {value:?}");
+    let Some((action, delay_ms)) = parse_verification_trigger(&value) else {
+        log::warn!("{VERIFY_EXIT_ENV} を解釈できないので無視する: {value:?}");
         return;
     };
     let app = app.clone();
-    log::info!("検証専用の終了の引き金が有効である: {delay_ms} ms 後に明示的な終了を行う");
+    log::info!(
+        "検証専用の引き金が有効である: {delay_ms} ms 後に {} を行う",
+        action.name(),
+    );
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        request_exit(&app);
+        match action {
+            VerificationAction::Exit => request_exit(&app),
+            // **パニックはメインスレッドで起こす。**ほかのスレッドで起こしたパニックはその
+            // スレッドを終わらせるだけでプロセスは生き続けるため、「意図的に異常終了させる」を
+            // 満たさない。`run_on_main_thread` はイベントループへ処理を渡すので、パニックは
+            // `app.run` の中から外へ伝播し、プロセスは異常終了する（フックは伝播の直前に走る）。
+            VerificationAction::Panic => {
+                if let Err(error) = app.run_on_main_thread(|| {
+                    panic!("検証専用の意図的な異常終了（{VERIFY_EXIT_ENV}=panic:<ミリ秒>）");
+                }) {
+                    log::error!("検証専用のパニックをメインスレッドへ渡せなかった: {error}");
+                }
+            }
+        }
     });
 }
 
@@ -1123,8 +1528,12 @@ fn arm_verification_exit_trigger(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        confirm_csp_values, csp_config_from, vetoes_exit, CspConfig, ExitControl, Residency,
+        clamp_to_char_boundary, confirm_csp_values, csp_config_from, format_crash_record,
+        parse_verification_trigger, record_once, vetoes_exit, write_crash_record,
+        CrashRecord, CspConfig, ExitControl, Residency, VerificationAction,
+        ABNORMAL_TERMINATION_RECORDING, MAX_CRASH_RECORD_BYTES,
     };
+    use std::sync::atomic::Ordering;
     use tauri::utils::config::Csp;
 
     /// 方針文字列から実効設定を組み立てる（本番の `csp_config` が `Config` から取り出すのと
@@ -1216,5 +1625,183 @@ mod tests {
         // 終了できなくならない」ことの構造的な担保である**（tauri#13511。
         // `request_exit` は掛け金を立ててから `app.exit(0)` を呼ぶ）。
         assert!(!vetoes_exit(Residency::StayResident, None, true));
+    }
+
+    // -----------------------------------------------------------------------
+    // 異常終了の記録（タスク 5.5、要件 8.2・8.4）
+    // -----------------------------------------------------------------------
+
+    /// 固定値の記録（時刻・バージョン・スレッド・メッセージ・位置が既知である）。
+    fn sample_record() -> CrashRecord {
+        CrashRecord {
+            epoch_seconds: 1_700_000_000,
+            version: "9.9.9",
+            thread: "main (ThreadId(1))".to_owned(),
+            process_terminates: true,
+            message: "テスト用のパニック".to_owned(),
+            location: "src/lib.rs:1:1".to_owned(),
+            backtrace: None,
+        }
+    }
+
+    #[test]
+    fn the_crash_record_pins_the_format() {
+        // 先頭行が「異常終了という事実」、続けて時刻・バージョン・スレッド・終了の帰結・
+        // メッセージ・位置。末尾は改行 1 つで終わる（読み手が完全な記録かどうかを判断できる）。
+        assert_eq!(
+            format_crash_record(&sample_record()),
+            "===== 異常終了（パニック） =====\n\
+             時刻 (UNIX epoch 秒): 1700000000\n\
+             バージョン: 9.9.9\n\
+             スレッド: main (ThreadId(1))\n\
+             プロセスの終了: このパニックにより異常終了する\n\
+             メッセージ: テスト用のパニック\n\
+             位置: src/lib.rs:1:1\n",
+        );
+    }
+
+    #[test]
+    fn a_worker_thread_panic_does_not_claim_the_process_ended() {
+        // メインスレッド以外のパニックではプロセスは生き続ける。**「異常終了した」と書かない**
+        // （記録は次のパニックで置き換わるので、嘘を残さない）。
+        let record = CrashRecord {
+            thread: "tokio-runtime-worker (ThreadId(7))".to_owned(),
+            process_terminates: false,
+            ..sample_record()
+        };
+        let rendered = format_crash_record(&record);
+        assert!(
+            rendered.contains("このスレッドだけが終了する"),
+            "終了しない事実を述べる: {rendered}"
+        );
+        assert!(!rendered.contains("このパニックにより異常終了する"));
+    }
+
+    #[test]
+    fn the_crash_record_includes_the_backtrace_when_captured() {
+        let record = CrashRecord {
+            backtrace: Some("   0: a\n   1: b\n\n".to_owned()),
+            ..sample_record()
+        };
+        let rendered = format_crash_record(&record);
+        assert!(
+            rendered.ends_with("バックトレース:\n   0: a\n   1: b\n"),
+            "余分な空行を残さず改行 1 つで終わる: {rendered:?}"
+        );
+        assert_eq!(rendered.matches("バックトレース").count(), 1);
+        // トレースが無いときは見出しも出さない。
+        assert!(!format_crash_record(&sample_record()).contains("バックトレース"));
+    }
+
+    #[test]
+    fn the_crash_record_is_written_to_any_sink() {
+        // 書き込み先を引数に取るので、ファイル無しで書式と書き込みを固定できる。
+        let mut sink = Vec::new();
+        let written =
+            write_crash_record(&mut sink, &sample_record()).expect("メモリへの書き込みは失敗しない");
+        assert_eq!(written, sink.len());
+        assert_eq!(
+            String::from_utf8(sink.clone()).expect("UTF-8"),
+            format_crash_record(&sample_record())
+        );
+        assert!(sink.ends_with(b"\n"));
+        assert!(!sink.ends_with(b"\n\n"), "改行を重ねない");
+    }
+
+    #[test]
+    fn an_oversized_crash_record_is_clamped_at_a_character_boundary() {
+        // 上限を大きく超えるメッセージ（マルチバイト文字）でも記録は残り、上限を超えない。
+        let record = CrashRecord {
+            message: "あ".repeat(MAX_CRASH_RECORD_BYTES),
+            ..sample_record()
+        };
+        let mut sink = Vec::new();
+        write_crash_record(&mut sink, &record).expect("メモリへの書き込みは失敗しない");
+        assert!(sink.len() <= MAX_CRASH_RECORD_BYTES, "上限を超えない");
+        let text = String::from_utf8(sink).expect("文字境界で切るので UTF-8 のまま");
+        assert!(text.starts_with("===== 異常終了（パニック） ====="));
+        assert!(text.contains("切り詰めた"), "切り詰めた事実を残す: {text:?}");
+        assert!(text.ends_with('\n'));
+    }
+
+    #[test]
+    fn clamping_never_splits_a_character() {
+        // 3 バイト文字の途中で切ろうとすると 2 バイト目まで戻る（有効な UTF-8 を保つ）。
+        assert_eq!(clamp_to_char_boundary("あい", 4), "あ");
+        assert_eq!(clamp_to_char_boundary("あい", 3), "あ");
+        assert_eq!(clamp_to_char_boundary("あい", 2), "");
+        assert_eq!(clamp_to_char_boundary("abc", 2), "ab");
+        assert_eq!(clamp_to_char_boundary("abc", 3), "abc");
+        assert_eq!(clamp_to_char_boundary("abc", 99), "abc");
+    }
+
+    #[test]
+    fn the_recording_guard_prevents_reentry() {
+        // 初回は本体が走り、フラグは元に戻る（2 回目も走る）。
+        assert_eq!(record_once(|| 1), Some(1));
+        assert_eq!(record_once(|| 2), Some(2));
+        // 記録中に再入すると本体を走らせない。**これが「記録経路のパニックで無限に続かない」
+        // ことのテストである**（フラグは record_once の外からも立てられる形にしてある）。
+        assert!(
+            !ABNORMAL_TERMINATION_RECORDING.swap(true, Ordering::SeqCst),
+            "事前条件: フラグは下りている"
+        );
+        let mut ran = false;
+        assert_eq!(
+            record_once(|| {
+                ran = true;
+            }),
+            None
+        );
+        assert!(!ran, "再入では本体を走らせない");
+        ABNORMAL_TERMINATION_RECORDING.store(false, Ordering::SeqCst);
+    }
+
+    // -----------------------------------------------------------------------
+    // 検証専用の引き金（タスク 5.4 / 5.5）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_verification_trigger_keeps_the_plain_integer_meaning() {
+        // 5.4 が文書化した書式（整数だけ）は「明示的な終了」のままである（後方互換）。
+        assert_eq!(
+            parse_verification_trigger("1500"),
+            Some((VerificationAction::Exit, 1500))
+        );
+        assert_eq!(
+            parse_verification_trigger("0"),
+            Some((VerificationAction::Exit, 0))
+        );
+    }
+
+    #[test]
+    fn the_verification_trigger_can_select_an_intentional_panic() {
+        // 5.5 が足した形。**同じ環境変数のまま**動作を選べる（片付けは 1 箇所）。
+        assert_eq!(
+            parse_verification_trigger("panic:1500"),
+            Some((VerificationAction::Panic, 1500))
+        );
+        assert_eq!(
+            parse_verification_trigger("exit:1500"),
+            Some((VerificationAction::Exit, 1500))
+        );
+        assert_eq!(
+            parse_verification_trigger(" panic : 1500 "),
+            Some((VerificationAction::Panic, 1500))
+        );
+    }
+
+    #[test]
+    fn an_uninterpretable_verification_trigger_selects_nothing() {
+        // 解釈できない値では**何もしない**（配布物の既定の振る舞いを変えない）。
+        for value in [
+            "", "abc", "panic", "panic:", "exit:", "crash:1500", "1500:panic", "-1", "1.5",
+        ] {
+            assert_eq!(
+                parse_verification_trigger(value),
+                None,
+                "解釈できてはならない: {value:?}"
+            );
+        }
     }
 }

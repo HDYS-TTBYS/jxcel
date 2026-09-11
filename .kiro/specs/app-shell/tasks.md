@@ -223,7 +223,7 @@
   - _Requirements: 2.8, 2.9_
   - _Depends: 1.3_
 
-- [ ] 5.5 異常終了の記録を実装する
+- [x] 5.5 異常終了の記録を実装する
   - 異常終了を捕捉して記録を残す経路を設置する
   - **完了状態**: 意図的に異常終了を起こすと、その事実が記録に残っていることが確認できる
   - _Requirements: 8.2_
@@ -479,6 +479,12 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **5.5**: panic hook を診断ステップ（`init_diagnostics` の末尾、`Builder::build` より前）で設置し、**専用の `jxcel-crash.log`** を方針のログディレクトリへ `settings::atomic::replace_with`（同一ディレクトリの一時ファイル → write/flush/`sync_all` → rename → Unix は親ディレクトリ fsync）で書く。**ログプラグイン経由にしない理由**: 設置時点でプラグインはまだ存在せず起動時パニックを取りこぼす／プラグインはバッファするので死ぬ前に書けない／プラグインのアクティブファイルへ追記すると `current_size` のローテーション会計が狂う。
+- **5.5**: **プラグインのローテーションは `jxcel-crash.log` を消せない**（`remove_old_files` は `<stem>_<date>.log` にしかマッチしない。ソースと実測の両方で確認済み）。サイズは `MAX_CRASH_RECORD_BYTES = 64 KiB` で、**`const _: () = assert!(MAX_RETAINED_LOG_BYTES + MAX_CRASH_RECORD_BYTES <= MAX_TOTAL_LOG_BYTES)`** がコンパイル時に 8.5 を守る。**置換（追記ではない）**なので古い記録は破棄される。長すぎる記録は UTF-8 文字境界で切詰め、切詰めマーカー行を付ける。
+- **5.5**: 記録の形式（テストで固定）: `===== 異常終了（パニック） =====` に続けて `時刻 (UNIX epoch 秒)` / `バージョン` / `スレッド` / `プロセスの終了` / `メッセージ` / `位置` の各行（`RUST_BACKTRACE` がある場合は `バックトレース:` 節）、末尾は単一の改行。**`プロセスの終了` は設置時に捕まえた main スレッドの `ThreadId` から計算する**ので、ワーカースレッドのパニックでプロセスが終わったと誤って書かない。フックは既定フックへ**連鎖**し（パニック時の異常終了ステータスは保たれる）、再入ガードで再帰しない。
+- **5.5（検証用トリガの集約）**: 5.4 の `JXCEL_VERIFICATION_EXIT_AFTER_MS` を拡張し、**`panic:<ms>` で意図的なパニック**、素の数値で従来の明示終了を選ぶ。**7.4 / 7.5 の片付け義務は引き続き 1 項目**（この環境変数と `arm_verification_exit_trigger` を削除するか feature で括る）。
+- **5.5（記録できない異常終了）**: panic hook で捕まえられるのはパニックだけ。**SIGKILL や segfault などの非パニック異常終了は記録できない**（OS がプロセスを即時終了させるため）。要件 8.2 の「異常終了の記録」はこの範囲である。
 
 - **5.4**: 常駐の判定は**純粋関数 `vetoes_exit(residency, code, latch)`** に切り出し、単体テストで 4 つの重要行を固定する（`ExitOnLastWindowClosed + None → 拒否しない` / `StayResident + None → 拒否` / `StayResident + Some(_) → 拒否しない` / 明示終了のラッチが立っていれば拒否しない）。**拒否は macOS のみ・`code: None` のみ**。Linux / Windows は決して拒否しない。
 - **5.4**: 終了の唯一の入口は `request_exit`（ラッチを立てて `app.exit(0)`）。**7.4 / 7.5 の Quit メニュー項目はこれを呼ぶこと**。プロセスが通常手段で終われなくなる経路は無い（ラッチは一方向、`Some(_)` は決して拒否しない、`AppHandle::exit` は失敗時に `std::process::exit` に落ちる。macOS の ⌘Q / Dock→終了 は tao の `applicationWillTerminate:` 経由で `ExitRequested` を通らないため拒否できない）。
