@@ -11,8 +11,8 @@
 //! `SidecarSpec.kind`、`SidecarIntegrity::EXPECTED_DIGESTS` のキー、`SidecarSupervisor::ensure` /
 //! `get` の引数、`orphan_sweep` の実行ファイル名照合が共有する唯一の識別子である。
 //!
-//! 本タスク（1.2）では骨組みと共有の列挙のみを置く。実体は tasks.md 3.1（整合性検査）・
-//! 3.2（起動と共有）・3.3（終了保証）・3.5（残留の掃除）が追加する。
+//! タスク 1.2 が骨組みと共有の列挙を置き、3.1 が整合性検査、3.2 が起動・共有・再起動を
+//! 追加した。tasks.md 3.3（終了保証）と 3.5（残留の掃除）が残っている。
 
 #[cfg(unix)]
 pub mod group_unix;
@@ -21,6 +21,10 @@ pub mod integrity;
 pub mod job_windows;
 pub mod orphan_sweep;
 pub mod supervisor;
+
+pub use supervisor::{
+    IntegrityVerifier, SidecarHandle, SidecarSpec, SidecarSupervisor, SpawnError, Supervisor,
+};
 
 /// 補助プロセスの種類。どの実行ファイルを、どの名前で同梱し、どのプロセスを監督するかを
 /// 一意に決める識別子である。

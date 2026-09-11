@@ -103,7 +103,7 @@
   - _Boundary: SidecarIntegrity_
   - _Depends: 1.2, 1.7_
 
-- [ ] 3.2 (P) 補助プロセスの起動・共有・再起動を実装する
+- [x] 3.2 (P) 補助プロセスの起動・共有・再起動を実装する
   - 種類ごとに高々 1 つのプロセスを保持する。要求が重なっても起動は 1 回に収める
   - 予期せず終了していた場合、次に必要になった時点で改めて起動を試みる
   - 起動失敗の原因を区別できる列挙として返す。実行ファイル不在・実行権限なし・整合性不一致・起動失敗を区別する
@@ -479,6 +479,13 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **3.2**: 監督の中核は `crates/app-shell/src/sidecar/supervisor.rs`。**起動は 1 回に収める**という不変条件は「登録表の mutex を、生存確認 → 整合性検査 → spawn → 登録 の全体にわたって保持する」ことで守る。`ensure` は**spawn の前に `integrity::verify` を通す**（要件 5.3 の順序を構造的に保証）。`get` は死んだ登録を除去して返さない。`ensure` にも「登録済みだが死んでいる」腕があり、除去して spawn し直す。
+- **3.2**: `SpawnError` は `NotFound` / `NotExecutable` / `IntegrityMismatch { path, source: IntegrityError }` / `Spawn` の 4 種。**`IntegrityError::Unregistered`（期待値が未登録）は `IntegrityMismatch` の `source` として報告**し、決して黙って通さない（design の `{ path }` に対する加算的な逸脱だが、5.3 が要求する「検出して報告」を満たすため）。バリアントだけを見る呼び出し元は「整合性検査に失敗した」と解釈するが、それは事実に反しない。
+- **3.2**: stdout / stderr は `Stdio::piped()` で作るだけで**読まない**。`take_stdout` / `take_stderr` で 3.4 に引き渡す設計で、64 KiB のパイプバッファ前提がコメントに明記されている（smoke は静かなので 3.4 まで詰まらない）。**3.4 が reader を実装して引き取ること。**
+- **3.2**: `shutdown_all`（3.3）と `sweep_orphans`（3.5）は**意図的に宣言もスタブもしない**。trait を後続タスクが拡張する。3.3 は終了保証（Job Object / プロセスグループ）、3.5 は孤児掃除を足す。
+- **3.2**: テスト用の `with_verifier` seam がある（**production の `new()` は `integrity::verify` を使う**）。テストのプロセス数計測はプラットフォーム別（Linux は `/proc` の PPid + cmdline 語幹、macOS は `pgrep -P -f`、Windows は `tasklist`）で、spawn 直後は `/proc` の cmdline が未充填なため settle ループを挟む。
+- **3.2（round-1 のレビュー指摘）**: 「登録済みだが死んでいる」腕は `get` 経由では到達しない（`get` が先に除去するため）。**`get` を呼ばずに kill → 死亡待ち → `ensure`** というテストがこの腕を守る唯一の回帰防止であり、これが無いと腕を壊しても全テストが緑のままになる（実測）。同種の「主要入口の分岐を `get` 経由のテストで満たした気になる」罠に注意。
 
 - **3.1**: `crates/app-shell/build.rs` が `<repo>/sidecars/<stem>-<TARGET>[.exe]` の SHA-256 を `$OUT_DIR/sidecar_digests.rs` へ発行し、`src/sidecar/integrity.rs` が `include!` する。**原本が無いターゲットでは空の表を書き、panic しない**（これが `cargo build --workspace` と `xcargo` のクロスターゲット検証を壊さない前提）。`rerun-if-changed` は実測で機能確認済み（原本を 1 バイト変えて再ビルドすると埋め込みダイジェストが変わる）。
 - **3.1**: `IntegrityError` は 3 変種。`Mismatch { kind, expected, actual }`（期待値・実測値の両方を小文字 hex で持ち、Display に両方を含む）、`Unreadable { path }`、**`Unregistered { kind, path }`**（1.7 の申し送りで追加。design の 2 変種では「期待値が埋め込まれていない」を表現できない）。**`Unregistered` はファイルを読む前に判定する**ので、未配置のビルドが `Unreadable` や整合として誤報告されることはない。**修復経路は存在しない**（このモジュールは `std::fs::read` のみ）。
