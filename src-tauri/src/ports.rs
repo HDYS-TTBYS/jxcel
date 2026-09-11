@@ -103,7 +103,8 @@ impl CloseVerdict {
 /// **アプリケーションシェル自身の入出力の失敗ではない**（本機能はパスを読まない）。所有者が
 /// 受け取れなかった理由を運ぶ。運ぶのは説明文字列だけに留め、分類は所有者の必要になった時点で
 /// 足す（本スペックの時点で所有者が存在しないため、推測で種類を増やさない）。
-#[allow(dead_code)] // 差し替わる実装（7.6/7.7 と下流スペック）が構築・報告するまでの seam。
+#[allow(dead_code)]
+// 差し替わる実装（7.6/7.7 と下流スペック）が構築・報告するまでの seam。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachError {
     message: String,
@@ -418,6 +419,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("jxcel-ports-missing-{}-{nanos}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "jxcel-ports-missing-{}-{nanos}",
+            std::process::id()
+        ))
     }
 }

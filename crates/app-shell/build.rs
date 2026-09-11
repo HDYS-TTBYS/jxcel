@@ -58,7 +58,11 @@ fn main() {
     // `TARGET` は Cargo がビルドスクリプトに渡すこのビルドのターゲットトリプルである。
     let target = env::var("TARGET").expect("Cargo はビルドスクリプトに TARGET を渡す");
     // Windows のターゲットトリプルだけ `.exe` を持つ（tasks.md 1.7 の命名規約）。
-    let exe_suffix = if target.contains("windows") { ".exe" } else { "" };
+    let exe_suffix = if target.contains("windows") {
+        ".exe"
+    } else {
+        ""
+    };
 
     let mut entries = String::new();
     for (stem, variant) in KINDS {

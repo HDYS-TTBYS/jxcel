@@ -238,7 +238,9 @@ pub fn app_data_base_dir() -> Result<PathBuf, SettingsError> {
 ///
 /// テストが開発者の実の環境に依存せずに各 OS の規約を確かめるための入口である。値が与えられて
 /// いない場合と空の場合をどちらも「未設定」として扱う。
-pub fn app_data_base_dir_with(lookup: &dyn Fn(&str) -> Option<OsString>) -> Result<PathBuf, SettingsError> {
+pub fn app_data_base_dir_with(
+    lookup: &dyn Fn(&str) -> Option<OsString>,
+) -> Result<PathBuf, SettingsError> {
     #[cfg(target_os = "linux")]
     {
         if let Some(xdg_data_home) = non_empty_env(lookup, "XDG_DATA_HOME") {
@@ -291,7 +293,10 @@ pub fn app_data_dir() -> Result<PathBuf, SettingsError> {
 /// 診断の保存先（tasks.md 4.4）も macOS / Windows ではアプリケーションデータ領域とは別の
 /// 環境変数（`HOME` / `LOCALAPPDATA`）を読むため、この読み取り規則だけを `pub(crate)` で
 /// 共有する。4.1 のデータ領域の解決そのものは Linux の診断保存先だけが再利用する。
-pub(crate) fn non_empty_env(lookup: &dyn Fn(&str) -> Option<OsString>, name: &str) -> Option<PathBuf> {
+pub(crate) fn non_empty_env(
+    lookup: &dyn Fn(&str) -> Option<OsString>,
+    name: &str,
+) -> Option<PathBuf> {
     let value = lookup(name)?;
     if value.is_empty() {
         None
@@ -321,7 +326,10 @@ pub enum SettingsError {
 
     /// 設定値を JSON へ変換できない。
     #[error("設定値を JSON に変換できない: {key}: {source}")]
-    EncodeFailed { key: SettingsKey, source: serde_json::Error },
+    EncodeFailed {
+        key: SettingsKey,
+        source: serde_json::Error,
+    },
 
     /// 書き込みに失敗した。**対象ファイルは直前の完全な内容のままである**（[`atomic`] の保証）。
     #[error("設定ファイルを書き込めない: {path}: {source}")]
@@ -435,7 +443,10 @@ impl fmt::Display for RecoveryCause {
                 formatter.write_str("設定ファイルを JSON オブジェクトとして解釈できなかった")
             }
             RecoveryCause::UnsupportedSchemaVersion { found: Some(found) } => {
-                write!(formatter, "設定ファイルの schema_version が未知（検出値 {found}）")
+                write!(
+                    formatter,
+                    "設定ファイルの schema_version が未知（検出値 {found}）"
+                )
             }
             RecoveryCause::UnsupportedSchemaVersion { found: None } => {
                 formatter.write_str("設定ファイルの schema_version が整数として読めない")
@@ -520,12 +531,24 @@ impl FileSettingsStore {
         let bytes = match fs::read(&file) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return (State { file, values: Map::new() }, None);
+                return (
+                    State {
+                        file,
+                        values: Map::new(),
+                    },
+                    None,
+                );
             }
             Err(_) => {
                 return (
-                    State { file: file.clone(), values: Map::new() },
-                    Some(RecoveredFrom { path: file, cause: RecoveryCause::Unreadable }),
+                    State {
+                        file: file.clone(),
+                        values: Map::new(),
+                    },
+                    Some(RecoveredFrom {
+                        path: file,
+                        cause: RecoveryCause::Unreadable,
+                    }),
                 );
             }
         };
@@ -534,7 +557,10 @@ impl FileSettingsStore {
             Ok(Value::Object(values)) => match unsupported_schema_version(&values) {
                 None => (State { file, values }, None),
                 Some(found) => (
-                    State { file: file.clone(), values: Map::new() },
+                    State {
+                        file: file.clone(),
+                        values: Map::new(),
+                    },
                     Some(RecoveredFrom {
                         path: file,
                         cause: RecoveryCause::UnsupportedSchemaVersion { found },
@@ -542,15 +568,23 @@ impl FileSettingsStore {
                 ),
             },
             Ok(_) | Err(_) => (
-                State { file: file.clone(), values: Map::new() },
-                Some(RecoveredFrom { path: file, cause: RecoveryCause::Malformed }),
+                State {
+                    file: file.clone(),
+                    values: Map::new(),
+                },
+                Some(RecoveredFrom {
+                    path: file,
+                    cause: RecoveryCause::Malformed,
+                }),
             ),
         }
     }
 
     /// この実体の読み込みについての報告。
     fn open_report(&self) -> OpenReport {
-        OpenReport { recovered_from: self.recovered_from.clone() }
+        OpenReport {
+            recovered_from: self.recovered_from.clone(),
+        }
     }
 
     /// 読み取りロックを取る。毒されていても中の状態は壊れていない（書き込みロックが守る不変条件は
@@ -612,7 +646,10 @@ impl SettingsStore for FileSettingsStore {
             Err(source) => {
                 // 失敗した書き込みをメモリに残さない（ファイルとメモリを食い違わせない）。
                 restore(&mut state.values, key, previous);
-                return Err(SettingsError::WriteFailed { path: state.file.clone(), source });
+                return Err(SettingsError::WriteFailed {
+                    path: state.file.clone(),
+                    source,
+                });
             }
         }
 
@@ -621,14 +658,19 @@ impl SettingsStore for FileSettingsStore {
         // 書き込みロックを解放し、購読者表のロックを取って配る。したがってロックの入れ子は常に
         // state → publish_order → subscribers の順である（module doc「ロック順」）。
         let order = if notification.is_some() {
-            Some(self.publish_order.lock().unwrap_or_else(PoisonError::into_inner))
+            Some(
+                self.publish_order
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner),
+            )
         } else {
             None
         };
         drop(state);
         if let Some(value) = notification {
             // 耐久化が成功した後に配る。購読者が `get` で読む値は既に新しい（要件 7.4）。
-            self.subscribers.publish(SettingsChanged { key: *key, value });
+            self.subscribers
+                .publish(SettingsChanged { key: *key, value });
         }
         drop(order);
         Ok(())
@@ -684,16 +726,19 @@ pub fn open(directory: &Path) -> Result<(Arc<FileSettingsStore>, OpenReport), Se
     // 使わない: macOS では `/var` が `/private/var` に、Windows では `C:\…` が `\\?\C:\…`
     // （8.3 形式の短い名前も展開される）になり、呼び出し側の知らない綴りがユーザー向けの
     // 復旧の報告に出てしまう（CI の macOS / Windows で実際に食い違った）。
-    let canonical = fs::canonicalize(directory).map_err(|source| SettingsError::DirectoryUnavailable {
-        path: directory.to_path_buf(),
-        source,
-    })?;
+    let canonical =
+        fs::canonicalize(directory).map_err(|source| SettingsError::DirectoryUnavailable {
+            path: directory.to_path_buf(),
+            source,
+        })?;
     // 読み込みと書き込みの対象は、呼び出し側の綴りを絶対パスにしたものである（シンボリック
     // リンクを解決せず、`\\?\` 形式にもしない）。絶対パスにするのは、相対パスで開いた後に
     // カレントディレクトリが変わっても書き込み先が動かないようにするため。
-    let absolute = std::path::absolute(directory).map_err(|source| {
-        SettingsError::DirectoryUnavailable { path: directory.to_path_buf(), source }
-    })?;
+    let absolute =
+        std::path::absolute(directory).map_err(|source| SettingsError::DirectoryUnavailable {
+            path: directory.to_path_buf(),
+            source,
+        })?;
 
     let mut entries = REGISTRY.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(existing) = entries.get(&canonical).and_then(Weak::upgrade) {

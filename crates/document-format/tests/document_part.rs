@@ -26,7 +26,11 @@ fn document_part_is_usable_from_outside_the_crate() {
     ];
 
     let part = DocumentPart::new(document_id, sheets).expect("標本は妥当");
-    assert_eq!(document_id, part.document_id(), "ドキュメント識別子が変わった");
+    assert_eq!(
+        document_id,
+        part.document_id(),
+        "ドキュメント識別子が変わった"
+    );
     assert_eq!("売上", part.sheets()[0].name());
 
     let bytes = part.to_json_bytes().expect("符号化");
@@ -41,7 +45,11 @@ fn document_part_is_usable_from_outside_the_crate() {
     assert_eq!(bytes, decoded.to_json_bytes().expect("再符号化"));
     assert_eq!(document_id, decoded.document_id());
     let names: Vec<&str> = decoded.sheets().iter().map(SheetMeta::name).collect();
-    assert_eq!(vec!["売上", ""], names, "シート順序かシート名が往復で変わった");
+    assert_eq!(
+        vec!["売上", ""],
+        names,
+        "シート順序かシート名が往復で変わった"
+    );
 
     // サブモジュール経由の型も公開面である（再エクスポートと同一の型）。
     fn module_path(part: &document_part::DocumentPart) -> usize {

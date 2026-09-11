@@ -359,9 +359,21 @@ fn three_owners_report_the_right_pair_and_lose_no_registration() {
     assert_eq!(
         listed(&registry),
         vec![
-            ("alpha".to_string(), "one".to_string(), "ctrl+KeyS".to_string()),
-            ("beta".to_string(), "two".to_string(), "ctrl+KeyT".to_string()),
-            ("gamma".to_string(), "three".to_string(), "ctrl+KeyU".to_string()),
+            (
+                "alpha".to_string(),
+                "one".to_string(),
+                "ctrl+KeyS".to_string()
+            ),
+            (
+                "beta".to_string(),
+                "two".to_string(),
+                "ctrl+KeyT".to_string()
+            ),
+            (
+                "gamma".to_string(),
+                "three".to_string(),
+                "ctrl+KeyU".to_string()
+            ),
         ],
         "成功した登録はどれも失われない"
     );
@@ -394,17 +406,21 @@ fn enumeration_order_is_deterministic_and_independent_of_insertion_order() {
     backward.reverse();
 
     let expected = vec![
-        ("alpha".to_string(), "a".to_string(), "ctrl+KeyA".to_string()),
-        ("alpha".to_string(), "z".to_string(), "ctrl+KeyS".to_string()),
+        (
+            "alpha".to_string(),
+            "a".to_string(),
+            "ctrl+KeyA".to_string(),
+        ),
+        (
+            "alpha".to_string(),
+            "z".to_string(),
+            "ctrl+KeyS".to_string(),
+        ),
         ("beta".to_string(), "m".to_string(), "ctrl+KeyB".to_string()),
         ("zeta".to_string(), "b".to_string(), "alt+F1".to_string()),
     ];
     assert_eq!(build(&forward), expected);
-    assert_eq!(
-        build(&backward),
-        expected,
-        "挿入順を逆にしても列挙順は同じ"
-    );
+    assert_eq!(build(&backward), expected, "挿入順を逆にしても列挙順は同じ");
 }
 
 // ---------------------------------------------------------------------------
@@ -416,7 +432,10 @@ fn enumeration_order_is_deterministic_and_independent_of_insertion_order() {
 #[test]
 fn malformed_chords_are_rejected_with_a_reason() {
     assert_eq!(Accelerator::parse(""), Err(AcceleratorParseError::Empty));
-    assert_eq!(Accelerator::parse("   \t "), Err(AcceleratorParseError::Empty));
+    assert_eq!(
+        Accelerator::parse("   \t "),
+        Err(AcceleratorParseError::Empty)
+    );
     assert!(
         matches!(Accelerator::parse("Ctrl"), Err(AcceleratorParseError::UnsupportedKey { ref token, .. }) if token == "Ctrl"),
         "修飾キーだけでは組み合わせにならない"
@@ -426,7 +445,10 @@ fn malformed_chords_are_rejected_with_a_reason() {
         "キーの無い末尾の区切りは拒否する"
     );
     assert!(
-        matches!(Accelerator::parse("Ctrl++S"), Err(AcceleratorParseError::EmptyToken { .. })),
+        matches!(
+            Accelerator::parse("Ctrl++S"),
+            Err(AcceleratorParseError::EmptyToken { .. })
+        ),
         "空のトークンは拒否する"
     );
     assert!(

@@ -36,5 +36,8 @@ fn main() {
     std::fs::write(&output, bindings.as_bytes()).expect("生成物を書き出せない");
 
     println!("生成した: {}", output.display());
-    println!("再生成コマンド: {}", app_shell::ipc::REGENERATE_BINDINGS_COMMAND);
+    println!(
+        "再生成コマンド: {}",
+        app_shell::ipc::REGENERATE_BINDINGS_COMMAND
+    );
 }

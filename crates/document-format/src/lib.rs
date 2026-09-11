@@ -179,12 +179,12 @@ pub use error::{DocumentError, IdKind};
 pub use ids::{
     AttachmentId, Blake3Digest, DocumentId, IdFactory, IdParseError, RowId, SheetId, TypeDefId,
 };
-pub use migration::{CURRENT_FORMAT_VERSION, FormatVersion, MigrationChain, VersionVerdict};
+pub use migration::{FormatVersion, MigrationChain, VersionVerdict, CURRENT_FORMAT_VERSION};
 pub use model::{
     Attachment, AttachmentRegistry, Document, RawJson, ReorderError, Row, SchemaPart, Sheet,
     TypeDef, UnknownRow, UnknownSheet,
 };
-pub use value::{CellValue, NestedValue, from_json_bytes, to_json_bytes};
+pub use value::{from_json_bytes, to_json_bytes, CellValue, NestedValue};
 
 use std::path::{Path, PathBuf};
 
@@ -315,8 +315,10 @@ impl DocumentFormatApi for DocumentFormat {
         // 1. ファイルの読み込み。読み込み経路が使う I/O は `fs::read` だけである
         //    （要件 5.5）。`retried` は保存経路の rename リトライ枯渇のための標識であり、
         //    読み込みでは常に `false`。
-        let bytes = std::fs::read(path)
-            .map_err(|source| DocumentError::Io { source, retried: false })?;
+        let bytes = std::fs::read(path).map_err(|source| DocumentError::Io {
+            source,
+            retried: false,
+        })?;
 
         // 2. コンテナの復号と、許可リスト照合・重複検出・サイズ照合・型マーカー検査
         //    （タスク 5.3。ZIP の知識はこの 1 経路に閉じる）。
@@ -324,8 +326,7 @@ impl DocumentFormatApi for DocumentFormat {
 
         // 3. 移行の事前判定（純粋な判定。モジュール docs 参照）。
         //    実際に移行が成功したかは 4 の `from_parts` が決める。
-        let migrated_from =
-            migrated_from_verdict(MigrationChain::gate(parts.format_version()));
+        let migrated_from = migrated_from_verdict(MigrationChain::gate(parts.format_version()));
 
         // 4. バージョンゲート・段階的移行・ダイジェスト照合・構造検証・モデル構築
         //    （タスク 4.8 + 6.1 + 6.2 の 1 経路）。`MigrationChain::apply` を直接呼ばない
@@ -441,8 +442,10 @@ fn preserve_pre_conversion_file(path: &Path) -> Result<(), DocumentError> {
         return Ok(());
     }
     // 3. 対象の現在のバイト列を読み、退避先へ原子的に書く。
-    let current =
-        std::fs::read(path).map_err(|source| DocumentError::Io { source, retried: false })?;
+    let current = std::fs::read(path).map_err(|source| DocumentError::Io {
+        source,
+        retried: false,
+    })?;
     AtomicWriter::commit(&backup, &current).map_err(backup_failure)
 }
 
@@ -465,7 +468,10 @@ fn backup_path(target: &Path) -> PathBuf {
 /// 1 度も走っていないため、[`DocumentError::Io`] の `retried` は常に `false` へ正規化する。
 fn backup_failure(error: DocumentError) -> DocumentError {
     match error {
-        DocumentError::Io { source, .. } => DocumentError::Io { source, retried: false },
+        DocumentError::Io { source, .. } => DocumentError::Io {
+            source,
+            retried: false,
+        },
         other => other,
     }
 }
@@ -527,7 +533,9 @@ mod tests {
         document
             .set_sheet_columns(sheet, vec!["name".to_owned()])
             .expect("標本のシートは実在する");
-        document.set_root_schema(sheet, SchemaPart::empty()).expect("標本のシートは実在する");
+        document
+            .set_root_schema(sheet, SchemaPart::empty())
+            .expect("標本のシートは実在する");
         let row = document.add_row(sheet).expect("標本の行は実在する");
         document
             .set_row_values(sheet, row, vec![CellValue::Text("りんご".to_owned())])
@@ -556,7 +564,10 @@ mod tests {
 
     /// 集合を（エントリ名, バイト列）の列へ写す。
     fn entries_of(parts: &DocumentParts) -> Vec<(EntryName, Vec<u8>)> {
-        parts.iter().map(|part| (part.name, part.bytes.clone())).collect()
+        parts
+            .iter()
+            .map(|part| (part.name, part.bytes.clone()))
+            .collect()
     }
 
     /// ディレクトリ直下の名前を昇順で返す（退避の有無の観測）。
@@ -564,7 +575,11 @@ mod tests {
         let mut names: Vec<String> = fs::read_dir(directory)
             .expect("作業ディレクトリが読める")
             .map(|entry| {
-                entry.expect("ディレクトリ要素が読める").file_name().to_string_lossy().into_owned()
+                entry
+                    .expect("ディレクトリ要素が読める")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
             })
             .collect();
         names.sort();
@@ -613,7 +628,10 @@ mod tests {
     #[test]
     fn only_an_applied_migration_marks_the_document_as_converted() {
         let document = sample_document();
-        assert!(!document.was_converted_from_an_older_format(), "新規文書が変換済みを名乗った");
+        assert!(
+            !document.was_converted_from_an_older_format(),
+            "新規文書が変換済みを名乗った"
+        );
 
         let current = parts_to_parts(&document).expect("保存経路");
         let plain = from_parts_with(synthetic::MULTI_STEP, &current).expect("現行版は読める");
@@ -642,7 +660,10 @@ mod tests {
 
         let parts = api().to_parts(&migrated).expect("保存経路");
         let reloaded = parts_from_parts(&parts).expect("現行版として読める");
-        assert!(!reloaded.was_converted_from_an_older_format(), "wire 形式へ変換済みが漏れている");
+        assert!(
+            !reloaded.was_converted_from_an_older_format(),
+            "wire 形式へ変換済みが漏れている"
+        );
         assert_eq!(
             entries_of(&parts),
             entries_of(&api().to_parts(&reloaded).expect("保存経路")),
@@ -684,8 +705,17 @@ mod tests {
         // 対象は変換後の内容として開ける（退避ではなく対象が新しい内容であることの実測）。
         let reopened = api().open(&path).expect("保存された対象は開ける");
         assert_eq!(
-            migrated.sheets().iter().map(|sheet| sheet.name().to_owned()).collect::<Vec<_>>(),
-            reopened.document.sheets().iter().map(|sheet| sheet.name().to_owned()).collect::<Vec<_>>(),
+            migrated
+                .sheets()
+                .iter()
+                .map(|sheet| sheet.name().to_owned())
+                .collect::<Vec<_>>(),
+            reopened
+                .document
+                .sheets()
+                .iter()
+                .map(|sheet| sheet.name().to_owned())
+                .collect::<Vec<_>>(),
             "保存された文書の内容が変換後と違う"
         );
     }
@@ -702,7 +732,11 @@ mod tests {
 
         api().save(&migrated, &path).expect("初回保存できる");
         let backup = scratch.file("doc.jxcel.bak");
-        assert_eq!(old_bytes, fs::read(&backup).expect("読める"), "初回の退避が違う");
+        assert_eq!(
+            old_bytes,
+            fs::read(&backup).expect("読める"),
+            "初回の退避が違う"
+        );
 
         api().save(&migrated, &path).expect("2 回目も保存できる");
         assert_eq!(
@@ -710,8 +744,15 @@ mod tests {
             fs::read(&backup).expect("読める"),
             "2 回目の保存が退避（変換前の原本）を上書きした"
         );
-        assert_ne!(old_bytes, fs::read(&path).expect("読める"), "対象が変換前に戻った");
-        assert!(api().open(&path).is_ok(), "2 回目に保存された対象が読めない");
+        assert_ne!(
+            old_bytes,
+            fs::read(&path).expect("読める"),
+            "対象が変換前に戻った"
+        );
+        assert!(
+            api().open(&path).is_ok(),
+            "2 回目に保存された対象が読めない"
+        );
     }
 
     /// 新規パスへの変換済み保存は退避を作らない（ディスク上に変換前の内容が無い。要件 6.4）。
@@ -719,7 +760,10 @@ mod tests {
     fn saving_a_converted_document_to_a_new_path_creates_no_backup() {
         let scratch = Scratch::new("backup_absent");
         let migrated = migrated_document(&sample_document());
-        assert!(migrated.was_converted_from_an_older_format(), "移行経路が変換済みを立てていない");
+        assert!(
+            migrated.was_converted_from_an_older_format(),
+            "移行経路が変換済みを立てていない"
+        );
         let path = scratch.file("fresh.jxcel");
         assert!(!path.exists(), "標本の対象パスが既に存在する");
 
@@ -747,13 +791,22 @@ mod tests {
         // 退避先をディレクトリにすると、そこへの `rename` が失敗する。
         fs::create_dir(scratch.file("doc.jxcel.bak")).expect("ディレクトリを作れる");
 
-        let error = api().save(&migrated, &path).expect_err("退避できない保存は中止される");
+        let error = api()
+            .save(&migrated, &path)
+            .expect_err("退避できない保存は中止される");
         assert!(
             matches!(error, DocumentError::Io { retried: false, .. }),
             "退避の失敗が Io(retried=false) でない: {error:?}"
         );
-        assert_eq!(before, fs::read(&path).expect("読める"), "退避の失敗で対象が変更された");
-        assert!(scratch.file("doc.jxcel.bak").is_dir(), "退避先のディレクトリが置き換えられた");
+        assert_eq!(
+            before,
+            fs::read(&path).expect("読める"),
+            "退避の失敗で対象が変更された"
+        );
+        assert!(
+            scratch.file("doc.jxcel.bak").is_dir(),
+            "退避先のディレクトリが置き換えられた"
+        );
         assert_eq!(
             vec!["doc.jxcel".to_owned(), "doc.jxcel.bak".to_owned()],
             entry_names(scratch.path()),
@@ -832,8 +885,13 @@ mod tests {
         #[cfg(unix)]
         assert_ne!(inode_before, inode(&path), "対象が原子的置換されていない");
         // 保存された対象は現行版として読める（移行後の内容が書かれている）。
-        let reopened = api().open(&path).expect("保存された対象は現行版として読める");
-        assert_eq!(None, reopened.migrated_from, "保存された対象が現行版として読めない");
+        let reopened = api()
+            .open(&path)
+            .expect("保存された対象は現行版として読める");
+        assert_eq!(
+            None, reopened.migrated_from,
+            "保存された対象が現行版として読めない"
+        );
         // (d) 2 回目の保存は退避（変換前の原本）を上書きしない。
         api().save(&migrated, &path).expect("2 回目も保存できる");
         assert_eq!(

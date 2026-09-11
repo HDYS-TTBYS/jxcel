@@ -44,11 +44,21 @@ use common::{
 fn to_parts_and_from_parts_round_trip_the_model_without_zip() {
     let before = sample();
 
-    let parts = api().to_parts(&before).expect("標本はパート集合へ取り出せる");
+    let parts = api()
+        .to_parts(&before)
+        .expect("標本はパート集合へ取り出せる");
     let after = api().from_parts(&parts).expect("パート集合は復元できる");
 
-    assert_eq!(before.document_id(), after.document_id(), "識別子が変わった");
-    assert_eq!(sheet_metadata(&before), sheet_metadata(&after), "シートが変わった");
+    assert_eq!(
+        before.document_id(),
+        after.document_id(),
+        "識別子が変わった"
+    );
+    assert_eq!(
+        sheet_metadata(&before),
+        sheet_metadata(&after),
+        "シートが変わった"
+    );
     assert_eq!(rows(&before), rows(&after), "行が変わった");
     assert_eq!(schemas(&before), schemas(&after), "スキーマが変わった");
     assert_eq!(attachments(&before), attachments(&after), "添付が変わった");
@@ -59,7 +69,9 @@ fn to_parts_and_from_parts_round_trip_the_model_without_zip() {
 #[test]
 fn parts_expose_every_entry_and_the_rows_of_their_own_sheet() {
     let document = sample();
-    let parts = api().to_parts(&document).expect("標本はパート集合へ取り出せる");
+    let parts = api()
+        .to_parts(&document)
+        .expect("標本はパート集合へ取り出せる");
 
     // エントリ集合の期待値: メタデータ・シートごとのスキーマと行・添付・索引（要件 2.2, 2.3）。
     let mut expected = vec![EntryName::Manifest, EntryName::Document];
@@ -68,7 +80,9 @@ fn parts_expose_every_entry_and_the_rows_of_their_own_sheet() {
         expected.push(EntryName::Rows { sheet: sheet.id() });
     }
     for attachment in document.attachments().iter() {
-        expected.push(EntryName::Attachment { attachment: attachment.id() });
+        expected.push(EntryName::Attachment {
+            attachment: attachment.id(),
+        });
     }
     expected.sort();
 
@@ -87,7 +101,11 @@ fn parts_expose_every_entry_and_the_rows_of_their_own_sheet() {
     // （0 行のシートの行エントリだけが空になる）。
     for part in parts.iter() {
         if !matches!(part.name, EntryName::Rows { .. }) {
-            assert!(!part.bytes.is_empty(), "空のエントリがある: {:?}", part.name);
+            assert!(
+                !part.bytes.is_empty(),
+                "空のエントリがある: {:?}",
+                part.name
+            );
         }
     }
 
@@ -104,7 +122,11 @@ fn parts_expose_every_entry_and_the_rows_of_their_own_sheet() {
             .iter()
             .find(|sheet| sheet.id() == decoded.sheet())
             .expect("行エントリのシートがモデルに実在する");
-        assert_eq!(sheet.rows().len(), decoded.rows().len(), "行数がそのシートと違う");
+        assert_eq!(
+            sheet.rows().len(),
+            decoded.rows().len(),
+            "行数がそのシートと違う"
+        );
         for (expected_row, actual_row) in sheet.rows().iter().zip(decoded.rows()) {
             assert_eq!(
                 expected_row.id().to_string(),
@@ -114,13 +136,23 @@ fn parts_expose_every_entry_and_the_rows_of_their_own_sheet() {
             assert_eq!(expected_row.values(), actual_row.values(), "セル値が違う");
         }
     }
-    assert_eq!(document.sheets().len(), row_entries, "行エントリが全シート分ない");
+    assert_eq!(
+        document.sheets().len(),
+        row_entries,
+        "行エントリが全シート分ない"
+    );
 
     // 添付の中身がバイト単位で読める（不透明バイト列として運ばれる。要件 7.5）。
     for attachment in document.attachments().iter() {
-        let name = EntryName::Attachment { attachment: attachment.id() };
+        let name = EntryName::Attachment {
+            attachment: attachment.id(),
+        };
         let part = parts.get(&name).expect("添付エントリが実在する");
-        assert_eq!(attachment.bytes(), part.bytes.as_slice(), "添付のバイト列が変わった");
+        assert_eq!(
+            attachment.bytes(),
+            part.bytes.as_slice(),
+            "添付のバイト列が変わった"
+        );
     }
 }
 
@@ -135,9 +167,16 @@ fn to_parts_is_deterministic() {
     let second = api().to_parts(&document).expect("2 回目は成功する");
 
     let capture = |parts: &DocumentParts| -> Vec<(EntryName, Vec<u8>)> {
-        parts.iter().map(|part| (part.name, part.bytes.clone())).collect()
+        parts
+            .iter()
+            .map(|part| (part.name, part.bytes.clone()))
+            .collect()
     };
-    assert_eq!(capture(&first), capture(&second), "同じモデルから違う集合が出た");
+    assert_eq!(
+        capture(&first),
+        capture(&second),
+        "同じモデルから違う集合が出た"
+    );
 }
 
 /// 読み込み経路が拒否する文書は `to_parts` も拒否する（書き出し側の不変条件検証）。
@@ -167,7 +206,13 @@ fn to_parts_rejects_documents_the_read_path_would_refuse() {
         .to_parts(&document_with_duplicate_type_def())
         .expect_err("TypeDefId の重複宣言は取り出せない");
     assert!(
-        matches!(&error, DocumentError::DuplicateId { kind: IdKind::TypeDef, .. }),
+        matches!(
+            &error,
+            DocumentError::DuplicateId {
+                kind: IdKind::TypeDef,
+                ..
+            }
+        ),
         "型定義の重複宣言が DuplicateId(TypeDef) でない: {error:?}"
     );
 }

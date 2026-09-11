@@ -58,7 +58,9 @@ fn attachment_registry_is_usable_from_outside_the_crate() {
     let id: AttachmentId = registry.add(payload.clone());
     let stored: &Attachment = registry.get(id).expect("登録済みの添付は取得できる");
     assert_eq!(payload, stored.bytes());
-    assert!(registry.get(AttachmentId::from_bytes(b"never registered")).is_none());
+    assert!(registry
+        .get(AttachmentId::from_bytes(b"never registered"))
+        .is_none());
 }
 
 #[test]
@@ -71,10 +73,14 @@ fn unreferenced_attachments_are_observable_through_the_public_api() {
     let referenced = doc.add_attachment(b"referenced".to_vec());
     let unreferenced = doc.add_attachment(vec![0x00, 0xff, 0x00]);
 
-    doc.set_row_values(sheet, row, vec![CellValue::Attachment(referenced)]).unwrap();
+    doc.set_row_values(sheet, row, vec![CellValue::Attachment(referenced)])
+        .unwrap();
 
     assert_eq!(vec![unreferenced], doc.unreferenced_attachments());
-    assert!(doc.attachment(referenced).is_some(), "参照済みも保持され続ける");
+    assert!(
+        doc.attachment(referenced).is_some(),
+        "参照済みも保持され続ける"
+    );
     assert_eq!(
         vec![0x00, 0xff, 0x00],
         doc.attachment(unreferenced).unwrap().bytes(),
@@ -85,8 +91,12 @@ fn unreferenced_attachments_are_observable_through_the_public_api() {
     let second = doc.add_sheet("second");
     let second_row = doc.add_row(second).unwrap();
     let only_from_second = doc.add_attachment(b"only from second".to_vec());
-    doc.set_row_values(second, second_row, vec![CellValue::Attachment(only_from_second)])
-        .unwrap();
+    doc.set_row_values(
+        second,
+        second_row,
+        vec![CellValue::Attachment(only_from_second)],
+    )
+    .unwrap();
     assert_eq!(
         vec![unreferenced],
         doc.unreferenced_attachments(),
@@ -155,7 +165,9 @@ fn attachment_payloads_survive_the_file_roundtrip_byte_for_byte() {
     let scratch = Scratch::new("attachment_payloads");
     let mut before = Document::new();
     let sheet = before.add_sheet("添付");
-    before.set_sheet_columns(sheet, vec!["ref".to_owned()]).expect("列を設定できる");
+    before
+        .set_sheet_columns(sheet, vec!["ref".to_owned()])
+        .expect("列を設定できる");
     let row = before.add_row(sheet).expect("行を追加できる");
 
     // 同一内容(binary と duplicate_of_binary)を 2 回登録する。content-addressed なので
@@ -172,21 +184,39 @@ fn attachment_payloads_survive_the_file_roundtrip_byte_for_byte() {
 
     // 登録の時点で 8 回の登録が 7 件の異なる内容へ畳まれている。
     let distinct = distinct_payloads();
-    assert_eq!(distinct.len(), before.attachments().len(), "同一内容が別エントリになった");
+    assert_eq!(
+        distinct.len(),
+        before.attachments().len(),
+        "同一内容が別エントリになった"
+    );
 
     let path = scratch.file("attachments.jxcel");
     api().save(&before, &path).expect("保存できる");
     let after = api().open(&path).expect("開ける").document;
 
-    assert_eq!(distinct.len(), after.attachments().len(), "往復で添付の件数が変わった");
+    assert_eq!(
+        distinct.len(),
+        after.attachments().len(),
+        "往復で添付の件数が変わった"
+    );
 
     // 全標本がバイト単位で一致し、識別子が内容のハッシュと一致し続ける(要件 7.1, 7.2, 7.5)。
     for (name, bytes) in samples() {
         let id = AttachmentId::from_bytes(&bytes);
-        let stored = after.attachment(id).unwrap_or_else(|| panic!("{name}: 往復で添付が落ちた"));
-        assert_eq!(bytes, stored.bytes(), "{name}: 往復でバイト列が 1 バイトでも変わった");
+        let stored = after
+            .attachment(id)
+            .unwrap_or_else(|| panic!("{name}: 往復で添付が落ちた"));
+        assert_eq!(
+            bytes,
+            stored.bytes(),
+            "{name}: 往復でバイト列が 1 バイトでも変わった"
+        );
         assert_eq!(id, stored.id(), "{name}: 添付の識別子が内容と一致しない");
-        assert_eq!(id, AttachmentId::from_bytes(stored.bytes()), "{name}: 識別子が内容からずれた");
+        assert_eq!(
+            id,
+            AttachmentId::from_bytes(stored.bytes()),
+            "{name}: 識別子が内容からずれた"
+        );
     }
 
     // 添付以外の経路(行・参照の持ち方)を含めたモデル全体の同一性。
@@ -203,7 +233,9 @@ fn referenced_and_unreferenced_attachments_stay_distinct_through_the_roundtrip()
     let scratch = Scratch::new("attachment_unreferenced");
     let mut before = Document::new();
     let sheet = before.add_sheet("参照");
-    before.set_sheet_columns(sheet, vec!["ref".to_owned()]).expect("列を設定できる");
+    before
+        .set_sheet_columns(sheet, vec!["ref".to_owned()])
+        .expect("列を設定できる");
     let row = before.add_row(sheet).expect("行を追加できる");
 
     let referenced = before.add_attachment(b"referenced".to_vec());
@@ -214,8 +246,14 @@ fn referenced_and_unreferenced_attachments_stay_distinct_through_the_roundtrip()
 
     // 前提: 片方だけが未参照である。
     assert_eq!(vec![unreferenced], before.unreferenced_attachments());
-    assert!(!before.unreferenced_attachments().contains(&referenced), "参照済みが未参照一覧に現れた");
-    assert!(before.attachment(unreferenced).is_some(), "未参照でも保持される");
+    assert!(
+        !before.unreferenced_attachments().contains(&referenced),
+        "参照済みが未参照一覧に現れた"
+    );
+    assert!(
+        before.attachment(unreferenced).is_some(),
+        "未参照でも保持される"
+    );
 
     // ZIP 経由(save → open)。
     let path = scratch.file("mixed.jxcel");
@@ -239,9 +277,20 @@ fn referenced_and_unreferenced_attachments_stay_distinct_through_the_roundtrip()
         let stored = after
             .attachment(unreferenced)
             .unwrap_or_else(|| panic!("{path}: 未参照添付が削除された"));
-        assert_eq!(vec![0x00, 0xff, 0x00, 0x80], stored.bytes(), "{path}: 未参照添付のバイト列が変わった");
-        assert_eq!(unreferenced, stored.id(), "{path}: 未参照添付の識別子が変わった");
-        assert!(after.attachment(referenced).is_some(), "{path}: 参照済みの添付が保持されていない");
+        assert_eq!(
+            vec![0x00, 0xff, 0x00, 0x80],
+            stored.bytes(),
+            "{path}: 未参照添付のバイト列が変わった"
+        );
+        assert_eq!(
+            unreferenced,
+            stored.id(),
+            "{path}: 未参照添付の識別子が変わった"
+        );
+        assert!(
+            after.attachment(referenced).is_some(),
+            "{path}: 参照済みの添付が保持されていない"
+        );
     }
 
     assert_same_document(&before, &via_file);
@@ -269,7 +318,11 @@ fn attachment_references_are_preserved_on_both_paths() {
         CellValue::Attachment(second),
     ]));
     before
-        .set_row_values(sheet, row, vec![CellValue::Attachment(first), nested.clone()])
+        .set_row_values(
+            sheet,
+            row,
+            vec![CellValue::Attachment(first), nested.clone()],
+        )
         .expect("参照を設定できる");
 
     let parts = api().to_parts(&before).expect("取り出せる");
@@ -289,7 +342,10 @@ fn attachment_references_are_preserved_on_both_paths() {
             &values[0],
             "{path}: 直接参照が別の識別子になった"
         );
-        assert_eq!(&nested, &values[1], "{path}: 入れ子内の参照が保たれなかった");
+        assert_eq!(
+            &nested, &values[1],
+            "{path}: 入れ子内の参照が保たれなかった"
+        );
         assert_eq!(
             vec![0x00, 0xff, 0x80, 0x01].as_slice(),
             after.attachment(first).expect("参照先を取得できる").bytes(),
@@ -312,7 +368,9 @@ fn attachment_references_are_preserved_on_both_paths() {
 fn attachment_entry_names_are_content_addressed() {
     let mut document = Document::new();
     let sheet = document.add_sheet("添付");
-    document.set_sheet_columns(sheet, Vec::<String>::new()).expect("列を設定できる");
+    document
+        .set_sheet_columns(sheet, Vec::<String>::new())
+        .expect("列を設定できる");
     for (_, bytes) in samples() {
         document.add_attachment(bytes);
     }
@@ -322,7 +380,10 @@ fn attachment_entry_names_are_content_addressed() {
     for (name, bytes) in entries_of(&parts) {
         if let EntryName::Attachment { attachment } = name {
             let id = AttachmentId::from_bytes(&bytes);
-            assert_eq!(attachment, id, "エントリ名の識別子が内容のハッシュと一致しない");
+            assert_eq!(
+                attachment, id,
+                "エントリ名の識別子が内容のハッシュと一致しない"
+            );
             assert_eq!(
                 format!("attachments/{}.bin", attachment.to_hex()),
                 name.to_string(),
@@ -333,12 +394,18 @@ fn attachment_entry_names_are_content_addressed() {
     }
 
     let distinct = distinct_payloads();
-    assert_eq!(distinct.len(), observed.len(), "同一内容が別エントリとして書かれた");
+    assert_eq!(
+        distinct.len(),
+        observed.len(),
+        "同一内容が別エントリとして書かれた"
+    );
     // 観測した識別子の集合が標本の相異なる内容のハッシュ集合と一致する。
     let mut observed_ids: Vec<AttachmentId> = observed.iter().map(|(id, _)| *id).collect();
     observed_ids.sort();
-    let mut expected_ids: Vec<AttachmentId> =
-        distinct.iter().map(|bytes| AttachmentId::from_bytes(bytes)).collect();
+    let mut expected_ids: Vec<AttachmentId> = distinct
+        .iter()
+        .map(|bytes| AttachmentId::from_bytes(bytes))
+        .collect();
     expected_ids.sort();
     assert_eq!(expected_ids, observed_ids);
     // 各エントリのバイト列は名前が指す内容そのものである。

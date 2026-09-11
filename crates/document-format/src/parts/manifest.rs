@@ -740,8 +740,16 @@ mod tests {
         );
 
         let decoded = ManifestPart::from_json_bytes(&bytes).expect("復号");
-        assert_eq!(part.version(), decoded.version(), "復号で形式バージョンが変わった");
-        assert_eq!(fingerprint(&part), fingerprint(&decoded), "復号で索引が変わった");
+        assert_eq!(
+            part.version(),
+            decoded.version(),
+            "復号で形式バージョンが変わった"
+        );
+        assert_eq!(
+            fingerprint(&part),
+            fingerprint(&decoded),
+            "復号で索引が変わった"
+        );
         assert_eq!(
             bytes,
             decoded.to_json_bytes().expect("再符号化"),
@@ -765,17 +773,28 @@ mod tests {
 
         let mut encodings = Vec::new();
         for entries in [samples(), reversed, rotated] {
-            let input_names: Vec<String> =
-                entries.iter().map(|entry| entry.name().to_string()).collect();
-            assert_ne!(ascending, input_names, "標本の入力順が既に昇順で、順序の検証にならない");
+            let input_names: Vec<String> = entries
+                .iter()
+                .map(|entry| entry.name().to_string())
+                .collect();
+            assert_ne!(
+                ascending, input_names,
+                "標本の入力順が既に昇順で、順序の検証にならない"
+            );
 
             let part = manifest(FormatVersion::new(1, 0), entries);
             assert_eq!(ascending, names(&part), "索引がエントリ名の昇順でない");
             encodings.push(part.to_json_bytes().expect("符号化"));
         }
 
-        assert_eq!(encodings[0], encodings[1], "入力順の違いがバイト列へ漏れている");
-        assert_eq!(encodings[0], encodings[2], "入力順の違いがバイト列へ漏れている");
+        assert_eq!(
+            encodings[0], encodings[1],
+            "入力順の違いがバイト列へ漏れている"
+        );
+        assert_eq!(
+            encodings[0], encodings[2],
+            "入力順の違いがバイト列へ漏れている"
+        );
     }
 
     /// 確定形: キー名・キー順序・入れ子の形・ダイジェストのテキスト形を文字列で固定する
@@ -950,7 +969,11 @@ mod tests {
             );
         }
 
-        assert_eq!(None, part.digest_of(&MANIFEST_ENTRY), "索引に自分自身が載っている");
+        assert_eq!(
+            None,
+            part.digest_of(&MANIFEST_ENTRY),
+            "索引に自分自身が載っている"
+        );
         assert_eq!(
             None,
             part.digest_of(&EntryName::parse(&format!("attachments/{HEX_A}.bin")).unwrap()),

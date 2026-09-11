@@ -34,7 +34,11 @@ fn inventory_of(kind: IdKind, id: &str, locations: &[impl AsRef<str>]) -> PartIn
 /// `DuplicateId` から（種別, 識別子, 出現箇所）を取り出す。
 fn duplicate(error: DocumentError) -> (IdKind, String, Vec<String>) {
     match error {
-        DocumentError::DuplicateId { kind, id, occurrences } => (kind, id, occurrences),
+        DocumentError::DuplicateId {
+            kind,
+            id,
+            occurrences,
+        } => (kind, id, occurrences),
         other => panic!("DuplicateId を期待したが {other:?} だった"),
     }
 }
@@ -67,7 +71,10 @@ fn a_duplicated_sheet_identifier_is_reported() {
     assert_eq!(IdKind::Sheet, kind, "種別が Sheet でない");
     assert_eq!(sheet, id, "重複した識別子が報告されていない");
     assert_eq!(
-        vec!["document.json sheets[0]".to_owned(), "document.json sheets[2]".to_owned()],
+        vec![
+            "document.json sheets[0]".to_owned(),
+            "document.json sheets[2]".to_owned()
+        ],
         occurrences,
         "出現箇所が報告されていない",
     );
@@ -119,7 +126,10 @@ fn a_row_identifier_duplicated_across_two_sheets_is_reported() {
     let inventory = inventory_of(
         IdKind::Row,
         &row,
-        &[format!("sheets/{first}.jsonl line 1"), format!("sheets/{second}.jsonl line 1")],
+        &[
+            format!("sheets/{first}.jsonl line 1"),
+            format!("sheets/{second}.jsonl line 1"),
+        ],
     );
 
     let (kind, id, occurrences) = duplicate(StructuralValidator::validate(&inventory).expect_err(
@@ -127,7 +137,11 @@ fn a_row_identifier_duplicated_across_two_sheets_is_reported() {
     ));
     assert_eq!(IdKind::Row, kind);
     assert_eq!(row, id);
-    assert_eq!(2, occurrences.len(), "2 シート分の出現箇所が報告されていない");
+    assert_eq!(
+        2,
+        occurrences.len(),
+        "2 シート分の出現箇所が報告されていない"
+    );
 }
 
 #[test]
@@ -144,9 +158,10 @@ fn a_duplicated_type_definition_identifier_is_reported() {
         ],
     );
 
-    let (kind, id, occurrences) = duplicate(StructuralValidator::validate(&inventory).expect_err(
-        "重複した型定義識別子が受け入れられた",
-    ));
+    let (kind, id, occurrences) = duplicate(
+        StructuralValidator::validate(&inventory)
+            .expect_err("重複した型定義識別子が受け入れられた"),
+    );
     assert_eq!(IdKind::TypeDef, kind, "種別が TypeDef でない");
     assert_eq!(type_def, id, "重複した識別子が報告されていない");
     assert_eq!(2, occurrences.len());
@@ -158,8 +173,11 @@ fn a_duplicated_attachment_identifier_is_reported() {
     // ある。同じ添付を 2 度宣言した目録を拒否する。
     let attachment = AttachmentId::from_bytes(b"same bytes").to_string();
     let entry = format!("attachments/{attachment}.bin");
-    let inventory =
-        inventory_of(IdKind::Attachment, &attachment, &[entry.as_str(), entry.as_str()]);
+    let inventory = inventory_of(
+        IdKind::Attachment,
+        &attachment,
+        &[entry.as_str(), entry.as_str()],
+    );
 
     let (kind, id, occurrences) = duplicate(
         StructuralValidator::validate(&inventory).expect_err("重複した添付識別子が受け入れられた"),
@@ -175,10 +193,26 @@ fn the_same_text_in_different_identifier_kinds_is_not_a_duplicate() {
     // 比較すると、この目録が誤って重複として報告される。
     let text = IdFactory::new().new_row_id().to_string();
     let mut inventory = PartInventory::new();
-    inventory.declare(IdDeclaration::new(IdKind::Sheet, &text, "document.json sheets[0]"));
-    inventory.declare(IdDeclaration::new(IdKind::Row, &text, "sheets/row.jsonl line 1"));
-    inventory.declare(IdDeclaration::new(IdKind::TypeDef, &text, "schemas/row.json types[0]"));
-    inventory.declare(IdDeclaration::new(IdKind::Attachment, &text, "attachments/row.bin"));
+    inventory.declare(IdDeclaration::new(
+        IdKind::Sheet,
+        &text,
+        "document.json sheets[0]",
+    ));
+    inventory.declare(IdDeclaration::new(
+        IdKind::Row,
+        &text,
+        "sheets/row.jsonl line 1",
+    ));
+    inventory.declare(IdDeclaration::new(
+        IdKind::TypeDef,
+        &text,
+        "schemas/row.json types[0]",
+    ));
+    inventory.declare(IdDeclaration::new(
+        IdKind::Attachment,
+        &text,
+        "attachments/row.bin",
+    ));
 
     StructuralValidator::validate(&inventory).expect("種別が違えば識別子の一意性は破られていない");
 }
@@ -197,7 +231,11 @@ fn a_complete_unique_inventory_passes() {
     let attachment = AttachmentId::from_bytes(b"payload").to_string();
 
     let mut inventory = PartInventory::new();
-    inventory.declare(IdDeclaration::new(IdKind::Sheet, &sheet, "document.json sheets[0]"));
+    inventory.declare(IdDeclaration::new(
+        IdKind::Sheet,
+        &sheet,
+        "document.json sheets[0]",
+    ));
     inventory.declare(IdDeclaration::new(
         IdKind::Row,
         &row,
@@ -268,10 +306,26 @@ fn validation_is_deterministic_and_reports_the_smallest_kind_then_text() {
             &type_def,
             "schemas/s.json types[1]",
         ));
-        inventory.declare(IdDeclaration::new(IdKind::Row, &row, "sheets/s.jsonl line 1"));
-        inventory.declare(IdDeclaration::new(IdKind::Row, &row, "sheets/s.jsonl line 2"));
-        inventory.declare(IdDeclaration::new(IdKind::Sheet, &sheet, "document.json sheets[0]"));
-        inventory.declare(IdDeclaration::new(IdKind::Sheet, &sheet, "document.json sheets[1]"));
+        inventory.declare(IdDeclaration::new(
+            IdKind::Row,
+            &row,
+            "sheets/s.jsonl line 1",
+        ));
+        inventory.declare(IdDeclaration::new(
+            IdKind::Row,
+            &row,
+            "sheets/s.jsonl line 2",
+        ));
+        inventory.declare(IdDeclaration::new(
+            IdKind::Sheet,
+            &sheet,
+            "document.json sheets[0]",
+        ));
+        inventory.declare(IdDeclaration::new(
+            IdKind::Sheet,
+            &sheet,
+            "document.json sheets[1]",
+        ));
         inventory
     };
 
@@ -279,7 +333,10 @@ fn validation_is_deterministic_and_reports_the_smallest_kind_then_text() {
     let expected = (
         IdKind::Sheet,
         sheet.clone(),
-        vec!["document.json sheets[0]".to_owned(), "document.json sheets[1]".to_owned()],
+        vec![
+            "document.json sheets[0]".to_owned(),
+            "document.json sheets[1]".to_owned(),
+        ],
     );
     // 4 種すべてが重複している目録では、種別順の先頭（Sheet）が報告される。
     let first = duplicate(StructuralValidator::validate(&inventory).expect_err("4 種すべて重複"));
@@ -300,10 +357,26 @@ fn within_a_kind_the_smallest_identifier_text_is_reported() {
     let large = factory.new_row_id().to_string();
     let mut inventory = PartInventory::new();
     // 宣言順はテキスト順と逆にしてある。
-    inventory.declare(IdDeclaration::new(IdKind::Row, &large, "sheets/a.jsonl line 1"));
-    inventory.declare(IdDeclaration::new(IdKind::Row, &large, "sheets/a.jsonl line 2"));
-    inventory.declare(IdDeclaration::new(IdKind::Row, &small, "sheets/b.jsonl line 1"));
-    inventory.declare(IdDeclaration::new(IdKind::Row, &small, "sheets/b.jsonl line 2"));
+    inventory.declare(IdDeclaration::new(
+        IdKind::Row,
+        &large,
+        "sheets/a.jsonl line 1",
+    ));
+    inventory.declare(IdDeclaration::new(
+        IdKind::Row,
+        &large,
+        "sheets/a.jsonl line 2",
+    ));
+    inventory.declare(IdDeclaration::new(
+        IdKind::Row,
+        &small,
+        "sheets/b.jsonl line 1",
+    ));
+    inventory.declare(IdDeclaration::new(
+        IdKind::Row,
+        &small,
+        "sheets/b.jsonl line 2",
+    ));
 
     let (kind, id, _) = duplicate(
         StructuralValidator::validate(&inventory).expect_err("2 つの行識別子が重複している"),
@@ -340,7 +413,11 @@ fn a_sheet_without_a_schema_part_is_reported() {
     let sheet = factory.new_sheet_id().to_string();
     let row = factory.new_row_id().to_string();
     let mut inventory = PartInventory::new();
-    inventory.declare(IdDeclaration::new(IdKind::Sheet, &sheet, "document.json sheets[0]"));
+    inventory.declare(IdDeclaration::new(
+        IdKind::Sheet,
+        &sheet,
+        "document.json sheets[0]",
+    ));
     inventory.declare(IdDeclaration::new(
         IdKind::Row,
         &row,
@@ -368,8 +445,16 @@ fn a_sheet_without_any_row_declaration_still_requires_a_schema() {
     let empty = factory.new_sheet_id().to_string();
     let row = factory.new_row_id().to_string();
     let mut inventory = PartInventory::new();
-    inventory.declare(IdDeclaration::new(IdKind::Sheet, &provided, "document.json sheets[0]"));
-    inventory.declare(IdDeclaration::new(IdKind::Sheet, &empty, "document.json sheets[1]"));
+    inventory.declare(IdDeclaration::new(
+        IdKind::Sheet,
+        &provided,
+        "document.json sheets[0]",
+    ));
+    inventory.declare(IdDeclaration::new(
+        IdKind::Sheet,
+        &empty,
+        "document.json sheets[1]",
+    ));
     inventory.declare(IdDeclaration::new(
         IdKind::Row,
         &row,
@@ -527,10 +612,13 @@ fn a_dangling_type_ref_from_the_root_schema_is_reported() {
     ));
 
     let (from, to) = dangling_type_ref(
-        StructuralValidator::validate(&inventory)
-            .expect_err("実在しない型定義参照が通った"),
+        StructuralValidator::validate(&inventory).expect_err("実在しない型定義参照が通った"),
     );
-    assert_eq!(format!("schemas/{sheet}.json root"), from, "参照元が報告されていない");
+    assert_eq!(
+        format!("schemas/{sheet}.json root"),
+        from,
+        "参照元が報告されていない"
+    );
     assert_eq!(missing, to, "参照先が報告されていない");
 }
 
@@ -544,7 +632,12 @@ fn a_dangling_type_ref_from_a_type_definition_is_reported() {
     let second = factory.new_type_def_id().to_string();
     let missing = factory.new_type_def_id().to_string();
     let mut inventory = PartInventory::new();
-    add_sheet(&mut inventory, &sheet, 0, &[first.as_str(), second.as_str()]);
+    add_sheet(
+        &mut inventory,
+        &sheet,
+        0,
+        &[first.as_str(), second.as_str()],
+    );
     inventory.declare_type_ref(TypeRefDeclaration::new(
         format!("schemas/{sheet}.json type {second}"),
         &missing,
@@ -552,8 +645,7 @@ fn a_dangling_type_ref_from_a_type_definition_is_reported() {
     ));
 
     let (from, to) = dangling_type_ref(
-        StructuralValidator::validate(&inventory)
-            .expect_err("型定義内の宙吊り参照が通った"),
+        StructuralValidator::validate(&inventory).expect_err("型定義内の宙吊り参照が通った"),
     );
     assert_eq!(
         format!("schemas/{sheet}.json type {second}"),
@@ -591,11 +683,15 @@ fn a_reference_to_a_type_defined_in_another_sheet_is_dangling() {
         &elsewhere,
         &first,
     ));
-    let (from, to) = dangling_type_ref(StructuralValidator::validate(&inventory).expect_err(
-        "別シートの型定義を指す参照が通った（同一シート規則が無い）",
-    ));
+    let (from, to) = dangling_type_ref(
+        StructuralValidator::validate(&inventory)
+            .expect_err("別シートの型定義を指す参照が通った（同一シート規則が無い）"),
+    );
     assert_eq!(format!("schemas/{first}.json root"), from);
-    assert_eq!(elsewhere, to, "別シートにしか無い型定義が実在として扱われた");
+    assert_eq!(
+        elsewhere, to,
+        "別シートにしか無い型定義が実在として扱われた"
+    );
 }
 
 #[test]
@@ -618,9 +714,10 @@ fn a_dangling_attachment_ref_nested_in_a_row_is_reported() {
         &deeply_nested_attachments(&[present, missing], &present.to_string()),
     );
 
-    let (from, id) = dangling_attachment_ref(StructuralValidator::validate(&inventory).expect_err(
-        "3 段深い位置の宙吊り添付参照が通った（再帰が浅い）",
-    ));
+    let (from, id) = dangling_attachment_ref(
+        StructuralValidator::validate(&inventory)
+            .expect_err("3 段深い位置の宙吊り添付参照が通った（再帰が浅い）"),
+    );
     assert_eq!(
         format!("sheets/{sheet}.jsonl line 7"),
         from,
@@ -673,16 +770,25 @@ fn attachment_refs_across_rows_and_sheets_are_all_checked() {
     };
 
     let (from, id) = dangling_attachment_ref(
-        StructuralValidator::validate(&build(true, true))
-            .expect_err("2 枚目の宙吊り参照が通った"),
+        StructuralValidator::validate(&build(true, true)).expect_err("2 枚目の宙吊り参照が通った"),
     );
-    assert_eq!(format!("sheets/{second}.jsonl line 3"), from, "参照元が違う");
+    assert_eq!(
+        format!("sheets/{second}.jsonl line 3"),
+        from,
+        "参照元が違う"
+    );
     assert_eq!(third_line.to_string(), id, "実在しない添付識別子が違う");
 
     // 3 行目の宙吊りを取り除くと、次の行の宙吊りが報告される（走査が続いている）。
-    let (from, id) = dangling_attachment_ref(StructuralValidator::validate(&build(false, true))
-        .expect_err("3 行目より後の宙吊り参照が報告されていない"));
-    assert_eq!(format!("sheets/{second}.jsonl line 9"), from, "参照元が違う");
+    let (from, id) = dangling_attachment_ref(
+        StructuralValidator::validate(&build(false, true))
+            .expect_err("3 行目より後の宙吊り参照が報告されていない"),
+    );
+    assert_eq!(
+        format!("sheets/{second}.jsonl line 9"),
+        from,
+        "参照元が違う"
+    );
     assert_eq!(ninth_line.to_string(), id, "実在しない添付識別子が違う");
 
     // 1 枚目の実在する参照だけなら通る（同じ標本が別の理由で緑になっていないこと）。
@@ -705,8 +811,7 @@ fn an_unreferenced_attachment_is_not_a_reference_failure() {
     }
     inventory.declare_attachment_refs("sheets/s.jsonl line 1", &CellValue::Attachment(referenced));
 
-    StructuralValidator::validate(&inventory)
-        .expect("未参照の添付が参照破れとして報告された");
+    StructuralValidator::validate(&inventory).expect("未参照の添付が参照破れとして報告された");
 }
 
 #[test]
@@ -718,14 +823,16 @@ fn a_part_referencing_an_unknown_sheet_is_reported_as_a_container_error() {
     let known = factory.new_sheet_id().to_string();
     let unknown = factory.new_sheet_id().to_string();
 
-    for entry in [format!("sheets/{unknown}.jsonl"), format!("schemas/{unknown}.json")] {
+    for entry in [
+        format!("sheets/{unknown}.jsonl"),
+        format!("schemas/{unknown}.json"),
+    ] {
         let mut inventory = PartInventory::new();
         add_sheet(&mut inventory, &known, 0, &[]);
         inventory.declare_sheet_ref(SheetRefDeclaration::new(entry.clone(), &unknown));
 
         let reported = invalid_container(
-            StructuralValidator::validate(&inventory)
-                .expect_err("未知シートを指すパートが通った"),
+            StructuralValidator::validate(&inventory).expect_err("未知シートを指すパートが通った"),
         );
         assert!(
             reported.contains(&entry),
@@ -740,7 +847,10 @@ fn a_part_referencing_an_unknown_sheet_is_reported_as_a_container_error() {
     // 既知シートを指すパートは通る。
     let mut known_ref = PartInventory::new();
     add_sheet(&mut known_ref, &known, 0, &[]);
-    known_ref.declare_sheet_ref(SheetRefDeclaration::new(format!("schemas/{known}.json"), &known));
+    known_ref.declare_sheet_ref(SheetRefDeclaration::new(
+        format!("schemas/{known}.json"),
+        &known,
+    ));
     StructuralValidator::validate(&known_ref)
         .expect("既知シートを指すパートが参照破れとして報告された");
 }
@@ -792,8 +902,7 @@ fn reference_validation_reports_the_first_break_in_the_documented_order() {
         assert_eq!(
             first,
             dangling_type_ref(
-                StructuralValidator::validate(&inventory)
-                    .expect_err("3 種すべてが破れている"),
+                StructuralValidator::validate(&inventory).expect_err("3 種すべてが破れている"),
             ),
             "同じ目録で検証結果が変わった",
         );
@@ -801,7 +910,10 @@ fn reference_validation_reports_the_first_break_in_the_documented_order() {
 
     // 型定義参照が実在すると、次は添付参照が報告される。
     assert_eq!(
-        ("sheets/s.jsonl line 1".to_owned(), missing_attachment.to_string()),
+        (
+            "sheets/s.jsonl line 1".to_owned(),
+            missing_attachment.to_string()
+        ),
         dangling_attachment_ref(
             StructuralValidator::validate(&build(false, true, true))
                 .expect_err("添付参照とシート参照が破れている")
@@ -813,11 +925,13 @@ fn reference_validation_reports_the_first_break_in_the_documented_order() {
         StructuralValidator::validate(&build(false, false, true))
             .expect_err("シート参照だけが破れている"),
     );
-    assert!(reported.contains(&format!("sheets/{unknown}.jsonl")), "{reported}");
+    assert!(
+        reported.contains(&format!("sheets/{unknown}.jsonl")),
+        "{reported}"
+    );
 
     // 3 種とも実在すれば通る（標本の破れはこの 3 つだけである）。
-    StructuralValidator::validate(&build(false, false, false))
-        .expect("参照がすべて実在する");
+    StructuralValidator::validate(&build(false, false, false)).expect("参照がすべて実在する");
 }
 
 #[test]
@@ -845,7 +959,11 @@ fn within_a_reference_kind_the_order_added_to_the_inventory_is_reported() {
     let (from, to) = dangling_type_ref(
         StructuralValidator::validate(&inventory).expect_err("2 つの宙吊り型定義参照"),
     );
-    assert_eq!(format!("schemas/{sheet}.json root"), from, "参照元が目録の順でない");
+    assert_eq!(
+        format!("schemas/{sheet}.json root"),
+        from,
+        "参照元が目録の順でない"
+    );
     assert_eq!(larger, to, "種別内で目録順ではなくソート順に報告している");
 }
 
@@ -856,8 +974,16 @@ fn the_identifier_and_schema_checks_still_take_precedence_over_references() {
     let sheet = factory.new_sheet_id().to_string();
     let missing_type = factory.new_type_def_id().to_string();
     let mut inventory = PartInventory::new();
-    inventory.declare(IdDeclaration::new(IdKind::Sheet, &sheet, "document.json sheets[0]"));
-    inventory.declare(IdDeclaration::new(IdKind::Sheet, &sheet, "document.json sheets[1]"));
+    inventory.declare(IdDeclaration::new(
+        IdKind::Sheet,
+        &sheet,
+        "document.json sheets[0]",
+    ));
+    inventory.declare(IdDeclaration::new(
+        IdKind::Sheet,
+        &sheet,
+        "document.json sheets[1]",
+    ));
     inventory.require_schema(&sheet);
     inventory.declare_type_ref(TypeRefDeclaration::new(
         format!("schemas/{sheet}.json root"),
@@ -874,7 +1000,11 @@ fn the_identifier_and_schema_checks_still_take_precedence_over_references() {
 
     // 重複を消すとスキーマ欠落が先に報告される（参照より先）。
     let mut no_schema = PartInventory::new();
-    no_schema.declare(IdDeclaration::new(IdKind::Sheet, &sheet, "document.json sheets[0]"));
+    no_schema.declare(IdDeclaration::new(
+        IdKind::Sheet,
+        &sheet,
+        "document.json sheets[0]",
+    ));
     no_schema.require_schema(&sheet);
     no_schema.declare_type_ref(TypeRefDeclaration::new(
         format!("schemas/{sheet}.json root"),
@@ -884,8 +1014,7 @@ fn the_identifier_and_schema_checks_still_take_precedence_over_references() {
     assert_eq!(
         sheet,
         missing_schema(
-            StructuralValidator::validate(&no_schema)
-                .expect_err("スキーマ欠落が報告されていない")
+            StructuralValidator::validate(&no_schema).expect_err("スキーマ欠落が報告されていない")
         ),
         "スキーマ存在の検査が参照より後になった",
     );
@@ -908,7 +1037,10 @@ fn reference_validation_does_not_change_the_inventory() {
         format!("sheets/{sheet}.jsonl line 1"),
         &deeply_nested_attachments(&[missing_attachment], "note"),
     );
-    inventory.declare_sheet_ref(SheetRefDeclaration::new("sheets/unlisted.jsonl", "01UNLISTED"));
+    inventory.declare_sheet_ref(SheetRefDeclaration::new(
+        "sheets/unlisted.jsonl",
+        "01UNLISTED",
+    ));
     let before = inventory.clone();
 
     dangling_type_ref(StructuralValidator::validate(&inventory).expect_err("宙吊りの参照"));
@@ -924,20 +1056,16 @@ fn blank_reference_texts_are_reported_without_panicking() {
     type_refs.declare_type_ref(TypeRefDeclaration::new("", "", ""));
     assert_eq!(
         (String::new(), String::new()),
-        dangling_type_ref(
-            StructuralValidator::validate(&type_refs).expect_err("空の型定義参照")
-        ),
+        dangling_type_ref(StructuralValidator::validate(&type_refs).expect_err("空の型定義参照")),
     );
 
     let missing = AttachmentId::from_bytes(b"missing payload");
     let mut attachment_refs = PartInventory::new();
-    attachment_refs
-        .declare_attachment_ref(AttachmentRefDeclaration::new("", missing.to_string()));
+    attachment_refs.declare_attachment_ref(AttachmentRefDeclaration::new("", missing.to_string()));
     assert_eq!(
         (String::new(), missing.to_string()),
         dangling_attachment_ref(
-            StructuralValidator::validate(&attachment_refs)
-                .expect_err("空の参照元の添付参照")
+            StructuralValidator::validate(&attachment_refs).expect_err("空の参照元の添付参照")
         ),
     );
 
@@ -956,10 +1084,12 @@ fn blank_reference_texts_are_reported_without_panicking() {
 
     let mut sheet_refs = PartInventory::new();
     sheet_refs.declare_sheet_ref(SheetRefDeclaration::new("", ""));
-    let reported = invalid_container(
-        StructuralValidator::validate(&sheet_refs).expect_err("空のシート参照"),
+    let reported =
+        invalid_container(StructuralValidator::validate(&sheet_refs).expect_err("空のシート参照"));
+    assert!(
+        reported.contains("document.json"),
+        "理由が報告されていない: {reported}"
     );
-    assert!(reported.contains("document.json"), "理由が報告されていない: {reported}");
 }
 
 #[test]
@@ -1012,10 +1142,13 @@ fn schema_type_refs_carry_their_source_and_feed_the_validator() {
         ));
     }
 
-    let (from, to) = dangling_type_ref(
-        StructuralValidator::validate(&inventory).expect_err("宙吊りの参照")
+    let (from, to) =
+        dangling_type_ref(StructuralValidator::validate(&inventory).expect_err("宙吊りの参照"));
+    assert_eq!(
+        format!("{entry} type {defined}"),
+        from,
+        "参照元が結線されていない"
     );
-    assert_eq!(format!("{entry} type {defined}"), from, "参照元が結線されていない");
     assert_eq!(missing, to, "参照先が結線されていない");
 }
 
@@ -1082,8 +1215,7 @@ fn a_type_reference_in_lower_case_resolves_to_the_declaration() {
         &sheet,
     ));
 
-    StructuralValidator::validate(&inventory)
-        .expect("小文字表記の参照先が宙吊りと報告された");
+    StructuralValidator::validate(&inventory).expect("小文字表記の参照先が宙吊りと報告された");
 }
 
 #[test]
@@ -1101,8 +1233,7 @@ fn a_type_reference_and_its_declaration_both_in_lower_case_resolve() {
         &sheet,
     ));
 
-    StructuralValidator::validate(&inventory)
-        .expect("小文字表記どうしの参照が宙吊りと報告された");
+    StructuralValidator::validate(&inventory).expect("小文字表記どうしの参照が宙吊りと報告された");
 }
 
 #[test]
@@ -1122,10 +1253,13 @@ fn an_unparsable_type_reference_is_dangling_with_the_raw_text() {
     ));
 
     let (from, to) = dangling_type_ref(
-        StructuralValidator::validate(&inventory)
-            .expect_err("パースできない参照先が通った"),
+        StructuralValidator::validate(&inventory).expect_err("パースできない参照先が通った"),
     );
-    assert_eq!(format!("schemas/{sheet}.json root"), from, "参照元が報告されていない");
+    assert_eq!(
+        format!("schemas/{sheet}.json root"),
+        from,
+        "参照元が報告されていない"
+    );
     assert_eq!(raw, to, "報告の参照先が原文でない");
 }
 
@@ -1146,8 +1280,7 @@ fn a_type_reference_to_another_identifier_in_lower_case_is_dangling_with_the_raw
     ));
 
     let (from, to) = dangling_type_ref(
-        StructuralValidator::validate(&inventory)
-            .expect_err("別の識別子を指す参照が通った"),
+        StructuralValidator::validate(&inventory).expect_err("別の識別子を指す参照が通った"),
     );
     assert_eq!(format!("schemas/{sheet}.json type {defined}"), from);
     assert_eq!(raw, to, "報告の参照先が原文でない");

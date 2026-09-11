@@ -51,11 +51,17 @@ fn sample() -> Sample {
     document
         .set_sheet_columns(
             stocked,
-            ["name", "count", "blob", "meta"].iter().map(|name| (*name).to_string()).collect(),
+            ["name", "count", "blob", "meta"]
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
         )
         .expect("標本のシートは実在する");
     document
-        .set_root_schema(stocked, SchemaPart::parse(SCHEMA_WITH_REF).expect("標本は妥当"))
+        .set_root_schema(
+            stocked,
+            SchemaPart::parse(SCHEMA_WITH_REF).expect("標本は妥当"),
+        )
         .expect("標本のシートは実在する");
 
     // 添付: 非 UTF-8・NUL を含むバイト列（要件 7.5 の不透明性）。
@@ -112,7 +118,10 @@ fn sample() -> Sample {
         .set_sheet_columns(summary, vec!["label".to_owned(), "total".to_owned()])
         .expect("標本のシートは実在する");
     document
-        .set_root_schema(summary, SchemaPart::parse(SCHEMA_EMPTY).expect("標本は妥当"))
+        .set_root_schema(
+            summary,
+            SchemaPart::parse(SCHEMA_EMPTY).expect("標本は妥当"),
+        )
         .expect("標本のシートは実在する");
     let only = document.add_row(summary).expect("標本のシートは実在する");
     document
@@ -123,12 +132,19 @@ fn sample() -> Sample {
         )
         .expect("標本の行は実在する");
 
-    Sample { document, referenced, unreferenced }
+    Sample {
+        document,
+        referenced,
+        unreferenced,
+    }
 }
 
 /// パート集合を（エントリ名, 実バイト列）の列へ写す（順序は [`DocumentParts::iter`] のまま）。
 fn entries(parts: &DocumentParts) -> Vec<(EntryName, Vec<u8>)> {
-    parts.iter().map(|part| (part.name, part.bytes.clone())).collect()
+    parts
+        .iter()
+        .map(|part| (part.name, part.bytes.clone()))
+        .collect()
 }
 
 /// エントリ名の表示テキスト（反復順そのまま）。
@@ -141,7 +157,13 @@ fn sheet_metadata(document: &Document) -> Vec<(SheetId, String, Vec<String>)> {
     document
         .sheets()
         .iter()
-        .map(|sheet| (sheet.id(), sheet.name().to_owned(), sheet.columns().to_vec()))
+        .map(|sheet| {
+            (
+                sheet.id(),
+                sheet.name().to_owned(),
+                sheet.columns().to_vec(),
+            )
+        })
         .collect()
 }
 
@@ -167,7 +189,11 @@ fn schemas(document: &Document) -> Vec<(Vec<u8>, Vec<String>, Vec<(String, Strin
         .iter()
         .map(|sheet| {
             let schema = sheet.root_schema();
-            let defs: Vec<String> = schema.type_def_ids().iter().map(|id| id.to_string()).collect();
+            let defs: Vec<String> = schema
+                .type_def_ids()
+                .iter()
+                .map(|id| id.to_string())
+                .collect();
             let refs: Vec<(String, String)> = schema
                 .type_refs()
                 .iter()
@@ -239,7 +265,10 @@ fn render_document_json(
             )
         })
         .collect();
-    format!(r#"{{"document_id":"{document_id}","sheets":[{}]}}"#, elements.join(","))
+    format!(
+        r#"{{"document_id":"{document_id}","sheets":[{}]}}"#,
+        elements.join(",")
+    )
 }
 
 /// シート順序（データである）を入れ替えても、パートの**反復順**はエントリ名の昇順のままである
@@ -257,20 +286,41 @@ fn iteration_order_does_not_follow_the_sheet_order() {
     sheet_order.reverse();
     let reversed = render_document_json(restored.document_id(), &sheet_order);
     let mut forward = entries(&parts);
-    replace(&mut forward, EntryName::Document, reversed.clone().into_bytes());
+    replace(
+        &mut forward,
+        EntryName::Document,
+        reversed.clone().into_bytes(),
+    );
     let swapped = rebuilt(version, forward);
 
-    assert_ne!(entries(&parts), entries(&swapped), "シート順序の入れ替えが内容に現れていない");
-    assert_eq!(ascending, names(&swapped), "シート順序がパートの反復順へ漏れている");
+    assert_ne!(
+        entries(&parts),
+        entries(&swapped),
+        "シート順序の入れ替えが内容に現れていない"
+    );
+    assert_eq!(
+        ascending,
+        names(&swapped),
+        "シート順序がパートの反復順へ漏れている"
+    );
 
     // 入れ替えた集合も読み込めて、シート順序がそのままモデルへ現れる（順序はデータである）。
     let reloaded = from_parts(&swapped).expect("読み込み経路");
-    let observed: Vec<String> =
-        reloaded.sheets().iter().map(|sheet| sheet.name().to_owned()).collect();
-    let expected: Vec<String> = sheet_order.iter().map(|(_, name, _)| name.clone()).collect();
+    let observed: Vec<String> = reloaded
+        .sheets()
+        .iter()
+        .map(|sheet| sheet.name().to_owned())
+        .collect();
+    let expected: Vec<String> = sheet_order
+        .iter()
+        .map(|(_, name, _)| name.clone())
+        .collect();
     assert_eq!(expected, observed, "シート順序が復元されていない");
-    let original: Vec<String> =
-        restored.sheets().iter().map(|sheet| sheet.name().to_owned()).collect();
+    let original: Vec<String> = restored
+        .sheets()
+        .iter()
+        .map(|sheet| sheet.name().to_owned())
+        .collect();
     assert_ne!(original, observed, "標本のシート順序が入れ替わっていない");
 }
 
@@ -283,11 +333,27 @@ fn parts_round_trip_is_byte_identical_and_preserves_the_model() {
     let parts = to_parts(&sample.document).expect("保存経路");
     let restored = from_parts(&parts).expect("読み込み経路");
 
-    assert_eq!(sample.document.document_id(), restored.document_id(), "識別子が変わった");
-    assert_eq!(sheet_metadata(&sample.document), sheet_metadata(&restored), "シートが変わった");
+    assert_eq!(
+        sample.document.document_id(),
+        restored.document_id(),
+        "識別子が変わった"
+    );
+    assert_eq!(
+        sheet_metadata(&sample.document),
+        sheet_metadata(&restored),
+        "シートが変わった"
+    );
     assert_eq!(rows(&sample.document), rows(&restored), "行が変わった");
-    assert_eq!(schemas(&sample.document), schemas(&restored), "スキーマが変わった");
-    assert_eq!(attachments(&sample.document), attachments(&restored), "添付が変わった");
+    assert_eq!(
+        schemas(&sample.document),
+        schemas(&restored),
+        "スキーマが変わった"
+    );
+    assert_eq!(
+        attachments(&sample.document),
+        attachments(&restored),
+        "添付が変わった"
+    );
 
     // 参照整合性の検証が実際に型定義参照を通っていること（`with_sheet` の結線が
     // 欠けていれば、この標本は宙吊りとして誤報され `from_parts` が Err になる）。
@@ -297,8 +363,16 @@ fn parts_round_trip_is_byte_identical_and_preserves_the_model() {
     );
 
     let again = to_parts(&restored).expect("再保存経路");
-    assert_eq!(entries(&parts), entries(&again), "往復でパート集合のバイト列が変わった");
-    assert_eq!(parts.format_version(), again.format_version(), "形式バージョンが変わった");
+    assert_eq!(
+        entries(&parts),
+        entries(&again),
+        "往復でパート集合のバイト列が変わった"
+    );
+    assert_eq!(
+        parts.format_version(),
+        again.format_version(),
+        "形式バージョンが変わった"
+    );
 }
 
 /// 同一モデルからは何度構築しても同一のパート集合（名前もバイト列も同一）になり、
@@ -310,8 +384,16 @@ fn parts_construction_is_deterministic() {
     let first = to_parts(&sample.document).expect("保存経路");
     let second = to_parts(&sample.document).expect("保存経路");
 
-    assert_eq!(entries(&first), entries(&second), "同一モデルで出力が変わった");
-    assert_eq!(FormatVersion::new(1, 0), first.format_version(), "現行バージョンが 1.0 でない");
+    assert_eq!(
+        entries(&first),
+        entries(&second),
+        "同一モデルで出力が変わった"
+    );
+    assert_eq!(
+        FormatVersion::new(1, 0),
+        first.format_version(),
+        "現行バージョンが 1.0 でない"
+    );
 }
 
 /// 反復は**エントリ名の昇順**であり、入力の並び（構築順・シート順）に依存しない。
@@ -328,7 +410,10 @@ fn iteration_is_ascending_and_independent_of_the_input_order() {
     sorted.sort();
     let sorted: Vec<String> = sorted.iter().map(|name| name.to_string()).collect();
     assert_eq!(sorted, ascending, "反復順がエントリ名の昇順でない");
-    assert!(ascending.len() >= 4, "標本のパートが少なすぎる: {ascending:?}");
+    assert!(
+        ascending.len() >= 4,
+        "標本のパートが少なすぎる: {ascending:?}"
+    );
 
     // 入力順を逆順・入れ替え順にしても、反復順も内容も同一である。
     let forward = entries(&parts);
@@ -338,8 +423,10 @@ fn iteration_is_ascending_and_independent_of_the_input_order() {
         shuffled.reverse();
         shuffled
     }] {
-        let input: Vec<(EntryName, Vec<u8>)> =
-            order.iter().map(|(name, bytes)| (*name, bytes.clone())).collect();
+        let input: Vec<(EntryName, Vec<u8>)> = order
+            .iter()
+            .map(|(name, bytes)| (*name, bytes.clone()))
+            .collect();
         let rebuilt = DocumentParts::from_entries(input).expect("標本の集合は妥当");
         assert_eq!(ascending, names(&rebuilt), "入力順が反復順へ漏れている");
         assert_eq!(forward, entries(&rebuilt), "入力順が内容を変えている");
@@ -354,24 +441,36 @@ fn manifest_indexes_every_other_part_and_never_itself() {
     let parts = to_parts(&sample.document).expect("保存経路");
 
     let manifest_part = parts.get(&MANIFEST_ENTRY).expect("索引は常に存在する");
-    let manifest =
-        ManifestPart::from_json_bytes(&manifest_part.bytes).expect("索引は復号できる");
-    let indexed: Vec<String> =
-        manifest.entries().iter().map(|entry| entry.name().to_string()).collect();
+    let manifest = ManifestPart::from_json_bytes(&manifest_part.bytes).expect("索引は復号できる");
+    let indexed: Vec<String> = manifest
+        .entries()
+        .iter()
+        .map(|entry| entry.name().to_string())
+        .collect();
     let observed = names(&parts);
-    let expected: Vec<String> =
-        observed.iter().filter(|name| name.as_str() != MANIFEST_ENTRY.to_string()).cloned().collect();
+    let expected: Vec<String> = observed
+        .iter()
+        .filter(|name| name.as_str() != MANIFEST_ENTRY.to_string())
+        .cloned()
+        .collect();
 
-    assert_eq!(expected, indexed, "索引が全パートを含んでいないか、自分自身を含んでいる");
+    assert_eq!(
+        expected, indexed,
+        "索引が全パートを含んでいないか、自分自身を含んでいる"
+    );
     assert!(
-        !indexed.iter().any(|name| name == &MANIFEST_ENTRY.to_string()),
+        !indexed
+            .iter()
+            .any(|name| name == &MANIFEST_ENTRY.to_string()),
         "索引が自分自身を含んでいる"
     );
     assert!(indexed.len() >= 4, "索引の対象が少なすぎる: {indexed:?}");
 
     // 各ダイジェストが実パートのバイト列と一致すること（`Part` が持つ値と索引の記録の双方）。
     for entry in manifest.entries() {
-        let part = parts.get(&entry.name()).expect("索引にあるパートは実在する");
+        let part = parts
+            .get(&entry.name())
+            .expect("索引にあるパートは実在する");
         verify_part(&entry.name(), &part.bytes, entry.digest()).expect("索引のダイジェスト不一致");
         assert_eq!(
             digest_part(&part.bytes),
@@ -466,7 +565,10 @@ fn missing_manifest_or_document_part_is_rejected() {
         Err(DocumentError::MissingPart { name }) => {
             assert_eq!(MANIFEST_ENTRY.to_string(), name);
         }
-        other => panic!("索引の無い集合が拒否されない: {:?}", other.map(|parts| names(&parts))),
+        other => panic!(
+            "索引の無い集合が拒否されない: {:?}",
+            other.map(|parts| names(&parts))
+        ),
     }
 
     // `document.json` が索引にも実体にも無い集合は、読み込みで不足として報告される。
@@ -543,13 +645,15 @@ fn structural_breakage_is_reported_before_a_model_is_built() {
 
     // 1. 実在しない型定義への参照（要件 1.7）。
     //    ルートの参照は残したまま、型定義の宣言だけを取り除いたエンベロープを書く。
-    let dangling_schema =
-        format!(r#"{{"root":{{"$ref":"{TYPE_DEF}"}},"types":[]}}"#).into_bytes();
+    let dangling_schema = format!(r#"{{"root":{{"$ref":"{TYPE_DEF}"}},"types":[]}}"#).into_bytes();
     let mut broken = forward.clone();
     replace(&mut broken, stocked_schema, dangling_schema);
     match from_parts(&rebuilt(version, broken)) {
         Err(DocumentError::DanglingTypeRef { from, to }) => {
-            assert!(from.starts_with(&stocked_schema.to_string()), "参照元が違う: {from}");
+            assert!(
+                from.starts_with(&stocked_schema.to_string()),
+                "参照元が違う: {from}"
+            );
             assert_eq!(TYPE_DEF, to, "参照先が違う");
         }
         other => panic!("宙吊りの型定義参照が報告されない: {other:?}"),
@@ -570,7 +674,10 @@ fn structural_breakage_is_reported_before_a_model_is_built() {
     replace(&mut broken, stockeds_rows, rows_bytes);
     match from_parts(&rebuilt(version, broken)) {
         Err(DocumentError::DanglingAttachmentRef { from, id }) => {
-            assert!(from.starts_with(&stockeds_rows.to_string()), "参照元が違う: {from}");
+            assert!(
+                from.starts_with(&stockeds_rows.to_string()),
+                "参照元が違う: {from}"
+            );
             assert_eq!(unknown_hex, id, "参照された添付識別子が違う");
         }
         other => panic!("宙吊りの添付参照が報告されない: {other:?}"),
@@ -632,7 +739,10 @@ fn row_keys_must_match_the_columns_persisted_in_document_json() {
         .1
         .clone();
     let text = String::from_utf8(bytes).expect("行データは UTF-8");
-    assert!(text.contains("\"count\""), "標本の行が想定の列を持たない: {text}");
+    assert!(
+        text.contains("\"count\""),
+        "標本の行が想定の列を持たない: {text}"
+    );
     // 列名を 1 つだけ書き換える（`document.json` は元の列名のまま）。
     let renamed = text.replace("\"count\"", "\"renamed\"").into_bytes();
     assert_ne!(text.as_bytes(), renamed.as_slice());
@@ -675,7 +785,11 @@ fn unknown_fields_survive_the_round_trip_through_the_model() {
     // 1 つ目のシート要素: 先頭（`sheet_id` の手前）。
     let text = text.replacen(r#"{"sheet_id""#, r#"{"element_note":1,"sheet_id""#, 1);
     // 2 つ目のシート要素: 先頭（別の未知キー）。
-    let text = text.replacen(r#"{"sheet_id""#, r#"{"element_color":"magenta","sheet_id""#, 1);
+    let text = text.replacen(
+        r#"{"sheet_id""#,
+        r#"{"element_color":"magenta","sheet_id""#,
+        1,
+    );
     // 3 つ目のシート要素: 末尾（`columns` の後ろ）。
     let text = text.replacen(
         r#""columns":["label","total"]}"#,
@@ -683,7 +797,11 @@ fn unknown_fields_survive_the_round_trip_through_the_model() {
         1,
     );
     for key in ["future_top", "element_note", "element_color", "\"width\""] {
-        assert_eq!(1, text.matches(key).count(), "未知キー `{key}` の差し込みに失敗した");
+        assert_eq!(
+            1,
+            text.matches(key).count(),
+            "未知キー `{key}` の差し込みに失敗した"
+        );
     }
     let modified = text.into_bytes();
     assert_ne!(
@@ -723,12 +841,21 @@ fn column_names_of_an_empty_sheet_survive_only_through_document_json() {
         .find(|sheet| sheet.rows().is_empty())
         .expect("標本は 0 行のシートを持つ");
     let empty_columns = empty_sheet.columns().to_vec();
-    assert!(!empty_columns.is_empty(), "0 行シートに列名が無く、検証にならない");
+    assert!(
+        !empty_columns.is_empty(),
+        "0 行シートに列名が無く、検証にならない"
+    );
 
     // 0 行のシートの行エントリは空であり、列順を表現できない。
-    let rows_entry = EntryName::Rows { sheet: empty_sheet.id() };
+    let rows_entry = EntryName::Rows {
+        sheet: empty_sheet.id(),
+    };
     assert!(
-        parts.get(&rows_entry).expect("0 行でも行エントリは存在する").bytes.is_empty(),
+        parts
+            .get(&rows_entry)
+            .expect("0 行でも行エントリは存在する")
+            .bytes
+            .is_empty(),
         "0 行の行エントリが空でない"
     );
     let decoded = document_format::parts::RowsCodec::decode(
@@ -736,13 +863,25 @@ fn column_names_of_an_empty_sheet_survive_only_through_document_json() {
         parts.get(&rows_entry).expect("行エントリ").bytes.as_slice(),
     )
     .expect("空の行エントリは復号できる");
-    assert!(decoded.columns().is_empty(), "空の行エントリから列順が復元できてしまっている");
+    assert!(
+        decoded.columns().is_empty(),
+        "空の行エントリから列順が復元できてしまっている"
+    );
 
     // `document.json` を経由した往復で列名が戻る。
     let restored = from_parts(&parts).expect("読み込み経路");
-    let restored_empty = restored.sheet_by_id(empty_sheet.id()).expect("シートは実在する");
-    assert_eq!(empty_columns, restored_empty.columns().to_vec(), "0 行シートの列名が消えた");
-    assert!(restored_empty.rows().is_empty(), "0 行のはずが行ができている");
+    let restored_empty = restored
+        .sheet_by_id(empty_sheet.id())
+        .expect("シートは実在する");
+    assert_eq!(
+        empty_columns,
+        restored_empty.columns().to_vec(),
+        "0 行シートの列名が消えた"
+    );
+    assert!(
+        restored_empty.rows().is_empty(),
+        "0 行のはずが行ができている"
+    );
 }
 
 /// 添付のバイト列は 1 バイトも変わらず往復し、参照されていない添付も消えない
@@ -756,7 +895,11 @@ fn attachment_bytes_and_unreferenced_attachments_survive() {
     for id in [sample.referenced, sample.unreferenced] {
         let before = sample.document.attachment(id).expect("標本に添付がある");
         let after = restored.attachment(id).expect("往復で添付が消えた");
-        assert_eq!(before.bytes(), after.bytes(), "添付のバイト列が変わった: {id}");
+        assert_eq!(
+            before.bytes(),
+            after.bytes(),
+            "添付のバイト列が変わった: {id}"
+        );
         assert!(!after.bytes().is_empty(), "添付が空になっている: {id}");
     }
 
@@ -789,7 +932,10 @@ fn parts_api_is_reachable_from_outside_the_crate() {
         first.digest,
         "先頭のパートのダイジェストが実バイト列と食い違う"
     );
-    assert_eq!(first.name, parts.get(&first.name).expect("get で引ける").name);
+    assert_eq!(
+        first.name,
+        parts.get(&first.name).expect("get で引ける").name
+    );
 
     // クレート根に `DocumentParts` は無い（`parts::` 配下に統一する）。
     fn takes_parts(parts: &DocumentParts) -> usize {

@@ -265,7 +265,11 @@ impl DocumentParts {
             .into_iter()
             .map(|(name, bytes)| {
                 let digest = digest_part(&bytes);
-                Part { name, bytes, digest }
+                Part {
+                    name,
+                    bytes,
+                    digest,
+                }
             })
             .collect();
         let parts = Self::canonicalize(parts)?;
@@ -313,7 +317,9 @@ impl DocumentParts {
         let index = self
             .parts
             .binary_search_by(|part| part.name.cmp(&MANIFEST_ENTRY))
-            .map_err(|_| DocumentError::MissingPart { name: MANIFEST_ENTRY.to_string() })?;
+            .map_err(|_| DocumentError::MissingPart {
+                name: MANIFEST_ENTRY.to_string(),
+            })?;
         let recorded = ManifestPart::from_json_bytes(&self.parts[index].bytes)?;
         let digests = self
             .parts
@@ -322,7 +328,11 @@ impl DocumentParts {
             .map(|part| (part.name, part.digest));
         let bytes = recorded.reindexed(version, digests)?.to_json_bytes()?;
         let digest = digest_part(&bytes);
-        self.parts[index] = Part { name: MANIFEST_ENTRY, bytes, digest };
+        self.parts[index] = Part {
+            name: MANIFEST_ENTRY,
+            bytes,
+            digest,
+        };
         self.version = version;
         Ok(self)
     }
@@ -392,7 +402,9 @@ pub fn to_parts(document: &Document) -> Result<DocumentParts, DocumentError> {
     // 添付は登録順ではなく識別子の昇順に反復される（content-addressed。要件 3.6）。
     for attachment in document.attachments().iter() {
         entries.push((
-            EntryName::Attachment { attachment: attachment.id() },
+            EntryName::Attachment {
+                attachment: attachment.id(),
+            },
             attachment.bytes().to_vec(),
         ));
     }
@@ -403,14 +415,25 @@ pub fn to_parts(document: &Document) -> Result<DocumentParts, DocumentError> {
     for (name, bytes) in entries {
         let digest = digest_part(&bytes);
         index.push(ManifestEntry::new(name, digest));
-        parts.push(Part { name, bytes, digest });
+        parts.push(Part {
+            name,
+            bytes,
+            digest,
+        });
     }
     let manifest = ManifestPart::new(CURRENT_FORMAT_VERSION, index)?.to_json_bytes()?;
     let digest = digest_part(&manifest);
-    parts.push(Part { name: MANIFEST_ENTRY, bytes: manifest, digest });
+    parts.push(Part {
+        name: MANIFEST_ENTRY,
+        bytes: manifest,
+        digest,
+    });
 
     let parts = DocumentParts::canonicalize(parts)?;
-    Ok(DocumentParts { parts, version: CURRENT_FORMAT_VERSION })
+    Ok(DocumentParts {
+        parts,
+        version: CURRENT_FORMAT_VERSION,
+    })
 }
 
 /// パート集合からドキュメントモデルを復元する（design `DocumentFormatApi::from_parts` の実体）。
@@ -553,9 +576,11 @@ pub(crate) fn from_parts_with(
 /// 読み込み経路も同じ入口を通るため、ここでも同じ報告をする（`panic` しない）。
 fn manifest_part_of(parts: &DocumentParts) -> Result<&Part, DocumentError> {
     resolve_manifest(parts.iter().map(|part| &part.name))?;
-    parts.get(&MANIFEST_ENTRY).ok_or_else(|| DocumentError::MissingPart {
-        name: MANIFEST_ENTRY.to_string(),
-    })
+    parts
+        .get(&MANIFEST_ENTRY)
+        .ok_or_else(|| DocumentError::MissingPart {
+            name: MANIFEST_ENTRY.to_string(),
+        })
 }
 
 /// 集合の索引（`manifest.json`）を復号する。
@@ -577,9 +602,11 @@ fn verify_indexed_parts(
     manifest: &ManifestPart,
 ) -> Result<(), DocumentError> {
     for entry in manifest.entries() {
-        let part = parts.get(&entry.name()).ok_or_else(|| DocumentError::MissingPart {
-            name: entry.name().to_string(),
-        })?;
+        let part = parts
+            .get(&entry.name())
+            .ok_or_else(|| DocumentError::MissingPart {
+                name: entry.name().to_string(),
+            })?;
         verify_part(&entry.name(), &part.bytes, entry.digest())?;
     }
     Ok(())
@@ -591,7 +618,9 @@ fn read_format_version(parts: &[Part]) -> Result<FormatVersion, DocumentError> {
     let manifest = parts
         .iter()
         .find(|part| part.name == MANIFEST_ENTRY)
-        .ok_or_else(|| DocumentError::MissingPart { name: MANIFEST_ENTRY.to_string() })?;
+        .ok_or_else(|| DocumentError::MissingPart {
+            name: MANIFEST_ENTRY.to_string(),
+        })?;
     Ok(ManifestPart::from_json_bytes(&manifest.bytes)?.version())
 }
 
@@ -661,10 +690,17 @@ fn inventory_of<'a>(
     // sheets/*: 行識別子の宣言、セル値からの添付参照、エントリ名が指すシートの参照。
     for (sheet, rows) in row_sets {
         let entry = EntryName::Rows { sheet };
-        inventory.declare_sheet_ref(SheetRefDeclaration::new(entry.to_string(), sheet.to_string()));
+        inventory.declare_sheet_ref(SheetRefDeclaration::new(
+            entry.to_string(),
+            sheet.to_string(),
+        ));
         for (index, row) in rows.iter().enumerate() {
             let from = format!("{entry} line {}", index + 1);
-            inventory.declare(IdDeclaration::new(IdKind::Row, row.id().to_string(), from.clone()));
+            inventory.declare(IdDeclaration::new(
+                IdKind::Row,
+                row.id().to_string(),
+                from.clone(),
+            ));
             for value in row.values() {
                 inventory.declare_attachment_refs(from.clone(), value);
             }
@@ -707,9 +743,18 @@ fn inventory_of<'a>(
 pub fn validate_document(document: &Document) -> Result<(), DocumentError> {
     let inventory = inventory_of(
         document.sheets().iter().map(Sheet::id),
-        document.sheets().iter().map(|sheet| (sheet.id(), sheet.root_schema())),
-        document.sheets().iter().map(|sheet| (sheet.id(), sheet.rows())),
-        document.attachments().iter().map(|attachment| attachment.id()),
+        document
+            .sheets()
+            .iter()
+            .map(|sheet| (sheet.id(), sheet.root_schema())),
+        document
+            .sheets()
+            .iter()
+            .map(|sheet| (sheet.id(), sheet.rows())),
+        document
+            .attachments()
+            .iter()
+            .map(|attachment| attachment.id()),
     );
     StructuralValidator::validate(&inventory)
 }
@@ -727,10 +772,16 @@ fn verify_row_columns(
         if rows.rows().is_empty() {
             continue;
         }
-        let Some(meta) = document_part.sheets().iter().find(|meta| meta.sheet_id() == rows.sheet())
+        let Some(meta) = document_part
+            .sheets()
+            .iter()
+            .find(|meta| meta.sheet_id() == rows.sheet())
         else {
             // 未知シートは構造検証（シート参照）が先に報告するため到達しない。
-            return Err(invalid(entry, "no metadata for this sheet in document.json"));
+            return Err(invalid(
+                entry,
+                "no metadata for this sheet in document.json",
+            ));
         };
         if meta.columns() != rows.columns() {
             return Err(invalid(
@@ -756,7 +807,9 @@ fn take_schema(
 ) -> Result<SchemaPart, DocumentError> {
     match schemas.iter().position(|(_, id, _)| *id == sheet) {
         Some(index) => Ok(schemas.swap_remove(index).2),
-        None => Err(DocumentError::MissingSchema { sheet: sheet.to_string() }),
+        None => Err(DocumentError::MissingSchema {
+            sheet: sheet.to_string(),
+        }),
     }
 }
 
@@ -781,7 +834,9 @@ fn rows_encode_error(sheet: SheetId, error: RowsEncodeError) -> DocumentError {
 
 /// エントリ名を文脈にした失敗（失敗箇所のラベル + 理由）。
 fn invalid(entry: &EntryName, reason: impl fmt::Display) -> DocumentError {
-    DocumentError::InvalidContainer { entry: format!("{entry}: {reason}") }
+    DocumentError::InvalidContainer {
+        entry: format!("{entry}: {reason}"),
+    }
 }
 
 #[cfg(test)]
@@ -814,7 +869,9 @@ mod tests {
         document
             .set_sheet_columns(stocked, columns(&["name", "$id", "量"]))
             .expect("標本のシートは実在する");
-        document.set_root_schema(stocked, schema_with_ref()).expect("標本のシートは実在する");
+        document
+            .set_root_schema(stocked, schema_with_ref())
+            .expect("標本のシートは実在する");
         let attachment = document.add_attachment(vec![0x00, 0xff, b'x']);
         let first = document.add_row(stocked).expect("標本の行は実在する");
         document
@@ -833,19 +890,30 @@ mod tests {
             .set_row_values(
                 stocked,
                 second,
-                vec![CellValue::Null, CellValue::Decimal("0.5".to_owned()), CellValue::Bool(true)],
+                vec![
+                    CellValue::Null,
+                    CellValue::Decimal("0.5".to_owned()),
+                    CellValue::Bool(true),
+                ],
             )
             .expect("標本の行は実在する");
 
         let empty = document.add_sheet("空");
-        document.set_sheet_columns(empty, columns(&["x"])).expect("標本のシートは実在する");
-        document.set_root_schema(empty, SchemaPart::empty()).expect("標本のシートは実在する");
+        document
+            .set_sheet_columns(empty, columns(&["x"]))
+            .expect("標本のシートは実在する");
+        document
+            .set_root_schema(empty, SchemaPart::empty())
+            .expect("標本のシートは実在する");
         document
     }
 
     /// 集合を（エントリ名, バイト列）の列へ写す。
     fn entries(parts: &DocumentParts) -> Vec<(EntryName, Vec<u8>)> {
-        parts.iter().map(|part| (part.name, part.bytes.clone())).collect()
+        parts
+            .iter()
+            .map(|part| (part.name, part.bytes.clone()))
+            .collect()
     }
 
     /// エントリ名の表示テキスト（反復順そのまま）。
@@ -885,7 +953,11 @@ mod tests {
         let document = sample_document();
         let parts = to_parts(&document).expect("保存経路");
         let forward = entries(&parts);
-        assert!(forward.len() >= 6, "標本のパートが少なすぎる: {}", forward.len());
+        assert!(
+            forward.len() >= 6,
+            "標本のパートが少なすぎる: {}",
+            forward.len()
+        );
 
         // 逆順・入れ替え順で組み立てても、反復順も内容も同一である。
         let ascending = names(&parts);
@@ -907,7 +979,10 @@ mod tests {
             Err(DocumentError::InvalidContainer { entry }) => {
                 assert!(entry.starts_with(&repeated), "entry が違う: {entry}");
             }
-            other => panic!("重複エントリ名が拒否されない: {:?}", other.map(|parts| names(&parts))),
+            other => panic!(
+                "重複エントリ名が拒否されない: {:?}",
+                other.map(|parts| names(&parts))
+            ),
         }
     }
 
@@ -924,7 +999,10 @@ mod tests {
             Err(DocumentError::InvalidContainer { entry }) => {
                 assert!(entry.starts_with("jxcel:"), "entry が違う: {entry}");
             }
-            other => panic!("形式マーカーが拒否されない: {:?}", other.map(|parts| names(&parts))),
+            other => panic!(
+                "形式マーカーが拒否されない: {:?}",
+                other.map(|parts| names(&parts))
+            ),
         }
     }
 
@@ -936,7 +1014,10 @@ mod tests {
         let parts = to_parts(&document).expect("保存経路");
         let forward = entries(&parts);
         let version = parts.format_version();
-        assert_eq!(CURRENT_FORMAT_VERSION, version, "現行バージョンが 1.0 でない");
+        assert_eq!(
+            CURRENT_FORMAT_VERSION, version,
+            "現行バージョンが 1.0 でない"
+        );
 
         // 索引が無い集合は構築できない。
         let without = forward
@@ -945,8 +1026,13 @@ mod tests {
             .cloned()
             .collect::<Vec<_>>();
         match DocumentParts::from_entries(without) {
-            Err(DocumentError::MissingPart { name }) => assert_eq!(MANIFEST_ENTRY.to_string(), name),
-            other => panic!("索引の無い集合が拒否されない: {:?}", other.map(|parts| names(&parts))),
+            Err(DocumentError::MissingPart { name }) => {
+                assert_eq!(MANIFEST_ENTRY.to_string(), name)
+            }
+            other => panic!(
+                "索引の無い集合が拒否されない: {:?}",
+                other.map(|parts| names(&parts))
+            ),
         }
 
         // 索引が復号できなければ拒否する（索引は信頼の根である）。
@@ -956,7 +1042,10 @@ mod tests {
             Err(DocumentError::InvalidContainer { entry }) => {
                 assert!(entry.starts_with("manifest.json:"), "entry が違う: {entry}");
             }
-            other => panic!("壊れた索引が拒否されない: {:?}", other.map(|parts| names(&parts))),
+            other => panic!(
+                "壊れた索引が拒否されない: {:?}",
+                other.map(|parts| names(&parts))
+            ),
         }
 
         // 索引が記録したバージョンはそのまま報告される（構築経路 `from_entries` はゲートを
@@ -973,7 +1062,11 @@ mod tests {
         let mut with_future = forward.clone();
         replace(&mut with_future, MANIFEST_ENTRY, future);
         let rebuilt = DocumentParts::from_entries(with_future).expect("標本の集合は妥当");
-        assert_eq!(FormatVersion::new(2, 7), rebuilt.format_version(), "索引のバージョンが読めない");
+        assert_eq!(
+            FormatVersion::new(2, 7),
+            rebuilt.format_version(),
+            "索引のバージョンが読めない"
+        );
     }
 
     /// 読み込み経路の形式バージョンゲート（要件 6.5。design 読み込みフロー「形式バージョン」）:
@@ -987,11 +1080,21 @@ mod tests {
 
         match from_parts(&forked) {
             Err(DocumentError::UnsupportedVersion { found, supported }) => {
-                assert_eq!(FormatVersion::new(2, 7), found, "要求バージョンが報告されていない");
-                assert_eq!(CURRENT_FORMAT_VERSION, supported, "対応バージョンが報告されていない");
+                assert_eq!(
+                    FormatVersion::new(2, 7),
+                    found,
+                    "要求バージョンが報告されていない"
+                );
+                assert_eq!(
+                    CURRENT_FORMAT_VERSION, supported,
+                    "対応バージョンが報告されていない"
+                );
             }
             Ok(restored) => {
-                panic!("拒否されずモデルが返った（{} シート）", restored.sheets().len())
+                panic!(
+                    "拒否されずモデルが返った（{} シート）",
+                    restored.sheets().len()
+                )
             }
             Err(other) => panic!("変種が違う: {other}"),
         }
@@ -1007,19 +1110,29 @@ mod tests {
         let document = sample_document();
         let parts = to_parts(&document).expect("保存経路");
 
-        for accepted in [FormatVersion::new(1, 0), FormatVersion::new(1, 1), FormatVersion::new(1, 99)]
-        {
+        for accepted in [
+            FormatVersion::new(1, 0),
+            FormatVersion::new(1, 1),
+            FormatVersion::new(1, 99),
+        ] {
             let same_major = rebuilt(accepted, entries(&parts));
             let restored = from_parts(&same_major)
                 .unwrap_or_else(|error| panic!("同一 major の {accepted} が拒否された: {error}"));
-            assert_eq!(document.document_id(), restored.document_id(), "{accepted} で内容が変わった");
+            assert_eq!(
+                document.document_id(),
+                restored.document_id(),
+                "{accepted} で内容が変わった"
+            );
         }
 
         for rejected in [FormatVersion::new(2, 0), FormatVersion::new(0, 9)] {
             let other_major = rebuilt(rejected, entries(&parts));
             match from_parts(&other_major) {
                 Err(DocumentError::UnsupportedVersion { found, supported }) => {
-                    assert_eq!(rejected, found, "{rejected} の要求バージョンが報告されていない");
+                    assert_eq!(
+                        rejected, found,
+                        "{rejected} の要求バージョンが報告されていない"
+                    );
                     assert_eq!(CURRENT_FORMAT_VERSION, supported);
                 }
                 Ok(restored) => panic!(
@@ -1041,7 +1154,9 @@ mod tests {
     fn the_version_gate_runs_before_the_integrity_check() {
         let document = sample_document();
         let parts = to_parts(&document).expect("保存経路");
-        let absent = EntryName::Rows { sheet: IdFactory::new().new_sheet_id() };
+        let absent = EntryName::Rows {
+            sheet: IdFactory::new().new_sheet_id(),
+        };
 
         let mut forward = entries(&parts);
         forward.retain(|(name, _)| *name != MANIFEST_ENTRY);
@@ -1062,7 +1177,10 @@ mod tests {
                 assert_eq!(FormatVersion::new(2, 7), found);
             }
             Ok(restored) => {
-                panic!("拒否されずモデルが返った（{} シート）", restored.sheets().len())
+                panic!(
+                    "拒否されずモデルが返った（{} シート）",
+                    restored.sheets().len()
+                )
             }
             Err(other) => panic!("ゲートが完全性照合より後にある: {other}"),
         }
@@ -1076,13 +1194,19 @@ mod tests {
         let parts = to_parts(&document).expect("保存経路");
 
         for part in parts.iter() {
-            assert_eq!(digest_part(&part.bytes), part.digest, "ダイジェストが実バイト列と違う");
+            assert_eq!(
+                digest_part(&part.bytes),
+                part.digest,
+                "ダイジェストが実バイト列と違う"
+            );
             let looked_up = parts.get(&part.name).expect("集合にある名前は引ける");
             assert_eq!(part.bytes, looked_up.bytes);
         }
 
         // 集合に無いエントリ名（標本が持たない別シートの行エントリ）は引けない。
-        let absent = EntryName::Rows { sheet: IdFactory::new().new_sheet_id() };
+        let absent = EntryName::Rows {
+            sheet: IdFactory::new().new_sheet_id(),
+        };
         assert!(parts.get(&absent).is_none(), "集合に無い名前が引けた");
     }
 
@@ -1102,7 +1226,10 @@ mod tests {
         let restored = from_parts(&parts).expect("読み込み経路");
         assert_eq!(document.document_id(), restored.document_id());
         assert!(restored.sheets().is_empty(), "シートが 0 枚でない");
-        assert_eq!(entries(&parts), entries(&to_parts(&restored).expect("再保存経路")));
+        assert_eq!(
+            entries(&parts),
+            entries(&to_parts(&restored).expect("再保存経路"))
+        );
     }
 
     /// 保存側の programming error（値の個数と列数の不一致・列名の重複）は、対象の行エントリ名を
@@ -1112,7 +1239,9 @@ mod tests {
         // 値の個数が列数と合わない行。
         let mut document = Document::new();
         let sheet = document.add_sheet("不一致");
-        document.set_sheet_columns(sheet, columns(&["only"])).expect("標本のシートは実在する");
+        document
+            .set_sheet_columns(sheet, columns(&["only"]))
+            .expect("標本のシートは実在する");
         let row = document.add_row(sheet).expect("標本の行は実在する");
         document
             .set_row_values(sheet, row, vec![CellValue::Int(1), CellValue::Int(2)])
@@ -1130,7 +1259,9 @@ mod tests {
         // 列名が重複しているシート。
         let mut document = Document::new();
         let sheet = document.add_sheet("重複列");
-        document.set_sheet_columns(sheet, columns(&["a", "a"])).expect("標本のシートは実在する");
+        document
+            .set_sheet_columns(sheet, columns(&["a", "a"]))
+            .expect("標本のシートは実在する");
         let row = document.add_row(sheet).expect("標本の行は実在する");
         document
             .set_row_values(sheet, row, vec![CellValue::Int(1), CellValue::Int(2)])
@@ -1207,17 +1338,33 @@ mod tests {
         let restored = from_parts_with(synthetic::MULTI_STEP, &recorded).expect("移行して読める");
         // 段の適用順序は、段がシート名へ積む印で観測する（逆順・一段のみでは最終形にならない）。
         let names: Vec<&str> = restored.sheets().iter().map(|sheet| sheet.name()).collect();
-        assert_eq!(vec!["在庫|v0.1|v1.0", "空|v0.1|v1.0"], names, "段の適用順序が違う");
+        assert_eq!(
+            vec!["在庫|v0.1|v1.0", "空|v0.1|v1.0"],
+            names,
+            "段の適用順序が違う"
+        );
         // 移行が書き換えるのは `document.json` だけである: 識別子・列名・行・添付はそのまま復元される。
-        assert_eq!(document.document_id(), restored.document_id(), "移行で識別子が変わった");
+        assert_eq!(
+            document.document_id(),
+            restored.document_id(),
+            "移行で識別子が変わった"
+        );
         assert_eq!(
             vec![columns(&["name", "$id", "量"]), columns(&["x"])],
-            restored.sheets().iter().map(|sheet| sheet.columns().to_vec()).collect::<Vec<_>>(),
+            restored
+                .sheets()
+                .iter()
+                .map(|sheet| sheet.columns().to_vec())
+                .collect::<Vec<_>>(),
             "移行で列名が変わった"
         );
         assert_eq!(
             vec![2, 0],
-            restored.sheets().iter().map(|sheet| sheet.rows().len()).collect::<Vec<_>>(),
+            restored
+                .sheets()
+                .iter()
+                .map(|sheet| sheet.rows().len())
+                .collect::<Vec<_>>(),
             "移行で行が変わった"
         );
         assert_eq!(
@@ -1230,7 +1377,11 @@ mod tests {
         let migrated = MigrationChain::apply_with(synthetic::MULTI_STEP, &recorded)
             .expect("合成表は妥当")
             .expect("古い版は移行される");
-        assert_eq!(CURRENT_FORMAT_VERSION, migrated.format_version(), "移行後の版が現行版でない");
+        assert_eq!(
+            CURRENT_FORMAT_VERSION,
+            migrated.format_version(),
+            "移行後の版が現行版でない"
+        );
     }
 
     /// 現行版の集合は移行されない: 合成の多段表を渡しても段は 1 つも走らず（印が付かず）、
@@ -1240,7 +1391,11 @@ mod tests {
     fn the_current_version_is_neither_migrated_nor_copied() {
         let document = sample_document();
         let parts = to_parts(&document).expect("保存経路");
-        assert_eq!(CURRENT_FORMAT_VERSION, parts.format_version(), "標本が現行版でない");
+        assert_eq!(
+            CURRENT_FORMAT_VERSION,
+            parts.format_version(),
+            "標本が現行版でない"
+        );
 
         let restored = from_parts_with(synthetic::MULTI_STEP, &parts).expect("現行版は読める");
         let names: Vec<&str> = restored.sheets().iter().map(|sheet| sheet.name()).collect();
@@ -1279,7 +1434,11 @@ mod tests {
 
         match from_parts_with(synthetic::MULTI_STEP, &broken) {
             Err(DocumentError::IntegrityMismatch { entry }) => {
-                assert_eq!(EntryName::Document.to_string(), entry, "不一致のエントリが違う");
+                assert_eq!(
+                    EntryName::Document.to_string(),
+                    entry,
+                    "不一致のエントリが違う"
+                );
             }
             Ok(restored) => panic!(
                 "壊れた旧版が移行で「修復」されて読まれた（{} シート）",
@@ -1299,7 +1458,9 @@ mod tests {
 
         let restored = from_parts_with(synthetic::MULTI_STEP, &recorded).expect("移行して読める");
         let rewritten = to_parts(&restored).expect("再保存経路");
-        let document = rewritten.get(&EntryName::Document).expect("メタデータは常に存在する");
+        let document = rewritten
+            .get(&EntryName::Document)
+            .expect("メタデータは常に存在する");
         let text = String::from_utf8(document.bytes.clone()).expect("メタデータは UTF-8");
         assert!(
             text.contains(r#""future_top":{"unit":"mm"}"#),

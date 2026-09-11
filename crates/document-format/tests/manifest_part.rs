@@ -39,7 +39,10 @@ fn manifest_is_usable_from_outside_the_crate() {
         .iter()
         .map(|entry| entry.name().to_string())
         .collect();
-    assert_eq!(vec!["document.json".to_owned(), sheet_entry.to_owned()], names);
+    assert_eq!(
+        vec!["document.json".to_owned(), sheet_entry.to_owned()],
+        names
+    );
 
     let bytes = part.to_json_bytes().expect("符号化");
     let decoded = ManifestPart::from_json_bytes(&bytes).expect("復号");

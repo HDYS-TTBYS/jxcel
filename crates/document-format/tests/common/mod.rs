@@ -149,7 +149,13 @@ pub fn snapshot(directory: &Path) -> Vec<(String, Vec<u8>)> {
 pub fn entry_names(directory: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(directory)
         .expect("作業ディレクトリが読める")
-        .map(|entry| entry.expect("ディレクトリ要素が読める").file_name().to_string_lossy().into_owned())
+        .map(|entry| {
+            entry
+                .expect("ディレクトリ要素が読める")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     names.sort();
     names
@@ -160,7 +166,10 @@ pub fn entry_names(directory: &Path) -> Vec<String> {
 /// `DocumentParts` は `PartialEq` を持たない（`Part` がダイジェストを抱える）ため、
 /// 集合の等値比較はこの写像かコンテナの符号化バイト列で行う（tasks.md の申し送り）。
 pub fn entries_of(parts: &DocumentParts) -> Vec<(EntryName, Vec<u8>)> {
-    parts.iter().map(|part| (part.name, part.bytes.clone())).collect()
+    parts
+        .iter()
+        .map(|part| (part.name, part.bytes.clone()))
+        .collect()
 }
 
 /// 索引（`manifest.json`）を実体から組み直したエントリ集合を返す。
@@ -190,7 +199,13 @@ pub fn sheet_metadata(document: &Document) -> Vec<(SheetId, String, Vec<String>)
     document
         .sheets()
         .iter()
-        .map(|sheet| (sheet.id(), sheet.name().to_owned(), sheet.columns().to_vec()))
+        .map(|sheet| {
+            (
+                sheet.id(),
+                sheet.name().to_owned(),
+                sheet.columns().to_vec(),
+            )
+        })
         .collect()
 }
 
@@ -226,7 +241,10 @@ pub fn schemas(
                 .type_defs()
                 .iter()
                 .map(|definition| {
-                    (definition.id().to_string(), definition.definition().as_bytes().to_vec())
+                    (
+                        definition.id().to_string(),
+                        definition.definition().as_bytes().to_vec(),
+                    )
                 })
                 .collect();
             let refs: Vec<(String, String)> = schema
@@ -303,14 +321,26 @@ pub fn document_view(document: &Document) -> DocumentView {
 pub fn assert_same_document(expected: &Document, actual: &Document) {
     let expected = document_view(expected);
     let actual = document_view(actual);
-    assert_eq!(expected.document_id, actual.document_id, "ドキュメント識別子が変わった");
-    assert_eq!(expected.sheets, actual.sheets, "シート（文書順・識別子・名前・列順）が変わった");
-    assert_eq!(expected.rows, actual.rows, "行（行順・識別子・セル値）が変わった");
+    assert_eq!(
+        expected.document_id, actual.document_id,
+        "ドキュメント識別子が変わった"
+    );
+    assert_eq!(
+        expected.sheets, actual.sheets,
+        "シート（文書順・識別子・名前・列順）が変わった"
+    );
+    assert_eq!(
+        expected.rows, actual.rows,
+        "行（行順・識別子・セル値）が変わった"
+    );
     assert_eq!(
         expected.schemas, actual.schemas,
         "スキーマ（ルート・型定義ペイロード・型参照）が変わった"
     );
-    assert_eq!(expected.attachments, actual.attachments, "添付（識別子・バイト列）が変わった");
+    assert_eq!(
+        expected.attachments, actual.attachments,
+        "添付（識別子・バイト列）が変わった"
+    );
     assert_eq!(
         expected.unreferenced_attachments, actual.unreferenced_attachments,
         "未参照添付の一覧が変わった"
@@ -329,11 +359,17 @@ pub fn sample() -> Document {
     document
         .set_sheet_columns(
             stocked,
-            ["name", "count", "blob"].iter().map(|name| (*name).to_owned()).collect(),
+            ["name", "count", "blob"]
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
         )
         .expect("標本のシートは実在する");
     document
-        .set_root_schema(stocked, SchemaPart::parse(SCHEMA_WITH_REF).expect("標本は妥当"))
+        .set_root_schema(
+            stocked,
+            SchemaPart::parse(SCHEMA_WITH_REF).expect("標本は妥当"),
+        )
         .expect("標本のシートは実在する");
 
     // 非 UTF-8 を含む添付（要件 7.5 の不透明性）。
@@ -384,7 +420,10 @@ pub fn sample_with_values() -> Document {
         )
         .expect("標本のシートは実在する");
     document
-        .set_root_schema(sheet, SchemaPart::parse(SCHEMA_WITH_REF).expect("標本は妥当"))
+        .set_root_schema(
+            sheet,
+            SchemaPart::parse(SCHEMA_WITH_REF).expect("標本は妥当"),
+        )
         .expect("標本のシートは実在する");
 
     let attachment = document.add_attachment(vec![0x00, 0xff, b'a', 0x80]);
@@ -426,7 +465,9 @@ pub fn sample_with_values() -> Document {
     ];
     for row_values in values {
         let row = document.add_row(sheet).expect("標本のシートは実在する");
-        document.set_row_values(sheet, row, row_values).expect("標本の行は実在する");
+        document
+            .set_row_values(sheet, row, row_values)
+            .expect("標本の行は実在する");
     }
 
     // 脱出口と `$` エスケープが実際に使われることを固定する（値の判別規則が変わって
@@ -437,9 +478,18 @@ pub fn sample_with_values() -> Document {
         .filter(|part| matches!(part.name, EntryName::Rows { .. }))
         .map(|part| String::from_utf8(part.bytes.clone()).expect("行エントリは UTF-8"))
         .collect();
-    assert!(wire.contains(r#"{"$t":"text","v":"123"}"#), "Text の脱出口が使われていない: {wire}");
-    assert!(wire.contains(r#"{"$t":"decimal""#), "Decimal の脱出口が使われていない: {wire}");
-    assert!(wire.contains(r#""$$t""#), "`$` 始まりのキーがエスケープされていない: {wire}");
+    assert!(
+        wire.contains(r#"{"$t":"text","v":"123"}"#),
+        "Text の脱出口が使われていない: {wire}"
+    );
+    assert!(
+        wire.contains(r#"{"$t":"decimal""#),
+        "Decimal の脱出口が使われていない: {wire}"
+    );
+    assert!(
+        wire.contains(r#""$$t""#),
+        "`$` 始まりのキーがエスケープされていない: {wire}"
+    );
 
     document
 }
@@ -474,11 +524,16 @@ pub fn sample_with_unreferenced_attachment() -> Document {
 pub fn entries_with_preserved_fields(marker: &str) -> Vec<(EntryName, Vec<u8>)> {
     let mut base = Document::new();
     let sheet = base.add_sheet("保持");
-    base.set_sheet_columns(sheet, vec!["c".to_owned()]).expect("標本のシートは実在する");
-    base.set_root_schema(sheet, SchemaPart::parse(SCHEMA_WITH_REF).expect("標本は妥当"))
+    base.set_sheet_columns(sheet, vec!["c".to_owned()])
         .expect("標本のシートは実在する");
+    base.set_root_schema(
+        sheet,
+        SchemaPart::parse(SCHEMA_WITH_REF).expect("標本は妥当"),
+    )
+    .expect("標本のシートは実在する");
     let row = base.add_row(sheet).expect("標本のシートは実在する");
-    base.set_row_values(sheet, row, vec![CellValue::Int(7)]).expect("標本の行は実在する");
+    base.set_row_values(sheet, row, vec![CellValue::Int(7)])
+        .expect("標本の行は実在する");
 
     let parts = to_parts(&base).expect("標本はパート集合へ取り出せる");
     let version = parts.format_version();
@@ -497,8 +552,11 @@ pub fn entries_with_preserved_fields(marker: &str) -> Vec<(EntryName, Vec<u8>)> 
         )
     });
     replace_entry(&mut entries, EntryName::Schema { sheet }, |text| {
-        let with_top =
-            text.replacen("\"root\"", &format!("\"future_schema\":\"{marker}\",\"root\""), 1);
+        let with_top = text.replacen(
+            "\"root\"",
+            &format!("\"future_schema\":\"{marker}\",\"root\""),
+            1,
+        );
         with_top.replacen(
             "{\"kind\":\"string\"}",
             &format!("{{\"kind\":\"string\"}},\"future_type\":{{\"m\":\"{marker}\"}}"),
@@ -517,9 +575,15 @@ pub fn entries_with_preserved_fields(marker: &str) -> Vec<(EntryName, Vec<u8>)> 
 pub fn sample_with_unknown_fields(marker: &str) -> Document {
     let entries = DocumentParts::from_entries(entries_with_preserved_fields(marker))
         .expect("標本の集合は妥当");
-    let document = api().from_parts(&entries).expect("未知フィールドを含む集合は復元できる");
+    let document = api()
+        .from_parts(&entries)
+        .expect("未知フィールドを含む集合は復元できる");
     let restored = entries_of(&to_parts(&document).expect("標本はパート集合へ取り出せる"));
-    assert_eq!(entries_of(&entries), restored, "未知フィールドがモデル経由の往復で落ちた");
+    assert_eq!(
+        entries_of(&entries),
+        restored,
+        "未知フィールドがモデル経由の往復で落ちた"
+    );
 
     document
 }
@@ -530,7 +594,10 @@ fn replace_entry(
     name: EntryName,
     rewrite: impl FnOnce(String) -> String,
 ) {
-    let slot = entries.iter().position(|(candidate, _)| *candidate == name).expect("エントリが実在する");
+    let slot = entries
+        .iter()
+        .position(|(candidate, _)| *candidate == name)
+        .expect("エントリが実在する");
     let text = String::from_utf8(entries[slot].1.clone()).expect("エントリは UTF-8");
     entries[slot].1 = rewrite(text).into_bytes();
 }
@@ -543,14 +610,22 @@ pub fn document_with_sheet(schema: &str, columns: &[&str], rows: Vec<Vec<CellVal
     let mut document = Document::new();
     let sheet = document.add_sheet("標本");
     document
-        .set_sheet_columns(sheet, columns.iter().map(|name| (*name).to_owned()).collect())
+        .set_sheet_columns(
+            sheet,
+            columns.iter().map(|name| (*name).to_owned()).collect(),
+        )
         .expect("標本のシートは実在する");
     document
-        .set_root_schema(sheet, SchemaPart::parse(schema).expect("標本のスキーマは解析できる"))
+        .set_root_schema(
+            sheet,
+            SchemaPart::parse(schema).expect("標本のスキーマは解析できる"),
+        )
         .expect("標本のシートは実在する");
     for row_values in rows {
         let row = document.add_row(sheet).expect("標本のシートは実在する");
-        document.set_row_values(sheet, row, row_values).expect("標本の行は実在する");
+        document
+            .set_row_values(sheet, row, row_values)
+            .expect("標本の行は実在する");
     }
     document
 }
@@ -608,12 +683,15 @@ pub fn local_headers(bytes: &[u8]) -> Vec<LocalHeader> {
             u16::from_le_bytes(bytes[offset + 10..offset + 12].try_into().expect("ヘッダ"));
         let modified_date =
             u16::from_le_bytes(bytes[offset + 12..offset + 14].try_into().expect("ヘッダ"));
-        let data_len = u32::from_le_bytes(bytes[offset + 18..offset + 22].try_into().expect("ヘッダ"))
-            as usize;
+        let data_len =
+            u32::from_le_bytes(bytes[offset + 18..offset + 22].try_into().expect("ヘッダ"))
+                as usize;
         let name_len =
-            u16::from_le_bytes(bytes[offset + 26..offset + 28].try_into().expect("ヘッダ")) as usize;
+            u16::from_le_bytes(bytes[offset + 26..offset + 28].try_into().expect("ヘッダ"))
+                as usize;
         let extra_len =
-            u16::from_le_bytes(bytes[offset + 28..offset + 30].try_into().expect("ヘッダ")) as usize;
+            u16::from_le_bytes(bytes[offset + 28..offset + 30].try_into().expect("ヘッダ"))
+                as usize;
         let name = String::from_utf8(bytes[offset + 30..offset + 30 + name_len].to_vec())
             .expect("エントリ名は UTF-8");
         let data_start = offset + 30 + name_len + extra_len;
@@ -628,7 +706,10 @@ pub fn local_headers(bytes: &[u8]) -> Vec<LocalHeader> {
         });
         offset = data_start + data_len;
     }
-    assert!(!headers.is_empty(), "ローカルヘッダが 1 つも見つからない（標準的な ZIP でない）");
+    assert!(
+        !headers.is_empty(),
+        "ローカルヘッダが 1 つも見つからない（標準的な ZIP でない）"
+    );
     headers
 }
 
@@ -676,11 +757,14 @@ pub fn central_headers(bytes: &[u8]) -> Vec<CentralHeader> {
         let modified_date =
             u16::from_le_bytes(bytes[offset + 14..offset + 16].try_into().expect("ヘッダ"));
         let name_len =
-            u16::from_le_bytes(bytes[offset + 28..offset + 30].try_into().expect("ヘッダ")) as usize;
+            u16::from_le_bytes(bytes[offset + 28..offset + 30].try_into().expect("ヘッダ"))
+                as usize;
         let extra_len =
-            u16::from_le_bytes(bytes[offset + 30..offset + 32].try_into().expect("ヘッダ")) as usize;
+            u16::from_le_bytes(bytes[offset + 30..offset + 32].try_into().expect("ヘッダ"))
+                as usize;
         let comment_len =
-            u16::from_le_bytes(bytes[offset + 32..offset + 34].try_into().expect("ヘッダ")) as usize;
+            u16::from_le_bytes(bytes[offset + 32..offset + 34].try_into().expect("ヘッダ"))
+                as usize;
         let external_attributes =
             u32::from_le_bytes(bytes[offset + 38..offset + 42].try_into().expect("ヘッダ"));
         let name = String::from_utf8(bytes[offset + 46..offset + 46 + name_len].to_vec())

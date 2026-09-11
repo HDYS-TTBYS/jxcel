@@ -489,7 +489,11 @@ mod tests {
             text.chars().all(|c| CROCKFORD.contains(c)),
             "正準 text 形が Crockford base32 大文字でない: {text}"
         );
-        assert_eq!(id, text.parse::<DocumentId>().unwrap(), "text 形往復が一致しない");
+        assert_eq!(
+            id,
+            text.parse::<DocumentId>().unwrap(),
+            "text 形往復が一致しない"
+        );
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(format!("\"{text}\""), json);
         assert_eq!(id, serde_json::from_str::<DocumentId>(&json).unwrap());

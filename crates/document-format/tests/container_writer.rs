@@ -39,9 +39,7 @@ use document_format::parts::{
     from_parts, DocumentPart, DocumentParts, ManifestEntry, ManifestPart, RowsCodec, SchemaCodec,
     SheetMeta,
 };
-use document_format::{
-    AttachmentId, DocumentId, EntryName, FormatVersion, SchemaPart, SheetId,
-};
+use document_format::{AttachmentId, DocumentId, EntryName, FormatVersion, SchemaPart, SheetId};
 
 mod common;
 
@@ -58,12 +56,17 @@ const ROW_COUNT: u32 = 40;
 
 /// 標本シートの列名（`document.json` の列順が権威であり、行エントリのキー順と一致させる）。
 fn columns() -> Vec<String> {
-    ["name", "count", "blob"].iter().map(|name| (*name).to_owned()).collect()
+    ["name", "count", "blob"]
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect()
 }
 
 /// 標本の添付（内容は固定の式で作る。乱数も時刻も使わない）。
 fn attachment_bytes() -> Vec<u8> {
-    (0..512u32).map(|index| (index.wrapping_mul(37) % 251) as u8).collect()
+    (0..512u32)
+        .map(|index| (index.wrapping_mul(37) % 251) as u8)
+        .collect()
 }
 
 /// 標本の行データ（1 行 1 オブジェクトの NDJSON。キー順は `$id` → 列順）。
@@ -74,7 +77,11 @@ fn rows_bytes(attachment: AttachmentId) -> Vec<u8> {
     let mut out = Vec::new();
     for index in 0..ROW_COUNT {
         let id = format!("{ROW_ID_PREFIX}{index:04}");
-        let blob = if index % 2 == 0 { format!("\"{hex}\"") } else { "null".to_owned() };
+        let blob = if index % 2 == 0 {
+            format!("\"{hex}\"")
+        } else {
+            "null".to_owned()
+        };
         out.extend_from_slice(
             format!(
                 "{{\"$id\":\"{id}\",\"name\":\"標本の行 {index}\",\"count\":{index},\"blob\":{blob}}}\n"
@@ -104,9 +111,11 @@ fn fixed_entries() -> Vec<(EntryName, Vec<u8>)> {
     .expect("標本は妥当");
     let document_bytes = document_part.to_json_bytes().expect("符号化");
 
-    let (schema_entry, schema_bytes) =
-        SchemaCodec::encode(sheet, &SchemaPart::parse(SCHEMA).expect("標本は妥当なスキーマ"))
-            .expect("標本のスキーマは符号化できる");
+    let (schema_entry, schema_bytes) = SchemaCodec::encode(
+        sheet,
+        &SchemaPart::parse(SCHEMA).expect("標本は妥当なスキーマ"),
+    )
+    .expect("標本のスキーマは符号化できる");
 
     let rows_entry = EntryName::Rows { sheet };
     let attachment = attachment_bytes();
@@ -126,7 +135,12 @@ fn fixed_entries() -> Vec<(EntryName, Vec<u8>)> {
         (EntryName::Document, document_bytes),
         (schema_entry, schema_bytes),
         (rows_entry, rows),
-        (EntryName::Attachment { attachment: attachment_id }, attachment),
+        (
+            EntryName::Attachment {
+                attachment: attachment_id,
+            },
+            attachment,
+        ),
     ]
 }
 
@@ -138,7 +152,10 @@ fn parts_with_manifest(entries: Vec<(EntryName, Vec<u8>)>) -> DocumentParts {
         .map(|(name, bytes)| ManifestEntry::of_bytes(*name, bytes))
         .collect();
     let manifest = ManifestPart::new(FormatVersion::new(1, 0), index).expect("標本の索引は妥当");
-    entries.push((EntryName::Manifest, manifest.to_json_bytes().expect("符号化")));
+    entries.push((
+        EntryName::Manifest,
+        manifest.to_json_bytes().expect("符号化"),
+    ));
     let parts = DocumentParts::from_entries(entries).expect("標本は妥当");
     // 標本が本物の文書であること（コンテナ層が透明に運べる対象であること）を確かめる。
     from_parts(&parts).expect("標本は妥当な文書");
@@ -184,7 +201,11 @@ fn encode_ignores_the_construction_order_of_the_part_set() {
     let ascending = names(&fixed_entries());
     assert_ne!(ascending, names(&reversed), "逆順の標本が昇順と同じである");
     assert_ne!(ascending, names(&rotated), "回転の標本が昇順と同じである");
-    assert_ne!(names(&reversed), names(&rotated), "2 つの入力順が同じである");
+    assert_ne!(
+        names(&reversed),
+        names(&rotated),
+        "2 つの入力順が同じである"
+    );
 
     for (label, entries) in [("逆順", reversed), ("回転", rotated)] {
         let parts = parts_with_manifest(entries);
@@ -205,7 +226,10 @@ fn encode_matches_the_committed_golden_bytes() {
     let actual = ContainerCodec::encode(&fixed_parts()).expect("符号化");
 
     if expected != actual {
-        let mismatch = expected.iter().zip(&actual).position(|(left, right)| left != right);
+        let mismatch = expected
+            .iter()
+            .zip(&actual)
+            .position(|(left, right)| left != right);
         panic!(
             "期待バイト列と符号化結果がバイト単位で一致しない（要件 3.1, 3.2）。\n\
              期待 {} バイト / 実際 {} バイト / 最初に相違した位置 {mismatch:?}\n\
@@ -240,7 +264,10 @@ fn encode_fixes_every_determinism_relevant_zip_parameter() {
         .collect();
     let local_names: Vec<String> = local.iter().map(|header| header.name.clone()).collect();
     let central_names: Vec<String> = central.iter().map(|header| header.name.clone()).collect();
-    assert_eq!(expected_names, local_names, "エントリの書き込み順が固定されていない");
+    assert_eq!(
+        expected_names, local_names,
+        "エントリの書き込み順が固定されていない"
+    );
     assert_eq!(
         local_names, central_names,
         "中央ディレクトリの順序がローカルヘッダの書き込み順と違う"
@@ -295,10 +322,18 @@ fn encode_fixes_every_determinism_relevant_zip_parameter() {
     assert_eq!(0, local[0].compression_method, "型マーカーが無圧縮でない");
     assert_eq!(0, central[0].compression_method, "型マーカーが無圧縮でない");
     for header in local.iter().skip(1) {
-        assert_eq!(8, header.compression_method, "Deflate でない: {}", header.name);
+        assert_eq!(
+            8, header.compression_method,
+            "Deflate でない: {}",
+            header.name
+        );
     }
     for header in central.iter().skip(1) {
-        assert_eq!(8, header.compression_method, "Deflate でない: {}", header.name);
+        assert_eq!(
+            8, header.compression_method,
+            "Deflate でない: {}",
+            header.name
+        );
     }
 
     // 型マーカーの内容は確定形（`jxcel\n<major>.<minor>\n`。`Stored` なので展開せずに
@@ -325,6 +360,3 @@ fn encode_contains_no_value_derived_from_the_current_time() {
         "時刻を進めた後の符号化がバイト一致しない（保存時刻に依存している。要件 3.6）"
     );
 }
-
-
-

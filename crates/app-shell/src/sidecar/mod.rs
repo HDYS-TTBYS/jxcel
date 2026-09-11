@@ -114,11 +114,7 @@ mod tests {
         }
 
         let names: HashSet<&str> = SidecarKind::ALL.iter().map(|kind| kind.as_str()).collect();
-        assert_eq!(
-            names.len(),
-            SidecarKind::ALL.len(),
-            "識別子が重複している"
-        );
+        assert_eq!(names.len(), SidecarKind::ALL.len(), "識別子が重複している");
     }
 
     /// 識別子は同梱する実行ファイルの語幹と一致する。`crates/sidecar-smoke` が生成する実行ファイルの

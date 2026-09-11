@@ -178,14 +178,16 @@ mod tests {
     /// ここでコンパイルが壊れ、判別可能性を機械的に保証する。
     fn discriminate(err: &DocumentError) -> (&'static str, Vec<String>) {
         match err {
-            DocumentError::InvalidContainer { entry } => {
-                ("InvalidContainer", vec![entry.clone()])
-            }
+            DocumentError::InvalidContainer { entry } => ("InvalidContainer", vec![entry.clone()]),
             DocumentError::MissingPart { name } => ("MissingPart", vec![name.clone()]),
             DocumentError::IntegrityMismatch { entry } => {
                 ("IntegrityMismatch", vec![entry.clone()])
             }
-            DocumentError::DuplicateId { kind, id, occurrences } => {
+            DocumentError::DuplicateId {
+                kind,
+                id,
+                occurrences,
+            } => {
                 let mut ctx = vec![kind.to_string(), id.clone()];
                 ctx.extend(occurrences.iter().cloned());
                 ("DuplicateId", ctx)
@@ -197,9 +199,10 @@ mod tests {
             DocumentError::DanglingAttachmentRef { from, id } => {
                 ("DanglingAttachmentRef", vec![from.clone(), id.clone()])
             }
-            DocumentError::UnsupportedVersion { found, supported } => {
-                ("UnsupportedVersion", vec![found.to_string(), supported.to_string()])
-            }
+            DocumentError::UnsupportedVersion { found, supported } => (
+                "UnsupportedVersion",
+                vec![found.to_string(), supported.to_string()],
+            ),
             DocumentError::NonRepresentableNumber { location } => {
                 ("NonRepresentableNumber", vec![location.clone()])
             }
@@ -211,8 +214,12 @@ mod tests {
     fn all_variants() -> Vec<DocumentError> {
         let version = |major, minor| FormatVersion { major, minor };
         vec![
-            DocumentError::InvalidContainer { entry: "outside/../outside.json".into() },
-            DocumentError::MissingPart { name: "manifest.json".into() },
+            DocumentError::InvalidContainer {
+                entry: "outside/../outside.json".into(),
+            },
+            DocumentError::MissingPart {
+                name: "manifest.json".into(),
+            },
             DocumentError::IntegrityMismatch {
                 entry: "parts/01JQ0ZK6Y7W2H3NQ8RTVXBGMAZ.sheet.json".into(),
             },
@@ -224,7 +231,9 @@ mod tests {
                     "parts/01JQ0ZK6Y7W2H3NQ8RTVXBGMAZ.sheet.json#rows[9]".into(),
                 ],
             },
-            DocumentError::MissingSchema { sheet: "01JSCHEMAMISSING000000000".into() },
+            DocumentError::MissingSchema {
+                sheet: "01JSCHEMAMISSING000000000".into(),
+            },
             DocumentError::DanglingTypeRef {
                 from: "rows[42]/cells[spec_type]".into(),
                 to: "01JTYPEDEFDELETED000000000".into(),
@@ -233,8 +242,13 @@ mod tests {
                 from: "rows[7]/cells[photo]".into(),
                 id: "a3dd2f9c4e1b58c7d0a6f47c2b1e5d90e0c1b7a6f5e4d3c2b2a9d8c7e6f5d412".into(),
             },
-            DocumentError::UnsupportedVersion { found: version(2, 0), supported: version(1, 0) },
-            DocumentError::NonRepresentableNumber { location: "rows[9]/cells[score]".into() },
+            DocumentError::UnsupportedVersion {
+                found: version(2, 0),
+                supported: version(1, 0),
+            },
+            DocumentError::NonRepresentableNumber {
+                location: "rows[9]/cells[score]".into(),
+            },
             DocumentError::Io {
                 source: std::io::Error::other("rename retry exhausted"),
                 retried: true,
@@ -286,7 +300,11 @@ mod tests {
 
         let (label, ctx) = discriminate(&errors[7]);
         assert_eq!("UnsupportedVersion", label);
-        assert_eq!(vec!["2.0", "1.0"], ctx, "UnsupportedVersion は found/supported を保持する");
+        assert_eq!(
+            vec!["2.0", "1.0"],
+            ctx,
+            "UnsupportedVersion は found/supported を保持する"
+        );
 
         let (label, ctx) = discriminate(&errors[9]);
         assert_eq!("Io", label);
@@ -323,7 +341,10 @@ mod tests {
         for (err, ctx) in errors.iter().zip(needles) {
             let text = err.to_string();
             for needle in ctx {
-                assert!(text.contains(needle), "Display {text:?} に診断文脈 {needle:?} が含まれない");
+                assert!(
+                    text.contains(needle),
+                    "Display {text:?} に診断文脈 {needle:?} が含まれない"
+                );
             }
         }
 

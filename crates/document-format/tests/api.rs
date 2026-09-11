@@ -97,7 +97,9 @@ fn assert_open_and_from_parts_agree(
 
     let from_file = api().open(&path).expect_err("違反入りのコンテナは開けない");
     let parts = DocumentParts::from_entries(entries).expect("標本の集合は妥当");
-    let from_memory = api().from_parts(&parts).expect_err("違反入りの集合は復元できない");
+    let from_memory = api()
+        .from_parts(&parts)
+        .expect_err("違反入りの集合は復元できない");
 
     assert_eq!(
         format!("{from_file:?}"),
@@ -144,7 +146,10 @@ fn document_with_non_finite_value() -> Document {
 
 /// NaN 遮断のエラーに載る位置（`RowsCodec::encode` が組み立てる診断形）。
 fn non_finite_location(document: &Document) -> String {
-    format!("sheets/{}.jsonl line 1: column score", document.sheets()[0].id())
+    format!(
+        "sheets/{}.jsonl line 1: column score",
+        document.sheets()[0].id()
+    )
 }
 
 /// モデル → ファイル → `open` で同一のモデルが戻る（要件 4.1, 5.2）。
@@ -156,13 +161,35 @@ fn open_round_trips_the_model_through_a_real_file() {
 
     let outcome = api().open(&path).expect("標本のファイルは開ける");
 
-    assert_eq!(before.document_id(), outcome.document.document_id(), "識別子が変わった");
-    assert_eq!(sheet_metadata(&before), sheet_metadata(&outcome.document), "シートが変わった");
+    assert_eq!(
+        before.document_id(),
+        outcome.document.document_id(),
+        "識別子が変わった"
+    );
+    assert_eq!(
+        sheet_metadata(&before),
+        sheet_metadata(&outcome.document),
+        "シートが変わった"
+    );
     assert_eq!(rows(&before), rows(&outcome.document), "行が変わった");
-    assert_eq!(schemas(&before), schemas(&outcome.document), "スキーマが変わった");
-    assert_eq!(attachments(&before), attachments(&outcome.document), "添付が変わった");
-    assert_eq!(None, outcome.migrated_from, "現行版なのに移行元が記録された");
-    assert!(!outcome.beyond_supported_scale, "小さい文書が保証対象外とされた");
+    assert_eq!(
+        schemas(&before),
+        schemas(&outcome.document),
+        "スキーマが変わった"
+    );
+    assert_eq!(
+        attachments(&before),
+        attachments(&outcome.document),
+        "添付が変わった"
+    );
+    assert_eq!(
+        None, outcome.migrated_from,
+        "現行版なのに移行元が記録された"
+    );
+    assert!(
+        !outcome.beyond_supported_scale,
+        "小さい文書が保証対象外とされた"
+    );
 }
 
 /// 決定性ゴールデン fixture を読み込み経路の入力にできる（要件 4.1）。
@@ -170,14 +197,28 @@ fn open_round_trips_the_model_through_a_real_file() {
 fn open_reads_the_committed_golden_fixture() {
     let outcome = api().open(&fixture_path()).expect("ゴールデンは開ける");
 
-    assert_eq!(1, outcome.document.sheets().len(), "ゴールデンのシート数が違う");
+    assert_eq!(
+        1,
+        outcome.document.sheets().len(),
+        "ゴールデンのシート数が違う"
+    );
     let sheet = &outcome.document.sheets()[0];
     assert_eq!("標本シート", sheet.name(), "ゴールデンのシート名が違う");
     assert_eq!(3, sheet.columns().len(), "ゴールデンの列数が違う");
     assert_eq!(40, sheet.rows().len(), "ゴールデンの行数が違う");
-    assert_eq!(1, attachments(&outcome.document).len(), "ゴールデンの添付数が違う");
-    assert_eq!(None, outcome.migrated_from, "現行版なのに移行元が記録された");
-    assert!(!outcome.beyond_supported_scale, "ゴールデンが保証対象外とされた");
+    assert_eq!(
+        1,
+        attachments(&outcome.document).len(),
+        "ゴールデンの添付数が違う"
+    );
+    assert_eq!(
+        None, outcome.migrated_from,
+        "現行版なのに移行元が記録された"
+    );
+    assert!(
+        !outcome.beyond_supported_scale,
+        "ゴールデンが保証対象外とされた"
+    );
 }
 
 /// 存在しない / 壊れた / jxcel でないファイルは `Err` になり、ファイルは変更されない。
@@ -199,7 +240,9 @@ fn open_rejects_absent_corrupt_and_foreign_files_without_changing_them() {
     let absent = scratch.file("absent.jxcel");
 
     // 判定順の観測（不在は Io、壊れた ZIP は InvalidContainer）。
-    let missing = api().open(&absent).expect_err("存在しないファイルは開けない");
+    let missing = api()
+        .open(&absent)
+        .expect_err("存在しないファイルは開けない");
     assert!(
         matches!(missing, DocumentError::Io { retried: false, .. }),
         "不在が Io(retried=false) でない: {missing:?}"
@@ -215,10 +258,20 @@ fn open_rejects_absent_corrupt_and_foreign_files_without_changing_them() {
 
     // 失敗した読み込みはファイルを変更しない（要件 5.5。ディレクトリ全体で見る）。
     let expected: Vec<(String, Vec<u8>)> = vec![
-        ("corrupt.jxcel".to_owned(), fs::read(&corrupt).expect("読める")),
-        ("truncated.jxcel".to_owned(), fs::read(&truncated).expect("読める")),
+        (
+            "corrupt.jxcel".to_owned(),
+            fs::read(&corrupt).expect("読める"),
+        ),
+        (
+            "truncated.jxcel".to_owned(),
+            fs::read(&truncated).expect("読める"),
+        ),
     ];
-    assert_eq!(expected, snapshot(scratch.path()), "失敗した読み込みがファイルを変更した");
+    assert_eq!(
+        expected,
+        snapshot(scratch.path()),
+        "失敗した読み込みがファイルを変更した"
+    );
     assert!(!absent.exists(), "存在しないパスが読み込みで作られた");
 }
 
@@ -241,15 +294,25 @@ fn open_never_writes_anything_to_the_filesystem() {
 
     api().open(&valid).expect("妥当なファイルは開ける");
     api().open(&corrupt).expect_err("壊れたファイルは開けない");
-    api().open(&absent).expect_err("存在しないファイルは開けない");
+    api()
+        .open(&absent)
+        .expect_err("存在しないファイルは開けない");
 
-    assert_eq!(valid_before, fs::read(&valid).expect("読める"), "対象ファイルが変更された");
+    assert_eq!(
+        valid_before,
+        fs::read(&valid).expect("読める"),
+        "対象ファイルが変更された"
+    );
     assert_eq!(
         corrupt_before,
         fs::read(&corrupt).expect("読める"),
         "壊れた対象ファイルが変更された"
     );
-    assert_eq!(before, snapshot(scratch.path()), "読み込みが一時ファイルを残した");
+    assert_eq!(
+        before,
+        snapshot(scratch.path()),
+        "読み込みが一時ファイルを残した"
+    );
 }
 
 /// 後段で失敗する入力は `Err` になり、部分的なモデルとして外に出ない（要件 5.4）。
@@ -272,7 +335,9 @@ fn open_reports_late_stage_failures_without_returning_a_partial_model() {
     let digest_case = scratch.file("digest.jxcel");
     fs::write(&digest_case, encode_entries(tampered)).expect("書き出し");
 
-    let error = api().open(&digest_case).expect_err("ダイジェスト不一致は失敗する");
+    let error = api()
+        .open(&digest_case)
+        .expect_err("ダイジェスト不一致は失敗する");
     assert!(
         matches!(error, DocumentError::IntegrityMismatch { .. }),
         "ダイジェスト不一致が IntegrityMismatch でない: {error:?}"
@@ -292,8 +357,7 @@ fn open_reports_late_stage_failures_without_returning_a_partial_model() {
         r#""},"types":[]}"#
     ))
     .expect("標本のスキーマは妥当");
-    let (schema_entry, schema_bytes) =
-        SchemaCodec::encode(sheet, &dangling).expect("符号化");
+    let (schema_entry, schema_bytes) = SchemaCodec::encode(sheet, &dangling).expect("符号化");
     let mut structural = entries_of(&parts);
     let slot = structural
         .iter()
@@ -301,10 +365,15 @@ fn open_reports_late_stage_failures_without_returning_a_partial_model() {
         .expect("スキーマエントリが実在する");
     structural[slot].1 = schema_bytes;
     let structural_case = scratch.file("structural.jxcel");
-    fs::write(&structural_case, rebuilt_with_manifest(parts.format_version(), structural))
-        .expect("書き出し");
+    fs::write(
+        &structural_case,
+        rebuilt_with_manifest(parts.format_version(), structural),
+    )
+    .expect("書き出し");
 
-    let error = api().open(&structural_case).expect_err("構造の違反は失敗する");
+    let error = api()
+        .open(&structural_case)
+        .expect_err("構造の違反は失敗する");
     assert!(
         matches!(error, DocumentError::DanglingTypeRef { .. }),
         "宙吊り参照が DanglingTypeRef でない: {error:?}"
@@ -312,10 +381,20 @@ fn open_reports_late_stage_failures_without_returning_a_partial_model() {
 
     // 失敗した 2 つのファイルはどちらも変更されていない（要件 5.5）。
     let expected: Vec<(String, Vec<u8>)> = vec![
-        ("digest.jxcel".to_owned(), fs::read(&digest_case).expect("読める")),
-        ("structural.jxcel".to_owned(), fs::read(&structural_case).expect("読める")),
+        (
+            "digest.jxcel".to_owned(),
+            fs::read(&digest_case).expect("読める"),
+        ),
+        (
+            "structural.jxcel".to_owned(),
+            fs::read(&structural_case).expect("読める"),
+        ),
     ];
-    assert_eq!(expected, snapshot(scratch.path()), "失敗した読み込みがファイルを変更した");
+    assert_eq!(
+        expected,
+        snapshot(scratch.path()),
+        "失敗した読み込みがファイルを変更した"
+    );
 }
 
 /// 記録された形式バージョンのゲートが読み込み経路に結線されている（要件 6.2, 6.5）。
@@ -333,15 +412,28 @@ fn open_gates_the_recorded_format_version() {
 
     // 現行版: そのまま読め、移行元は記録されない。
     let current_path = scratch.file("current.jxcel");
-    fs::write(&current_path, rebuilt_with_manifest(current, entries_of(&parts))).expect("書き出し");
+    fs::write(
+        &current_path,
+        rebuilt_with_manifest(current, entries_of(&parts)),
+    )
+    .expect("書き出し");
     let outcome = api().open(&current_path).expect("現行版は読める");
-    assert_eq!(None, outcome.migrated_from, "現行版なのに移行元が記録された");
+    assert_eq!(
+        None, outcome.migrated_from,
+        "現行版なのに移行元が記録された"
+    );
 
     // 現行より新しい major: 中止（要件 6.5）。
     let future = FormatVersion::new(current.major + 1, 0);
     let future_path = scratch.file("future.jxcel");
-    fs::write(&future_path, rebuilt_with_manifest(future, entries_of(&parts))).expect("書き出し");
-    let error = api().open(&future_path).expect_err("未来の major は開けない");
+    fs::write(
+        &future_path,
+        rebuilt_with_manifest(future, entries_of(&parts)),
+    )
+    .expect("書き出し");
+    let error = api()
+        .open(&future_path)
+        .expect_err("未来の major は開けない");
     assert!(
         matches!(error, DocumentError::UnsupportedVersion { found, supported }
             if found == future && supported == current),
@@ -352,7 +444,9 @@ fn open_gates_the_recorded_format_version() {
     let past = FormatVersion::new(0, 9);
     let past_path = scratch.file("past.jxcel");
     fs::write(&past_path, rebuilt_with_manifest(past, entries_of(&parts))).expect("書き出し");
-    let error = api().open(&past_path).expect_err("移行先の無い古い版は開けない");
+    let error = api()
+        .open(&past_path)
+        .expect_err("移行先の無い古い版は開けない");
     assert!(
         matches!(error, DocumentError::UnsupportedVersion { found, supported }
             if found == past && supported == current),
@@ -365,7 +459,10 @@ fn open_gates_the_recorded_format_version() {
 /// 境界をリテラルで扱うテスト（下記）とは別に、公開定数そのものを 1 本で固定する。
 #[test]
 fn supported_row_limit_is_one_hundred_thousand() {
-    assert_eq!(100_000, SUPPORTED_ROW_LIMIT, "保証対象の行数が要件 8.4 と違う");
+    assert_eq!(
+        100_000, SUPPORTED_ROW_LIMIT,
+        "保証対象の行数が要件 8.4 と違う"
+    );
 }
 
 /// 10 万行を超えるドキュメントを拒否せず、保証対象外として通知する（要件 8.4, 8.5）。
@@ -384,16 +481,24 @@ fn open_flags_documents_beyond_the_supported_row_limit_without_rejecting_them() 
         outcome.document.sheets()[0].rows().len(),
         "行数が往復で変わった"
     );
-    assert!(!outcome.beyond_supported_scale, "100,000 行が保証対象外とされた");
+    assert!(
+        !outcome.beyond_supported_scale,
+        "100,000 行が保証対象外とされた"
+    );
 
     let over_limit = write_document(&scratch, "over_limit.jxcel", &document_with_rows(100_001));
-    let outcome = api().open(&over_limit).expect("超過しても拒否しない（要件 8.5）");
+    let outcome = api()
+        .open(&over_limit)
+        .expect("超過しても拒否しない（要件 8.5）");
     assert_eq!(
         100_001,
         outcome.document.sheets()[0].rows().len(),
         "行数が往復で変わった"
     );
-    assert!(outcome.beyond_supported_scale, "100,001 行が保証対象内とされた");
+    assert!(
+        outcome.beyond_supported_scale,
+        "100,001 行が保証対象内とされた"
+    );
 }
 
 // --- 保存経路（タスク 7.2。要件 8.2、5.6 の維持） -----------------------------------
@@ -411,11 +516,27 @@ fn save_round_trips_the_model_through_a_real_file() {
     api().save(&before, &path).expect("標本は保存できる");
 
     let outcome = api().open(&path).expect("保存したファイルは開ける");
-    assert_eq!(before.document_id(), outcome.document.document_id(), "識別子が変わった");
-    assert_eq!(sheet_metadata(&before), sheet_metadata(&outcome.document), "シートが変わった");
+    assert_eq!(
+        before.document_id(),
+        outcome.document.document_id(),
+        "識別子が変わった"
+    );
+    assert_eq!(
+        sheet_metadata(&before),
+        sheet_metadata(&outcome.document),
+        "シートが変わった"
+    );
     assert_eq!(rows(&before), rows(&outcome.document), "行が変わった");
-    assert_eq!(schemas(&before), schemas(&outcome.document), "スキーマが変わった");
-    assert_eq!(attachments(&before), attachments(&outcome.document), "添付が変わった");
+    assert_eq!(
+        schemas(&before),
+        schemas(&outcome.document),
+        "スキーマが変わった"
+    );
+    assert_eq!(
+        attachments(&before),
+        attachments(&outcome.document),
+        "添付が変わった"
+    );
 }
 
 /// 同一の `Document` は、書き込み先のパスが違ってもバイト単位で同一に保存される
@@ -455,14 +576,20 @@ fn save_leaves_the_existing_file_untouched_when_a_stage_fails() {
     assert!(!before.is_empty(), "保存されたファイルが空である");
 
     let broken = document_with_non_finite_value();
-    let error = api().save(&broken, &path).expect_err("非有限値は保存できない");
+    let error = api()
+        .save(&broken, &path)
+        .expect_err("非有限値は保存できない");
     assert!(
         matches!(&error, DocumentError::NonRepresentableNumber { location }
             if *location == non_finite_location(&broken)),
         "NaN の拒否が NonRepresentableNumber(正しい位置)でない: {error:?}"
     );
 
-    assert_eq!(before, fs::read(&path).expect("読める"), "失敗した保存が対象ファイルを変更した");
+    assert_eq!(
+        before,
+        fs::read(&path).expect("読める"),
+        "失敗した保存が対象ファイルを変更した"
+    );
 }
 
 /// 保存は成功・失敗のどちらでも一時ファイルの残骸を残さない
@@ -473,12 +600,18 @@ fn save_leaves_no_temporary_files_behind() {
     let path = scratch.file("target.jxcel");
 
     api().save(&sample(), &path).expect("標本は保存できる");
-    api().save(&document_with_non_finite_value(), &path).expect_err("非有限値は保存できない");
+    api()
+        .save(&document_with_non_finite_value(), &path)
+        .expect_err("非有限値は保存できない");
 
     let leftovers: Vec<String> = fs::read_dir(scratch.path())
         .expect("作業ディレクトリが読める")
         .map(|entry| {
-            entry.expect("ディレクトリ要素が読める").file_name().to_string_lossy().into_owned()
+            entry
+                .expect("ディレクトリ要素が読める")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
         })
         .filter(|name| name.starts_with(".jxcel-tmp-"))
         .collect();
@@ -496,7 +629,9 @@ fn save_creates_missing_files_and_replaces_existing_contents() {
     let document = sample();
 
     let fresh = scratch.file("fresh.jxcel");
-    api().save(&document, &fresh).expect("存在しないパスへ保存できる");
+    api()
+        .save(&document, &fresh)
+        .expect("存在しないパスへ保存できる");
     let expected = fs::read(&fresh).expect("読める");
     assert!(!expected.is_empty(), "新規作成されたファイルが空である");
     api().open(&fresh).expect("新規作成されたファイルは開ける");
@@ -505,7 +640,11 @@ fn save_creates_missing_files_and_replaces_existing_contents() {
     let grown = scratch.file("grown.jxcel");
     fs::write(&grown, b"x").expect("書き出し");
     api().save(&document, &grown).expect("上書きできる");
-    assert_eq!(expected, fs::read(&grown).expect("読める"), "延長の内容が違う");
+    assert_eq!(
+        expected,
+        fs::read(&grown).expect("読める"),
+        "延長の内容が違う"
+    );
 
     // 大きな既存内容を小さな内容で置き換える（切り詰め）。
     let shrunk = scratch.file("shrunk.jxcel");
@@ -514,7 +653,10 @@ fn save_creates_missing_files_and_replaces_existing_contents() {
     api().save(&document, &shrunk).expect("上書きできる");
     let written = fs::read(&shrunk).expect("読める");
     assert_eq!(expected, written, "切り詰めの内容が違う");
-    assert!(written.len() < large.len(), "大きな既存内容が切り詰められていない");
+    assert!(
+        written.len() < large.len(),
+        "大きな既存内容が切り詰められていない"
+    );
 }
 
 /// 親ディレクトリが無いパスへの保存は `Err`（`Io { retried: false }`）になり、
@@ -529,14 +671,23 @@ fn save_reports_a_missing_parent_directory_without_writing_anywhere() {
     let path = scratch.path().join("missing").join("target.jxcel");
 
     let before = snapshot(scratch.path());
-    let error = api().save(&sample(), &path).expect_err("親ディレクトリが無ければ保存できない");
+    let error = api()
+        .save(&sample(), &path)
+        .expect_err("親ディレクトリが無ければ保存できない");
     assert!(
         matches!(error, DocumentError::Io { retried: false, .. }),
         "親ディレクトリ欠落が Io(retried=false) でない: {error:?}"
     );
     assert!(!path.exists(), "保存に失敗したパスが作られた");
-    assert!(!scratch.path().join("missing").exists(), "親ディレクトリが作られた");
-    assert_eq!(before, snapshot(scratch.path()), "失敗した保存が作業ディレクトリを変えた");
+    assert!(
+        !scratch.path().join("missing").exists(),
+        "親ディレクトリが作られた"
+    );
+    assert_eq!(
+        before,
+        snapshot(scratch.path()),
+        "失敗した保存が作業ディレクトリを変えた"
+    );
 }
 
 /// 保存が書き込むのは対象パスだけである（成功時に現れるエントリは対象ファイルのみ）。
@@ -546,7 +697,10 @@ fn save_reports_a_missing_parent_directory_without_writing_anywhere() {
 fn save_writes_only_the_target_entry() {
     let scratch = Scratch::new("save_only_target");
     let path = scratch.file("only.jxcel");
-    assert!(entry_names(scratch.path()).is_empty(), "作業ディレクトリが最初から空でない");
+    assert!(
+        entry_names(scratch.path()).is_empty(),
+        "作業ディレクトリが最初から空でない"
+    );
 
     api().save(&sample(), &path).expect("標本は保存できる");
 
@@ -568,7 +722,10 @@ fn save_without_conversion_creates_no_backup() {
     let path = write_document(&scratch, "current.jxcel", &sample());
 
     let outcome = api().open(&path).expect("現行版は開ける");
-    assert!(outcome.migrated_from.is_none(), "現行版で移行元が記録された");
+    assert!(
+        outcome.migrated_from.is_none(),
+        "現行版で移行元が記録された"
+    );
     assert!(
         !outcome.document.was_converted_from_an_older_format(),
         "現行版の読み込みで変換済みが立った"
@@ -603,7 +760,11 @@ fn save_rejects_a_dangling_type_ref_before_writing() {
         matches!(error, DocumentError::DanglingTypeRef { .. }),
         "宙吊り参照が DanglingTypeRef でない: {error:?}"
     );
-    assert_eq!(before, fs::read(&path).expect("読める"), "失敗した保存が対象ファイルを変更した");
+    assert_eq!(
+        before,
+        fs::read(&path).expect("読める"),
+        "失敗した保存が対象ファイルを変更した"
+    );
 }
 
 /// レジストリに登録されていない添付を参照する文書は保存できない（要件 7.4）。
@@ -626,7 +787,11 @@ fn save_rejects_an_unregistered_attachment_ref_before_writing() {
             if id == UNREGISTERED_ATTACHMENT_HEX),
         "未登録添付が DanglingAttachmentRef(正しい id)でない: {error:?}"
     );
-    assert_eq!(before, fs::read(&path).expect("読める"), "失敗した保存が対象ファイルを変更した");
+    assert_eq!(
+        before,
+        fs::read(&path).expect("読める"),
+        "失敗した保存が対象ファイルを変更した"
+    );
 }
 
 /// 同一の型定義識別子を 2 回宣言する文書は保存できない（要件 4.3）。
@@ -644,10 +809,20 @@ fn save_rejects_duplicate_type_def_ids_before_writing() {
         .save(&document_with_duplicate_type_def(), &path)
         .expect_err("型定義の重複宣言は保存できない");
     assert!(
-        matches!(error, DocumentError::DuplicateId { kind: IdKind::TypeDef, .. }),
+        matches!(
+            error,
+            DocumentError::DuplicateId {
+                kind: IdKind::TypeDef,
+                ..
+            }
+        ),
         "重複宣言が DuplicateId(TypeDef) でない: {error:?}"
     );
-    assert_eq!(before, fs::read(&path).expect("読める"), "失敗した保存が対象ファイルを変更した");
+    assert_eq!(
+        before,
+        fs::read(&path).expect("読める"),
+        "失敗した保存が対象ファイルを変更した"
+    );
 }
 
 /// 保存が拒否する違反文書は、パート経路（`to_parts` → `from_parts`）でも同じ違反として
@@ -667,7 +842,9 @@ fn save_and_the_parts_path_report_the_same_structural_violations() {
         document_with_duplicate_type_def(),
     ];
     for document in &violations {
-        let save_error = api().save(document, &path).expect_err("違反文書は保存できない");
+        let save_error = api()
+            .save(document, &path)
+            .expect_err("違反文書は保存できない");
         let parts = to_parts(document).expect("パート構築までは成功する");
         let read_error = from_parts(&parts).expect_err("読み込み経路も違反を拒否する");
         assert_eq!(
@@ -691,9 +868,15 @@ fn save_reproduces_the_committed_golden_fixture_bytes() {
     let outcome = api().open(&fixture_path()).expect("ゴールデンは開ける");
 
     let path = scratch.file("reencoded.jxcel");
-    api().save(&outcome.document, &path).expect("ゴールデンの文書は保存できる");
+    api()
+        .save(&outcome.document, &path)
+        .expect("ゴールデンの文書は保存できる");
 
-    assert_eq!(golden, fs::read(&path).expect("読める"), "再符号化がゴールデンと一致しない");
+    assert_eq!(
+        golden,
+        fs::read(&path).expect("読める"),
+        "再符号化がゴールデンと一致しない"
+    );
 }
 
 /// 既存ファイルへの保存はディレクトリエントリを差し替える（`AtomicWriter::commit` の
@@ -716,7 +899,10 @@ fn save_replaces_the_directory_entry_instead_of_rewriting_in_place() {
     api().save(&sample(), &path).expect("上書きできる");
     let second = fs::metadata(&path).expect("メタデータが読める").ino();
 
-    assert_ne!(first, second, "上書きが inode を差し替えていない（原子的置換でない）");
+    assert_ne!(
+        first, second,
+        "上書きが inode を差し替えていない（原子的置換でない）"
+    );
 }
 
 // --- 論理エントリ集合の公開契約（タスク 7.3。要件 2.2, 2.3） ---------------------------

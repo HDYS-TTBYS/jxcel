@@ -29,7 +29,7 @@
 
 use document_format::json::determinism;
 use document_format::json::{
-    read_ndjson, write_cell, write_json, write_ordered_object, write_ndjson, PreservedFields,
+    read_ndjson, write_cell, write_json, write_ndjson, write_ordered_object, PreservedFields,
     PreservingObjectWriter,
 };
 use document_format::{CellValue, DocumentError};
@@ -37,8 +37,7 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// 行の文脈。セル位置は `<ROW_LOCATION> column <キー>` としてエラーに載る。
-const ROW_LOCATION: &str =
-    "sheet 01J2X3Z0000000000000000001 row 01J2X3Z0000000000000000002";
+const ROW_LOCATION: &str = "sheet 01J2X3Z0000000000000000001 row 01J2X3Z0000000000000000002";
 
 /// 宣言順（`version`, `document_id`, `sheet_order`）が辞書順と異なる構造体。
 #[derive(Serialize)]
@@ -97,8 +96,7 @@ fn ordered_columns_follow_the_caller_supplied_schema_order() {
     // 列名と値は組のまま入れ替わる。
     let reversed: Vec<(&str, &CellValue)> = columns(&cells).into_iter().rev().collect();
     let mut other = Vec::new();
-    write_ordered_object(&mut other, ROW_LOCATION, &reversed)
-        .expect("列集合の書き出しが失敗した");
+    write_ordered_object(&mut other, ROW_LOCATION, &reversed).expect("列集合の書き出しが失敗した");
     assert_eq!(
         "{\"備考\":\"備考です\",\"alpha\":7,\"数量\":\"12.50\"}",
         String::from_utf8(other).expect("出力は UTF-8"),
@@ -182,9 +180,15 @@ impl<'de> Visitor<'de> for ManifestPartProbeVisitor {
             }
         }
         let Some(version) = version else {
-            return Err(de::Error::custom("manifest part is missing the `version` key"));
+            return Err(de::Error::custom(
+                "manifest part is missing the `version` key",
+            ));
         };
-        Ok(ManifestPartProbe { version, parts: parts.unwrap_or_default(), preserved })
+        Ok(ManifestPartProbe {
+            version,
+            parts: parts.unwrap_or_default(),
+            preserved,
+        })
     }
 }
 
@@ -198,17 +202,28 @@ fn unknown_fields_survive_a_read_write_cycle_from_outside_the_crate() {
     assert_eq!(2, part.preserved.len(), "未知フィールドが保持されていない");
     assert_eq!(
         vec!["future_a", "future_b"],
-        part.preserved.iter().map(|field| field.key()).collect::<Vec<_>>(),
+        part.preserved
+            .iter()
+            .map(|field| field.key())
+            .collect::<Vec<_>>(),
         "保持順が原文順でない",
     );
 
     let mut out = Vec::new();
     let mut writer = PreservingObjectWriter::new(&mut out, &part.preserved);
-    writer.write_known("version", &part.version).expect("既知フィールドの書き出しが失敗した");
-    writer.write_known("parts", &part.parts).expect("既知フィールドの書き出しが失敗した");
+    writer
+        .write_known("version", &part.version)
+        .expect("既知フィールドの書き出しが失敗した");
+    writer
+        .write_known("parts", &part.parts)
+        .expect("既知フィールドの書き出しが失敗した");
     writer.finish().expect("オブジェクトの確定が失敗した");
 
-    assert_eq!(INPUT, String::from_utf8(out).expect("出力は UTF-8"), "往復でバイト列が変わった");
+    assert_eq!(
+        INPUT,
+        String::from_utf8(out).expect("出力は UTF-8"),
+        "往復でバイト列が変わった"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -239,7 +254,11 @@ fn ndjson_codec_is_usable_from_outside_the_crate() {
             label: CellValue::Text("a\nb".into()),
             amount: CellValue::Int(1),
         },
-        RowProbe { id: "02".into(), label: CellValue::Null, amount: CellValue::Float(-0.0) },
+        RowProbe {
+            id: "02".into(),
+            label: CellValue::Null,
+            amount: CellValue::Float(-0.0),
+        },
     ];
 
     let mut out = Vec::new();
@@ -251,7 +270,10 @@ fn ndjson_codec_is_usable_from_outside_the_crate() {
          {\"id\":\"02\",\"label\":null,\"amount\":0.0}\n",
         String::from_utf8(out.clone()).expect("出力は UTF-8"),
     );
-    assert_eq!(rows.len(), out.iter().filter(|&&byte| byte == b'\n').count());
+    assert_eq!(
+        rows.len(),
+        out.iter().filter(|&&byte| byte == b'\n').count()
+    );
     assert!(!out.contains(&b'\r'), "出力に `\\r` が含まれる");
 
     let decoded: Vec<RowProbe> = read_ndjson(&out, SHEET_ENTRY).expect("読み込みが失敗した");
@@ -264,7 +286,8 @@ fn ndjson_codec_is_usable_from_outside_the_crate() {
         .expect("空の書き出しが失敗した");
     assert!(second.is_empty());
     let decoded_empty: Vec<RowProbe> =
-        document_format::json::ndjson::read_ndjson(&second, SHEET_ENTRY).expect("読み込みが失敗した");
+        document_format::json::ndjson::read_ndjson(&second, SHEET_ENTRY)
+            .expect("読み込みが失敗した");
     assert!(decoded_empty.is_empty());
 }
 
@@ -297,7 +320,9 @@ fn ndjson_keeps_the_row_order_and_line_granularity_the_caller_supplies() {
     let ids: Vec<String> = encoded
         .lines()
         .map(|line| {
-            serde_json::from_str::<RowProbe>(line).expect("行が単一の JSON オブジェクトでない").id
+            serde_json::from_str::<RowProbe>(line)
+                .expect("行が単一の JSON オブジェクトでない")
+                .id
         })
         .collect();
     assert_eq!(
@@ -319,10 +344,18 @@ fn ndjson_keeps_the_row_order_and_line_granularity_the_caller_supplies() {
 
     let before: Vec<&str> = encoded.lines().collect();
     let after: Vec<&str> = changed_text.lines().collect();
-    assert_eq!(before.len(), after.len(), "レコード数が同じなのに行数が変わった");
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "レコード数が同じなのに行数が変わった"
+    );
     assert_eq!(
         1,
-        before.iter().zip(&after).filter(|(before, after)| before != after).count(),
+        before
+            .iter()
+            .zip(&after)
+            .filter(|(before, after)| before != after)
+            .count(),
         "1 セルの変更が 1 行に収まっていない",
     );
 }

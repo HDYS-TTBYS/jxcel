@@ -103,8 +103,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use app_shell::diagnostics::{self, DiagnosticsLevel};
@@ -490,7 +490,11 @@ fn init_diagnostics() -> Result<StartupState, StartupError> {
     // 解決など起動の前提そのものの失敗であり、5.1 の前提不成立の経路が扱う）。
     install_crash_recorder(&log_dir);
 
-    Ok(StartupState { settings, log_dir, recovered })
+    Ok(StartupState {
+        settings,
+        log_dir,
+        recovered,
+    })
 }
 
 /// 記録の保存先を用意する（要件 8.1、8.5。タスク 5.2）。
@@ -693,7 +697,10 @@ fn confirm_effective_logging(config: &LoggingConfig) -> Result<(), StartupError>
         )),
         Err(error) => Err(StartupError::new(
             PREREQUISITE_DIAGNOSTICS,
-            format!("記録機構が {} へ記録を書けなかった: {error}", active.display()),
+            format!(
+                "記録機構が {} へ記録を書けなかった: {error}",
+                active.display()
+            ),
         )),
     }
 }
@@ -845,9 +852,8 @@ fn write_crash_record(writer: &mut impl Write, record: &CrashRecord) -> io::Resu
     let bytes = if rendered.len() <= MAX_CRASH_RECORD_BYTES {
         rendered.into_bytes()
     } else {
-        let marker = format!(
-            "\n（記録の上限 {MAX_CRASH_RECORD_BYTES} バイトを超えたため切り詰めた）\n"
-        );
+        let marker =
+            format!("\n（記録の上限 {MAX_CRASH_RECORD_BYTES} バイトを超えたため切り詰めた）\n");
         let body = clamp_to_char_boundary(&rendered, MAX_CRASH_RECORD_BYTES - marker.len());
         let mut clamped = Vec::with_capacity(MAX_CRASH_RECORD_BYTES);
         clamped.extend_from_slice(body.as_bytes());
@@ -1082,7 +1088,10 @@ fn csp_config_from(csp: Option<&Csp>) -> CspConfig {
                 .unwrap_or_default()
         })
         .unwrap_or_default();
-    CspConfig { policy, connect_src }
+    CspConfig {
+        policy,
+        connect_src,
+    }
 }
 
 /// 構築の前に、実効の方針が IPC の宛先だけを許可していることを確かめる（要件 1.6、8.3）。
@@ -1128,7 +1137,11 @@ fn confirm_effective_csp(config: &CspConfig) -> Result<(), StartupError> {
     log::info!(
         "通信内容保護方針の実効 connect-src: {} / 方針全体: {}",
         show_sources(&config.connect_src),
-        if config.policy.is_empty() { "(未設定)" } else { &config.policy },
+        if config.policy.is_empty() {
+            "(未設定)"
+        } else {
+            &config.policy
+        },
     );
     confirm_csp_values(config)
 }
@@ -1145,7 +1158,11 @@ fn show_sources<S: AsRef<str>>(sources: &[S]) -> String {
     if sources.is_empty() {
         return "(なし)".to_owned();
     }
-    sources.iter().map(|s| s.as_ref()).collect::<Vec<_>>().join(" ")
+    sources
+        .iter()
+        .map(|s| s.as_ref())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// 手順 3 が準備した状態。後続タスクが `AppHandle::state` から読む。
@@ -1194,7 +1211,10 @@ pub struct StartupError {
 
 impl StartupError {
     fn new(prerequisite: &'static str, detail: impl Into<String>) -> Self {
-        Self { prerequisite, detail: detail.into() }
+        Self {
+            prerequisite,
+            detail: detail.into(),
+        }
     }
 
     /// 満たされなかった前提の名前。メッセージの先頭に出す。
@@ -1263,7 +1283,9 @@ fn persist_startup_failure(record: &str) -> Option<PathBuf> {
         }
     }
     candidates.push(std::env::temp_dir().join(STARTUP_FAILURE_FILE_NAME));
-    candidates.into_iter().find(|path| fs::write(path, record).is_ok())
+    candidates
+        .into_iter()
+        .find(|path| fs::write(path, record).is_ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -1281,7 +1303,10 @@ fn persist_startup_failure(record: &str) -> Option<PathBuf> {
 /// `argv` の与えられ方はプラットフォームで異なる。[`LaunchRequest::from_argv`] が吸収する。
 fn handover(app: &AppHandle, argv: Vec<String>, cwd: String) {
     let request = LaunchRequest::from_argv(&argv);
-    tauri_plugin_log::log::info!("二重起動を引き継ぎました（cwd={cwd}）: {}", request.describe());
+    tauri_plugin_log::log::info!(
+        "二重起動を引き継ぎました（cwd={cwd}）: {}",
+        request.describe()
+    );
     present_window_for_request(app, request);
 }
 
@@ -1596,7 +1621,8 @@ fn handle_run_event(app: &AppHandle, event: RunEvent) {
         RunEvent::Exit => shutdown_sidecars(app),
         #[cfg(target_os = "macos")]
         RunEvent::Reopen {
-            has_visible_windows, ..
+            has_visible_windows,
+            ..
         } => handle_reopen(app, has_visible_windows),
         _ => {}
     }
@@ -1808,9 +1834,9 @@ fn verification_sidecar_path() -> PathBuf {
 mod tests {
     use super::{
         clamp_to_char_boundary, confirm_csp_values, csp_config_from, format_crash_record,
-        parse_verification_trigger, record_once, vetoes_exit, write_crash_record,
-        CrashRecord, CspConfig, ExitControl, Residency, VerificationAction,
-        ABNORMAL_TERMINATION_RECORDING, MAX_CRASH_RECORD_BYTES,
+        parse_verification_trigger, record_once, vetoes_exit, write_crash_record, CrashRecord,
+        CspConfig, ExitControl, Residency, VerificationAction, ABNORMAL_TERMINATION_RECORDING,
+        MAX_CRASH_RECORD_BYTES,
     };
     use std::sync::atomic::Ordering;
     use tauri::utils::config::Csp;
@@ -1823,9 +1849,8 @@ mod tests {
 
     #[test]
     fn connect_src_with_exactly_the_ipc_destinations_is_accepted() {
-        let config = policy(
-            "default-src 'self'; connect-src ipc: http://ipc.localhost; script-src 'self'",
-        );
+        let config =
+            policy("default-src 'self'; connect-src ipc: http://ipc.localhost; script-src 'self'");
         assert_eq!(config.connect_src.len(), 2);
         assert!(confirm_csp_values(&config).is_ok());
     }
@@ -1897,7 +1922,10 @@ mod tests {
     #[test]
     fn an_explicit_quit_releases_every_veto() {
         let control = ExitControl::default();
-        assert!(!control.quit_requested(), "初期状態では掛け金は立っていない");
+        assert!(
+            !control.quit_requested(),
+            "初期状態では掛け金は立っていない"
+        );
         control.authorize_quit();
         assert!(control.quit_requested());
         // 掛け金が立った後は、macOS の `code: None` でさえ拒否しない。**これが「通常手段で
@@ -1976,8 +2004,8 @@ mod tests {
     fn the_crash_record_is_written_to_any_sink() {
         // 書き込み先を引数に取るので、ファイル無しで書式と書き込みを固定できる。
         let mut sink = Vec::new();
-        let written =
-            write_crash_record(&mut sink, &sample_record()).expect("メモリへの書き込みは失敗しない");
+        let written = write_crash_record(&mut sink, &sample_record())
+            .expect("メモリへの書き込みは失敗しない");
         assert_eq!(written, sink.len());
         assert_eq!(
             String::from_utf8(sink.clone()).expect("UTF-8"),
@@ -1999,7 +2027,10 @@ mod tests {
         assert!(sink.len() <= MAX_CRASH_RECORD_BYTES, "上限を超えない");
         let text = String::from_utf8(sink).expect("文字境界で切るので UTF-8 のまま");
         assert!(text.starts_with("===== 異常終了（パニック） ====="));
-        assert!(text.contains("切り詰めた"), "切り詰めた事実を残す: {text:?}");
+        assert!(
+            text.contains("切り詰めた"),
+            "切り詰めた事実を残す: {text:?}"
+        );
         assert!(text.ends_with('\n'));
     }
 
@@ -2102,8 +2133,20 @@ mod tests {
     fn an_uninterpretable_verification_trigger_selects_nothing() {
         // 解釈できない値では**何もしない**（配布物の既定の振る舞いを変えない）。
         for value in [
-            "", "abc", "panic", "panic:", "exit:", "sidecar", "sidecar:", "sidecar:x",
-            "fail-window", "fail-window:", "fail-window:x", "crash:1500", "1500:panic", "-1",
+            "",
+            "abc",
+            "panic",
+            "panic:",
+            "exit:",
+            "sidecar",
+            "sidecar:",
+            "sidecar:x",
+            "fail-window",
+            "fail-window:",
+            "fail-window:x",
+            "crash:1500",
+            "1500:panic",
+            "-1",
             "1.5",
         ] {
             assert_eq!(

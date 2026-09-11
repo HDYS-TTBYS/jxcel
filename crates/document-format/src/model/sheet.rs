@@ -102,7 +102,10 @@ impl Row {
     /// (行データの復号 = タスク 4.5 が消費する)。
     #[inline]
     pub(crate) fn new(id: RowId) -> Self {
-        Self { id, values: Vec::new() }
+        Self {
+            id,
+            values: Vec::new(),
+        }
     }
 
     /// 列順のセル値を置き換える経路(`Document::set_row_values` が呼ぶ)。

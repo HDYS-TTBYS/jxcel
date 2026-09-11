@@ -183,8 +183,13 @@ fn stage(target: &Path, bytes: &[u8]) -> Result<NamedTempFile, DocumentError> {
         .map_err(|err| io_error(err, false))?;
     // `NamedTempFile` の `Write` は `File` への素通しでバッファリングしないため、
     // フラッシュは要らない（`write_all` のあとそのまま `sync_all` できる）。
-    staged.write_all(bytes).map_err(|err| io_error(err, false))?;
-    staged.as_file().sync_all().map_err(|err| io_error(err, false))?;
+    staged
+        .write_all(bytes)
+        .map_err(|err| io_error(err, false))?;
+    staged
+        .as_file()
+        .sync_all()
+        .map_err(|err| io_error(err, false))?;
     Ok(staged)
 }
 
@@ -264,7 +269,9 @@ fn rename_with_retries(staged: &Path, target: &Path) -> Result<(), DocumentError
 fn retry_backoff(attempt: u32) -> Duration {
     // 上限（2^31 倍）で止めてから飽和させる: `1u32 << 32` の桁溢れを避ける。
     let doublings = attempt.saturating_sub(1).min(31);
-    RENAME_FIRST_BACKOFF.saturating_mul(1u32 << doublings).min(RENAME_MAX_BACKOFF)
+    RENAME_FIRST_BACKOFF
+        .saturating_mul(1u32 << doublings)
+        .min(RENAME_MAX_BACKOFF)
 }
 
 /// `rename` の失敗を再試行すべきか（[`RETRYABLE_RENAME_CODES`] の判定）。
@@ -360,7 +367,10 @@ mod tests {
     fn assert_failed_before_replacement(err: DocumentError, context: &str) {
         match err {
             DocumentError::Io { retried, .. } => {
-                assert!(!retried, "再試行していない失敗で retried が真になった: {context}");
+                assert!(
+                    !retried,
+                    "再試行していない失敗で retried が真になった: {context}"
+                );
             }
             other => panic!("Io 以外が返った（{context}）: {other:?}"),
         }
@@ -380,8 +390,16 @@ mod tests {
             AtomicWriter::commit(&target, replacement).expect("置換が失敗した");
 
             let observed = read(&target);
-            assert_eq!(*replacement, observed.as_slice(), "バイト単位で一致しない: 標本 {index}");
-            assert_ne!(ORIGINAL, observed.as_slice(), "旧内容のままである: 標本 {index}");
+            assert_eq!(
+                *replacement,
+                observed.as_slice(),
+                "バイト単位で一致しない: 標本 {index}"
+            );
+            assert_ne!(
+                ORIGINAL,
+                observed.as_slice(),
+                "旧内容のままである: 標本 {index}"
+            );
             assert_eq!(
                 vec!["document.jxcel".to_string()],
                 entries(dir.path()),
@@ -478,7 +496,11 @@ mod tests {
             synced,
             "同期段が対象の親ディレクトリで呼ばれていない"
         );
-        assert_eq!(replacement, read(&target), "置換が成立していない（部分的な内容が疑われる）");
+        assert_eq!(
+            replacement,
+            read(&target),
+            "置換が成立していない（部分的な内容が疑われる）"
+        );
         assert_eq!(
             vec!["document.jxcel".to_string()],
             entries(dir.path()),
@@ -510,7 +532,11 @@ mod tests {
             read(&occupied.join("inner.txt")).as_slice(),
             "対象ディレクトリの中のファイルが変わった"
         );
-        assert_eq!(b"sibling", read(&sibling).as_slice(), "兄弟ファイルが変わった");
+        assert_eq!(
+            b"sibling",
+            read(&sibling).as_slice(),
+            "兄弟ファイルが変わった"
+        );
         assert_eq!(
             vec!["occupied".to_string(), "sibling.txt".to_string()],
             entries(dir.path()),
@@ -532,7 +558,11 @@ mod tests {
 
         assert_failed_before_replacement(err, "親ディレクトリが無い");
         assert!(!missing.exists(), "親ディレクトリが作られた");
-        assert_eq!(b"sibling", read(&sibling).as_slice(), "既存のファイルが変わった");
+        assert_eq!(
+            b"sibling",
+            read(&sibling).as_slice(),
+            "既存のファイルが変わった"
+        );
         assert_eq!(vec!["sibling.txt".to_string()], entries(dir.path()));
     }
 
@@ -570,7 +600,11 @@ mod tests {
             .expect_err("一時ファイルを作れないパスで成功してしまった");
 
         assert_failed_before_replacement(err, "一時ファイルを作れない（パス長の上限）");
-        assert_eq!(ORIGINAL, read(&target).as_slice(), "失敗したのに既存の対象が変わった");
+        assert_eq!(
+            ORIGINAL,
+            read(&target).as_slice(),
+            "失敗したのに既存の対象が変わった"
+        );
         assert_eq!(
             vec![TARGET_NAME.to_string()],
             entries(&parent),
@@ -617,7 +651,10 @@ mod tests {
             Path::new("/tmp"),
             parent_dir(Path::new("/tmp/document.jxcel")).expect("親ディレクトリを取れない")
         );
-        assert!(parent_dir(Path::new("/")).is_err(), "親を持たないパスが受理された");
+        assert!(
+            parent_dir(Path::new("/")).is_err(),
+            "親を持たないパスが受理された"
+        );
     }
 
     /// 要件 5.6 の中核（design「AtomicWriter / Validation」）: 一時ファイルを書き終えた後・
@@ -637,13 +674,14 @@ mod tests {
         let scratch = tempfile::tempdir().expect("一時ディレクトリを作れない");
         let target = target_with_original(dir.path());
 
-        let child = Command::new(std::env::current_exe().expect("テストバイナリのパスを得られない"))
-            .args(["--exact", CRASH_TEST, "--nocapture"])
-            .current_dir(scratch.path())
-            .env(CHILD_ACTION_ENV, CHILD_ACTION)
-            .env(CHILD_TARGET_ENV, &target)
-            .output()
-            .expect("子プロセスを起動できない");
+        let child =
+            Command::new(std::env::current_exe().expect("テストバイナリのパスを得られない"))
+                .args(["--exact", CRASH_TEST, "--nocapture"])
+                .current_dir(scratch.path())
+                .env(CHILD_ACTION_ENV, CHILD_ACTION)
+                .env(CHILD_TARGET_ENV, &target)
+                .output()
+                .expect("子プロセスを起動できない");
 
         assert!(
             died_abnormally(child.status),
@@ -663,7 +701,11 @@ mod tests {
 
         // (2) 書き終えた一時ファイルが対象と同一ディレクトリに残っている。
         let names = entries(dir.path());
-        assert_eq!(2, names.len(), "対象ディレクトリのエントリが想定と違う: {names:?}");
+        assert_eq!(
+            2,
+            names.len(),
+            "対象ディレクトリのエントリが想定と違う: {names:?}"
+        );
         let staged_name = names
             .iter()
             .find(|name| name.as_str() != "document.jxcel")
@@ -710,21 +752,42 @@ mod tests {
     /// （即時再試行・一定間隔・上限の無い伸びを落とす）。
     #[test]
     fn rename_retry_backoff_grows_and_is_capped() {
-        assert_eq!(RENAME_FIRST_BACKOFF, retry_backoff(1), "1 回目の待機が初期待機でない");
-        assert!(retry_backoff(2) > retry_backoff(1), "2 回目で待機が延びない");
-        assert!(retry_backoff(3) > retry_backoff(2), "3 回目で待機が延びない");
+        assert_eq!(
+            RENAME_FIRST_BACKOFF,
+            retry_backoff(1),
+            "1 回目の待機が初期待機でない"
+        );
+        assert!(
+            retry_backoff(2) > retry_backoff(1),
+            "2 回目で待機が延びない"
+        );
+        assert!(
+            retry_backoff(3) > retry_backoff(2),
+            "3 回目で待機が延びない"
+        );
 
         for attempt in 1..RENAME_ATTEMPTS {
             let current = retry_backoff(attempt);
             assert!(!current.is_zero(), "待機が 0 になった: attempt={attempt}");
-            assert!(current <= RENAME_MAX_BACKOFF, "上限を超えた: attempt={attempt}");
+            assert!(
+                current <= RENAME_MAX_BACKOFF,
+                "上限を超えた: attempt={attempt}"
+            );
             assert!(
                 current <= retry_backoff(attempt + 1),
                 "待機が縮んだ: attempt={attempt}"
             );
         }
-        assert_eq!(RENAME_MAX_BACKOFF, retry_backoff(RENAME_ATTEMPTS), "上限で頭打ちにならない");
-        assert_eq!(RENAME_MAX_BACKOFF, retry_backoff(u32::MAX), "大きな試行回で飽和しない");
+        assert_eq!(
+            RENAME_MAX_BACKOFF,
+            retry_backoff(RENAME_ATTEMPTS),
+            "上限で頭打ちにならない"
+        );
+        assert_eq!(
+            RENAME_MAX_BACKOFF,
+            retry_backoff(u32::MAX),
+            "大きな試行回で飽和しない"
+        );
     }
 
     /// この環境（Unix）では、どの OS エラーコードも再試行の対象にならない。Windows の

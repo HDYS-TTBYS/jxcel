@@ -399,11 +399,7 @@ impl Document {
     ///
     /// `order` が現在の行識別子集合**ちょうど**の順列でなければ [`ReorderError`] を返し、
     /// 順序は 1 つも変わらない(部分適用なし)。
-    pub fn reorder_rows(
-        &mut self,
-        sheet: SheetId,
-        order: &[RowId],
-    ) -> Result<(), ReorderError> {
+    pub fn reorder_rows(&mut self, sheet: SheetId, order: &[RowId]) -> Result<(), ReorderError> {
         self.sheets
             .iter_mut()
             .find(|s| s.id() == sheet)
@@ -500,7 +496,11 @@ mod tests {
             doc.add_sheet("mid"),
         ];
         let observed: Vec<SheetId> = doc.sheets().iter().map(Sheet::id).collect();
-        assert_eq!(issued.to_vec(), observed, "sheets() は追加順を保持しなければならない");
+        assert_eq!(
+            issued.to_vec(),
+            observed,
+            "sheets() は追加順を保持しなければならない"
+        );
         let names: Vec<&str> = doc.sheets().iter().map(Sheet::name).collect();
         assert_eq!(["zeta", "alpha", "mid"], names.as_slice());
     }
@@ -556,7 +556,10 @@ mod tests {
         let mut sorted_after = after.clone();
         sorted_before.sort();
         sorted_after.sort();
-        assert_eq!(sorted_before, sorted_after, "並び替えは識別子を変更しない(同一集合)");
+        assert_eq!(
+            sorted_before, sorted_after,
+            "並び替えは識別子を変更しない(同一集合)"
+        );
         assert_ne!(before, after, "位置は実際に変わっている(空振りの確認)");
     }
 
@@ -582,7 +585,9 @@ mod tests {
 
         // 不足(一部を省略)。欠落は決定的診断のため ULID 順にソートされる。
         assert_eq!(
-            Err(ReorderError::Incomplete { missing: vec![rows[0], rows[2]] }),
+            Err(ReorderError::Incomplete {
+                missing: vec![rows[0], rows[2]]
+            }),
             doc.reorder_rows(sheet, &[rows[1]])
         );
 
@@ -645,7 +650,10 @@ mod tests {
         };
         let mut doc = Document::new();
         assert_eq!(Err(UnknownSheet { sheet: stranger }), doc.add_row(stranger));
-        assert_eq!(Err(UnknownSheet { sheet: stranger }), doc.rename_sheet(stranger, "x"));
+        assert_eq!(
+            Err(UnknownSheet { sheet: stranger }),
+            doc.rename_sheet(stranger, "x")
+        );
         assert_eq!(
             Err(ReorderError::UnknownSheet { sheet: stranger }),
             doc.reorder_rows(stranger, &[])
@@ -681,13 +689,21 @@ mod tests {
         doc.set_root_schema(sheet, first).unwrap();
         assert_eq!(
             r#"{"v":1}"#,
-            doc.sheet_by_id(sheet).unwrap().root_schema().root().as_str()
+            doc.sheet_by_id(sheet)
+                .unwrap()
+                .root_schema()
+                .root()
+                .as_str()
         );
         let second = SchemaPart::parse(r#"{"root":true}"#).unwrap();
         doc.set_root_schema(sheet, second).unwrap();
         assert_eq!(
             "true",
-            doc.sheet_by_id(sheet).unwrap().root_schema().root().as_str(),
+            doc.sheet_by_id(sheet)
+                .unwrap()
+                .root_schema()
+                .root()
+                .as_str(),
             "2 回目の差し替えでもルートはちょうど 1 つ(置換)"
         );
 
@@ -700,7 +716,14 @@ mod tests {
             Err(UnknownSheet { sheet: reported }) => assert_eq!(stranger, reported),
             Ok(()) => panic!("未知シートへの設定は失敗しなければならない"),
         }
-        assert_eq!("true", doc.sheet_by_id(sheet).unwrap().root_schema().root().as_str());
+        assert_eq!(
+            "true",
+            doc.sheet_by_id(sheet)
+                .unwrap()
+                .root_schema()
+                .root()
+                .as_str()
+        );
     }
 
     #[test]
@@ -713,14 +736,21 @@ mod tests {
         );
         let mut doc = Document::new();
         let sheet = doc.add_sheet("schema");
-        doc.set_root_schema(sheet, SchemaPart::parse(text).unwrap()).unwrap();
+        doc.set_root_schema(sheet, SchemaPart::parse(text).unwrap())
+            .unwrap();
 
         let stored = doc.sheet_by_id(sheet).unwrap().root_schema();
         // 解釈するのは識別子(ULID へ解決)と参照ターゲット(生テキスト)のみ。
         assert_eq!(1, stored.type_defs().len());
-        assert_eq!("01ARZ3NDEKTSV4RRFFQ69G5FAV", stored.type_defs()[0].id().to_string());
-        let targets: Vec<&str> =
-            stored.type_ref_targets().iter().map(String::as_str).collect();
+        assert_eq!(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            stored.type_defs()[0].id().to_string()
+        );
+        let targets: Vec<&str> = stored
+            .type_ref_targets()
+            .iter()
+            .map(String::as_str)
+            .collect();
         assert_eq!(targets, ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]);
         // 型の意味論に見えるキー(未知の型演算子)も解釈せず、バイトのまま保持する。
         assert_eq!(
@@ -736,12 +766,14 @@ mod tests {
         const ROWS_PER_SHEET: usize = 10_000;
 
         let mut doc = Document::new();
-        let sheet_ids: Vec<SheetId> =
-            (0..SHEETS).map(|i| doc.add_sheet(format!("sheet-{i}"))).collect();
+        let sheet_ids: Vec<SheetId> = (0..SHEETS)
+            .map(|i| doc.add_sheet(format!("sheet-{i}")))
+            .collect();
         let mut issued: Vec<Vec<RowId>> = Vec::with_capacity(SHEETS);
         for &sheet in &sheet_ids {
-            let rows: Vec<RowId> =
-                (0..ROWS_PER_SHEET).map(|_| doc.add_row(sheet).unwrap()).collect();
+            let rows: Vec<RowId> = (0..ROWS_PER_SHEET)
+                .map(|_| doc.add_row(sheet).unwrap())
+                .collect();
             issued.push(rows);
         }
 
@@ -787,7 +819,11 @@ mod tests {
         let id = doc.add_attachment(payload.clone());
         let stored = doc.attachment(id).expect("登録直後の添付は取得できる");
         assert_eq!(payload, stored.bytes(), "1 バイトも変わらない");
-        assert_eq!(AttachmentId::from_bytes(&payload), id, "識別子は内容の BLAKE3");
+        assert_eq!(
+            AttachmentId::from_bytes(&payload),
+            id,
+            "識別子は内容の BLAKE3"
+        );
         assert_eq!(id, stored.id());
         assert_eq!(1, doc.attachments().len());
 
@@ -796,7 +832,9 @@ mod tests {
         assert_eq!(1, doc.attachments().len());
 
         // 未登録の識別子は `None`(panic しない)。
-        assert!(doc.attachment(AttachmentId::from_bytes(b"unknown")).is_none());
+        assert!(doc
+            .attachment(AttachmentId::from_bytes(b"unknown"))
+            .is_none());
 
         // どの行からも参照されていないため未参照として一覧できる(削除はしない)。
         assert_eq!(vec![id], doc.unreferenced_attachments());
@@ -809,7 +847,9 @@ mod tests {
         let mut doc = Document::new();
         let sheet = doc.add_sheet("rows");
         let row = doc.add_row(sheet).unwrap();
-        assert!(doc.sheet_by_id(sheet).unwrap().rows()[0].values().is_empty());
+        assert!(doc.sheet_by_id(sheet).unwrap().rows()[0]
+            .values()
+            .is_empty());
 
         let first = vec![CellValue::Int(1), CellValue::Text("x".to_string())];
         doc.set_row_values(sheet, row, first.clone()).unwrap();
@@ -817,7 +857,8 @@ mod tests {
         assert_eq!(first, observed);
 
         // 追加ではなく置換: 2 回目の設定で値列は置き換わり、行は増えず識別子も不変。
-        doc.set_row_values(sheet, row, vec![CellValue::Null]).unwrap();
+        doc.set_row_values(sheet, row, vec![CellValue::Null])
+            .unwrap();
         let sheet_ref = doc.sheet_by_id(sheet).unwrap();
         assert_eq!(1, sheet_ref.rows().len(), "行は増えない");
         assert_eq!(row, sheet_ref.rows()[0].id(), "行識別子は設定で変わらない");
@@ -850,8 +891,13 @@ mod tests {
         );
 
         // どちらの失敗でも既存の行は無変更で、添付も削除されない。
-        assert!(doc.sheet_by_id(sheet).unwrap().rows()[0].values().is_empty());
-        assert_eq!(b"kept".to_vec(), doc.attachment(attachment).unwrap().bytes());
+        assert!(doc.sheet_by_id(sheet).unwrap().rows()[0]
+            .values()
+            .is_empty());
+        assert_eq!(
+            b"kept".to_vec(),
+            doc.attachment(attachment).unwrap().bytes()
+        );
     }
 
     #[test]
@@ -875,17 +921,22 @@ mod tests {
         all.sort();
         assert_eq!(all, doc.unreferenced_attachments());
 
-        doc.set_row_values(first, row_a, vec![CellValue::Attachment(shared)]).unwrap();
+        doc.set_row_values(first, row_a, vec![CellValue::Attachment(shared)])
+            .unwrap();
         doc.set_row_values(
             first,
             row_b,
-            vec![CellValue::Nested(NestedValue::Array(vec![CellValue::Attachment(only_b)]))],
+            vec![CellValue::Nested(NestedValue::Array(vec![
+                CellValue::Attachment(only_b),
+            ]))],
         )
         .unwrap();
-        doc.set_row_values(second, row_c, vec![CellValue::Attachment(shared)]).unwrap();
+        doc.set_row_values(second, row_c, vec![CellValue::Attachment(shared)])
+            .unwrap();
         // `only_c` は 2 枚目のシートからのみ参照される: 全シートを走査しなければ
         // 未参照に見えてしまう添付であり、この集計の回帰検出点である。
-        doc.set_row_values(second, row_d, vec![CellValue::Attachment(only_c)]).unwrap();
+        doc.set_row_values(second, row_d, vec![CellValue::Attachment(only_c)])
+            .unwrap();
 
         // 別シートからの参照も参照済みとして集計される: 1 枚目からのみ参照される
         // `only_b` と 2 枚目からのみ参照される `only_c` はいずれも一覧に現れない。
@@ -894,8 +945,14 @@ mod tests {
         assert_eq!(expected_after, doc.unreferenced_attachments());
 
         // 行順を入れ替えても、シート名を変えても結果は同一(順序は識別子で決まる)。
-        let reversed: Vec<RowId> =
-            doc.sheet_by_id(first).unwrap().rows().iter().map(Row::id).rev().collect();
+        let reversed: Vec<RowId> = doc
+            .sheet_by_id(first)
+            .unwrap()
+            .rows()
+            .iter()
+            .map(Row::id)
+            .rev()
+            .collect();
         doc.reorder_rows(first, &reversed).unwrap();
         doc.rename_sheet(first, "renamed").unwrap();
         assert_eq!(expected_after, doc.unreferenced_attachments());

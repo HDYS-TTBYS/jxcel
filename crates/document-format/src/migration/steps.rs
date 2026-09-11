@@ -149,8 +149,11 @@ pub(crate) mod synthetic {
     ];
 
     /// 記録値（0.0）から出る段が無い表（隙間）。
-    pub(crate) const GAP: &[MigrationStep] =
-        &[MigrationStep::new(MIDDLE, FormatVersion::new(1, 0), stamp_v1_0)];
+    pub(crate) const GAP: &[MigrationStep] = &[MigrationStep::new(
+        MIDDLE,
+        FormatVersion::new(1, 0),
+        stamp_v1_0,
+    )];
 
     /// 現行 major に届かない表（0.1 で止まる）。
     pub(crate) const SHORT: &[MigrationStep] = &[MigrationStep::new(OLDEST, MIDDLE, stamp_v0_1)];
@@ -159,8 +162,11 @@ pub(crate) mod synthetic {
     pub(crate) const STALLED: &[MigrationStep] = &[MigrationStep::new(OLDEST, OLDEST, stamp_v0_1)];
 
     /// 現行 major（1）を飛び越す段（0.0 → 2.0）を含む表。
-    pub(crate) const OVERSHOOT: &[MigrationStep] =
-        &[MigrationStep::new(OLDEST, FormatVersion::new(2, 0), stamp_v1_0)];
+    pub(crate) const OVERSHOOT: &[MigrationStep] = &[MigrationStep::new(
+        OLDEST,
+        FormatVersion::new(2, 0),
+        stamp_v1_0,
+    )];
 
     /// 同じ版から 2 段出る表（鎖が一意に定まらない）。
     pub(crate) const AMBIGUOUS: &[MigrationStep] = &[
@@ -213,8 +219,16 @@ pub(crate) mod synthetic {
         let text = String::from_utf8(std::mem::take(&mut document.1)).expect("確定形は UTF-8");
         let text = text.replacen('{', r#"{"future_top":{"unit":"mm"},"#, 1);
         let text = text.replacen(r#"{"sheet_id""#, r#"{"element_note":7,"sheet_id""#, 1);
-        assert_eq!(1, text.matches("future_top").count(), "未知キーの差し込みに失敗した");
-        assert_eq!(1, text.matches("element_note").count(), "未知キーの差し込みに失敗した");
+        assert_eq!(
+            1,
+            text.matches("future_top").count(),
+            "未知キーの差し込みに失敗した"
+        );
+        assert_eq!(
+            1,
+            text.matches("element_note").count(),
+            "未知キーの差し込みに失敗した"
+        );
         document.1 = text.into_bytes();
 
         // manifest.json: 索引を実体に合わせて組み直し、トップレベルと 1 要素へ未知キーを挿す。
@@ -233,8 +247,16 @@ pub(crate) mod synthetic {
             r#"{"entry_note":9,"name":"document.json""#,
             1,
         );
-        assert_eq!(1, text.matches("future_manifest").count(), "未知キーの差し込みに失敗した");
-        assert_eq!(1, text.matches("entry_note").count(), "未知キーの差し込みに失敗した");
+        assert_eq!(
+            1,
+            text.matches("future_manifest").count(),
+            "未知キーの差し込みに失敗した"
+        );
+        assert_eq!(
+            1,
+            text.matches("entry_note").count(),
+            "未知キーの差し込みに失敗した"
+        );
         entries.push((MANIFEST_ENTRY, text.into_bytes()));
 
         DocumentParts::from_entries(entries).expect("標本の集合は妥当")
@@ -260,8 +282,9 @@ pub(crate) mod synthetic {
         mark: &str,
         required: Option<&str>,
     ) -> Result<DocumentParts, DocumentError> {
-        let entry =
-            parts.get(&EntryName::Document).ok_or_else(|| DocumentError::MissingPart {
+        let entry = parts
+            .get(&EntryName::Document)
+            .ok_or_else(|| DocumentError::MissingPart {
                 name: EntryName::Document.to_string(),
             })?;
         let decoded = DocumentPart::from_json_bytes(&entry.bytes)?;

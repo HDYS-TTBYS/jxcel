@@ -94,7 +94,9 @@ impl AttachmentRegistry {
     /// 空のレジストリを作る。
     #[inline]
     pub fn new() -> Self {
-        Self { entries: BTreeMap::new() }
+        Self {
+            entries: BTreeMap::new(),
+        }
     }
 
     /// バイト列を添付として登録し、その識別子を返す(要件 7.1, 7.2)。
@@ -104,7 +106,9 @@ impl AttachmentRegistry {
     /// エントリをそのまま残す)。バイト列は解釈・変換・再圧縮せずそのまま保持する。
     pub fn add(&mut self, bytes: Vec<u8>) -> AttachmentId {
         let id = AttachmentId::from_bytes(&bytes);
-        self.entries.entry(id).or_insert_with(|| Attachment { id, bytes });
+        self.entries
+            .entry(id)
+            .or_insert_with(|| Attachment { id, bytes });
         id
     }
 
@@ -177,7 +181,9 @@ mod tests {
             b"\x00\x01binary\x00\x00".to_vec(),
             // gzip のマジックで始まる(deflate ストリームに見える)既圧縮データ。
             // 再圧縮すれば必ず別バイト列になる並び。
-            vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x9c, 0x3d],
+            vec![
+                0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x9c, 0x3d,
+            ],
             (0..=255u8).collect(),
         ]
     }
@@ -190,13 +196,25 @@ mod tests {
         for payload in &payloads {
             let id = registry.add(payload.clone());
             let stored = registry.get(id).expect("登録直後の添付は取得できる");
-            assert_eq!(payload, stored.bytes(), "保持と取り出しで 1 バイトも変わってはならない");
+            assert_eq!(
+                payload,
+                stored.bytes(),
+                "保持と取り出しで 1 バイトも変わってはならない"
+            );
             assert_eq!(payload.len(), stored.bytes().len());
-            assert_eq!(id, stored.id(), "取得した添付の識別子は登録時の識別子と同一");
+            assert_eq!(
+                id,
+                stored.id(),
+                "取得した添付の識別子は登録時の識別子と同一"
+            );
             // 識別子は内容の BLAKE3(要件 7.2)。内容を解釈していないことの帰結である。
             assert_eq!(AttachmentId::from_bytes(payload), id);
         }
-        assert_eq!(payloads.len(), registry.len(), "異なる内容は別エントリになる");
+        assert_eq!(
+            payloads.len(),
+            registry.len(),
+            "異なる内容は別エントリになる"
+        );
 
         // 内容を注視しないことの証拠: 非 UTF-8 を含む列がそのまま成功している。
         // 文字列として解釈する実装なら、ここで拒否か置換が起きる。
@@ -232,8 +250,12 @@ mod tests {
         let mut backward = AttachmentRegistry::new();
         let forward_ids: Vec<AttachmentId> =
             payloads.iter().cloned().map(|p| forward.add(p)).collect();
-        let backward_ids: Vec<AttachmentId> =
-            payloads.iter().rev().cloned().map(|p| backward.add(p)).collect();
+        let backward_ids: Vec<AttachmentId> = payloads
+            .iter()
+            .rev()
+            .cloned()
+            .map(|p| backward.add(p))
+            .collect();
 
         let mut sorted_forward = forward_ids.clone();
         let mut sorted_backward = backward_ids.clone();
@@ -266,7 +288,11 @@ mod tests {
         let mut expected = observed.clone();
         expected.sort();
         assert_eq!(expected, observed, "AttachmentId の昇順で反復する");
-        assert_eq!(payloads.len(), observed.len(), "全エントリがちょうど 1 回ずつ現れる");
+        assert_eq!(
+            payloads.len(),
+            observed.len(),
+            "全エントリがちょうど 1 回ずつ現れる"
+        );
     }
 
     #[test]
@@ -282,14 +308,21 @@ mod tests {
         let unreferenced = registry.unreferenced_attachments(std::iter::empty::<&CellValue>());
         let mut expected = ids.clone();
         expected.sort();
-        assert_eq!(expected, unreferenced, "未参照の添付を AttachmentId 昇順で一覧する");
+        assert_eq!(
+            expected, unreferenced,
+            "未参照の添付を AttachmentId 昇順で一覧する"
+        );
 
         // 一覧した後も登録済みのまま取得できる(削除されない)。
         for (id, payload) in ids.iter().zip(&payloads) {
             let stored = registry.get(*id).expect("未参照でも削除されない");
             assert_eq!(payload, stored.bytes());
         }
-        assert_eq!(payloads.len(), registry.len(), "集計はレジストリを変更しない");
+        assert_eq!(
+            payloads.len(),
+            registry.len(),
+            "集計はレジストリを変更しない"
+        );
         assert_eq!(
             unreferenced,
             registry.unreferenced_attachments(std::iter::empty::<&CellValue>()),
@@ -346,7 +379,10 @@ mod tests {
             "参照済みは現れず、未参照だけが昇順で残る"
         );
         for referenced in [in_array, in_object, deep] {
-            assert!(registry.get(referenced).is_some(), "参照済みの添付も削除されない");
+            assert!(
+                registry.get(referenced).is_some(),
+                "参照済みの添付も削除されない"
+            );
         }
     }
 
@@ -374,6 +410,9 @@ mod tests {
         let stored = registry.add(b"stored".to_vec());
         let stranger = AttachmentId::from_bytes(b"never registered");
         let values = vec![CellValue::Attachment(stranger)];
-        assert_eq!(vec![stored], registry.unreferenced_attachments(values.iter()));
+        assert_eq!(
+            vec![stored],
+            registry.unreferenced_attachments(values.iter())
+        );
     }
 }

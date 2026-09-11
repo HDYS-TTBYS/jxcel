@@ -84,7 +84,10 @@ fn zip_bytes(entries: Vec<RawEntry>) -> Vec<u8> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     for (name, bytes, method) in entries {
         writer
-            .start_file(name, SimpleFileOptions::default().compression_method(method))
+            .start_file(
+                name,
+                SimpleFileOptions::default().compression_method(method),
+            )
             .expect("エントリを開始できる");
         writer.write_all(&bytes).expect("エントリを書ける");
     }
@@ -147,7 +150,10 @@ fn forged_size_container(
     let mut entries = document_entries(document);
     with_expanding_document(&mut entries, expand_to);
     for name in invalid_names {
-        entries.insert(0, (name.to_string(), b"{}".to_vec(), CompressionMethod::Stored));
+        entries.insert(
+            0,
+            (name.to_string(), b"{}".to_vec(), CompressionMethod::Stored),
+        );
     }
     let mut bytes = zip_bytes(entries);
     patch_declared_size(&mut bytes, "document.json", declared);
@@ -160,7 +166,11 @@ fn forged_size_container(
 /// ため、重複パスのアーカイブは正しい ZIP を組んだ後に名前だけを書き換えて作る。
 /// `from` と `to` は同じバイト長でなければならない（長さ欄を書き換えないため）。
 fn patch_entry_name(bytes: &mut [u8], from: &str, to: &str) {
-    assert_eq!(from.len(), to.len(), "名前の長さを変えない（長さ欄を書き換えないため）");
+    assert_eq!(
+        from.len(),
+        to.len(),
+        "名前の長さを変えない（長さ欄を書き換えないため）"
+    );
 
     let central = central_headers(bytes)
         .into_iter()
@@ -269,14 +279,23 @@ fn names_outside_the_allow_list_are_rejected_with_the_raw_name() {
         ("nul", "man\u{0}ifest.json"),
         ("unknown", "unknown.json"),
         ("directory", "schemas/"),
-        ("uppercase_suffix", "sheets/01ARZ3NDEKTSV4RRFFQ69G5FAV.JSONL"),
+        (
+            "uppercase_suffix",
+            "sheets/01ARZ3NDEKTSV4RRFFQ69G5FAV.JSONL",
+        ),
     ];
 
     for (tag, name) in cases {
-        let container =
-            zip_bytes(vec![(name.to_string(), b"{}".to_vec(), CompressionMethod::Stored)]);
+        let container = zip_bytes(vec![(
+            name.to_string(),
+            b"{}".to_vec(),
+            CompressionMethod::Stored,
+        )]);
         let entry = rejection_of(&scratch, tag, &container);
-        assert_eq!(*name, entry, "{tag}: 該当エントリ名が原文のまま載っていない: {entry:?}");
+        assert_eq!(
+            *name, entry,
+            "{tag}: 該当エントリ名が原文のまま載っていない: {entry:?}"
+        );
     }
 }
 
@@ -298,7 +317,10 @@ fn a_duplicate_entry_path_is_rejected_with_the_shared_path() {
 
     let entry = rejection_of(&scratch, "duplicate", &container);
     assert_eq!("manifest.json: duplicate entry path", entry);
-    assert!(entry.contains("manifest.json"), "該当パスが載っていない: {entry:?}");
+    assert!(
+        entry.contains("manifest.json"),
+        "該当パスが載っていない: {entry:?}"
+    );
 }
 
 /// 許可リスト違反と重複パスを同時に持つ入力は、重複ではなく**許可リスト違反**で拒否される
@@ -311,12 +333,22 @@ fn a_duplicate_entry_path_is_rejected_with_the_shared_path() {
 fn an_allow_list_violation_is_reported_before_a_duplicate_path() {
     let scratch = Scratch::new("malicious_precedence");
     let mut entries = document_entries(&sample());
-    entries.insert(0, ("../evil.json".to_string(), b"{}".to_vec(), CompressionMethod::Stored));
+    entries.insert(
+        0,
+        (
+            "../evil.json".to_string(),
+            b"{}".to_vec(),
+            CompressionMethod::Stored,
+        ),
+    );
     let mut container = zip_bytes(entries);
     patch_entry_name(&mut container, "document.json", "manifest.json");
 
     let entry = rejection_of(&scratch, "precedence", &container);
-    assert_eq!("../evil.json", entry, "許可リスト違反より重複パスが先に報告されている");
+    assert_eq!(
+        "../evil.json", entry,
+        "許可リスト違反より重複パスが先に報告されている"
+    );
 }
 
 /// 正規化で同一視され得る別表記（`./manifest.json`）は、**重複ではなく許可リスト違反**として
@@ -364,8 +396,7 @@ fn the_allow_list_is_decided_before_any_entry_is_expanded() {
 
     let size_rejection = rejection_of(&scratch, "order_control", &without_invalid);
     assert_eq!(
-        "document.json: declared size 100 does not match expanded size 101",
-        size_rejection,
+        "document.json: declared size 100 does not match expanded size 101", size_rejection,
         "対照（許可リスト外を足さない場合）がサイズ照合で拒否されていない"
     );
 
@@ -396,7 +427,10 @@ fn a_declared_size_smaller_than_the_expansion_is_rejected_with_bounded_reading()
     );
 
     let entry = rejection_of(&scratch, "underdeclared", &container);
-    assert_eq!("document.json: declared size 100 does not match expanded size 101", entry);
+    assert_eq!(
+        "document.json: declared size 100 does not match expanded size 101",
+        entry
+    );
 }
 
 /// 実際より大きい非圧縮サイズを宣言するアーカイブも拒否される（一致要求の逆方向）。
@@ -428,7 +462,11 @@ fn a_correct_archive_built_the_same_way_is_accepted() {
 
     let decoded = ContainerCodec::decode(&container).expect("正しいアーカイブは復号できる");
     let expected = to_parts(&document).expect("標本はパート集合へ取り出せる");
-    assert_eq!(entries_of(&expected), entries_of(&decoded), "復号した集合が標本と違う");
+    assert_eq!(
+        entries_of(&expected),
+        entries_of(&decoded),
+        "復号した集合が標本と違う"
+    );
     assert_eq!(
         expected.format_version(),
         decoded.format_version(),

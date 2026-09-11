@@ -126,9 +126,13 @@ fn container_with_optional_manifest(document: &Document, include_manifest: bool)
     writer
         .start_file(EntryName::Marker.to_string(), options)
         .expect("型マーカーのエントリを開始できる");
-    writer.write_all(&marker_bytes(version)).expect("型マーカーを書ける");
+    writer
+        .write_all(&marker_bytes(version))
+        .expect("型マーカーを書ける");
     for (name, bytes) in entries {
-        writer.start_file(name.to_string(), options).expect("エントリを開始できる");
+        writer
+            .start_file(name.to_string(), options)
+            .expect("エントリを開始できる");
         writer.write_all(&bytes).expect("エントリを書ける");
     }
     writer.finish().expect("ZIP を完成できる").into_inner()
@@ -153,10 +157,16 @@ fn assert_open_rejects(
     fs::write(&path, container).expect("壊れた入力を書き出せる");
     let before = snapshot(scratch.path());
 
-    let error = api().open(&path).expect_err("破損入りのコンテナが読み込まれた");
+    let error = api()
+        .open(&path)
+        .expect_err("破損入りのコンテナが読み込まれた");
     assert!(expected(&error), "{tag}: 期待した違反と違う: {error:?}");
 
-    assert_eq!(before, snapshot(scratch.path()), "{tag}: 読み込みがファイルを変更した");
+    assert_eq!(
+        before,
+        snapshot(scratch.path()),
+        "{tag}: 読み込みがファイルを変更した"
+    );
 }
 
 /// ダイジェスト改竄は、索引の記録と一致しないエントリ名つきで中止される（要件 5.3）。
@@ -175,9 +185,12 @@ fn digest_tampering_is_reported_with_the_changed_entry() {
     let entry_name = entries[slot].0.to_string();
     entries[slot].1.extend_from_slice(b" ");
 
-    assert_open_rejects(&scratch, "digest", encode(entries), |error| {
-        matches!(error, DocumentError::IntegrityMismatch { entry } if entry == &entry_name)
-    });
+    assert_open_rejects(
+        &scratch,
+        "digest",
+        encode(entries),
+        |error| matches!(error, DocumentError::IntegrityMismatch { entry } if entry == &entry_name),
+    );
 }
 
 /// 同一の `TypeDefId` を 2 回宣言するスキーマは、識別子と出現箇所つきで中止される（要件 4.3）。
@@ -189,14 +202,25 @@ fn duplicate_type_def_ids_are_reported_with_their_occurrences() {
     let scratch = Scratch::new("duplicate_typedef");
     let container = encode(entries_of_document(&document_with_duplicate_type_def()));
 
-    assert_open_rejects(&scratch, "duplicate_typedef", container, |error| match error {
-        DocumentError::DuplicateId { kind: IdKind::TypeDef, id, occurrences } => {
-            id == TYPEDEF_ID
-                && occurrences.len() == 2
-                && occurrences.iter().all(|occurrence| occurrence.starts_with("schemas/"))
-        }
-        _ => false,
-    });
+    assert_open_rejects(
+        &scratch,
+        "duplicate_typedef",
+        container,
+        |error| match error {
+            DocumentError::DuplicateId {
+                kind: IdKind::TypeDef,
+                id,
+                occurrences,
+            } => {
+                id == TYPEDEF_ID
+                    && occurrences.len() == 2
+                    && occurrences
+                        .iter()
+                        .all(|occurrence| occurrence.starts_with("schemas/"))
+            }
+            _ => false,
+        },
+    );
 }
 
 /// 同一の `RowId` を 2 つのシートの行が宣言する入力は、識別子と出現箇所つきで中止される
@@ -212,10 +236,15 @@ fn duplicate_type_def_ids_are_reported_with_their_occurrences() {
 fn duplicate_row_ids_are_reported_with_their_occurrences() {
     let scratch = Scratch::new("duplicate_row");
     let document = document_with_a_row_in_each_sheet();
-    let sheets: Vec<String> =
-        document.sheets().iter().map(|sheet| sheet.id().to_string()).collect();
-    let ids: Vec<String> =
-        rows(&document).iter().map(|sheet_rows| sheet_rows[0].0.clone()).collect();
+    let sheets: Vec<String> = document
+        .sheets()
+        .iter()
+        .map(|sheet| sheet.id().to_string())
+        .collect();
+    let ids: Vec<String> = rows(&document)
+        .iter()
+        .map(|sheet_rows| sheet_rows[0].0.clone())
+        .collect();
     assert_eq!(2, ids.len(), "標本は 2 シートに 1 行ずつを持つ");
     assert_ne!(ids[0], ids[1], "標本の行識別子は元々異なる");
 
@@ -225,7 +254,12 @@ fn duplicate_row_ids_are_reported_with_their_occurrences() {
     let mut entries = entries_of(&parts);
     let slot = entries
         .iter()
-        .position(|(name, _)| *name == EntryName::Rows { sheet: second_sheet })
+        .position(|(name, _)| {
+            *name
+                == EntryName::Rows {
+                    sheet: second_sheet,
+                }
+        })
         .expect("標本は対象シートの行エントリを持つ");
     let text = String::from_utf8(entries[slot].1.clone()).expect("行エントリは UTF-8");
 
@@ -245,7 +279,11 @@ fn duplicate_row_ids_are_reported_with_their_occurrences() {
         "duplicate_row",
         rebuilt_with_manifest(version, entries),
         move |error| match error {
-            DocumentError::DuplicateId { kind: IdKind::Row, id, occurrences } => {
+            DocumentError::DuplicateId {
+                kind: IdKind::Row,
+                id,
+                occurrences,
+            } => {
                 *id == expected_id
                     && occurrences.len() == 2
                     && expected_sheets
@@ -362,7 +400,9 @@ fn a_sheet_without_its_schema_part_is_reported_with_the_sheet_id() {
         .filter(|(name, _)| *name != EntryName::Schema { sheet })
         .collect();
     assert!(
-        entries.iter().any(|(name, _)| *name == EntryName::Rows { sheet }),
+        entries
+            .iter()
+            .any(|(name, _)| *name == EntryName::Rows { sheet }),
         "行エントリは残っている（欠くのはスキーマだけ）"
     );
 
@@ -422,7 +462,9 @@ fn a_missing_manifest_is_reported() {
     // 対照: 索引を残した同じ組み立ての入力は読める。
     let control = scratch.file("control.jxcel");
     fs::write(&control, container_with_optional_manifest(&sample(), true)).expect("書き出し");
-    api().open(&control).expect("索引を残した入力は読める（欠落だけが原因であることの確認）");
+    api()
+        .open(&control)
+        .expect("索引を残した入力は読める（欠落だけが原因であることの確認）");
 
     assert_open_rejects(
         &scratch,

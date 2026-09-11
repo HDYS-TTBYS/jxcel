@@ -164,9 +164,9 @@ pub enum NestedValue {
 impl NestedValue {
     fn contains_non_finite(&self) -> bool {
         match self {
-            NestedValue::Object(entries) => entries
-                .iter()
-                .any(|(_, value)| value.contains_non_finite()),
+            NestedValue::Object(entries) => {
+                entries.iter().any(|(_, value)| value.contains_non_finite())
+            }
             NestedValue::Array(items) => items.iter().any(CellValue::contains_non_finite),
         }
     }
@@ -588,8 +588,9 @@ impl<'de> Visitor<'de> for ValueVisitor {
 /// むき出しの文字列を決定的に変種へ決める(モジュール docs 規則 1)。
 fn text_to_value(text: String) -> CellValue {
     match classify(&text) {
-        StringKind::Attachment => AttachmentId::from_hex(&text)
-            .map_or(CellValue::Text(text), CellValue::Attachment),
+        StringKind::Attachment => {
+            AttachmentId::from_hex(&text).map_or(CellValue::Text(text), CellValue::Attachment)
+        }
         StringKind::Decimal => CellValue::Decimal(text),
         StringKind::Text => CellValue::Text(text),
     }
@@ -732,7 +733,10 @@ mod tests {
                     )])),
                 ])),
             ),
-            ("decimal".to_owned(), CellValue::Decimal(not_a_reference.to_hex())),
+            (
+                "decimal".to_owned(),
+                CellValue::Decimal(not_a_reference.to_hex()),
+            ),
             ("text".to_owned(), CellValue::Text(not_a_reference.to_hex())),
             ("count".to_owned(), CellValue::Int(1)),
             ("nothing".to_owned(), CellValue::Null),
@@ -748,10 +752,9 @@ mod tests {
 
         // トップレベルが Attachment の場合もただ 1 件を訪れる。
         let mut top_level = Vec::new();
-        value::visit_attachment_references(
-            &CellValue::Attachment(direct),
-            &mut |id| top_level.push(id),
-        );
+        value::visit_attachment_references(&CellValue::Attachment(direct), &mut |id| {
+            top_level.push(id)
+        });
         assert_eq!(vec![direct], top_level, "トップレベルの添付が訪れない");
 
         // Attachment を 1 つも含まない値は何も訪れない。
@@ -774,7 +777,10 @@ mod tests {
         assert_eq!("5.0", encode(&CellValue::Float(5.0)));
         assert!(matches!(decode("5"), CellValue::Int(5)), "`5` は Int");
         assert!(!matches!(decode("5"), CellValue::Float(_)));
-        assert!(matches!(decode("5.0"), CellValue::Float(_)), "`5.0` は Float");
+        assert!(
+            matches!(decode("5.0"), CellValue::Float(_)),
+            "`5.0` は Float"
+        );
         assert!(!matches!(decode("5.0"), CellValue::Int(_)));
         for value in [
             CellValue::Int(5),
@@ -832,7 +838,9 @@ mod tests {
         ]));
         let in_array = CellValue::Nested(NestedValue::Array(vec![
             CellValue::Text("x".into()),
-            CellValue::Nested(NestedValue::Array(vec![CellValue::Float(f64::NEG_INFINITY)])),
+            CellValue::Nested(NestedValue::Array(vec![CellValue::Float(
+                f64::NEG_INFINITY,
+            )])),
         ]));
         for nested in [in_object, in_array] {
             let err = value::to_json_bytes(&nested, LOC).unwrap_err();
@@ -888,7 +896,11 @@ mod tests {
         for text in ["1.5", "+1.", ".5", "1e10", "-0.25", "42"] {
             let wire = format!("\"{text}\"");
             let value = decode(&wire);
-            assert_eq!(CellValue::Decimal(text.into()), value, "{text} の分類が不正");
+            assert_eq!(
+                CellValue::Decimal(text.into()),
+                value,
+                "{text} の分類が不正"
+            );
             assert_eq!(wire, encode(&value), "Decimal はむき出しの文字列で書く");
             roundtrip(&value);
         }
@@ -947,11 +959,17 @@ mod tests {
         let upper = hex.to_uppercase();
         assert_ne!(hex, upper, "テスト前提: 小文字 hex に英字が含まれる");
         // 正準形でない 64 文字は Attachment でない → Text むき出し。
-        assert_eq!(CellValue::Text(upper.clone()), decode(&format!("\"{upper}\"")));
+        assert_eq!(
+            CellValue::Text(upper.clone()),
+            decode(&format!("\"{upper}\""))
+        );
         assert_eq!(format!("\"{upper}\""), roundtrip(&CellValue::Text(upper)));
         // 63 文字も Text(長さが決定的な判別基準)。
         let short = "f".repeat(63);
-        assert_eq!(CellValue::Text(short.clone()), decode(&format!("\"{short}\"")));
+        assert_eq!(
+            CellValue::Text(short.clone()),
+            decode(&format!("\"{short}\""))
+        );
         roundtrip(&CellValue::Text(short));
     }
 
@@ -968,7 +986,10 @@ mod tests {
         match decode(r#"{"b":1,"a":true,"b2":null}"#) {
             CellValue::Nested(NestedValue::Object(entries)) => assert_eq!(
                 vec!["b", "a", "b2"],
-                entries.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>()
+                entries
+                    .iter()
+                    .map(|(key, _)| key.as_str())
+                    .collect::<Vec<_>>()
             ),
             other => panic!("Nested でない: {other:?}"),
         }
@@ -988,7 +1009,10 @@ mod tests {
                     CellValue::Null,
                 ])),
             ),
-            ("empty".into(), CellValue::Nested(NestedValue::Array(vec![]))),
+            (
+                "empty".into(),
+                CellValue::Nested(NestedValue::Array(vec![])),
+            ),
         ]));
         roundtrip(&value);
     }
@@ -1017,7 +1041,10 @@ mod tests {
         // 64 桁の 10 進文字列は Attachment の hex 文法にも一致するため折り返す。
         let text = "1".repeat(64);
         let value = CellValue::Decimal(text.clone());
-        assert_eq!(format!("{{\"$t\":\"decimal\",\"v\":\"{text}\"}}"), encode(&value));
+        assert_eq!(
+            format!("{{\"$t\":\"decimal\",\"v\":\"{text}\"}}"),
+            encode(&value)
+        );
         roundtrip(&value);
     }
 
@@ -1087,8 +1114,8 @@ mod tests {
             encode(&CellValue::Decimal(String::new()))
         );
         for text in [
-            "hello", "", " ", "1.5abc", "1e", "1E+5x", "-", ".", "١٢٣", "3.1.4",
-            "1_000", "1.5\"", "\\1.5", "NaN", "Infinity", "0x10",
+            "hello", "", " ", "1.5abc", "1e", "1E+5x", "-", ".", "١٢٣", "3.1.4", "1_000", "1.5\"",
+            "\\1.5", "NaN", "Infinity", "0x10",
         ] {
             roundtrip(&CellValue::Decimal(text.into()));
         }
@@ -1149,7 +1176,11 @@ mod tests {
                 ),
                 other => panic!("`{wire}` の復元が Float でない: {other:?}"),
             }
-            assert_eq!(wire, encode(&back), "Float の再エンコードがバイト一致しない");
+            assert_eq!(
+                wire,
+                encode(&back),
+                "Float の再エンコードがバイト一致しない"
+            );
         }
         // 単純な浮動小数の wire は float_roundtrip の導入で変わらない
         // (書き出しは zmij の最短位表記で feature 有無と無関係。指数は `1e+300` の
@@ -1167,11 +1198,11 @@ mod tests {
         // 回帰: 正の 2^63 超は visit_u64 で弾いていたが、それ以下(負側)と
         // 2^64 以上の正は serde_json が浮動小数へ回送して Float に化けていた。
         for literal in [
-            "9223372036854775808",    // i64::MAX + 1
-            "-9223372036854775809",   // i64::MIN - 1
-            "18446744073709551615",   // u64::MAX(u64 に収まるが i64 に収まらない)
-            "18446744073709551616",   // 2^64
-            "-18446744073709551617",  // -(2^64 + 1)
+            "9223372036854775808",                                // i64::MAX + 1
+            "-9223372036854775809",                               // i64::MIN - 1
+            "18446744073709551615", // u64::MAX(u64 に収まるが i64 に収まらない)
+            "18446744073709551616", // 2^64
+            "-18446744073709551617", // -(2^64 + 1)
             "99999999999999999999999999999999999999999999999999", // 50 桁
         ] {
             for wire in [
@@ -1188,8 +1219,14 @@ mod tests {
             }
         }
         // 境界そのものは従来どおり復元できる。
-        assert!(matches!(decode("9223372036854775807"), CellValue::Int(i64::MAX)));
-        assert!(matches!(decode("-9223372036854775808"), CellValue::Int(i64::MIN)));
+        assert!(matches!(
+            decode("9223372036854775807"),
+            CellValue::Int(i64::MAX)
+        ));
+        assert!(matches!(
+            decode("-9223372036854775808"),
+            CellValue::Int(i64::MIN)
+        ));
         // 範囲外の数字は**文字列データ**なら対象外(文字列データはそのまま復元)。
         assert!(matches!(
             decode("\"18446744073709551616\""),
@@ -1202,7 +1239,10 @@ mod tests {
         roundtrip(&CellValue::Decimal("18446744073709551616".into()));
         // 整数だが整数リテラルでない小数表記は Float のまま(有効な f64 である)。
         for wire in ["9223372036854775808.0", "1e300", "-1e300"] {
-            assert!(matches!(decode(wire), CellValue::Float(_)), "{wire} は Float");
+            assert!(
+                matches!(decode(wire), CellValue::Float(_)),
+                "{wire} は Float"
+            );
         }
     }
 }

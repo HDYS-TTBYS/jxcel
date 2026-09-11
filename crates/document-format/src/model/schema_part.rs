@@ -126,7 +126,9 @@ const EMPTY_ROOT: &str = "null";
 /// 文字列のまま `entry` に残す)。`context` は失敗箇所を指す説明(例
 /// `schemas entry: root`、`schemas entry: type <ULID>`)。
 fn container_error(context: &dyn fmt::Display, reason: &dyn fmt::Display) -> DocumentError {
-    DocumentError::InvalidContainer { entry: format!("{context}: {reason}") }
+    DocumentError::InvalidContainer {
+        entry: format!("{context}: {reason}"),
+    }
 }
 
 /// 検証のみで保持する不透明 JSON ペイロード(タスク 2.2。design「不透明な保持」)。
@@ -163,7 +165,9 @@ impl RawJson {
         let text = std::str::from_utf8(bytes).map_err(|e| container_error(&entry, &e))?;
         serde_json::from_str::<serde::de::IgnoredAny>(text)
             .map_err(|e| container_error(&entry, &e))?;
-        Ok(Self { bytes: bytes.to_vec() })
+        Ok(Self {
+            bytes: bytes.to_vec(),
+        })
     }
 
     /// 保存済みバイト列のテキスト形。構築時に有効と検証されたバイト列のみが格納される
@@ -184,7 +188,9 @@ impl RawJson {
     /// 内部コンストラクタ: **呼び出し側が構文検証済みと保証する**テキストからの構築。
     /// エンベロープ parse では `RawValue` として JSON パーサが構文検証済みのバイト列のみを渡す。
     fn captured(text: &str) -> Self {
-        Self { bytes: text.as_bytes().to_vec() }
+        Self {
+            bytes: text.as_bytes().to_vec(),
+        }
     }
 }
 
@@ -441,7 +447,9 @@ impl<'de> Visitor<'de> for EnvelopeVisitor {
                 }
                 KEY_TYPES => {
                     if types.is_some() {
-                        return Err(de::Error::custom("duplicate `types` key in schema envelope"));
+                        return Err(de::Error::custom(
+                            "duplicate `types` key in schema envelope",
+                        ));
                     }
                     types = Some(map.next_value::<Vec<TypeDef>>()?);
                     preserved.record_known_field();
@@ -454,9 +462,15 @@ impl<'de> Visitor<'de> for EnvelopeVisitor {
             }
         }
         let Some(root) = root else {
-            return Err(de::Error::custom("schema envelope is missing the `root` key"));
+            return Err(de::Error::custom(
+                "schema envelope is missing the `root` key",
+            ));
         };
-        Ok(Envelope { root, types: types.unwrap_or_default(), preserved })
+        Ok(Envelope {
+            root,
+            types: types.unwrap_or_default(),
+            preserved,
+        })
     }
 }
 
@@ -499,8 +513,7 @@ impl<'de> Visitor<'de> for TypeDefVisitor {
                             "duplicate `definition` key in type definition",
                         ));
                     }
-                    definition =
-                        Some(RawJson::captured(map.next_value::<Box<RawValue>>()?.get()));
+                    definition = Some(RawJson::captured(map.next_value::<Box<RawValue>>()?.get()));
                     preserved.record_known_field();
                 }
                 _ => preserved.capture(&key, &mut map)?,
@@ -517,7 +530,11 @@ impl<'de> Visitor<'de> for TypeDefVisitor {
         // `id` は ULID-26 テキストとして解決する(型の解釈ではない: 識別子解決は本
         // スペックの所有。エラー入力は診断文言へ写す)。
         let id = TypeDefId::from_str(&id_text).map_err(de::Error::custom)?;
-        Ok(TypeDef { id, definition, preserved })
+        Ok(TypeDef {
+            id,
+            definition,
+            preserved,
+        })
     }
 }
 
@@ -570,7 +587,12 @@ impl<'a, 'de> Visitor<'de> for RefScan<'a> {
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
         let Self { targets } = self;
         // 各要素で &mut を再借用して再帰する(seeds は消費されるがループで再利用する)。
-        while seq.next_element_seed(RefScan { targets: &mut *targets })?.is_some() {}
+        while seq
+            .next_element_seed(RefScan {
+                targets: &mut *targets,
+            })?
+            .is_some()
+        {}
         Ok(())
     }
 
@@ -582,7 +604,9 @@ impl<'a, 'de> Visitor<'de> for RefScan<'a> {
                 // 非文字列は invalid_type 位置付きエラーで走査全体を中止させる)。
                 targets.push(map.next_value_seed(RefTarget)?);
             } else {
-                map.next_value_seed(RefScan { targets: &mut *targets })?;
+                map.next_value_seed(RefScan {
+                    targets: &mut *targets,
+                })?;
             }
         }
         Ok(())
@@ -638,16 +662,17 @@ fn scan_payload(
 ) -> Result<(), DocumentError> {
     let start = targets.len();
     serde_json::Deserializer::from_str(raw.as_str())
-        .deserialize_any(RefScan { targets: &mut *targets })
+        .deserialize_any(RefScan {
+            targets: &mut *targets,
+        })
         .map_err(|e| container_error(&format_args!("{}: {}", ENTRY_CONTEXT, label), &e))?;
     // 出現列はターゲット列の同じ範囲から作る(順序も重複もそのまま)。
     if targets.len() > start {
         let from = label.to_string();
-        refs.extend(
-            targets[start..]
-                .iter()
-                .map(|target| TypeRef { from: from.clone(), to: target.clone() }),
-        );
+        refs.extend(targets[start..].iter().map(|target| TypeRef {
+            from: from.clone(),
+            to: target.clone(),
+        }));
     }
     Ok(())
 }
@@ -663,7 +688,10 @@ mod tests {
 
     /// テキストから `TypeDefId` リストを作る(テストの読みやすさ用)。
     fn ids(texts: &[&str]) -> Vec<TypeDefId> {
-        texts.iter().map(|t| TypeDefId::from_str(t).unwrap()).collect()
+        texts
+            .iter()
+            .map(|t| TypeDefId::from_str(t).unwrap())
+            .collect()
     }
 
     /// 不正入力が必ず `InvalidContainer` になることを確認して `entry` を返す。
@@ -717,7 +745,10 @@ mod tests {
         );
         assert_eq!(1, part.type_defs().len());
         assert_eq!(ids(&[ID_A])[0], part.type_defs()[0].id());
-        assert_eq!(r#"{ "x" : [ null, false ] }"#, part.type_defs()[0].definition().as_str());
+        assert_eq!(
+            r#"{ "x" : [ null, false ] }"#,
+            part.type_defs()[0].definition().as_str()
+        );
     }
 
     // --- 要件 1.2: ルートはちょうど 1 つ -----------------------------------
@@ -749,7 +780,10 @@ mod tests {
         let parsed = SchemaPart::parse(r#"{"root":null}"#).unwrap();
         assert_eq!(part.root().as_bytes(), parsed.root().as_bytes());
         assert_eq!(part.type_defs().len(), parsed.type_defs().len());
-        assert_eq!(part.preserved_fields().len(), parsed.preserved_fields().len());
+        assert_eq!(
+            part.preserved_fields().len(),
+            parsed.preserved_fields().len()
+        );
     }
 
     #[test]
@@ -763,7 +797,10 @@ mod tests {
     fn duplicate_root_key_is_rejected() {
         // 要件 1.2: 2 個は不正。serde_json のデフォルト last-wins にせず、
         // エンベロープ水準で明示的に検出する。出現順どちらのパターンも拒否する。
-        for text in [r#"{"root": 1, "root": 2, "types": []}"#, r#"{"root":1,"types":[],"root":2}"#] {
+        for text in [
+            r#"{"root": 1, "root": 2, "types": []}"#,
+            r#"{"root":1,"types":[],"root":2}"#,
+        ] {
             let entry = invalid_container(text);
             assert!(entry.contains("root"), "診断に root を含むべき: {entry}");
         }
@@ -857,7 +894,11 @@ mod tests {
         assert_eq!(vec![("past", 0), ("mid", 1), ("tail", 2)], first);
         assert_eq!(vec![("only", 2)], second);
         // 値は原文のバイト列のまま。
-        let tail = &part.type_defs()[0].preserved_fields().iter().nth(2).unwrap();
+        let tail = &part.type_defs()[0]
+            .preserved_fields()
+            .iter()
+            .nth(2)
+            .unwrap();
         assert_eq!(b"3", tail.value_bytes());
     }
 
@@ -932,8 +973,11 @@ mod tests {
         // (前方互換の決定。走査対象は root / 型定義のみ)。
         let part = SchemaPart::parse(r#"{"$ref":"01ARZ3NDEKTSV4RRFFQ69G5FAV","root":{}}"#).unwrap();
         assert!(part.type_ref_targets().is_empty());
-        let preserved: Vec<&str> =
-            part.preserved_fields().iter().map(|field| field.key()).collect();
+        let preserved: Vec<&str> = part
+            .preserved_fields()
+            .iter()
+            .map(|field| field.key())
+            .collect();
         assert_eq!(vec!["$ref"], preserved);
         assert_eq!(
             br#""01ARZ3NDEKTSV4RRFFQ69G5FAV""#.as_slice(),
@@ -954,7 +998,13 @@ mod tests {
         let preserved: Vec<(&str, &[u8], usize)> = part
             .preserved_fields()
             .iter()
-            .map(|field| (field.key(), field.value_bytes(), field.preceding_known_fields()))
+            .map(|field| {
+                (
+                    field.key(),
+                    field.value_bytes(),
+                    field.preceding_known_fields(),
+                )
+            })
             .collect();
         assert_eq!(
             vec![

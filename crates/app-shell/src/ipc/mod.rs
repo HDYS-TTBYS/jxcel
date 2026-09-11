@@ -195,8 +195,12 @@ fn command_names_constant() -> String {
     let mut out = String::new();
     out.push('\n');
     out.push_str("/**\n");
-    out.push_str(" * 境界を越えるコマンド名の一覧。`crates/app-shell/src/ipc/command_names.rs` の\n");
-    out.push_str(" * `COMMAND_NAMES` と同一の内容・同一の順序である。`src-tauri` のハンドラ登録と\n");
+    out.push_str(
+        " * 境界を越えるコマンド名の一覧。`crates/app-shell/src/ipc/command_names.rs` の\n",
+    );
+    out.push_str(
+        " * `COMMAND_NAMES` と同一の内容・同一の順序である。`src-tauri` のハンドラ登録と\n",
+    );
     out.push_str(" * 本生成物が同じ配列を参照し、名前のドリフトを構造的に塞ぐ。\n");
     out.push_str(" */\n");
     out.push_str("export const COMMAND_NAMES = [\n");
@@ -218,7 +222,9 @@ fn event_names_constant() -> String {
     let mut out = String::new();
     out.push('\n');
     out.push_str("/**\n");
-    out.push_str(" * 境界を越えるイベント名の一覧。`crates/app-shell/src/ipc/mod.rs` の定義と同一で、\n");
+    out.push_str(
+        " * 境界を越えるイベント名の一覧。`crates/app-shell/src/ipc/mod.rs` の定義と同一で、\n",
+    );
     out.push_str(" * フロントエンドはこの定数だけを参照する（文字列リテラルを書かない）。\n");
     out.push_str(" */\n");
     out.push_str("export const SETTINGS_CHANGED_EVENT = \"");
@@ -315,7 +321,6 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
     Ok(out)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::error::IpcError;
@@ -397,9 +402,8 @@ mod tests {
             let at = from + rel;
             let before = code[..at].chars().next_back();
             let after = code[at + token.len()..].chars().next();
-            let is_ident = |c: Option<char>| {
-                c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$')
-            };
+            let is_ident =
+                |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$');
             assert!(
                 is_ident(before) || is_ident(after),
                 "生成物の型の位置に {token} が現れた:\n{code}"
@@ -434,7 +438,8 @@ mod tests {
                     assert_no_json_number(item, &format!("{at}.{name}"));
                 }
             }
-            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::String(_) => {}
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::String(_) => {
+            }
         }
     }
 
@@ -474,8 +479,12 @@ mod tests {
     /// `any` を部分文字列として含む識別子を誤検出しないことを固定する。
     #[test]
     fn detectors_ignore_identifiers_containing_the_tokens() {
-        assert_no_any("export type Company = { many: string, anything: string, anyCount: string, }");
-        assert_no_numeric_type("export type RowCount = { numberOfRows: string, bigintValue: string, }");
+        assert_no_any(
+            "export type Company = { many: string, anything: string, anyCount: string, }",
+        );
+        assert_no_numeric_type(
+            "export type RowCount = { numberOfRows: string, bigintValue: string, }",
+        );
     }
 
     /// 説明文に現れただけの語は違反ではないことを固定する。ts-rs は `///` を JSDoc として
@@ -535,12 +544,16 @@ mod tests {
     #[test]
     fn boundary_types_expose_no_number() {
         let envelope: IpcResult<WindowContext, IpcError> = IpcResult::Ok {
-            data: WindowContext { window: WindowLabel::new("doc-0") },
+            data: WindowContext {
+                window: WindowLabel::new("doc-0"),
+            },
         };
         assert_no_json_number(&serde_json::to_value(&envelope).unwrap(), "envelope");
 
         let err: IpcResult<WindowContext, IpcError> = IpcResult::Err {
-            error: IpcError::Sidecar { message: "起動できない".into() },
+            error: IpcError::Sidecar {
+                message: "起動できない".into(),
+            },
         };
         assert_no_json_number(&serde_json::to_value(&err).unwrap(), "error");
     }
@@ -548,14 +561,22 @@ mod tests {
     #[test]
     fn error_payload_is_not_a_bare_string() {
         let causes = [
-            IpcError::Settings { message: "設定を読めない".into() },
-            IpcError::Sidecar { message: "起動できない".into() },
-            IpcError::Window { message: "生成できない".into() },
+            IpcError::Settings {
+                message: "設定を読めない".into(),
+            },
+            IpcError::Sidecar {
+                message: "起動できない".into(),
+            },
+            IpcError::Window {
+                message: "生成できない".into(),
+            },
         ];
         let mut kinds = std::collections::BTreeSet::new();
         for cause in &causes {
             let value = serde_json::to_value(cause).unwrap();
-            let object = value.as_object().expect("エラーは原因の情報を持つ対象である");
+            let object = value
+                .as_object()
+                .expect("エラーは原因の情報を持つ対象である");
             assert!(kinds.insert(object["kind"].as_str().unwrap().to_owned()));
             // 詳細は `detail` の下の対象であり、裸の文字列ではない。
             let detail = object["detail"].as_object().expect("詳細は対象である");
@@ -567,20 +588,30 @@ mod tests {
     #[test]
     fn envelope_round_trips_both_arms() {
         let ok: IpcResult<WindowContext, IpcError> = IpcResult::Ok {
-            data: WindowContext { window: WindowLabel::new("doc-0") },
+            data: WindowContext {
+                window: WindowLabel::new("doc-0"),
+            },
         };
         let value = serde_json::to_value(&ok).unwrap();
         assert_eq!(value["status"], serde_json::Value::String("ok".into()));
         assert!(value.get("data").is_some());
-        assert_eq!(serde_json::from_value::<IpcResult<WindowContext, IpcError>>(value).unwrap(), ok);
+        assert_eq!(
+            serde_json::from_value::<IpcResult<WindowContext, IpcError>>(value).unwrap(),
+            ok
+        );
 
         let err: IpcResult<WindowContext, IpcError> = IpcResult::Err {
-            error: IpcError::Window { message: "生成できない".into() },
+            error: IpcError::Window {
+                message: "生成できない".into(),
+            },
         };
         let value = serde_json::to_value(&err).unwrap();
         assert_eq!(value["status"], serde_json::Value::String("error".into()));
         assert!(value.get("error").is_some());
-        assert_eq!(serde_json::from_value::<IpcResult<WindowContext, IpcError>>(value).unwrap(), err);
+        assert_eq!(
+            serde_json::from_value::<IpcResult<WindowContext, IpcError>>(value).unwrap(),
+            err
+        );
     }
 
     // ------------------------------------------------------------------
@@ -623,14 +654,20 @@ mod tests {
         let first = render_bindings().expect("境界の型から TypeScript を生成できなければならない");
         let second = render_bindings().expect("境界の型から TypeScript を生成できなければならない");
         assert!(!first.is_empty(), "生成物が空である");
-        assert_eq!(first, second, "同一の入力から常に同一のバイト列が出なければならない");
+        assert_eq!(
+            first, second,
+            "同一の入力から常に同一のバイト列が出なければならない"
+        );
     }
 
     #[test]
     fn bindings_mirror_command_names_in_order() {
         let ts = render_bindings().unwrap();
         let emitted = emitted_command_names(&ts);
-        let expected = COMMAND_NAMES.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
+        let expected = COMMAND_NAMES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
         assert_eq!(
             emitted, expected,
             "生成物のコマンド名は COMMAND_NAMES と同一の内容・同一の順序でなければならない"
@@ -648,7 +685,8 @@ mod tests {
                 "コマンド名は英小文字で始める: {name}"
             );
             assert!(
-                name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                name.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
                 "コマンド名は snake_case とする: {name}"
             );
             assert!(seen.insert(*name), "コマンド名が重複している: {name}");
@@ -678,7 +716,10 @@ mod tests {
             "export type SettingsResponse =",
             "export type SettingsChangedEvent =",
         ] {
-            assert!(ts.contains(declaration), "生成物に `{declaration}` が無い:\n{ts}");
+            assert!(
+                ts.contains(declaration),
+                "生成物に `{declaration}` が無い:\n{ts}"
+            );
         }
     }
 
@@ -706,26 +747,39 @@ mod tests {
         };
         let encoded = serde_json::to_value(&request).unwrap();
         // 新定型は内側の値そのものとして直列化される（`{"key":...,"value":"dark"}`）。
-        assert_eq!(encoded["value"], serde_json::Value::String("dark".to_owned()));
+        assert_eq!(
+            encoded["value"],
+            serde_json::Value::String("dark".to_owned())
+        );
         let back: SettingsSetRequest = serde_json::from_value(encoded).unwrap();
         assert_eq!(back, request);
 
         let response = SettingsResponse {
-            context: WindowContext { window: WindowLabel::new("empty-1") },
+            context: WindowContext {
+                window: WindowLabel::new("empty-1"),
+            },
             key: "appearance.theme".to_owned(),
             value: Some(SettingsValue::new(serde_json::Value::Bool(true))),
         };
         let encoded = serde_json::to_value(&response).unwrap();
         // 応答は呼び出し元ウィンドウの識別子を文字列で運ぶ（要件 4.6）。
-        assert_eq!(encoded["context"]["window"], serde_json::Value::String("empty-1".into()));
+        assert_eq!(
+            encoded["context"]["window"],
+            serde_json::Value::String("empty-1".into())
+        );
         assert_eq!(encoded["value"], serde_json::Value::Bool(true));
 
         let changed = SettingsChangedEvent {
             key: "window.geometry".to_owned(),
-            value: SettingsValue::new(serde_json::json!({ "x": 1, "y": 2, "width": 3, "height": 4 })),
+            value: SettingsValue::new(
+                serde_json::json!({ "x": 1, "y": 2, "width": 3, "height": 4 }),
+            ),
         };
         let encoded = serde_json::to_value(&changed).unwrap();
-        assert_eq!(encoded["key"], serde_json::Value::String("window.geometry".into()));
+        assert_eq!(
+            encoded["key"],
+            serde_json::Value::String("window.geometry".into())
+        );
         assert_eq!(encoded["value"]["width"], serde_json::json!(3));
     }
 
@@ -734,7 +788,9 @@ mod tests {
     fn bindings_expose_the_event_name() {
         let ts = render_bindings().unwrap();
         assert!(
-            ts.contains(&format!("export const SETTINGS_CHANGED_EVENT = \"{SETTINGS_CHANGED_EVENT}\";")),
+            ts.contains(&format!(
+                "export const SETTINGS_CHANGED_EVENT = \"{SETTINGS_CHANGED_EVENT}\";"
+            )),
             "生成物にイベント名の定数が無い:\n{ts}"
         );
     }
@@ -749,8 +805,14 @@ mod tests {
         let encoded = serde_json::to_value(&changed).unwrap();
         let object = encoded.as_object().expect("通知は対象でなければならない");
         assert_eq!(
-            object.keys().cloned().collect::<std::collections::BTreeSet<_>>(),
-            ["key", "value"].into_iter().map(str::to_owned).collect::<std::collections::BTreeSet<_>>(),
+            object
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["key", "value"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<std::collections::BTreeSet<_>>(),
             "通知が鍵と値以外を運んでいる: {encoded}"
         );
     }
@@ -762,6 +824,9 @@ mod tests {
             ts.contains(REGENERATE_BINDINGS_COMMAND),
             "生成物のヘッダに再生成コマンドが無い:\n{ts}"
         );
-        assert!(ts.contains("手で編集しない"), "生成物であることの注意がヘッダに無い:\n{ts}");
+        assert!(
+            ts.contains("手で編集しない"),
+            "生成物であることの注意がヘッダに無い:\n{ts}"
+        );
     }
 }

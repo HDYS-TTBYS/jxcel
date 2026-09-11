@@ -44,8 +44,13 @@ fn line_ids(bytes: &[u8]) -> Vec<String> {
     lines(bytes)
         .into_iter()
         .map(|line| {
-            let rest = line.strip_prefix(b"{\"$id\":\"").expect("`$id` が先頭キーでない");
-            let end = rest.iter().position(|&byte| byte == b'"').expect("識別子の終端が無い");
+            let rest = line
+                .strip_prefix(b"{\"$id\":\"")
+                .expect("`$id` が先頭キーでない");
+            let end = rest
+                .iter()
+                .position(|&byte| byte == b'"')
+                .expect("識別子の終端が無い");
             String::from_utf8(rest[..end].to_vec()).expect("識別子は UTF-8")
         })
         .collect()
@@ -54,7 +59,9 @@ fn line_ids(bytes: &[u8]) -> Vec<String> {
 /// `\n` で分割した行（末尾 LF は終端であり空行を生まない）。
 fn lines(bytes: &[u8]) -> Vec<&[u8]> {
     assert!(bytes.ends_with(b"\n"), "行末が LF でない");
-    bytes[..bytes.len() - 1].split(|&byte| byte == b'\n').collect()
+    bytes[..bytes.len() - 1]
+        .split(|&byte| byte == b'\n')
+        .collect()
 }
 
 /// 指定した値列の行を追加順に持つ標本ドキュメントを作る。
@@ -64,7 +71,8 @@ fn document_with_rows(values: Vec<Vec<CellValue>>) -> (Document, SheetId, Vec<Ro
     let mut ids = Vec::with_capacity(values.len());
     for row_values in values {
         let row = doc.add_row(sheet).expect("行の追加");
-        doc.set_row_values(sheet, row, row_values).expect("値の設定");
+        doc.set_row_values(sheet, row, row_values)
+            .expect("値の設定");
         ids.push(row);
     }
     (doc, sheet, ids)
@@ -77,20 +85,26 @@ fn document_with_rows(values: Vec<Vec<CellValue>>) -> (Document, SheetId, Vec<Ro
 #[test]
 fn row_order_is_preserved_and_never_sorted() {
     const ROWS: usize = 8;
-    let values: Vec<Vec<CellValue>> =
-        (0..ROWS).map(|index| vec![CellValue::Text(format!("v{index}"))]).collect();
+    let values: Vec<Vec<CellValue>> = (0..ROWS)
+        .map(|index| vec![CellValue::Text(format!("v{index}"))])
+        .collect();
     let (mut doc, sheet, ids) = document_with_rows(values);
     let columns = vec!["label".to_string()];
 
     let reversed: Vec<RowId> = ids.iter().rev().copied().collect();
-    let shuffled: Vec<RowId> =
-        [3, 0, 7, 1, 6, 2, 5, 4].iter().map(|&position| ids[position]).collect();
+    let shuffled: Vec<RowId> = [3, 0, 7, 1, 6, 2, 5, 4]
+        .iter()
+        .map(|&position| ids[position])
+        .collect();
 
     for order in [&reversed, &shuffled] {
         doc.reorder_rows(sheet, order).expect("並び替え");
-        let (entry, bytes) =
-            RowsCodec::encode(sheet, &columns, doc.sheet_by_id(sheet).expect("シート").rows())
-                .expect("符号化");
+        let (entry, bytes) = RowsCodec::encode(
+            sheet,
+            &columns,
+            doc.sheet_by_id(sheet).expect("シート").rows(),
+        )
+        .expect("符号化");
 
         // 出力テキストの行頭 `$id` が入力順と一致する（復号とは独立の観測）。
         let expected_ids: Vec<String> = order.iter().map(|id| id.to_string()).collect();
@@ -99,9 +113,16 @@ fn row_order_is_preserved_and_never_sorted() {
         // 復号後の行順も一致し、行と値が一緒に移動している。
         let decoded = RowsCodec::decode(&entry, &bytes).expect("復号");
         let observed: Vec<RowId> = decoded.rows().iter().map(|row| row.id()).collect();
-        assert_eq!(order.as_slice(), observed.as_slice(), "復号の行順が入力順と違う");
+        assert_eq!(
+            order.as_slice(),
+            observed.as_slice(),
+            "復号の行順が入力順と違う"
+        );
         for (position, &id) in order.iter().enumerate() {
-            let origin = ids.iter().position(|candidate| *candidate == id).expect("既知の行");
+            let origin = ids
+                .iter()
+                .position(|candidate| *candidate == id)
+                .expect("既知の行");
             assert_eq!(
                 vec![CellValue::Text(format!("v{origin}"))],
                 decoded.rows()[position].values().to_vec(),
@@ -120,17 +141,25 @@ fn each_sheet_has_its_own_rows_entry() {
     let sheet_a = doc.add_sheet("A");
     let sheet_b = doc.add_sheet("B");
     let row_a = doc.add_row(sheet_a).expect("行の追加");
-    doc.set_row_values(sheet_a, row_a, vec![CellValue::Int(1)]).expect("値の設定");
+    doc.set_row_values(sheet_a, row_a, vec![CellValue::Int(1)])
+        .expect("値の設定");
     let row_b = doc.add_row(sheet_b).expect("行の追加");
-    doc.set_row_values(sheet_b, row_b, vec![CellValue::Int(2)]).expect("値の設定");
+    doc.set_row_values(sheet_b, row_b, vec![CellValue::Int(2)])
+        .expect("値の設定");
 
     let columns = vec!["v".to_string()];
-    let (entry_a, bytes_a) =
-        RowsCodec::encode(sheet_a, &columns, doc.sheet_by_id(sheet_a).expect("シート").rows())
-            .expect("符号化");
-    let (entry_b, bytes_b) =
-        RowsCodec::encode(sheet_b, &columns, doc.sheet_by_id(sheet_b).expect("シート").rows())
-            .expect("符号化");
+    let (entry_a, bytes_a) = RowsCodec::encode(
+        sheet_a,
+        &columns,
+        doc.sheet_by_id(sheet_a).expect("シート").rows(),
+    )
+    .expect("符号化");
+    let (entry_b, bytes_b) = RowsCodec::encode(
+        sheet_b,
+        &columns,
+        doc.sheet_by_id(sheet_b).expect("シート").rows(),
+    )
+    .expect("符号化");
 
     assert_ne!(entry_a, entry_b, "異なるシートが同じエントリ名になった");
     assert_eq!(rows_entry(sheet_a), entry_a);
@@ -140,9 +169,22 @@ fn each_sheet_has_its_own_rows_entry() {
     let decoded_b = RowsCodec::decode(&entry_b, &bytes_b).expect("復号");
     assert_eq!(sheet_a, decoded_a.sheet());
     assert_eq!(sheet_b, decoded_b.sheet());
-    assert_eq!(vec![row_a], decoded_a.rows().iter().map(|row| row.id()).collect::<Vec<_>>());
-    assert_eq!(vec![CellValue::Int(1)], decoded_a.rows()[0].values().to_vec());
-    assert_eq!(vec![CellValue::Int(2)], decoded_b.rows()[0].values().to_vec());
+    assert_eq!(
+        vec![row_a],
+        decoded_a
+            .rows()
+            .iter()
+            .map(|row| row.id())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        vec![CellValue::Int(1)],
+        decoded_a.rows()[0].values().to_vec()
+    );
+    assert_eq!(
+        vec![CellValue::Int(2)],
+        decoded_b.rows()[0].values().to_vec()
+    );
     assert_eq!(columns, decoded_a.columns());
 
     // 再エクスポートと定義元が同一の型であること（`parts::` 配下の公開面）。
@@ -178,19 +220,34 @@ fn each_sheet_has_its_own_rows_entry() {
 fn changing_one_cell_changes_exactly_one_line() {
     const ROWS: usize = 100;
     let values: Vec<Vec<CellValue>> = (0..ROWS)
-        .map(|index| vec![CellValue::Text(format!("行 {index}")), CellValue::Int(index as i64)])
+        .map(|index| {
+            vec![
+                CellValue::Text(format!("行 {index}")),
+                CellValue::Int(index as i64),
+            ]
+        })
         .collect();
     let (mut doc, sheet, ids) = document_with_rows(values);
     let columns = vec!["label".to_string(), "n".to_string()];
 
-    let (_, before) =
-        RowsCodec::encode(sheet, &columns, doc.sheet_by_id(sheet).expect("シート").rows())
-            .expect("符号化");
-    doc.set_row_values(sheet, ids[57], vec![CellValue::Text("変更後".into()), CellValue::Int(57)])
-        .expect("値の設定");
-    let (_, after) =
-        RowsCodec::encode(sheet, &columns, doc.sheet_by_id(sheet).expect("シート").rows())
-            .expect("符号化");
+    let (_, before) = RowsCodec::encode(
+        sheet,
+        &columns,
+        doc.sheet_by_id(sheet).expect("シート").rows(),
+    )
+    .expect("符号化");
+    doc.set_row_values(
+        sheet,
+        ids[57],
+        vec![CellValue::Text("変更後".into()), CellValue::Int(57)],
+    )
+    .expect("値の設定");
+    let (_, after) = RowsCodec::encode(
+        sheet,
+        &columns,
+        doc.sheet_by_id(sheet).expect("シート").rows(),
+    )
+    .expect("符号化");
 
     let before_lines = lines(&before);
     let after_lines = lines(&after);
@@ -216,16 +273,30 @@ fn leading_dollar_column_names_are_escaped_and_round_trip() {
     ];
     let (doc, sheet, ids) = document_with_rows(vec![values.clone()]);
     let row = ids[0];
-    let columns: Vec<String> =
-        ["$total", "$$deep", "$id", "plain"].iter().map(|name| (*name).to_string()).collect();
+    let columns: Vec<String> = ["$total", "$$deep", "$id", "plain"]
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
 
-    let (entry, bytes) =
-        RowsCodec::encode(sheet, &columns, doc.sheet_by_id(sheet).expect("シート").rows())
-            .expect("符号化");
+    let (entry, bytes) = RowsCodec::encode(
+        sheet,
+        &columns,
+        doc.sheet_by_id(sheet).expect("シート").rows(),
+    )
+    .expect("符号化");
     let text = String::from_utf8(bytes.clone()).expect("UTF-8");
-    assert!(text.starts_with(&format!("{{\"$id\":\"{row}\",")), "予約キーが先頭でない: {text}");
-    assert!(text.contains(r#""$$total":"合計""#), "`$` 始まりの列名がエスケープされない: {text}");
-    assert!(text.contains(r#""$$$deep":"深い""#), "`$$` 始まりの列名がエスケープされない: {text}");
+    assert!(
+        text.starts_with(&format!("{{\"$id\":\"{row}\",")),
+        "予約キーが先頭でない: {text}"
+    );
+    assert!(
+        text.contains(r#""$$total":"合計""#),
+        "`$` 始まりの列名がエスケープされない: {text}"
+    );
+    assert!(
+        text.contains(r#""$$$deep":"深い""#),
+        "`$$` 始まりの列名がエスケープされない: {text}"
+    );
     assert!(
         text.contains(r#""$$id":"これは行識別子ではない""#),
         "予約キーに見える列名が壊れた: {text}"
@@ -233,7 +304,11 @@ fn leading_dollar_column_names_are_escaped_and_round_trip() {
 
     let decoded = RowsCodec::decode(&entry, &bytes).expect("復号");
     assert_eq!(columns, decoded.columns(), "列名が往復で変わった");
-    assert_eq!(row, decoded.rows()[0].id(), "予約キーでない列が行識別子として読まれた");
+    assert_eq!(
+        row,
+        decoded.rows()[0].id(),
+        "予約キーでない列が行識別子として読まれた"
+    );
     assert_eq!(values, decoded.rows()[0].values().to_vec());
 }
 
@@ -289,7 +364,10 @@ fn self_contradictions_are_rejected() {
     else {
         panic!("行識別子の重複が受理された");
     };
-    assert!(label.starts_with(&format!("{entry} line 2: ")), "行番号付きの診断でない: {label}");
+    assert!(
+        label.starts_with(&format!("{entry} line 2: ")),
+        "行番号付きの診断でない: {label}"
+    );
 
     let duplicated_key = format!(r#"{{"$id":"{ROW_1}","a":1,"a":2}}"#) + "\n";
     let Err(DocumentError::InvalidContainer { entry: label }) =
@@ -297,7 +375,10 @@ fn self_contradictions_are_rejected() {
     else {
         panic!("同じ行オブジェクト内のキー重複が受理された");
     };
-    assert!(label.starts_with(&format!("{entry} line 1: ")), "行番号付きの診断でない: {label}");
+    assert!(
+        label.starts_with(&format!("{entry} line 1: ")),
+        "行番号付きの診断でない: {label}"
+    );
 }
 
 /// i64 範囲外の整数リテラルは黙って浮動小数へ落ちず、コンテナ不正として拒否される。
@@ -317,17 +398,24 @@ fn out_of_range_integer_literals_are_rejected() {
         else {
             panic!("{literal} が拒否されなかった（黙って浮動小数へ落ちた）");
         };
-        assert!(label.starts_with(&format!("{entry} line 1: ")), "行番号付きでない: {label}");
+        assert!(
+            label.starts_with(&format!("{entry} line 1: ")),
+            "行番号付きでない: {label}"
+        );
         assert!(label.contains("column n"), "列が特定できない: {label}");
     }
 
     // 境界の内側は通る（門が過剰でないこと）。
-    for (literal, expected) in
-        [("9223372036854775807", i64::MAX), ("-9223372036854775808", i64::MIN)]
-    {
+    for (literal, expected) in [
+        ("9223372036854775807", i64::MAX),
+        ("-9223372036854775808", i64::MIN),
+    ] {
         let input = format!(r#"{{"$id":"{ROW_1}","n":{literal}}}"#) + "\n";
         let decoded = RowsCodec::decode(&entry, input.as_bytes()).expect("境界内は通る");
-        assert_eq!(vec![CellValue::Int(expected)], decoded.rows()[0].values().to_vec());
+        assert_eq!(
+            vec![CellValue::Int(expected)],
+            decoded.rows()[0].values().to_vec()
+        );
     }
 }
 
@@ -356,9 +444,12 @@ fn cell_values_round_trip_verbatim() {
     let (doc, sheet, ids) = document_with_rows(vec![values.clone()]);
     let row = ids[0];
 
-    let (entry, bytes) =
-        RowsCodec::encode(sheet, &columns, doc.sheet_by_id(sheet).expect("シート").rows())
-            .expect("符号化");
+    let (entry, bytes) = RowsCodec::encode(
+        sheet,
+        &columns,
+        doc.sheet_by_id(sheet).expect("シート").rows(),
+    )
+    .expect("符号化");
     let expected = format!(
         "{{\"$id\":\"{row}\",\"text\":\"日本語 🎉 \u{2028} \\\"x\\\"\\n\",\
          \"nested\":{{\"z\":1,\"a\":\"x\"}},\"attachment\":\"{attachment}\",\
@@ -371,8 +462,7 @@ fn cell_values_round_trip_verbatim() {
     assert_eq!(values, decoded.rows()[0].values().to_vec());
     assert_eq!(row, decoded.rows()[0].id());
     // 再符号化しても同一バイト列（同一入力 → 同一バイト列）。
-    let (_, again) =
-        RowsCodec::encode(sheet, &columns, decoded.rows()).expect("再符号化");
+    let (_, again) = RowsCodec::encode(sheet, &columns, decoded.rows()).expect("再符号化");
     assert_eq!(bytes, again);
 }
 
@@ -382,14 +472,20 @@ fn an_empty_sheet_encodes_to_zero_bytes() {
     let (doc, sheet, ids) = document_with_rows(Vec::new());
     assert!(ids.is_empty());
     let columns = vec!["a".to_string()];
-    let (entry, bytes) =
-        RowsCodec::encode(sheet, &columns, doc.sheet_by_id(sheet).expect("シート").rows())
-            .expect("符号化");
+    let (entry, bytes) = RowsCodec::encode(
+        sheet,
+        &columns,
+        doc.sheet_by_id(sheet).expect("シート").rows(),
+    )
+    .expect("符号化");
     assert!(bytes.is_empty(), "0 行の出力が 0 バイトでない");
     let decoded = RowsCodec::decode(&entry, &bytes).expect("復号");
     assert_eq!(sheet, decoded.sheet());
     assert!(decoded.rows().is_empty());
-    assert!(decoded.columns().is_empty(), "0 行のエントリは列順を持たない");
+    assert!(
+        decoded.columns().is_empty(),
+        "0 行のエントリは列順を持たない"
+    );
 }
 
 /// 書き手側の programming error（値の個数不一致・列名の重複・非有限値）は `panic` せず
@@ -409,7 +505,11 @@ fn encode_reports_input_errors_with_the_local_type() {
         panic!("値の個数不一致が受理された");
     };
     match error {
-        RowsEncodeError::ValueCountMismatch { row: reported, columns: got, values: given } => {
+        RowsEncodeError::ValueCountMismatch {
+            row: reported,
+            columns: got,
+            values: given,
+        } => {
             assert_eq!(row, reported);
             assert_eq!(2, got);
             assert_eq!(1, given);
@@ -433,14 +533,21 @@ fn encode_reports_input_errors_with_the_local_type() {
     }
 
     // 正常系は通る。
-    let (_, bytes) =
-        RowsCodec::encode(sheet, &columns, doc.sheet_by_id(sheet).expect("シート").rows())
-            .expect("符号化");
+    let (_, bytes) = RowsCodec::encode(
+        sheet,
+        &columns,
+        doc.sheet_by_id(sheet).expect("シート").rows(),
+    )
+    .expect("符号化");
     assert_eq!(1, lines(&bytes).len());
 
     // 非有限値は value 層の単一の源（`to_json_bytes`）が遮断し、型付きエラーになる。
-    doc.set_row_values(sheet, row, vec![CellValue::Float(f64::NAN), CellValue::Int(2)])
-        .expect("値の設定");
+    doc.set_row_values(
+        sheet,
+        row,
+        vec![CellValue::Float(f64::NAN), CellValue::Int(2)],
+    )
+    .expect("値の設定");
     let Err(error) = RowsCodec::encode(
         sheet,
         &columns,
@@ -475,8 +582,14 @@ fn decoded_rows_expose_the_files_own_column_order() {
     assert_eq!(sheet, decoded.sheet());
     assert_eq!(vec!["b".to_string(), "a".to_string()], decoded.columns());
     assert_eq!(2, decoded.rows().len());
-    assert_eq!(vec![CellValue::Int(1), CellValue::Int(2)], decoded.rows()[0].values().to_vec());
-    assert_eq!(ROW_1.parse::<RowId>().expect("標本 ULID"), decoded.rows()[0].id());
+    assert_eq!(
+        vec![CellValue::Int(1), CellValue::Int(2)],
+        decoded.rows()[0].values().to_vec()
+    );
+    assert_eq!(
+        ROW_1.parse::<RowId>().expect("標本 ULID"),
+        decoded.rows()[0].id()
+    );
 }
 
 /// 復号が受理するキーは**書き手の像**に限る（単一 `$` で始まり `$id` でも `$$` でもない
@@ -551,9 +664,12 @@ fn cell_wire_bytes_match_the_value_layer() {
     ];
     let (doc, sheet, _) = document_with_rows(values.clone());
     let columns = vec!["v".to_string()];
-    let (_, bytes) =
-        RowsCodec::encode(sheet, &columns, doc.sheet_by_id(sheet).expect("シート").rows())
-            .expect("符号化");
+    let (_, bytes) = RowsCodec::encode(
+        sheet,
+        &columns,
+        doc.sheet_by_id(sheet).expect("シート").rows(),
+    )
+    .expect("符号化");
     let encoded: Vec<String> = lines(&bytes)
         .into_iter()
         .map(|line| {

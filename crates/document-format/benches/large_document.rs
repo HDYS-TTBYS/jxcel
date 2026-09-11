@@ -134,7 +134,9 @@ fn sample_with_rows(row_count: usize) -> Document {
 
     let parts = DocumentParts::from_entries(with_rebuilt_manifest(version, entries))
         .expect("行を差し替えた集合は妥当");
-    api().from_parts(&parts).expect("行を差し替えた集合は復元できる")
+    api()
+        .from_parts(&parts)
+        .expect("行を差し替えた集合は復元できる")
 }
 
 /// 10 万行 × 30 列の `open` / `save` を計測する（予算: 開く 3 秒 / 保存 2 秒）。
@@ -173,8 +175,12 @@ fn large_document(c: &mut Criterion) {
     {
         let over = sample_with_rows(ROWS + 1);
         let over_path = scratch.file("over.jxcel");
-        api().save(&over, &over_path).expect("超過した標本も保存できる");
-        let outcome = api().open(&over_path).expect("超過しても拒否しない（要件 8.5）");
+        api()
+            .save(&over, &over_path)
+            .expect("超過した標本も保存できる");
+        let outcome = api()
+            .open(&over_path)
+            .expect("超過しても拒否しない（要件 8.5）");
         assert!(
             outcome.beyond_supported_scale,
             "10 万行 + 1 行が保証対象内とされた（要件 8.5）"
@@ -215,7 +221,9 @@ fn large_document(c: &mut Criterion) {
 fn save_phases(c: &mut Criterion) {
     let scratch = Scratch::new("bench_save_phases");
     let sample = sample_with_rows(ROWS);
-    let parts = api().to_parts(&sample).expect("標本はパート集合へ取り出せる");
+    let parts = api()
+        .to_parts(&sample)
+        .expect("標本はパート集合へ取り出せる");
     let bytes = ContainerCodec::encode(&parts).expect("標本は符号化できる");
     let path = scratch.file("phases.jxcel");
 

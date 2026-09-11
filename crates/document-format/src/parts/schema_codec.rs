@@ -103,7 +103,7 @@ use crate::entry_name::EntryName;
 use crate::error::DocumentError;
 use crate::ids::SheetId;
 use crate::json::PreservingObjectWriter;
-use crate::model::{KEY_DEFINITION, KEY_ID, KEY_ROOT, KEY_TYPES, RawJson, SchemaPart, TypeDef};
+use crate::model::{RawJson, SchemaPart, TypeDef, KEY_DEFINITION, KEY_ID, KEY_ROOT, KEY_TYPES};
 
 /// 符号化・復号の内部失敗に添える文脈（エントリ名を前置する前の理由）。
 const CODEC_CONTEXT: &str = "schema part";
@@ -145,10 +145,7 @@ impl SchemaCodec {
     /// 返す（`$ref` の抽出順・重複保持・検証の意味はタスク 2.2 のまま変えない）。
     /// エントリ名が `schemas/<ulid>.json` 形でない場合もコンテナ不正として拒否する
     /// （panic しない。モジュール docs「エラー対応」）。
-    pub fn decode(
-        entry: &EntryName,
-        bytes: &[u8],
-    ) -> Result<(SheetId, SchemaPart), DocumentError> {
+    pub fn decode(entry: &EntryName, bytes: &[u8]) -> Result<(SheetId, SchemaPart), DocumentError> {
         let EntryName::Schema { sheet } = entry else {
             return Err(invalid_entry(
                 entry,
@@ -228,7 +225,9 @@ fn raw_payload(payload: &RawJson) -> Result<Box<RawValue>, DocumentError> {
 /// `entry` はエントリ名を前置する前の理由であり、[`with_entry`] が対象エントリ名を
 /// 付ける（復号の入口は [`invalid_entry`] を直接使う）。
 fn invalid_schema(reason: impl fmt::Display) -> DocumentError {
-    DocumentError::InvalidContainer { entry: format!("{CODEC_CONTEXT}: {reason}") }
+    DocumentError::InvalidContainer {
+        entry: format!("{CODEC_CONTEXT}: {reason}"),
+    }
 }
 
 /// エントリ名を持たない内部失敗へ、対象エントリ名を前置する。
@@ -241,7 +240,9 @@ fn with_entry(entry: &EntryName, error: DocumentError) -> DocumentError {
 
 /// エントリ名を文脈にした失敗（復号の入口と、エントリ種別の取り違え）。
 fn invalid_entry(entry: &EntryName, reason: impl fmt::Display) -> DocumentError {
-    DocumentError::InvalidContainer { entry: format!("{entry}: {reason}") }
+    DocumentError::InvalidContainer {
+        entry: format!("{entry}: {reason}"),
+    }
 }
 
 #[cfg(test)]
@@ -259,8 +260,7 @@ mod tests {
 
     /// 標本ルート: 内部の空白・`\uXXXX` エスケープ表記・日本語・絵文字・i64 を超える整数
     /// リテラル・入れ子・`$ref` を含む（不透明ペイロードの verbatim 保持の検証）。
-    const ROOT: &str =
-        r#"{ "cols" : [ {"name":"金額","kind":9999999999999999999999999} ,"e🎉\n\u00e9" ] ,"z": null ,"r":{"$ref":"R1"} }"#;
+    const ROOT: &str = r#"{ "cols" : [ {"name":"金額","kind":9999999999999999999999999} ,"e🎉\n\u00e9" ] ,"z": null ,"r":{"$ref":"R1"} }"#;
 
     /// 標本の型定義 A: 入れ子・配列・指数表記・`$ref` を含む。
     const DEF_A_JSON: &str = r#"[ {"$ref":"R2"} ,"\u00e9",1e30,{"deep":[[null]],"empty":{}} ]"#;
@@ -290,8 +290,10 @@ mod tests {
 
     /// 型定義 `defs` 件のエンベロープを確定形で組み立てる（未知フィールド無し）。
     fn envelope(root: &str, defs: &[(&str, &str)]) -> String {
-        let elements: Vec<String> =
-            defs.iter().map(|(id, definition)| element(id, definition)).collect();
+        let elements: Vec<String> = defs
+            .iter()
+            .map(|(id, definition)| element(id, definition))
+            .collect();
         format!(r#"{{"root":{root},"types":[{}]}}"#, elements.join(","))
     }
 
@@ -318,8 +320,7 @@ mod tests {
 
         let (decoded_sheet, decoded) = SchemaCodec::decode(&encoded_entry, &bytes).expect("復号");
         assert_eq!(sheet_id, decoded_sheet, "復号でシート識別子が変わった");
-        let (re_entry, re_bytes) =
-            SchemaCodec::encode(decoded_sheet, &decoded).expect("再符号化");
+        let (re_entry, re_bytes) = SchemaCodec::encode(decoded_sheet, &decoded).expect("再符号化");
         assert_eq!(encoded_entry, re_entry, "再符号化でエントリ名が変わった");
         assert_eq!(bytes, re_bytes, "復号 → 再符号化でバイト列が変わった");
         decoded
@@ -332,7 +333,10 @@ mod tests {
 
     /// 型定義識別子をテキストの列として取り出す。
     fn type_def_ids(part: &SchemaPart) -> Vec<String> {
-        part.type_def_ids().iter().map(|id| id.to_string()).collect()
+        part.type_def_ids()
+            .iter()
+            .map(|id| id.to_string())
+            .collect()
     }
 
     // --- 不透明ペイロードの完全な往復（要件 1.3, 2.2） -----------------------
@@ -363,7 +367,10 @@ mod tests {
         let part =
             SchemaPart::parse(&envelope(r#"{"a":1}"#, &[(DEF_A, "null")])).expect("標本は妥当");
         let (entry_name, bytes) = SchemaCodec::encode(sheet(SHEET_A), &part).expect("符号化");
-        assert_eq!("schemas/01K4ANRRG004HMASW9NF6YY093.json", entry_name.to_string());
+        assert_eq!(
+            "schemas/01K4ANRRG004HMASW9NF6YY093.json",
+            entry_name.to_string()
+        );
         assert_eq!(
             r#"{"root":{"a":1},"types":[{"id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","definition":null}]}"#,
             text(&bytes),
@@ -371,8 +378,8 @@ mod tests {
         );
 
         // 空のスキーマも同じ確定形になる（`types` は常に書く）。
-        let (_, empty_bytes) = SchemaCodec::encode(sheet(SHEET_B), &SchemaPart::empty())
-            .expect("符号化");
+        let (_, empty_bytes) =
+            SchemaCodec::encode(sheet(SHEET_B), &SchemaPart::empty()).expect("符号化");
         assert_eq!(r#"{"root":null,"types":[]}"#, text(&empty_bytes));
 
         // 入力の既知キーが宣言順でなくても、出力は常に宣言順へ揃う（`types` → `root` の
@@ -394,7 +401,10 @@ mod tests {
     fn a_missing_types_key_means_zero_definitions_and_normalizes_to_an_empty_array() {
         let bytes = br#"{"root":{"a":1}}"#;
         let (_, part) = SchemaCodec::decode(&entry_for(SHEET_A), bytes).expect("復号");
-        assert!(part.type_defs().is_empty(), "`types` 欠落が 0 件と解釈されていない");
+        assert!(
+            part.type_defs().is_empty(),
+            "`types` 欠落が 0 件と解釈されていない"
+        );
         let (_, written) = SchemaCodec::encode(sheet(SHEET_A), &part).expect("符号化");
         assert_eq!(r#"{"root":{"a":1},"types":[]}"#, text(&written));
     }
@@ -405,8 +415,11 @@ mod tests {
     /// どこにあっても、読み → 書き戻しが**バイト単位**に元へ戻る。
     #[test]
     fn unknown_top_level_fields_round_trip_byte_for_byte() {
-        let elements =
-            format!("{},{}", element(DEF_A, DEF_A_JSON), element(DEF_B, DEF_B_JSON));
+        let elements = format!(
+            "{},{}",
+            element(DEF_A, DEF_A_JSON),
+            element(DEF_B, DEF_B_JSON)
+        );
         let cases = [
             // 前（既知フィールドの手前）
             format!(r#"{{"future":{{"rev":2}},"root":{ROOT},"types":[{elements}]}}"#),
@@ -418,8 +431,16 @@ mod tests {
 
         for input in cases {
             let part = assert_round_trip(SHEET_A, &input);
-            assert_eq!(2, part.type_defs().len(), "未知キーが既知フィールドを隠している");
-            assert_eq!(ROOT, part.root().as_str(), "未知キーの保持でルートが変わった");
+            assert_eq!(
+                2,
+                part.type_defs().len(),
+                "未知キーが既知フィールドを隠している"
+            );
+            assert_eq!(
+                ROOT,
+                part.root().as_str(),
+                "未知キーの保持でルートが変わった"
+            );
         }
     }
 
@@ -437,13 +458,15 @@ mod tests {
         );
         let second = format!(r#"{{"id":"{DEF_B}","definition":{DEF_B_JSON},"added_in":"1.1"}}"#);
         let third = element(DEF_C, "null");
-        let input =
-            format!(r#"{{"root":{ROOT},"types":[{first},{second},{third}]}}"#);
+        let input = format!(r#"{{"root":{ROOT},"types":[{first},{second},{third}]}}"#);
 
         let part = assert_round_trip(SHEET_A, &input);
 
         // 未知キーは既知フィールドを隠さない（識別子も本文も正しく読める）。
-        assert_eq!(vec![DEF_A.to_owned(), DEF_B.to_owned(), DEF_C.to_owned()], type_def_ids(&part));
+        assert_eq!(
+            vec![DEF_A.to_owned(), DEF_B.to_owned(), DEF_C.to_owned()],
+            type_def_ids(&part)
+        );
         assert_eq!(DEF_A_JSON, part.type_defs()[0].definition().as_str());
         assert_eq!(DEF_B_JSON, part.type_defs()[1].definition().as_str());
         assert_eq!("null", part.type_defs()[2].definition().as_str());
@@ -460,14 +483,37 @@ mod tests {
         let cases: Vec<(&str, String)> = vec![
             ("root 欠落", r#"{"types":[]}"#.to_owned()),
             ("root 重複", r#"{"root":1,"root":2,"types":[]}"#.to_owned()),
-            ("types 重複", r#"{"root":{},"types":[],"types":[]}"#.to_owned()),
+            (
+                "types 重複",
+                r#"{"root":{},"types":[],"types":[]}"#.to_owned(),
+            ),
             ("types が配列でない", r#"{"root":{},"types":{}}"#.to_owned()),
-            ("types の要素がオブジェクトでない", r#"{"root":{},"types":[1]}"#.to_owned()),
-            ("型定義に id が無い", format!(r#"{{"root":0,"types":[{}]}}"#, element("", "{}"))),
-            ("型定義に definition が無い", format!(r#"{{"root":0,"types":[{{"id":"{DEF_A}"}}]}}"#)),
-            ("id が ULID でない", format!(r#"{{"root":0,"types":[{}]}}"#, element("not-a-ulid", "{}"))),
-            ("id が重複", format!(r#"{{"root":0,"types":[{{"id":"{DEF_A}","id":"{DEF_B}","definition":{{}}}}]}}"#)),
-            ("参照の値が非文字列", r#"{"root":{"a":{"$ref":123}}}"#.to_owned()),
+            (
+                "types の要素がオブジェクトでない",
+                r#"{"root":{},"types":[1]}"#.to_owned(),
+            ),
+            (
+                "型定義に id が無い",
+                format!(r#"{{"root":0,"types":[{}]}}"#, element("", "{}")),
+            ),
+            (
+                "型定義に definition が無い",
+                format!(r#"{{"root":0,"types":[{{"id":"{DEF_A}"}}]}}"#),
+            ),
+            (
+                "id が ULID でない",
+                format!(r#"{{"root":0,"types":[{}]}}"#, element("not-a-ulid", "{}")),
+            ),
+            (
+                "id が重複",
+                format!(
+                    r#"{{"root":0,"types":[{{"id":"{DEF_A}","id":"{DEF_B}","definition":{{}}}}]}}"#
+                ),
+            ),
+            (
+                "参照の値が非文字列",
+                r#"{"root":{"a":{"$ref":123}}}"#.to_owned(),
+            ),
             ("参照の値が null", r#"{"root":{"$ref":null}}"#.to_owned()),
             ("JSON として不正", r#"{"root":}"#.to_owned()),
             ("末尾にゴミ", r#"{"root":{}}x"#.to_owned()),
@@ -491,12 +537,21 @@ mod tests {
 
         // 失敗箇所のラベルはタスク 2.2 のまま（root の失敗は root、型定義の失敗は id）。
         let root_label = invalid_label(&format!(r#"{{"root":{{"$ref":1}}}}"#));
-        assert!(root_label.contains("root"), "root ラベルが無い: {root_label}");
-        assert!(root_label.contains("column"), "位置情報が無い: {root_label}");
+        assert!(
+            root_label.contains("root"),
+            "root ラベルが無い: {root_label}"
+        );
+        assert!(
+            root_label.contains("column"),
+            "位置情報が無い: {root_label}"
+        );
         let type_label = invalid_label(&format!(
             r#"{{"root":{{}},"types":[{{"id":"{DEF_A}","definition":{{"$ref":[]}}}}]}}"#
         ));
-        assert!(type_label.contains(DEF_A), "型定義 id が診断に無い: {type_label}");
+        assert!(
+            type_label.contains(DEF_A),
+            "型定義 id が診断に無い: {type_label}"
+        );
     }
 
     /// 参照に見える文字列は参照ではない（意味論ブラインド）。`$ref` キーを持つオブジェクト
@@ -527,7 +582,10 @@ mod tests {
         let (entry, first) = SchemaCodec::encode(sheet(SHEET_A), &part).expect("符号化");
         let (_, second) = SchemaCodec::encode(sheet(SHEET_A), &part).expect("符号化");
         assert_eq!(entry, entry_for(SHEET_A));
-        assert_eq!(first, second, "同一の SchemaPart の 2 回の符号化がバイト一致しない");
+        assert_eq!(
+            first, second,
+            "同一の SchemaPart の 2 回の符号化がバイト一致しない"
+        );
 
         // 別経路で組み立てた同じ内容（解析 → 復号 → 再符号化）も同じバイト列になる。
         let (_, decoded) = SchemaCodec::decode(&entry, &first).expect("復号");
@@ -538,7 +596,11 @@ mod tests {
         let other = SchemaPart::parse(&input).expect("標本は妥当");
         let (_, fourth) = SchemaCodec::encode(sheet(SHEET_A), &other).expect("符号化");
         assert_eq!(first, fourth);
-        assert_eq!(input, text(&first), "未知フィールドを含む入力が往復で変わった");
+        assert_eq!(
+            input,
+            text(&first),
+            "未知フィールドを含む入力が往復で変わった"
+        );
     }
 
     // --- シートごとに独立したエントリ（要件 2.2） ---------------------------
@@ -549,14 +611,23 @@ mod tests {
     fn sheets_get_independent_entries_and_recover_their_identifiers() {
         let sheet_a = sheet(SHEET_A);
         let sheet_b = sheet(SHEET_B);
-        assert_ne!(sheet_a, sheet_b, "標本のシート識別子が同一で、検証にならない");
+        assert_ne!(
+            sheet_a, sheet_b,
+            "標本のシート識別子が同一で、検証にならない"
+        );
 
         let part = sample_part();
         let (entry_a, bytes_a) = SchemaCodec::encode(sheet_a, &part).expect("符号化");
         let (entry_b, bytes_b) = SchemaCodec::encode(sheet_b, &part).expect("符号化");
         assert_ne!(entry_a, entry_b, "異なるシートが同じエントリ名になった");
-        assert_eq!("schemas/01K4ANRRG004HMASW9NF6YY093.json", entry_a.to_string());
-        assert_eq!("schemas/01K4ANRSF804HMASW9QKFG04HM.json", entry_b.to_string());
+        assert_eq!(
+            "schemas/01K4ANRRG004HMASW9NF6YY093.json",
+            entry_a.to_string()
+        );
+        assert_eq!(
+            "schemas/01K4ANRSF804HMASW9QKFG04HM.json",
+            entry_b.to_string()
+        );
         assert_eq!(bytes_a, bytes_b, "同じスキーマのバイト列がシートで変わった");
 
         for (entry_name, expected) in [(&entry_a, sheet_a), (&entry_b, sheet_b)] {
