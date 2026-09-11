@@ -41,6 +41,10 @@
 //! - [`shell_cmds`]: app-shell 自身のコマンド（本タスク 7.1 の設定の読み書きと、設定変更の
 //!   通知の配線）。
 //! - [`bulk`]: 大きなペイロードの経路（タスク 7.2）。封筒を通らない唯一のコマンドを持つ。
+//! - [`crate::window::close`]: 終了拒否の仲介（タスク 7.6）。フロントエンドの購読から呼ばれる
+//!   `can_close_window` を持ち、委譲点の判定を境界へ写す。**この機能の実体はウィンドウの
+//!   ライフサイクル（`window/`）側にある**ため、コマンド関数もそこに置く（design.md の
+//!   ディレクトリ構成に従う）。根はここで列挙するだけである。
 
 mod bulk;
 mod shell_cmds;
@@ -88,6 +92,7 @@ command_root! {
     command_names::SETTINGS_GET => shell_cmds::settings_get,
     command_names::SETTINGS_SET => shell_cmds::settings_set,
     command_names::BULK_ECHO => bulk::bulk_echo,
+    command_names::CAN_CLOSE_WINDOW => crate::window::close::can_close_window,
 }
 
 #[cfg(test)]

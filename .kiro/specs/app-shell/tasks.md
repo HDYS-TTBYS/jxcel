@@ -309,7 +309,7 @@
   - _Requirements: 3.3, 3.5_
   - _Depends: 6.1, 7.4_
 
-- [ ] 7.6 ウィンドウの終了拒否の仲介を実装する
+- [x] 7.6 ウィンドウの終了拒否の仲介を実装する
   - 終了の可否は非同期に決まるが、基盤は可否を待たずに読む。**したがって待ってから拒否することはできない**
   - フロントエンド側の購読が登録されているだけで自動的に拒否される仕組みに非同期の往復を載せる。**この往復にはコマンド面と呼び出しラッパが必要である**
   - 拒否が解除された後に閉じるときは、終了要求を再発火しない方の操作を使う。再発火する操作を使うと拒否に再突入する
@@ -479,6 +479,13 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **7.6（機構・重要）**: 終了拒否は**フロントエンドの購読が存在するだけで基盤が自動で拒否する**。`tauri-2.11.5/src/manager/window.rs:170-174` が `has_js_listener("tauri://close-requested")` を見て `api.prevent_close()` し、同イベントを emit する。**したがって Rust 側に 2 つ目の拒否を足してはならない**。JS 側（`@tauri-apps/api` 2.11.1 の `window.js:1632-1639`）はハンドラが `preventDefault()` を呼ばない場合に限り `this.destroy()` を実行するので、**購読側は常に同期的に `preventDefault()` を呼び、閉じるか否かは往復の結果だけが決める**。閉じる確定操作は **`destroy()` のみ**（`close()` は `CloseRequested` を再発火して自動拒否へ再突入する）。
+- **7.6**: 境界は `can_close_window`（**要求型を持たない**。呼び出し元は注入された `WebviewWindow` からのみ得る＝偽装不可）。応答は `IpcResult<CanCloseWindowResponse, IpcError>`、`CanCloseWindowResponse { context, verdict }`、`WindowCloseVerdict = Allow | Deny{reason}`。**`Deny` は `status: "ok"` 側**（「委譲先が拒否した」と「通信が失敗した」をフロントが区別できるように）。判定は 6.2 の `app.state::<DocumentHostPort>()` を実行時に引く（6.2 の申し送りをここで履行）。ACL は `permissions/app.toml` の `allow-can-close-window` ＋ `capabilities/default.json` の許可（**与えないと pruning で消える**）。
+- **7.6**: 実装は `src-tauri/src/window/close.rs`（仲介と判定の写像）＋ `src/shell/closeVeto.ts`（購読と往復。`installCloseVeto()` を `src/main.tsx` で結線）。**コマンド失敗／`destroy()` 失敗のときは閉じない**（不明な判定で閉じると未保存の変更を破棄しうる。購読は残るので再試行でき、閉じられなくなる経路は無い）。購読の登録自体に失敗した場合は基盤が「JS リスナ無し」と見なして通常どおり閉じる。
+- **7.6（ライブ実測）**: `npx tauri build --debug --no-bundle --features verification-triggers` ＋ `GDK_BACKEND=x11`、`WM_DELETE_WINDOW` を ctypes `XSendEvent`（`event_mask=0`）で送る。拒否（`JXCEL_VERIFICATION_DENY_CLOSE=<label>`）→ ウィンドウは `xwininfo` に残りプロセスも生存、**位置とサイズの保存行は 0 件**。許可 → ウィンドウもプロセスも消え（最後の 1 枚 → 終了。2.8 維持）、`Destroyed` 経路で保存が 1 件。**1 回の終了要求につき往復はちょうど 1 回**（拒否したウィンドウへ 3 回送って 1・2・3 件と単調増加、ループせず再試行できる）。拒否の判定が ports から来ていることもログ 2 行で確認済み。
+- **7.6（テスト基盤の制約）**: **RED 相当の自動試験はこのリポジトリでは書けない**。`tauri` は `features = []` で `[dev-dependencies]` も無く、`tauri::test` / `mock_runtime` は使われていない。`can_close_window` は `WebviewWindow`（Wry）を取るため、`mock_runtime` では引数を構成できず、シグネチャを変えない限り単体化できない。**GUI 経路の受入はホスト実行で観測する**のが 5.4 / 6.3 / 7.4 / 7.5 と同じこのプロジェクトの流儀。**10.4/10.5 が 3 OS での実測を担う。**
+
 
 - **7.5（重要・基盤の限界）**: **tauri 2.11.5 のメニューイベントは項目 id のみを運び、発生元ウィンドウを渡す API は存在しない**（`MenuEvent { id }`、`tauri/src/app.rs` が全リスナへ配る。`Window::on_menu_event` も「自分の」ウィンドウとともに全イベントで呼ばれるだけ）。**したがってウィンドウ単位の環境でも、発生元は活性化時点のフォーカスから復元している**（メニューバーのショートカットはフォーカスを持つウィンドウでしか発火しない性質に依拠）。`menu.rs` の `activation_target` / `routed_target` / `select_focused`（決定的）が唯一の解決点で、`PerWindow` は発生元、`ApplicationWide` は活性化時点のフォーカス（古い値は決して勝たない）。design.md の該当行にこの逸脱を注記済み。**10.6 が 3 OS で実キー入力により作用先＝フォーカス中ウィンドウを確認する**。
 - **7.5**: 対象が無いときも選択は通知され、`MenuSelection::window()` は `None`（ログは「対象ウィンドウ=(対象なし)」）。有効・無効の計算も同じ解決を使う。**再計算の起動点は `menu::refresh`** で、(1) `on_window_event` の `Focused(_)`（出入り両方）、(2) `Destroyed`、(3) ウィンドウ生成完了直後。メニューバーは組み直さず項目の状態のみ更新する。

@@ -12,6 +12,9 @@
 //! - 7.1: 設定コマンドの入力と応答（[`SettingsGetRequest`] / [`SettingsSetRequest`] /
 //!   [`SettingsResponse`] / [`SettingsValue`]）と、設定変更のイベント（[`SETTINGS_CHANGED_EVENT`] /
 //!   [`SettingsChangedEvent`]）
+//! - 7.6: 終了可否の問い合わせの応答（[`CanCloseWindowResponse`] / [`WindowCloseVerdict`]）。
+//!   **要求の型は無い** — 呼び出し元ウィンドウは Tauri が注入する `WebviewWindow` から得るため、
+//!   フロントエンドがウィンドウを申告する payload を持たない（偽装できない）
 
 use serde::{Deserialize, Serialize};
 
@@ -171,6 +174,42 @@ pub struct SettingsChangedEvent {
     pub value: SettingsValue,
 }
 
+/// ウィンドウを閉じてよいかの判定（タスク 7.6。要件 2.6）。
+///
+/// ドキュメント所有者への委譲点（`src-tauri/src/ports.rs` の `CloseVerdict`）の判定を、
+/// そのまま境界の形へ写したものである。`verdict` を判別子とする判別可能な合併型として
+/// TypeScript へ落ちるため、フロントエンドは `verdict` で網羅的に分岐できる。
+///
+/// **`Deny` は失敗ではない。**「委譲先が閉じてはならないと答えた」という正常な応答であり、
+/// 封筒（[`IpcResult`]）の `status: "error"` の腕には載せない。`reason` は利用者へ伝えるための
+/// 材料であり、**見せ方を決めるのは呼び出し元（フロントエンド）である**
+/// （tasks.md 6.2 / 7.6。ここで文言を確定しない）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(tag = "verdict")]
+pub enum WindowCloseVerdict {
+    /// 閉じてよい。
+    Allow,
+    /// 閉じてはならない。`reason` は拒否の理由（空でもよい）。
+    Deny {
+        /// 拒否の理由。利用者へ提示するための材料であり、そのまま見せる文言とは限らない。
+        reason: String,
+    },
+}
+
+/// ウィンドウを閉じてよいかの問い合わせの応答（タスク 7.6。要件 2.6、4.6）。
+///
+/// **呼び出し元ウィンドウの文脈を必ず含む。**呼び出し元は Tauri が注入する
+/// `WebviewWindow` から得るので、**フロントエンドがウィンドウの識別子を payload で申告する
+/// 経路は存在しない**（偽装できない。要件 4.6、tasks.md 7.1）。`verdict` が委譲先の判定で
+/// あり、`Allow` のときだけフロントエンドがウィンドウを破棄する。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct CanCloseWindowResponse {
+    /// 呼び出し元ウィンドウの文脈（要件 4.6）。
+    pub context: WindowContext,
+    /// ドキュメント所有者の判定（要件 2.6）。
+    pub verdict: WindowCloseVerdict,
+}
+
 /// TypeScript の生成物を再生成する、唯一の文書化されたコマンド（タスク 2.2）。
 ///
 /// 生成物のヘッダにもこの文字列を埋め込むため、定数として一箇所に持つ。実行ファイルは
@@ -266,6 +305,21 @@ fn concrete_window_context_result(cfg: &ts_rs::Config) -> (String, String) {
     (NAME.to_owned(), text)
 }
 
+/// 終了可否の応答の具体形（タスク 7.6）。 [`concrete_window_context_result`] と同じ理由で
+/// 置く。ペイロード型は [`CanCloseWindowResponse`] である。
+fn concrete_can_close_window_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "CanCloseWindowResult";
+    let mut text = String::from(
+        "// 終了可否の問い合わせの応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を\n\
+         // 名指ししないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<CanCloseWindowResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
 /// 設定コマンドの応答の具体形（タスク 7.1）。 [`concrete_window_context_result`] と同じ理由で
 /// 置く。ペイロード型は [`SettingsResponse`] である。
 fn concrete_settings_result(cfg: &ts_rs::Config) -> (String, String) {
@@ -301,10 +355,13 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<SettingsSetRequest>(&cfg),
         declared::<SettingsResponse>(&cfg),
         declared::<SettingsChangedEvent>(&cfg),
+        declared::<WindowCloseVerdict>(&cfg),
+        declared::<CanCloseWindowResponse>(&cfg),
         declared::<IpcError>(&cfg),
         declared::<IpcResult<WindowContext, IpcError>>(&cfg),
         concrete_window_context_result(&cfg),
         concrete_settings_result(&cfg),
+        concrete_can_close_window_result(&cfg),
     ];
     declarations.sort_by(|a, b| a.0.cmp(&b.0));
 

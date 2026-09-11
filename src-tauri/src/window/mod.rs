@@ -38,11 +38,14 @@
 //! **`verification-triggers` feature でのみコンパイルされる**（既定のビルドには検証専用の
 //! 経路が入らない。tasks.md 5.4 の申し送り）。
 //!
-//! 子モジュール [`close`]（終了拒否の仲介 / タスク 7.6）は 1.3 が置いた骨組みのままである。
+//! 子モジュール [`close`]（終了拒否の仲介 / タスク 7.6）は、フロントエンドの購読から呼ばれる
+//! `can_close_window` コマンドを持ち、委譲点（[`crate::ports::DocumentHostPort`]）の判定を
+//! 境界へ写す。**Rust 側は拒否を足さない** — 基盤が「JS リスナの存在」だけで自動的に拒否し、
+//! 可否の往復はフロントエンドが載せる（[`close`] のモジュール doc を参照）。
 //! [`geometry`]（位置とサイズの記憶 / 要件 2.7 / タスク 6.3）は生成の初期値（[`build_window`]）
 //! と破棄の通知（[`on_window_event`]）の 2 箇所に結線されている。
 
-mod close;
+pub(crate) mod close;
 mod geometry;
 
 use std::collections::BTreeMap;
@@ -208,6 +211,12 @@ pub fn focus<R: Runtime>(window: &WebviewWindow<R>) {
 ///    必ず登録を見つける**（登録が漏れない）。破棄はウィンドウが閉じられた後に届くので、
 ///    ここで取り除いた登録はもう使われない。**ウィンドウの集合が変わった**ので、ここでも
 ///    メニューの有効・無効を計算し直す（対象ウィンドウが消えると対象が無くなる）。
+///
+/// **`WindowEvent::CloseRequested` で `prevent_close()` を呼ばない。** Tauri は
+/// `tauri://close-requested` の JS リスナが登録されているだけで自動的に拒否する
+/// （`tauri` 2.11.5 の `src/manager/window.rs`）。可否の往復はフロントエンドが
+/// [`close`] の `can_close_window` で載せるので、ここに 2 つ目の拒否を重ねると
+/// その経路まで塞いでしまう（[`close`] のモジュール doc）。
 pub fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
     geometry::observe(window, event);
     // フォーカスの出入りの両方で更新する（アプリ全体のメニューでは、フォーカスを失ったときに

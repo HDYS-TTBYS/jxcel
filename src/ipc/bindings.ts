@@ -33,6 +33,26 @@ export const SETTINGS_CHANGED_EVENT = "settings_changed";
 // 境界を越える型（crates/app-shell/src/ipc/ の定義から ts-rs が生成）
 
 /**
+ * ウィンドウを閉じてよいかの問い合わせの応答（タスク 7.6。要件 2.6、4.6）。
+ *
+ * **呼び出し元ウィンドウの文脈を必ず含む。**呼び出し元は Tauri が注入する
+ * `WebviewWindow` から得るので、**フロントエンドがウィンドウの識別子を payload で申告する
+ * 経路は存在しない**（偽装できない。要件 4.6、tasks.md 7.1）。`verdict` が委譲先の判定で
+ * あり、`Allow` のときだけフロントエンドがウィンドウを破棄する。
+ */
+export type CanCloseWindowResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈（要件 4.6）。
+ */
+context: WindowContext, 
+/**
+ * ドキュメント所有者の判定（要件 2.6）。
+ */
+verdict: WindowCloseVerdict, };
+// 終了可否の問い合わせの応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を
+// 名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type CanCloseWindowResult = IpcResult<CanCloseWindowResponse, IpcError>;
+/**
  * 失敗の原因を区別できる列挙（要件 4.4）。文字列だけのエラーにしない。
  *
  * `kind` を判別子とし、原因ごとの詳細を `detail` に持つ判別可能な合併型として TypeScript へ
@@ -133,6 +153,23 @@ value: SettingsValue, };
  * 列挙の新定型は serde でも内側の値そのものとして直列化される（[`WindowLabel`] と同じ）。
  */
 export type SettingsValue = unknown;
+/**
+ * ウィンドウを閉じてよいかの判定（タスク 7.6。要件 2.6）。
+ *
+ * ドキュメント所有者への委譲点（`src-tauri/src/ports.rs` の `CloseVerdict`）の判定を、
+ * そのまま境界の形へ写したものである。`verdict` を判別子とする判別可能な合併型として
+ * TypeScript へ落ちるため、フロントエンドは `verdict` で網羅的に分岐できる。
+ *
+ * **`Deny` は失敗ではない。**「委譲先が閉じてはならないと答えた」という正常な応答であり、
+ * 封筒（[`IpcResult`]）の `status: "error"` の腕には載せない。`reason` は利用者へ伝えるための
+ * 材料であり、**見せ方を決めるのは呼び出し元（フロントエンド）である**
+ * （tasks.md 6.2 / 7.6。ここで文言を確定しない）。
+ */
+export type WindowCloseVerdict = { "verdict": "Allow" } | { "verdict": "Deny", 
+/**
+ * 拒否の理由。利用者へ提示するための材料であり、そのまま見せる文言とは限らない。
+ */
+reason: string, };
 /**
  * コマンド呼び出しの文脈（要件 4.2、4.6）。呼び出し元ウィンドウを呼び出し先が識別できる
  * ようにする。

@@ -69,12 +69,16 @@ use app_shell::ipc::WindowLabel;
 /// ウィンドウを閉じてよいかの判定（要件 2.6）。
 ///
 /// **すべてのウィンドウに対して答える。**「答えられない」状態は持たない。
-#[allow(dead_code)] // 終了拒否の仲介（7.6）が判定を読むまでの seam。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CloseVerdict {
     /// 閉じてよい。
     Allow,
     /// 閉じてはならない。
+    ///
+    /// **既定のビルドでは構築されない** — 拒否を返すのは差し替えられた宿主（下流スペックの
+    /// ドキュメント所有者、および検証ビルドの委譲先）だけである。それでも封筒の写像
+    /// （[`crate::window::close`] の `to_boundary`）がこの腕を読むので、契約として必要である。
+    #[allow(dead_code)]
     Deny {
         /// 拒否の理由。**利用者へそのまま見せる文言ではなく、呼び出し元が伝えるための材料**で
         /// ある（見せ方を決めるのはタスク 7.6）。空でもよい。
@@ -82,7 +86,6 @@ pub enum CloseVerdict {
     },
 }
 
-#[allow(dead_code)] // 終了拒否の仲介（7.6）が判定を読むまでの seam。
 impl CloseVerdict {
     /// 許可かどうか。
     pub fn is_allow(&self) -> bool {
@@ -181,7 +184,6 @@ impl DocumentHost for DefaultDocumentHost {
 /// `Manager::manage<T>()` は同じ型を 2 回置けず、置いた値を後から入れ替える口も持たないため、
 /// 「不変の置き場（本型）」と「差し替え可能な宿主（[`DocumentHost`] の実装）」を分けている。
 /// 差し替えの接続点はファイル冒頭の「差し替え（下流スペックの接続点）」を参照。
-#[allow(dead_code)] // 委譲点の呼び出し元（7.6/7.7）と差し替え（下流スペック）が使うまでの seam。
 pub struct DocumentHostPort {
     /// 現在の宿主。読み手はこの [`Arc`] を複製してからロックを離すので、宿主の呼び出し中に
     /// ロックを保持しない（宿主が [`install`](Self::install) を呼び返してもデッドロックしない）。
@@ -242,6 +244,99 @@ impl DocumentHostPort {
         self.host.write().unwrap_or_else(PoisonError::into_inner)
     }
 }
+
+// ---------------------------------------------------------------------------
+// 検証専用の委譲先（`verification-triggers` feature の下にのみ存在する）
+// ---------------------------------------------------------------------------
+
+/// 検証専用: 拒否するウィンドウのラベルを与える環境変数の名前。
+///
+/// **この定数は `verification-triggers` feature の下にのみ存在する。** 既定のビルド（配布物）
+/// には名前自体が無いので、環境変数を読むコードを既定の経路へ繋ぐことは**コンパイルできない**。
+/// 実行時の担保は `strings -a` による不在の確認である（tasks.md 5.4 の申し送りを 7.4 が
+/// feature 化し、7.6 がその規約に従う）。
+///
+/// 値は**ラベルそのもの**（例 `empty-1`）である。名前が指すラベルのウィンドウだけを拒否し、
+/// 他のラベル・未設定・空文字のときは許可する。**許可と拒否の両方の腕を同じバイナリで実測
+/// できる**ようにするための形である。
+#[cfg(feature = "verification-triggers")]
+pub const VERIFY_DENY_CLOSE_ENV: &str = "JXCEL_VERIFICATION_DENY_CLOSE";
+
+/// 検証専用: 名指しされたラベルのウィンドウだけを拒否する委譲先。
+///
+/// **本番の実装ではない。** 完了状態「委譲先が拒否を返すとウィンドウが閉じず、許可を返すと
+/// 閉じる」を実測するには拒否を返す委譲先が要るが、既定実装（[`DefaultDocumentHost`]）は常に
+/// 許可する。そこで**拒否の対象を環境変数で外から選べる**委譲先を検証ビルドにだけ同梱する。
+///
+/// 判定のたびに記録へ 1 行残す。**この行が「ハードコードされた判断ではなく委譲点を通った
+/// 往復である」ことの実測根拠になる**（`strings -a` の不在確認と対で使う）。
+#[cfg(feature = "verification-triggers")]
+#[derive(Debug, Clone)]
+pub struct VerificationDocumentHost {
+    /// このラベルのウィンドウだけを拒否する。
+    deny_label: String,
+}
+
+#[cfg(feature = "verification-triggers")]
+impl VerificationDocumentHost {
+    /// 拒否するラベルを指定して作る。
+    pub fn new(deny_label: impl Into<String>) -> Self {
+        Self {
+            deny_label: deny_label.into(),
+        }
+    }
+}
+
+#[cfg(feature = "verification-triggers")]
+impl DocumentHost for VerificationDocumentHost {
+    fn may_close(&self, window: &WindowLabel) -> CloseVerdict {
+        if window.as_str() == self.deny_label {
+            tauri_plugin_log::log::info!("検証用の委譲先: {} の終了を拒否した", window.as_str());
+            return CloseVerdict::Deny {
+                reason: format!(
+                    "検証用の委譲先が {} の終了を拒否した（{}）",
+                    self.deny_label, VERIFY_DENY_CLOSE_ENV
+                ),
+            };
+        }
+        tauri_plugin_log::log::info!(
+            "検証用の委譲先: {} の終了を許可した（拒否の対象は {}）",
+            window.as_str(),
+            self.deny_label
+        );
+        CloseVerdict::Allow
+    }
+
+    fn attach(&self, _window: &WindowLabel, _path: &Path) -> Result<(), AttachError> {
+        // 既定実装と同じくパスに触れない（本番の実装ではない）。
+        Ok(())
+    }
+}
+
+/// 検証専用: 環境変数 [`VERIFY_DENY_CLOSE_ENV`] がラベルを名指ししていれば、そのラベルだけを
+/// 拒否する委譲先を入れたポートを返す。未設定・空なら `None`（呼び出し側が既定実装へ落ちる）。
+#[cfg(feature = "verification-triggers")]
+pub fn verification_port_from_env() -> Option<DocumentHostPort> {
+    let label = std::env::var(VERIFY_DENY_CLOSE_ENV).ok()?;
+    if label.is_empty() {
+        return None;
+    }
+    Some(DocumentHostPort::new(Arc::new(
+        VerificationDocumentHost::new(label),
+    )))
+}
+
+/// 既定のビルドの委譲点が [`DefaultDocumentHost`] だけで組まれることをコンパイル時に表明する。
+///
+/// 既定のビルドでは検証専用の型・定数（[`VerificationDocumentHost`] /
+/// [`VERIFY_DENY_CLOSE_ENV`]）が**どれも定義されない**。したがって既定の経路
+/// （`crate::lifecycle::document_host_port`）がそれらを名指すコードは未解決の名前になり、
+/// コンパイルできない — これが「配布物に検証専用の拒否を入れない」ことの主要な担保である。
+/// この `const` はそのうえで、既定の経路が [`DocumentHostPort::default`]（＝常に許可する
+/// [`DefaultDocumentHost`]）を指すことを型で名指しする（拒否の不在そのものは、既定ビルドで
+/// のみコンパイルされる `the_default_build_cannot_deny` と `strings -a` が実測する）。
+#[cfg(not(feature = "verification-triggers"))]
+const _: fn() -> DocumentHostPort = DocumentHostPort::default;
 
 #[cfg(test)]
 mod tests {
@@ -423,5 +518,58 @@ mod tests {
             "jxcel-ports-missing-{}-{nanos}",
             std::process::id()
         ))
+    }
+}
+
+/// 既定のビルド（配布物）では**拒否の腕が 1 つも入らない**ことを固定する。
+///
+/// 検証専用の委譲先（[`VerificationDocumentHost`]）は `verification-triggers` の下にのみ
+/// 定義されるため、このテストは既定ビルドでのみコンパイルされる。既定の委譲点が常に許可を
+/// 返すことを実測し、`strings -a` による「検証専用の名前がバイナリに無い」ことの確認と対にする。
+#[cfg(not(feature = "verification-triggers"))]
+#[test]
+fn the_default_build_cannot_deny() {
+    let port = DocumentHostPort::default();
+    assert_eq!(
+        port.may_close(&WindowLabel::new("empty-1")),
+        CloseVerdict::Allow
+    );
+}
+
+/// 検証専用の委譲先の単体テスト（`verification-triggers` の下でのみコンパイルされる）。
+///
+/// **拒否は名指しされたラベルだけ**であることを固定する。これが崩れると、許可の腕の実測
+/// （`JXCEL_VERIFICATION_DENY_CLOSE` に一致しないラベルを指定して閉じる）が成立しなくなる。
+#[cfg(all(test, feature = "verification-triggers"))]
+mod verification_tests {
+    use std::sync::Arc;
+
+    use app_shell::ipc::WindowLabel;
+
+    use super::{CloseVerdict, DocumentHostPort, VerificationDocumentHost};
+
+    #[test]
+    fn the_verification_host_denies_only_the_named_label() {
+        let port = DocumentHostPort::new(Arc::new(VerificationDocumentHost::new("empty-1")));
+        assert!(matches!(
+            port.may_close(&WindowLabel::new("empty-1")),
+            CloseVerdict::Deny { .. }
+        ));
+        assert_eq!(
+            port.may_close(&WindowLabel::new("empty-2")),
+            CloseVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn the_denial_carries_the_named_label_and_the_environment_variable() {
+        let port = DocumentHostPort::new(Arc::new(VerificationDocumentHost::new("doc-1")));
+        let verdict = port.may_close(&WindowLabel::new("doc-1"));
+        let reason = verdict.reason().expect("拒否には理由が付く");
+        assert!(reason.contains("doc-1"), "理由にラベルが無い: {reason}");
+        assert!(
+            reason.contains(crate::ports::VERIFY_DENY_CLOSE_ENV),
+            "理由に環境変数の名前が無い: {reason}"
+        );
     }
 }

@@ -94,6 +94,12 @@
 //! [`menu::attach_to_window`]）に付くので、後から作られるウィンドウ（引き継ぎ・Dock クリック）も
 //! メニューを持つ。個別機能は `app.state::<menu::MenuRegistry>()` から自分の項目を足す。
 //!
+//! タスク 7.6 は**終了拒否の仲介**を結線した（要件 2.6）。委譲点 [`DocumentHostPort`] を
+//! 構築の前に管理状態として置き（[`document_host_port`]）、フロントエンドの購読から呼ばれる
+//! `can_close_window`（[`crate::window::close`]）が**実行時にこのポートを引いて**判定を得る。
+//! **既定のビルドでは常に許可する既定実装だけが入る** — 拒否を返す委譲先は非既定の
+//! `verification-triggers` feature の下にのみ存在し、拒否の実測にだけ使う。
+//!
 //! 本ファイルがまだ持たないもの（各タスクがここへ書き込む）:
 //!
 //! - タスク 7.5: メニュー項目へのショートカットの割り当てと表示、フォーカス先ウィンドウへの
@@ -261,14 +267,15 @@ pub fn run() -> Result<(), StartupError> {
     // 個別機能は `app.state::<MenuRegistry>()` から `register` を呼んで自分の項目を足す。
     // **このポートがメニューの唯一の登録口である**（`menu.rs` のモジュール doc を参照）。
     let builder = builder.manage(menu::MenuRegistry::new());
-    // ドキュメント所有者への委譲点（要件 2.1・2.6。タスク 6.2）。**常に許可し、パスを
-    //   受け取っても何もしない既定実装**をアプリ全体で 1 実体だけ置く。終了拒否の仲介
-    //   （7.6）とネイティブファイル選択（7.7）は `app.state::<DocumentHostPort>()` から
-    //   この実体を取り、判定と引き渡しをこのポート経由で行う。**下流スペックは
-    //   `DocumentHostPort::install`（自分の `setup` フック）か、この行の
-    //   `DocumentHostPort::default()` を `DocumentHostPort::new(自分の実装)` へ置き換える
-    //   ことで差し替える**（`ports.rs` のモジュール doc に接続点を記した）。
-    let builder = builder.manage(DocumentHostPort::default());
+    // ドキュメント所有者への委譲点（要件 2.1・2.6。タスク 6.2 が定義し、7.6 が消費する）。
+    //   **常に許可し、パスを受け取っても何もしない既定実装**をアプリ全体で 1 実体だけ置く。
+    //   終了拒否の仲介（7.6）とネイティブファイル選択（7.7）は
+    //   `app.state::<DocumentHostPort>()` からこの実体を取り、判定と引き渡しをこのポート経由で
+    //   行う。**下流スペックは `DocumentHostPort::install`（自分の `setup` フック）か、この
+    //   行を `DocumentHostPort::new(自分の実装)` へ置き換えることで差し替える**
+    //   （`ports.rs` のモジュール doc に接続点を記した）。既定のビルドでは検証専用の分岐ごと
+    //   存在しない（[`document_host_port`]）。
+    let builder = builder.manage(document_host_port());
     // 破棄の通知をレジストリへ流す。**全ウィンドウに効く**（`tauri.conf.json` の宣言の有無に
     // よらず、`WebviewWindowBuilder` で作ったウィンドウにもマネージャ経由で結線される）。
     let builder = builder.on_window_event(window::on_window_event);
@@ -402,6 +409,33 @@ fn register_single_instance(builder: tauri::Builder<tauri::Wry>) -> tauri::Build
 /// 登録簿を見ることになる。
 fn sweep_orphans_at_startup(app: &AppHandle) -> usize {
     app.state::<Supervisor>().sweep_orphans()
+}
+
+/// ドキュメント所有者への委譲点を組み立てる（要件 2.1・2.6。タスク 6.2 が定義し、7.6 が消費する）。
+///
+/// 既定は**常に許可する** [`DefaultDocumentHost`] である。この関数が構築の前に 1 回だけ呼ばれ、
+/// 出来たポートが管理状態としてアプリ全体で共有される（`Manager::manage` は型ごとに 1 実体）。
+///
+/// # 検証専用の差し替え（非既定の feature）
+///
+/// `verification-triggers` feature が有効な**検証ビルドでのみ**、環境変数
+/// [`crate::ports::VERIFY_DENY_CLOSE_ENV`] が名指しするラベルのウィンドウを拒否する委譲先を
+/// 差し込める（完了状態「委譲先が拒否を返すとウィンドウが閉じず、許可を返すと閉じる」を
+/// 実測するため）。**既定のビルドにはこの分岐ごと存在しない** — 実装は下の
+/// `#[cfg(feature)]` 版だけであり、既定版は [`DocumentHostPort::default`] を返す。
+#[cfg(feature = "verification-triggers")]
+fn document_host_port() -> DocumentHostPort {
+    crate::ports::verification_port_from_env().unwrap_or_default()
+}
+
+/// 既定のビルド（配布物）の委譲点。**常に許可する既定実装だけを使う。**
+///
+/// 検証専用の型・環境変数の名前は `verification-triggers` の下にのみ定義されるため、ここから
+/// 名指すことはできない（名指せば未解決の名前でコンパイルが落ちる）。この関数の存在が
+/// 「既定のビルドに検証専用の拒否が入らない」ことのコンパイル時の担保である。
+#[cfg(not(feature = "verification-triggers"))]
+fn document_host_port() -> DocumentHostPort {
+    DocumentHostPort::default()
 }
 
 /// アプリ全体で 1 つの監督を作る。**タスク 8.1 が差し替える seam である。**

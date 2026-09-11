@@ -47,7 +47,12 @@ identifier = "allow-bulk-echo"
 description = "大きなペイロードを 1 回の往復で受け渡す生バイト経路のコマンド（bulk_echo）を許可する。JSON を通らない応答を返す唯一のコマンドである（要件 4.5）。"
 commands.allow = ["bulk_echo"]
 
+[[permission]]
+identifier = "allow-can-close-window"
+description = "ウィンドウを閉じてよいかをドキュメント所有者へ問い合わせるコマンド（can_close_window）を許可する。呼び出し元ウィンドウは基盤が注入する引数から取るため、フロントエンドはウィンドウを偽装できない（要件 2.6、4.6）。"
+commands.allow = ["can_close_window"]
+
 [[set]]
 identifier = "app-shell"
 description = "app-shell が登録する自前コマンドの集合。capability はこの集合名だけを参照する。ファイルシステム系・シェル系の権限はここにも含めない（要件 4.7）。"
-permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo"]
+permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window"]
