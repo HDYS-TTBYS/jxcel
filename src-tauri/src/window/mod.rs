@@ -44,6 +44,13 @@
 //! 可否の往復はフロントエンドが載せる（[`close`] のモジュール doc を参照）。
 //! [`geometry`]（位置とサイズの記憶 / 要件 2.7 / タスク 6.3）は生成の初期値（[`build_window`]）
 //! と破棄の通知（[`on_window_event`]）の 2 箇所に結線されている。
+//!
+//! **初回描画の監視（要件 10.1、10.2 / タスク 8.2）も同じ 2 箇所に結線されている。**生成が
+//! 成功した時点（[`build_window`]。**ウィンドウ生成の唯一の場所**であるため、起動時・引き継ぎ・
+//! Dock クリックのどの経路でも通る）で [`crate::watchdog::start_watch`] が期限付きの監視を
+//! 始め、破棄の通知で [`crate::watchdog::forget_watch`] が取り消す（**期限より前に閉じられた
+//! ウィンドウを不成立として記録しない**）。実体は Tauri 非依存の中核
+//! （`app_shell::render`）にあり、ここは呼ぶだけである。
 
 pub(crate) mod close;
 mod geometry;
@@ -60,7 +67,10 @@ use tauri::{
 use tauri_plugin_log::log;
 
 /// 生成するウィンドウの表示名。`tauri.conf.json` の `productName` と一致させる。
-const WINDOW_TITLE: &str = "jxcel";
+///
+/// **クレート内に公開する**のは、描画不成立の提示を取り下げるとき（`crate::watchdog`）に
+/// 元の題名へ戻す必要があるためである（同じ綴りを 2 箇所に持たない）。
+pub(crate) const WINDOW_TITLE: &str = "jxcel";
 
 /// 新しいウィンドウの既定の大きさ（論理ピクセル）。
 ///
@@ -180,6 +190,12 @@ fn build_window<R: Runtime>(app: &AppHandle<R>, label: &str) -> tauri::Result<We
     }
     let window = builder.build()?;
     geometry::remember_created(&window);
+    // 初回描画の監視を開始する（要件 10.1、10.2。タスク 8.2）。**ここがウィンドウ生成の
+    // 唯一の場所**なので、起動時・二重起動の引き継ぎ・Dock クリックのどの経路で開かれた
+    // ウィンドウにも監視が付く。期限はこの瞬間から測る（`app_shell::render::FIRST_PAINT_DEADLINE`）。
+    // 破棄は [`on_window_event`] が `forget` で取り消す（期限より前に閉じられたウィンドウを
+    // 不成立として記録しない）。
+    crate::watchdog::start_watch(app, &WindowLabel::new(label.to_owned()));
     // メニューを付ける（要件 3.1, 3.6。タスク 7.4）。**ここがウィンドウ生成の唯一の場所**なので、
     // 後から作られるウィンドウ（起動時・二重起動の引き継ぎ・Dock クリック）にもメニューが付く。
     // ウィンドウ単位のメニューを持てないプラットフォーム（macOS）では何もしない — アプリ全体の
@@ -228,6 +244,10 @@ pub fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
         return;
     }
     let label = window.label().to_owned();
+    // 初回描画の監視を取り消す（要件 10.2。タスク 8.2）。**破棄されたウィンドウを不成立と
+    // して記録しない** — 画面に残っていないので「無内容の画面のまま留まらせる」ことに
+    // 当たらず、記録すると利用者が閉じただけのウィンドウを失敗として数えてしまう。
+    crate::watchdog::forget_watch(window.app_handle(), &WindowLabel::new(label.clone()));
     if let Some(state) = window.state::<WindowRegistry>().remove(&label) {
         log::info!(
             "ウィンドウを閉じた: label={label} ドキュメント={}",

@@ -335,7 +335,7 @@
   - _Requirements: 5.1, 5.2, 5.5, 5.9_
   - _Depends: 1.7, 3.1, 3.2, 3.4, 5.2_
 
-- [ ] 8.2 (P) 初回描画のハートビートと判定を実装する
+- [x] 8.2 (P) 初回描画のハートビートと判定を実装する
   - ウィンドウ生成時に期限付きの監視を開始する。到達の通知を受け取るコマンドを用意する
   - 期限を超過したら診断情報に記録する。**無内容の画面のまま留まらせない**
   - ソフトウェア描画に落ちているかを判定し、判定結果を三値で表す
@@ -479,6 +479,14 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **8.2（契約・重要）**: 通知コマンド `render_heartbeat` の結果は 3 つ。**(a) 初回の通知** → 判定を確定し記録。**(b) 2 回目以降／期限超過の後に届いた通知** → 判定・記録・印のいずれも動かさず、確定済みの判定を `Ok` で返し、**期限超過後なら提示（題名と注意書き）だけを取り下げる**。**(c) 監視していない（未知、または期限より前に破棄された）ウィンドウ** → 封筒の失敗腕 `IpcError::Window`（理由にラベル）。**「期限超過後」は (c) ではなく (b)**（`expire_due` は項目を削除せず判定を書き込むだけなので、その後の通知も `AlreadyDecided` に落ちる）。**この 3 分岐を doc と実装で必ず一致させること**（8.2 は一度ここで棄却された。9.7 / 10.x が doc を正本として読む）。
+- **8.2（判定と期限）**: `FIRST_PAINT_DEADLINE = 3 秒`（ウィンドウ生成から）。起動予算 2 秒（要件 1.3）に対し、ウィンドウ生成は起動の途中なので通知は期限より前に届く（余裕 ≥ 1 秒）。判定は Tauri 非依存の `crates/app-shell/src/render.rs`（実画面なしで検証するため）: 通知＋ラスタライザがソフトウェア実装の綴りに一致 → `SoftwareRaster`／通知あり（一致しない・取得できない）→ `Painted`／期限内に通知なし → `NoPaint`。境界の列挙 `RenderVerdict` だけは ts-rs の都合で `ipc/mod.rs`。
+- **8.2（8.3 への申し送り・重要）**: 印は **`SettingsKey::RenderFallback`（`render.fallback`、全体で 1 つの真偽値）**。意味は「直近に確定した判定が `NoPaint`」。**書くのは `RenderWatchdog` だけ**（`NoPaint` で true、`Painted` / `SoftwareRaster` で false。同値なら書かず、未設定のまま false も書かない）。8.3 は `app_shell::render::render_fallback_pending(&FileSettingsStore)` で読む（8.3 は書かない）。**注意 2 点**: (i) 現行の起動順は `reserve_render_fallback_point`（手順 1）が設定ストアを開く `init_diagnostics`（手順 3）より前なので、8.3 はストアを自前で開くか順序を調整する必要がある。(ii) 印は全体で 1 つなので、混在時（一方の窓が `NoPaint`、他方が `Painted`）は後の `Painted` で false に戻りうる。
+- **8.2（利用者に見えるもの・重要）**: 期限超過時は **(1) OS が描くネイティブの題名**を「jxcel — 描画が成立しませんでした（<経過> ミリ秒待機 / <label>）」に変え、**(2) WebKit が描けるなら全画面の注意書き**を `document.createElement` ＋ **CSSOM** で組んで出す（**アプリのバンドルも CSS も参照しない**）。**CSP `style-src 'self'` は `setAttribute("style", …)` を遮断する**ため、位置も色も CSSOM で与える（**`'unsafe-inline'` を足してはならない**。`the_notice_script_depends_on_no_application_asset` が退行を固定）。加えて診断へ error 1 行。終了も待機もしない。文言は**現時点で真のことだけ**を述べる（8.3 が入るまで「代替経路を試みます」と書かない。`the_notice_states_only_what_is_true_now` が再混入を防ぐ）。
+- **8.2**: 送信側は `src/shell/renderHeartbeat.ts` の `installRenderHeartbeat()`（`main.tsx` で結線）**1 本のみ**。**9.7 はこれを再利用し、2 本目を足してはならない**（両方が通知すると先着が判定を確定するため、どちらが先かは環境依存になる）。JS の引数鍵は `{ request: { renderer } }`（**実測: 鍵が違うと拒否され期限超過になる**）。`UNMASKED_RENDERER_WEBGL` はこのホストの WebKitGTK では汎用の `Apple GPU` を返すため、**ソフトウェア実装の綴りは実機では観測できない**（ヘッドレスのテストが唯一の証拠）。
+- **8.2（検証用の引き金）**: `verification-triggers` の下に `JXCEL_VERIFICATION_SUPPRESS_HEARTBEAT=1`（フロントエンドの通知を抑止して期限超過を起こす）。既定ビルドには識別子も文言も入らない（バイト検索で確認済み）。**10.4 はこの引き金で NoPaint の経路を 3 OS で確認できる。**
+
 
 - **8.1（解決規則・重要）**: Windows / macOS は**実行ファイル自身のディレクトリ**（macOS は `Contents/MacOS`、Windows は `$INSTDIR`）に**トリプル接尾辞を外した語幹**（Windows のみ `.exe`）で置かれる（`external_binaries` が `-<triple>[.exe]` を付与し、`tauri-build::copy_binaries` / tauri-bundler の `Settings::copy_binaries` / NSIS の `installer.nsi` が除去することをソースで確認）。**Linux は `usr/share/jxcel/sidecar-smoke`** で、**AppImage の根は `APPDIR` から取る**。deb も同じ `usr/share/jxcel/` に落ちる（実測）。**`usr/bin` への複製は無い**（走査対象外という決定の実効性を AppImage の中身で確認）。**通常経路で展開する処理は存在しない。**
 - **8.1**: 原本が未配置のときの挙動はプラットフォームで違う（Windows / macOS は `tauri-build` がビルド時に落ち、Linux は `cargo build` は通って実行時に**パスを含む `NotFound`** を記録する。1.7 の記述どおり）。`target/share/jxcel/sidecar-smoke` に同じ形を作れば同じバイナリが解決・起動する（開発時の実測手段）。

@@ -298,6 +298,12 @@ pub fn run() -> Result<(), StartupError> {
     // `startup` は直後に管理状態へ移すため、その前に `Arc` を複製しておく。
     let settings_store = Arc::clone(startup.settings());
     let builder = builder.manage(startup);
+    // 初回描画の監視（要件 10.1・10.2。タスク 8.2）。**判定と記録の中核は Tauri 非依存の
+    // `app_shell::render` にあり、ここは実時計・診断の記録先・8.3 の印を注入して管理状態へ
+    // 置くだけである。**構築の前に置くのは、ウィンドウの生成（構築の後に起きる）が管理状態を
+    // 見つけられない瞬間を作らないためである（時計・記録先・印のどれも `AppHandle` を要さない）。
+    // 期限を見張るスレッドは構築の後に開始する（[`crate::watchdog::start_deadline_watch`]）。
+    let builder = builder.manage(crate::watchdog::render_watch(&settings_store));
     // 補助プロセスのホスト（要件 5.1〜5.3、5.5、5.9。タスク 8.1）。監督を束ね、解決済みの
     // 期待パスを与えたうえでアプリ全体で 1 実体だけ置く。起動時の残留掃除（手順 5）と終了時の
     // 終了（[`shutdown_sidecars`]）が同じ登録簿を見るようにする。**要求元はすべて
@@ -325,7 +331,18 @@ pub fn run() -> Result<(), StartupError> {
         .build(context)
         .map_err(|error| StartupError::new(PREREQUISITE_RUNTIME, error.to_string()))?;
 
-    // 手順 4.1: 設定変更の通知をフロントエンドへ届ける配線（要件 7.4。タスク 7.1）。
+    // 手順 4.0: 初回描画の期限を見張るスレッド（要件 10.1・10.2。タスク 8.2）。
+    //   番号を 4.0 にしてあるのは、4.1〜4.7 の番号が他の doc（`modules` の説明と各手順の
+    //   コメント）から参照されているためである — 挿入で繰り下げると、その参照が指す先を
+    //   すべて書き換える必要がある。
+    //   中核の監視（管理状態。手順 3.5 付近で登録済み）へ実時計と記録先は注入済みなので、
+    //   ここで始めるのは「期限を過ぎた監視を確定させ、確定した不成立を提示する」ループだけ
+    //   である。**構築の後に開始する**（`AppHandle` が要る）。ウィンドウは `RunEvent::Ready`
+    //   （手順 6）以降に作られるため、最初の窓の期限にも間に合う。スレッドはプロセスの寿命と
+    //   同じだけ生きる（ウィンドウごとに立てない）。
+    crate::watchdog::start_deadline_watch(app.handle());
+
+    // 手順 4.2: 設定変更の通知をフロントエンドへ届ける配線（要件 7.4。タスク 7.1）。
     //   共有実体（要件 7.3）へ 1 回だけ `subscribe()` し、専用スレッドが受信ループを回して
     //   変更のたびに全ウィンドウへ Tauri イベントを emit する。**構築の後に置く** — emit には
     //   `AppHandle` が要り、ウィンドウは `RunEvent::Ready`（手順 6）以降に現れる。購読前の変更は

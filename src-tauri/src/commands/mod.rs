@@ -47,6 +47,9 @@
 //!   ディレクトリ構成に従う）。根はここで列挙するだけである。
 //! - [`crate::dialog`]: 親ウィンドウを指定したファイル選択（タスク 7.7）。9.6 の画面から
 //!   呼ばれる `pick_document_file` を持ち、**メニューの項目と同じ 1 本の実装**を通る。
+//! - [`crate::watchdog`]: 初回描画の監視と判定（タスク 8.2）。フロントエンドが描画フレームの
+//!   中から呼ぶ `render_heartbeat` を持ち、判定・記録・8.3 の印を Tauri 非依存の中核
+//!   （`app_shell::render`）へ委ねる。
 
 mod bulk;
 mod shell_cmds;
@@ -91,6 +94,7 @@ macro_rules! command_root {
 }
 
 command_root! {
+    command_names::RENDER_HEARTBEAT => crate::watchdog::render_heartbeat,
     command_names::SETTINGS_GET => shell_cmds::settings_get,
     command_names::SETTINGS_SET => shell_cmds::settings_set,
     command_names::BULK_ECHO => bulk::bulk_echo,

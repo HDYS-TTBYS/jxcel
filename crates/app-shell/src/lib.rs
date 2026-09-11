@@ -14,9 +14,14 @@
 //! 実体は tasks.md の 2.x / 4.x が、補助プロセスの監督（[`sidecar`]）の実体は 3.x が埋める。
 //! 複数のモジュールが参照する共有の列挙（補助プロセスの種類）は [`sidecar::SidecarKind`] に
 //! 定義してある。
+//!
+//! [`render`] は初回描画の監視と三値の判定を所有する（tasks.md 8.2、要件 10.1、10.2）。
+//! **GUI を起動せずに検証できるよう、時計と記録先を注入できる形にしてある** — 判定と記録の
+//! 経路は実画面なしの `cargo test` で固定される。
 
 pub mod accelerator;
 pub mod diagnostics;
 pub mod ipc;
+pub mod render;
 pub mod settings;
 pub mod sidecar;

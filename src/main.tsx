@@ -16,6 +16,7 @@ import { createRoot } from "react-dom/client";
 
 import { installCloseVeto } from "./shell/closeVeto";
 import { Layout } from "./shell/Layout";
+import { installRenderHeartbeat } from "./shell/renderHeartbeat";
 
 // `src/index.html` のマウント先。欠けたまま起動すると無内容のウィンドウが残るため、
 // 黙って握り潰さずに失敗させる（要件 10.2 の趣旨に沿う）。
@@ -30,6 +31,12 @@ if (container === null) {
 // 可否を問い合わせ、許可されたときだけ `destroy()` で閉じる。
 // `installCloseVeto` は例外を投げない（登録に失敗した場合はウィンドウは通常どおり閉じる）。
 void installCloseVeto();
+
+// 初回描画のハートビート（要件 10.1、10.2。タスク 8.2）。**マウントの直後に仕掛け、通知は
+// 描画フレームの中から送る** — 描画失敗を検出する仕組みは基盤側に無いので、フレームが実際に
+// 描かれたことを示せるのはこの経路だけである（`src/shell/renderHeartbeat.ts` のモジュール doc）。
+// 送信は例外を外へ出さず、届かなければ監視側が期限超過として不成立を記録して利用者に提示する。
+installRenderHeartbeat();
 
 createRoot(container).render(
   <StrictMode>

@@ -18,6 +18,9 @@
 //! - 7.7: ファイル選択の結果と応答（[`DocumentPickOutcome`] / [`PickDocumentFileResponse`]）。
 //!   **選択された位置は境界を越えない** — 委譲先（`DocumentHost::attach`）へ引き渡すだけで、
 //!   本機能もフロントエンドもその中身に触れないためである（要件 2.4）
+//! - 8.2: 初回描画の通知の要求と応答、および三値の判定（[`RenderHeartbeatRequest`] /
+//!   [`RenderHeartbeatResponse`] / [`RenderVerdict`]）。**要求はウィンドウを運ばない** —
+//!   呼び出し元は Tauri が注入する `WebviewWindow` から取る（偽装できない。要件 4.6）
 
 use serde::{Deserialize, Serialize};
 
@@ -213,6 +216,59 @@ pub struct CanCloseWindowResponse {
     pub verdict: WindowCloseVerdict,
 }
 
+/// 初回描画の判定（タスク 8.2。要件 10.1、10.2）。**三値である。**
+///
+/// 判定の実体は Tauri 非依存の中核（`crates/app-shell/src/render.rs`）にあり、本型はその
+/// 結果を境界へ出すための形である（`ts-rs` の derive を付けてよい唯一の場所が本モジュールで
+/// あるという不変条件に従う）。写像の根拠は `render.rs` のモジュール doc にある。要約:
+///
+/// - `Painted`（[`RenderVerdict::Painted`]）: 描画フレームの中から通知が届き、ラスタライザが
+///   ハードウェア加速（または判別不能）だった。**描画が成立した。**
+/// - `SoftwareRaster`（[`RenderVerdict::SoftwareRaster`]）: 通知が届いたが、ラスタライザが
+///   既知のソフトウェア実装だった。**描画は成立している**（低速な経路である）。
+/// - `NoPaint`（[`RenderVerdict::NoPaint`]）: 期限までに通知が届かなかった。**描画が成立して
+///   いない。** したがってこの値だけが、次回起動で代替経路を適用するための印を立てる（要件 10.3）。
+///
+/// **タイムアウト（`NoPaint`）とソフトウェアラスタライザ（`SoftwareRaster`）は別の値で
+/// ある。**前者は描画の不成立、後者は描画の成立であり、混同すると要件 10.3 の代替経路を
+/// 正常な環境へ適用してしまう。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub enum RenderVerdict {
+    /// 描画が成立した。
+    Painted,
+    /// 描画は成立したが、ソフトウェアラスタライザ経由だった。
+    SoftwareRaster,
+    /// 期限までに通知が届かず、**描画が成立しなかった**。
+    NoPaint,
+}
+
+/// 初回描画の通知の要求（タスク 8.2。要件 10.1、10.2）。
+///
+/// 運ぶのは**ラスタライザの文字列だけ**である（フロントエンドが
+/// `WEBGL_debug_renderer_info` の `UNMASKED_RENDERER_WEBGL` から得た値。research.md 決定 7）。
+/// 取得できない環境では `null` であり、その場合も通知が届いたこと自体は描画成立の証拠に
+/// なる（中核の写像を参照）。
+///
+/// **ウィンドウは運ばない。** 呼び出し元は Tauri が注入する `WebviewWindow` から取るため、
+/// フロントエンドがウィンドウを偽装する経路は存在しない（要件 4.6、tasks.md 7.1）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct RenderHeartbeatRequest {
+    /// ラスタライザの文字列。取得できなければ `null`。
+    pub renderer: Option<String>,
+}
+
+/// 初回描画の通知の応答（タスク 8.2。要件 10.1、10.2、4.6）。
+///
+/// **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。`verdict` はこの通知で確定した
+/// 判定であり、2 回目以降の通知では最初に確定した値がそのまま返る（上書きしない）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct RenderHeartbeatResponse {
+    /// 呼び出し元ウィンドウの文脈（要件 4.6）。
+    pub context: WindowContext,
+    /// 確定した判定（要件 10.1、10.2）。
+    pub verdict: RenderVerdict,
+}
+
 /// ファイル選択の結果（タスク 7.7。要件 2.4）。
 ///
 /// 選択手段（`src-tauri/src/dialog.rs` の DialogGate）が得た結果と、その位置をドキュメント
@@ -386,6 +442,21 @@ fn concrete_pick_document_file_result(cfg: &ts_rs::Config) -> (String, String) {
     (NAME.to_owned(), text)
 }
 
+/// 初回描画の通知の応答の具体形（タスク 8.2）。 [`concrete_window_context_result`] と同じ理由で
+/// 置く。ペイロード型は [`RenderHeartbeatResponse`] である。
+fn concrete_render_heartbeat_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "RenderHeartbeatResult";
+    let mut text = String::from(
+        "// 初回描画の通知の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を\n\
+         // 名指ししないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<RenderHeartbeatResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
 /// 設定コマンドの応答の具体形（タスク 7.1）。 [`concrete_window_context_result`] と同じ理由で
 /// 置く。ペイロード型は [`SettingsResponse`] である。
 fn concrete_settings_result(cfg: &ts_rs::Config) -> (String, String) {
@@ -425,12 +496,16 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<CanCloseWindowResponse>(&cfg),
         declared::<DocumentPickOutcome>(&cfg),
         declared::<PickDocumentFileResponse>(&cfg),
+        declared::<RenderVerdict>(&cfg),
+        declared::<RenderHeartbeatRequest>(&cfg),
+        declared::<RenderHeartbeatResponse>(&cfg),
         declared::<IpcError>(&cfg),
         declared::<IpcResult<WindowContext, IpcError>>(&cfg),
         concrete_window_context_result(&cfg),
         concrete_settings_result(&cfg),
         concrete_can_close_window_result(&cfg),
         concrete_pick_document_file_result(&cfg),
+        concrete_render_heartbeat_result(&cfg),
     ];
     declarations.sort_by(|a, b| a.0.cmp(&b.0));
 

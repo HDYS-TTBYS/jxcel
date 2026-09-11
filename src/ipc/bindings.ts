@@ -114,6 +114,59 @@ outcome: DocumentPickOutcome, };
 // しないため、境界が名指しできる具体形を明示的に置く。
 export type PickDocumentFileResult = IpcResult<PickDocumentFileResponse, IpcError>;
 /**
+ * 初回描画の通知の要求（タスク 8.2。要件 10.1、10.2）。
+ *
+ * 運ぶのは**ラスタライザの文字列だけ**である（フロントエンドが
+ * `WEBGL_debug_renderer_info` の `UNMASKED_RENDERER_WEBGL` から得た値。research.md 決定 7）。
+ * 取得できない環境では `null` であり、その場合も通知が届いたこと自体は描画成立の証拠に
+ * なる（中核の写像を参照）。
+ *
+ * **ウィンドウは運ばない。** 呼び出し元は Tauri が注入する `WebviewWindow` から取るため、
+ * フロントエンドがウィンドウを偽装する経路は存在しない（要件 4.6、tasks.md 7.1）。
+ */
+export type RenderHeartbeatRequest = { 
+/**
+ * ラスタライザの文字列。取得できなければ `null`。
+ */
+renderer: string | null, };
+/**
+ * 初回描画の通知の応答（タスク 8.2。要件 10.1、10.2、4.6）。
+ *
+ * **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。`verdict` はこの通知で確定した
+ * 判定であり、2 回目以降の通知では最初に確定した値がそのまま返る（上書きしない）。
+ */
+export type RenderHeartbeatResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈（要件 4.6）。
+ */
+context: WindowContext, 
+/**
+ * 確定した判定（要件 10.1、10.2）。
+ */
+verdict: RenderVerdict, };
+// 初回描画の通知の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を
+// 名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type RenderHeartbeatResult = IpcResult<RenderHeartbeatResponse, IpcError>;
+/**
+ * 初回描画の判定（タスク 8.2。要件 10.1、10.2）。**三値である。**
+ *
+ * 判定の実体は Tauri 非依存の中核（`crates/app-shell/src/render.rs`）にあり、本型はその
+ * 結果を境界へ出すための形である（`ts-rs` の derive を付けてよい唯一の場所が本モジュールで
+ * あるという不変条件に従う）。写像の根拠は `render.rs` のモジュール doc にある。要約:
+ *
+ * - `Painted`（[`RenderVerdict::Painted`]）: 描画フレームの中から通知が届き、ラスタライザが
+ *   ハードウェア加速（または判別不能）だった。**描画が成立した。**
+ * - `SoftwareRaster`（[`RenderVerdict::SoftwareRaster`]）: 通知が届いたが、ラスタライザが
+ *   既知のソフトウェア実装だった。**描画は成立している**（低速な経路である）。
+ * - `NoPaint`（[`RenderVerdict::NoPaint`]）: 期限までに通知が届かなかった。**描画が成立して
+ *   いない。** したがってこの値だけが、次回起動で代替経路を適用するための印を立てる（要件 10.3）。
+ *
+ * **タイムアウト（`NoPaint`）とソフトウェアラスタライザ（`SoftwareRaster`）は別の値で
+ * ある。**前者は描画の不成立、後者は描画の成立であり、混同すると要件 10.3 の代替経路を
+ * 正常な環境へ適用してしまう。
+ */
+export type RenderVerdict = "Painted" | "SoftwareRaster" | "NoPaint";
+/**
  * 設定変更の通知（タスク 7.1。要件 7.4）。
  *
  * 設定ストアの通知（`crate::settings::SettingsChanged`）を境界の形へ写したものである。運ぶのは

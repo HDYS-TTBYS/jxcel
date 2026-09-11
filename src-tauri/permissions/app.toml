@@ -57,7 +57,12 @@ identifier = "allow-pick-document-file"
 description = "親ウィンドウを指定したファイル選択を提示するコマンド（pick_document_file）を許可する。親は基盤が注入するウィンドウから取るためフロントエンドは偽装できず、選ばれた位置は委譲先へ渡すだけで中身は読まない（要件 2.4、4.6、4.7）。"
 commands.allow = ["pick_document_file"]
 
+[[permission]]
+identifier = "allow-render-heartbeat"
+description = "初回描画の通知を受け取るコマンド（render_heartbeat）を許可する。呼び出し元ウィンドウは基盤が注入する引数から取るため、フロントエンドはウィンドウを偽装できず、通知できるのは自分の描画フレームに限られる（要件 4.6、10.1、10.2）。"
+commands.allow = ["render_heartbeat"]
+
 [[set]]
 identifier = "app-shell"
 description = "app-shell が登録する自前コマンドの集合。capability はこの集合名だけを参照する。ファイルシステム系・シェル系の権限はここにも含めない（要件 4.7）。"
-permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file"]
+permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file", "allow-render-heartbeat"]
