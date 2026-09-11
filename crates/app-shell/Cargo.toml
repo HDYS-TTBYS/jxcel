@@ -26,6 +26,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # 失敗の原因を区別できる列挙（要件 4.4、5.4）を導出する。
 thiserror = "2.0"
+# 実行時の整合性検査（要件 5.3、tasks.md 3.1）で、解決した補助プロセスのファイルの
+# SHA-256 を計算する。`build.rs` も同じクレートをビルド時依存として使う（下の
+# `[build-dependencies]` を参照）— build スクリプトは通常依存を参照できないため、
+# 同じクレートを両方に宣言する。Cargo は同一の解決版を共有する。
+sha2 = "0.10"
 # 境界を越える型の TypeScript 生成。design.md「Technology Stack」が 12.0.1 を、
 # research.md 決定 1 が `tauri-specta` の却下を確定させている。
 # `serde-compat`（12.0.1 の既定 feature）は serde の `rename` / `tag` 属性を生成結果へ

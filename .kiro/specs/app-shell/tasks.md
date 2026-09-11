@@ -94,7 +94,7 @@
 
 - [ ] 3. Core: 補助プロセスの監督（Tauri 非依存）
 
-- [ ] 3.1 (P) 補助プロセスの整合性検査を実装する
+- [x] 3.1 (P) 補助プロセスの整合性検査を実装する
   - 同梱元ファイルのダイジェストを算出し、コンパイル時の定数として埋め込む処理を用意する。原本が未配置の場合の扱いは配置規約で決めたものに従う
   - 実行時に解決したファイルのダイジェストを算出して定数と照合する
   - **不一致は修復に接続しない**。配布形態によっては書き換えられないため、検出は起動の中止と報告に接続する
@@ -479,6 +479,12 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **3.1**: `crates/app-shell/build.rs` が `<repo>/sidecars/<stem>-<TARGET>[.exe]` の SHA-256 を `$OUT_DIR/sidecar_digests.rs` へ発行し、`src/sidecar/integrity.rs` が `include!` する。**原本が無いターゲットでは空の表を書き、panic しない**（これが `cargo build --workspace` と `xcargo` のクロスターゲット検証を壊さない前提）。`rerun-if-changed` は実測で機能確認済み（原本を 1 バイト変えて再ビルドすると埋め込みダイジェストが変わる）。
+- **3.1**: `IntegrityError` は 3 変種。`Mismatch { kind, expected, actual }`（期待値・実測値の両方を小文字 hex で持ち、Display に両方を含む）、`Unreadable { path }`、**`Unregistered { kind, path }`**（1.7 の申し送りで追加。design の 2 変種では「期待値が埋め込まれていない」を表現できない）。**`Unregistered` はファイルを読む前に判定する**ので、未配置のビルドが `Unreadable` や整合として誤報告されることはない。**修復経路は存在しない**（このモジュールは `std::fs::read` のみ）。
+- **3.1**: `sha2` は **runtime 依存と build 依存の両方**に必要（実行時の照合とビルド時の発行）。`SidecarKind` を増やすスペックは **`build.rs` の `KINDS` 対応表も同時に更新する**こと（重複しており機械的な連動が無い。忘れると `Unregistered` として起動中止側に倒れる）。
+- **3.1**: 試験用の seam として `verify_with(kind, path, expected)` と、生成された `BUILD_TARGET_TRIPLE` がある。後者は **8.1 のプラットフォーム別パス解決の入力**に使える。テストは独立した SHA-256 計算で期待値を作っており、実装の私的ヘルパーに依存しない。
+- **3.1**: CI の段順は `Stage sidecar original`（`ci.yml`）が `Build` / `Test` より前にあるため、CI でも「原本が配置済みの実経路」が走る（1.7 の配置がこの順序になっている）。
 
 - **2.4**: `src/ipc/client.ts` の `invokeCommand` は**解決値をそのまま返す純粋な透過**である。`return await invoke<IpcResult<T, IpcError>>(command, args);` であり、**解決値を新しい封筒で包んではならない**（包むとドメインの失敗が `status: "ok"` として報告され、要件 4.4 が壊れる。round-1 のレビューで棄却された実例）。封筒を新しく作るのは `invoke` が拒否した経路だけ（`{status:"error", error:{kind:"Frontend", detail:{message}}}`）。
 - **2.4**: 合成した誤り型は `IpcClientError = IpcError | FrontendIpcError`、戻りは `IpcClientResult<T> = IpcResult<T, IpcClientError>`。生成の `IpcError` は変更せず、フロントエンド局所の `kind: "Frontend"` を足すだけなので `status` / `kind` の絞り込みは保たれる。**生成の 3 種だけを分岐する呼び出し側は `Frontend` を明示的に扱う必要がある**（型検査がそれを強制する）。`CommandName = (typeof COMMAND_NAMES)[number]`。
