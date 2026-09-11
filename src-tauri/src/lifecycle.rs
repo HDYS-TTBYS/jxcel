@@ -116,6 +116,7 @@ use tauri::{AppHandle, Manager, RunEvent};
 use tauri_plugin_log::log::{self, LevelFilter};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 
+use crate::commands;
 use crate::ports::DocumentHostPort;
 use crate::window::{self, WindowRegistry, WindowRequest};
 
@@ -249,11 +250,26 @@ pub fn run() -> Result<(), StartupError> {
     // 破棄の通知をレジストリへ流す。**全ウィンドウに効く**（`tauri.conf.json` の宣言の有無に
     // よらず、`WebviewWindowBuilder` で作ったウィンドウにもマネージャ経由で結線される）。
     let builder = builder.on_window_event(window::on_window_event);
+    // 設定の共有実体（要件 7.3。タスク 7.1）。**`StartupState` が持つ `Arc` と同じ実体**を
+    // コマンド面の管理状態としても置く。`Manager::manage<T>()` は型ごとに 1 実体なので、
+    // ここで別の `open` を呼んではならない（同じディレクトリのストアが 2 つになる）。
+    // `startup` は直後に管理状態へ移すため、その前に `Arc` を複製しておく。
+    let settings_store = Arc::clone(startup.settings());
     let builder = builder.manage(startup);
     // 補助プロセスの監督（要件 5.6。タスク 5.6）。アプリ全体で 1 実体だけ所有し、起動時の
     // 残留掃除（手順 5）と終了時の終了（[`shutdown_sidecars`]）が同じ登録簿を見るようにする。
     // 8.1 の `SidecarHost` は `AppHandle::state` からこの実体を取って `ensure` する。
     let builder = builder.manage(sidecar_supervisor());
+
+    // 設定の共有実体をコマンド面の管理状態として置く（要件 7.3。タスク 7.1）。上の
+    // `settings_store` と同じ `Arc` である。設定変更の通知（要件 7.4）は構築の後にこの
+    // `Arc` から 1 回 `subscribe()` する。
+    let builder = builder.manage(Arc::clone(&settings_store));
+    // コマンド面の根（要件 4.1、4.4、4.6。タスク 7.1）。登録の一覧は `commands` モジュールの
+    // 1 箇所だけにあり、`generate_handler!` へも同じ一覧が渡る。**この根に業務ロジックは
+    // 無い** — 各機能は自分のモジュールにコマンド関数を持ち、根は列挙だけを行う（共有の継ぎ目。
+    // design.md「CommandSurface」）。
+    let builder = builder.invoke_handler(commands::invoke_handler());
 
     // 手順 4: 構築。ここで GTK / WebKit のランタイムと、登録順に各プラグインが初期化される。
     //   **記録機構のロガーもここで取り付けられる**（`tauri-plugin-log` の `setup`）。そのため
@@ -263,6 +279,13 @@ pub fn run() -> Result<(), StartupError> {
     let app = builder
         .build(context)
         .map_err(|error| StartupError::new(PREREQUISITE_RUNTIME, error.to_string()))?;
+
+    // 手順 4.1: 設定変更の通知をフロントエンドへ届ける配線（要件 7.4。タスク 7.1）。
+    //   共有実体（要件 7.3）へ 1 回だけ `subscribe()` し、専用スレッドが受信ループを回して
+    //   変更のたびに全ウィンドウへ Tauri イベントを emit する。**構築の後に置く** — emit には
+    //   `AppHandle` が要り、ウィンドウは `RunEvent::Ready`（手順 6）以降に現れる。購読前の変更は
+    //   再生されない（4.3）ため、起動直後に設定を書き換える経路よりも前に購読を張っておく。
+    commands::start_settings_notifications(app.handle(), &settings_store);
 
     // 手順 4.5: 記録機構の実効設定を起動時に確認する（要件 8.1、8.5）。起動行を記録し、
     //   記録中のファイルが方針の保存先に現れたことを確かめる。書けなければ診断の保存先の

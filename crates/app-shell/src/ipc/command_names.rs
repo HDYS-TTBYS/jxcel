@@ -18,46 +18,54 @@
 //!
 //! 設定変更の通知（タスク 7.1、要件 7.4）は Tauri の**イベント**としてフロントエンドへ届き、
 //! `invoke` の宛先を持たない。したがって本配列には現れない。配列は「フロントエンドから
-//! 呼び出せるコマンド」の一覧である。
+//! 呼び出せるコマンド」の一覧である。イベント名は [`crate::ipc::SETTINGS_CHANGED_EVENT`] に
+//! 定義し、生成物へ定数として出す（フロントエンドが文字列リテラルを書かないため）。
+//!
+//! # 個々の名前の定数
+//!
+//! 各名前は `pub const` として公開する。**`src-tauri` のハンドラ登録（タスク 7.1）はこの定数を
+//! 参照して登録し、文字列リテラルを書かない。** 登録された名前が配列の要素であることは、
+//! `src-tauri/src/commands/mod.rs` のテストが機械的に検査する（`generate_handler!` と配列の間に
+//! コンパイル時の連動が無いため、そこを埋める唯一の安価な砦である）。
 
 /// 描画のハートビート通知を受け取る（タスク 8.2 が実装し、送信側はタスク 9.7。要件 10.1、10.2）。
-const RENDER_HEARTBEAT: &str = "render_heartbeat";
+pub const RENDER_HEARTBEAT: &str = "render_heartbeat";
 
 /// ウィンドウを閉じてよいかの問い合わせに答える（タスク 7.6。要件 2.6）。
 ///
 /// 判定は非同期であり、フロントエンドはこの往復の結果に従って `destroy` するか何もしない。
-const CAN_CLOSE_WINDOW: &str = "can_close_window";
+pub const CAN_CLOSE_WINDOW: &str = "can_close_window";
 
 /// 名前付き設定値を読み取る（タスク 7.1 が面へ結線し、実体はタスク 4.1。要件 7.1、7.3）。
-const SETTINGS_GET: &str = "settings_get";
+pub const SETTINGS_GET: &str = "settings_get";
 
 /// 名前付き設定値を書き込む（タスク 7.1 が面へ結線し、実体はタスク 4.2。要件 7.1、7.4）。
 ///
 /// 書き込みは購読している全ウィンドウへ通知される（通知自体はイベント経路であり、
 /// 本配列の対象外）。
-const SETTINGS_SET: &str = "settings_set";
+pub const SETTINGS_SET: &str = "settings_set";
 
 /// 親ウィンドウを指定したファイル選択を提示する（タスク 7.7。要件 2.4）。
 ///
 /// 選ばれた位置はドキュメント所有者へ引き渡すだけで、本機能はパスを読まない。
-const PICK_DOCUMENT_FILE: &str = "pick_document_file";
+pub const PICK_DOCUMENT_FILE: &str = "pick_document_file";
 
 /// 大きなペイロードを 1 回の呼び出しで受け渡す（タスク 7.2。要件 4.5）。
 ///
 /// JSON を経由しない生バイトの経路であり、行ごとに境界を越えることを必要としない。
-const BULK_ECHO: &str = "bulk_echo";
+pub const BULK_ECHO: &str = "bulk_echo";
 
 /// 記録の保存場所を返す（タスク 9.5 の導線。実体はタスク 4.4。要件 8.1）。
-const DIAGNOSTICS_LOG_LOCATION: &str = "diagnostics_log_location";
+pub const DIAGNOSTICS_LOG_LOCATION: &str = "diagnostics_log_location";
 
 /// 記録をひとつのファイルにまとめて書き出す（タスク 9.5 の導線。実体はタスク 4.5。要件 8.6）。
-const DIAGNOSTICS_EXPORT: &str = "diagnostics_export";
+pub const DIAGNOSTICS_EXPORT: &str = "diagnostics_export";
 
 /// 記録の詳細度を読み取る（タスク 9.5 の導線。実体はタスク 4.5。要件 8.7）。
-const DIAGNOSTICS_VERBOSITY_GET: &str = "diagnostics_verbosity_get";
+pub const DIAGNOSTICS_VERBOSITY_GET: &str = "diagnostics_verbosity_get";
 
 /// 記録の詳細度を変更する（タスク 9.5 の導線。実体はタスク 4.5。要件 8.7）。
-const DIAGNOSTICS_VERBOSITY_SET: &str = "diagnostics_verbosity_set";
+pub const DIAGNOSTICS_VERBOSITY_SET: &str = "diagnostics_verbosity_set";
 
 /// フロントエンドから呼び出せるコマンド名の一覧（要件 4.1、4.2）。
 ///

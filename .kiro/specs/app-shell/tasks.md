@@ -266,7 +266,7 @@
 
 - [ ] 7. Integration: コマンド面とメニュー
 
-- [ ] 7.1 コマンド面とエラー封筒・ウィンドウ文脈を結線する
+- [x] 7.1 コマンド面とエラー封筒・ウィンドウ文脈を結線する
   - コマンド登録の根を用意する。**登録一覧はコンパイル時に集中して列挙する必要があり、完全な動的登録はできない**。各機能は自分のモジュールに関数を持ち、根は列挙だけを行う規約を定める
   - すべてのコマンドが封筒を返す形にし、例外に頼らない
   - 呼び出し元ウィンドウを引数として受け取り、呼び出し先が識別できるようにする
@@ -479,6 +479,13 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **7.1**: コマンド登録の根は `src-tauri/src/commands/mod.rs` の `command_root!` マクロで、**`tauri::generate_handler!` へ渡す一覧とテストが `COMMAND_NAMES` と突き合わせる一覧の両方の源**。規約: 各機能は自分のモジュール（`shell_cmds.rs` / `bulk.rs` …）に関数を置き、**根は列挙だけ**を行う。機械的な固定は 3 つ — ①登録名 ⊆ `COMMAND_NAMES`、②登録名 == ハンドラの関数名（Tauri は関数識別子をコマンド名にする）、③重複なし。加えて `const _: &[&str] = &[…]` で名前定数を参照し、改名・削除がテスト外でもコンパイルを壊す。**逆向き（配列 ⊆ 登録）は意図的に強制しない**（配列は後続タスクが名前を先に予約する場所）。
+- **7.1**: 境界に足した型（ts-rs は `src/ipc/mod.rs` のみ）: `SettingsValue`（`serde_json::Value` の新定型、`#[ts(type = "unknown")]`。`any` も整数型も出さない）、`SettingsGetRequest { key }`、`SettingsSetRequest { key, value }`、`SettingsResponse { context, key, value }`（`context` は **2.1 の `WindowContext` をそのまま使う**）、`SettingsResult = IpcResult<SettingsResponse, IpcError>`。**カタログ外の鍵は invoke の拒否ではなく封筒の error 腕**（`kind: Settings`）になる。
+- **7.1**: 呼び出し元ウィンドウは **Tauri が注入する `WebviewWindow`** から得る（フロントエンドのペイロード由来ではない＝偽装できない）。応答に載せ、記録には**ラベルと鍵の名前だけ**を書く（**値は記録しない**）。
+- **7.1**: 設定変更の通知は `SETTINGS_CHANGED_EVENT = "settings_changed"`（`ipc/mod.rs` の定数で、`render_bindings()` が `bindings.ts` に出すので**フロントエンドは綴りを間違えられない**）と `SettingsChangedEvent { key, value }` を `AppHandle::emit` で**全ウィンドウ**へ配る（設定は全ウィンドウ共有）。鍵は閉じたカタログ名に限られる。
+- **7.1（1.3 のノートの訂正・重要）**: **capability の `windows` キーを省略しても「全ウィンドウに適用」にはならない**（ピン留めした tauri 2.11.5 / tauri-utils 2.9.3 では**どのウィンドウにも一致せず**、`core:event`（`listen` に必要）が拒否される）。1.3 のメモは誤りで、**正しくはウィンドウを明示する**必要がある。7.1 で `"windows": ["doc-*", "empty-*"]` を指定した。**7.3 の検査は「`windows` キー不在」を `windows: ["*"]` と同一視してはならない。**
+- **7.1（7.3 がやること）**: `permissions/app.toml` で `__app-acl__` を有効化、`build.removeUnusedCommands: true`、`scripts/check-capabilities.sh` で `^(fs|shell):` と `windows: "*"` を検出、そして**ACL を有効にした後は自前コマンドの権限を capability に与えること**（与えないと `removeUnusedCommands` が `settings_get`/`settings_set` を削ってしまう）。
 
 - **6.3**: 保存値は **`SettingsKey::WindowGeometry` の 1 オブジェクトだけ**（`{x:i32, y:i32, width:u32, height:u32}`。物理ピクセルで、`x/y` は枠の左上・`width/height` はクライアント領域）。**ラベル由来のキーもラベルごとの写像も作らない**（design/research が `tauri-plugin-window-state` を却下した理由）。未知フィールドは無視する。
 - **6.3**: **観測と書き込みを分ける**。形状は `Moved` / `Resized` / `CloseRequested` / 生成完了で**観測だけ**し、**書き込みは `WindowEvent::Destroyed`** で行う（破棄時点ではネイティブウィンドウが無く取得系が使えないため、観測済みの値を書く）。これにより **`RunEvent::Exit` 依存を回避**し（SIGKILL 後もファイルが不変であることを実測）、**7.6 が拒否解除後に `destroy()` で閉じる経路でも保存される**（`destroy()` は `CloseRequested` を再発火しない）。拒否されただけのウィンドウは保存されない。

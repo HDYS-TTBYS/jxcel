@@ -23,6 +23,12 @@ export const COMMAND_NAMES = [
   "diagnostics_verbosity_set",
 ] as const;
 
+/**
+ * 境界を越えるイベント名の一覧。`crates/app-shell/src/ipc/mod.rs` の定義と同一で、
+ * フロントエンドはこの定数だけを参照する（文字列リテラルを書かない）。
+ */
+export const SETTINGS_CHANGED_EVENT = "settings_changed";
+
 // ---------------------------------------------------------------------------
 // 境界を越える型（crates/app-shell/src/ipc/ の定義から ts-rs が生成）
 
@@ -43,6 +49,90 @@ export type IpcError = { "kind": "Settings", "detail": { message: string, } } | 
  * （research.md 決定 1 が `tauri-specta` を却下した理由のひとつ）。
  */
 export type IpcResult<T, E> = { "status": "ok", data: T, } | { "status": "error", error: E, };
+/**
+ * 設定変更の通知（タスク 7.1。要件 7.4）。
+ *
+ * 設定ストアの通知（`crate::settings::SettingsChanged`）を境界の形へ写したものである。運ぶのは
+ * **カタログにある閉じた鍵の名前と、その新しい値だけ**である。したがってドキュメントの内容
+ * （セル値・スキーマ）を指す鍵はカタログに存在せず、この経路には載りえない（要件 7.7、8.4）。
+ * 記録側へ値を渡す経路はこの型ではなく [`crate::diagnostics::Redacted`] を通る（タスク 7.1 は
+ * 記録に**鍵だけ**を書き、値は決して書かない）。
+ */
+export type SettingsChangedEvent = { 
+/**
+ * 変更された鍵（カタログ名）。
+ */
+key: string, 
+/**
+ * 変更後の値。
+ */
+value: SettingsValue, };
+/**
+ * 設定値の読み取り要求（タスク 7.1。要件 7.1）。
+ *
+ * 鍵は**名前の文字列**で運ぶ。`SettingsKey` は閉じた列挙であり、文字列から鍵を作る入口は
+ * `SettingsKey::from_name` だけである（要件 7.7）。したがってカタログに無い名前は
+ * 呼び出し先でエラー封筒の腕になり、**値の型は鍵ごとに固定しない**（値の型の閉性は
+ * 7.7 の要求ではなく、要求は鍵空間の閉性である。tasks.md 4.2）。
+ */
+export type SettingsGetRequest = { 
+/**
+ * 読み取る設定の鍵（カタログ名。例 `appearance.theme`）。
+ */
+key: string, };
+/**
+ * 設定コマンドの応答（タスク 7.1。要件 4.6、7.1）。
+ *
+ * **呼び出し元ウィンドウの文脈を必ず含む。**呼び出し先は呼び出し元を識別でき（要件 4.6、
+ * 2.1 の [`WindowContext`] を再定義せずそのまま使う）、フロントエンドも自分がどのウィンドウから
+ * 呼んだかを応答から観測できる。`key` は正規化後のカタログ名、`value` は書き込み後（読み取りは
+ * 現在）の値で、鍵が存在しなければ `None` である。
+ */
+export type SettingsResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈（要件 4.6）。
+ */
+context: WindowContext, 
+/**
+ * 対象の鍵（カタログ名）。
+ */
+key: string, 
+/**
+ * 現在（書き込みコマンドでは書き込み後）の値。存在しない鍵は `None`。
+ */
+value: SettingsValue | null, };
+// 設定コマンドの応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を名指し
+// しないため、境界が名指しできる具体形を明示的に置く。
+export type SettingsResult = IpcResult<SettingsResponse, IpcError>;
+/**
+ * 設定値の書き込み要求（タスク 7.1。要件 7.1、7.4）。
+ */
+export type SettingsSetRequest = { 
+/**
+ * 書き込む設定の鍵（カタログ名）。
+ */
+key: string, 
+/**
+ * 書き込む値。ドキュメントの内容を指す鍵はカタログに存在しない（要件 7.7）。
+ */
+value: SettingsValue, };
+/**
+ * 境界を越える設定値（タスク 7.1。要件 7.1、7.4）。
+ *
+ * 設定ストアは鍵から生の JSON への写像を持つ（[`crate::settings`]）。その値を境界で型付け
+ * するには、カタログの 5 鍵それぞれに固有の型を並べた列挙を持つか、JSON の形をそのまま写す
+ * かのどちらかである。ここは後者を取り、**TypeScript では `unknown`** として出す
+ * （`#[ts(type = "unknown")]`）。
+ *
+ * **`serde_json::Value` をそのまま境界へ出さない理由**は 2 つある。ts-rs の
+ * `serde-json-impl` feature を有効にすると生成物が `any` になり、「生成物に `any` を混ぜない」
+ * という不変条件（tasks.md 2.1、research.md 決定 1）を破る。また `i64` / `u64` を露出させる
+ * 経路を型で塞いでおく必要がある（識別子は文字列とする規則）。`unknown` は受け手に絞り込みを
+ * 強制するため、値の形を呼び出し側が仮定しない。
+ *
+ * 列挙の新定型は serde でも内側の値そのものとして直列化される（[`WindowLabel`] と同じ）。
+ */
+export type SettingsValue = unknown;
 /**
  * コマンド呼び出しの文脈（要件 4.2、4.6）。呼び出し元ウィンドウを呼び出し先が識別できる
  * ようにする。
