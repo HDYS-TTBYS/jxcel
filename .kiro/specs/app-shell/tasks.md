@@ -363,7 +363,7 @@
   - _Requirements: 9.1, 9.2_
   - _Depends: 1.4_
 
-- [ ] 9.2 外観の明暗と選択の永続化を実装する
+- [x] 9.2 外観の明暗と選択の永続化を実装する
   - 明色と暗色の外観を用意し、既定では OS の外観設定に追随する
   - 明示的に選択された場合は OS の設定より優先し、再起動後も維持する
   - **完了状態**: OS の外観を切り替えると追随し、明示選択した後は OS を切り替えても変わらず、再起動後も選択が保たれる
@@ -479,6 +479,14 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **9.2（外観の形・重要）**: 外観の唯一の源は `src/shell/theme.ts`。適用先は **`<html>`** で、`data-appearance`（`light` / `dark`）、`data-appearance-choice`（`system` / `light` / `dark`）、`color-scheme`、および **CSS カスタムプロパティ `--jxcel-*`** を CSSOM で与える。シェルのクローム（`[data-testid="jxcel-shell"]` / `jxcel-shell-chrome`）も個別機能の画面も**同じ変数群を参照する**（画面は自前の配色を持たない）。**新しい設定キーもコマンドも増やしていない** — 既存の `SettingsKey::AppearanceTheme`（`appearance.theme`）と `settings_get` / `settings_set` / `SETTINGS_CHANGED_EVENT` を使う（7.1 / 4.1 / 4.3 の経路そのもの）。
+- **9.2（初回描画・重要）**: `src/main.tsx` は `createRoot().render()` の**前に** `bootstrapAppearance()` を await する（**上限 `APPEARANCE_READ_TIMEOUT_MS = 1500 ms`**）。`src/index.html` には **JS 前の下地**が `prefers-color-scheme` に追随して置いてあるので、最悪でも「空の下地が OS の色で出る」だけであり、**シェル自体は常に解決済みの外観で描かれる**（間違った外観のシェルは出ない）。実測: 通常の初回描画 ≈0.4 秒、読み取りが上限まで遅れた場合 ≈1.54 秒（**起動予算 2 秒に対して余裕 ≈0.46 秒**）、ハートビート ≈1.57 秒（**3 秒の期限に対して余裕 ≈1.43 秒**）。**予算を詰めるときの唯一の調整点は `APPEARANCE_READ_TIMEOUT_MS`**。
+- **9.2（操作の導線）**: クロームに 3 つのボタン（`jxcel-appearance-control` / `-system` / `-light` / `-dark`、`aria-pressed` 付き）。**`ShellRegion` の外**にあり、9.1 の領域識別・遷移の契約を侵さない。
+- **9.2（失敗時の扱い）**: 値が無い → `system`。**解釈できない値 → 警告して `system`、ファイルは書き換えない**（4.2 の「解釈できないものを壊さない」方針と一致。実測で md5 不変）。読み取り失敗（IPC 不在・封筒の失敗・期限）→ `system` で描画継続。書き込み失敗 → **その起動の間だけメモリ上の選択を保つ**。購読失敗 → 警告して継続。**未達の検証**: Settings 種別の失敗封筒・1500 ms の期限切れ・実ウィンドウでの購読失敗（いずれもコード読解のみ）。
+- **9.2（ハートビートとの関係）**: `installRenderHeartbeat` の呼び出しは **`src/main.tsx` の 1 箇所のまま**（外観の await の後・render の前）で、通知は入れ子の `requestAnimationFrame` から出る。並べ替えは**通知を遅らせるだけ**（実測 161〜167 ms、期限 3 秒に対して余裕十分）。起動ごとに `初回描画が成立した` はちょうど 1 回。
+- **9.2（検証の型）**: ブラウザ側は Vite dev サーバ＋`emulateMediaFeatures` で `data-*` と計算色を読み、実アプリ側は `XSendEvent`（`event_mask=0`）でボタンを押して `settings.json` と画素（明暗の面板色）を比べる。**10.4 の目印（アクセント `#c2185b`）は両方の外観で残る**ことを画素で確認済み。**注意（ハーネス）**: ヘッドレスの Puppeteer `emulateMediaFeatures` は `matchMedia` の `change` を発火しないため、**ブラウザ側では「実行中の OS 追随」を再現できない**。追随の実証は**実 OS を切り替えて**行うこと（9.2 はそう実証している）。
+
 
 - **9.1（シェルの形・重要）**: 遷移の仕組みは `src/shell/router.tsx` の **`useShellRouter(registry)` 1 つだけ**で、現在画面の状態（`useState`）と変更の入口（`navigate`）を単独で持つ。画面は **`SHELL_SCREEN_REGISTRY` の `screens` と `initial`** で登録し、画面が受け取るのは **`ScreenProps { screenId, navigate }` だけ**（`ScreenDefinition.component` は `ComponentType<ScreenProps>`）。**画面が自前のレイアウト・遷移を作る余地は型で塞いである。**`history` / `window.location` / react-router の類は `src/` に 1 つも無い（grep で確認）。
 - **9.1（現在画面の識別・重要）**: 領域の要素 `[data-testid="jxcel-shell-region"]` に **`data-shell-screen={screen.id}`** が付く（同じ値が `aria-label` と `[data-testid="jxcel-shell-screen-title"]` にも出る）。**外から 1 式で読める**（10.4 の 3 OS 確認はこれを使える）。`ScreenId = string` だが、登録簿が一意性・空文字・初期画面の存在を検査し、`navigate` は未知の id で**例外を投げる**（黙って別画面へ落ちない）。

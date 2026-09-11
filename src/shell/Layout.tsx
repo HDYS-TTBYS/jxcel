@@ -4,7 +4,8 @@
  *
  * 所有: `ShellLayout`（design.md「Components and Interfaces → Frontend Layer」、
  * 「Directory Structure」の `src/shell/Layout.tsx`）。
- * 要件: 1.1, 1.2（3 OS で初期画面が描画されること）, 9.1（画面が差し込まれる領域の定義）。
+ * 要件: 1.1, 1.2（3 OS で初期画面が描画されること）, 9.1（画面が差し込まれる領域の定義）,
+ * 9.3, 9.4（明暗の外観と、明示選択の優先・永続化。タスク 9.2）。
  *
  * # 画面の契約（**個別機能が守る側**）
  *
@@ -17,9 +18,20 @@
  *    （領域は `flex: 1 1 auto` と `min-height: 0` を持つので、内容はそこでスクロールする）。
  * 3. **自前の遷移を持たない。** `history` / `location` / ハッシュ / 独自のルーターを参照せず、
  *    遷移は受け取った `navigate` だけを呼ぶ（要件 9.2。機構は `./router` の 1 つだけである）。
- * 4. **自前で配色を決めない。** 明暗の外観はシェルが持つ（タスク 9.2）。9.2 はこのファイルの
- *    style を theme の解決結果へ差し替え、`InitialScreen` の `INITIAL_SCREEN_PANEL_COLOR` も
- *    theme 側へ移す。画面はシェルが与える配色に従う。
+ * 4. **自前で配色を決めない。** 明暗の外観はシェルが持ち（タスク 9.2 の `./theme`）、
+ *    画面は `var(--jxcel-…)` を参照するだけである（下の「外観」を参照）。
+ *
+ * # 外観（要件 9.3、9.4。タスク 9.2）
+ *
+ * 明暗の解決・適用・永続化は `./theme` が単独で持つ。**解決後の外観は `<html>` の
+ * `data-appearance` と、同じ要素に書かれる CSS カスタムプロパティ（`APPEARANCE_VARS`）の
+ * 1 組に載る。** カスタムプロパティは継承するので、このファイルの `<main>` とヘッダ帯、および
+ * 領域へ差し込まれる個別機能の画面は、**同じ 1 組の配色**に従う。このファイルは色の値を持たず、
+ * `var(--jxcel-…)` を参照するだけである（画面の契約 4）。
+ *
+ * ヘッダ帯には外観を選ぶ最小の操作（`data-testid="jxcel-appearance-control"`）を置く。これは
+ * **シェルのクロームの一部であり、領域（`ShellRegion`）の中には置かない** — 9.1 の領域の識別
+ * （`data-shell-screen`）・遷移の契約と、画面へ渡す props の契約に触れないためである。
  *
  * # 現在画面の識別（外部から観測できる形・再掲）
  *
@@ -34,19 +46,16 @@
  *
  * # 3 OS の描画確認（10.4）が目印にするもの
  *
- * **アクセント色 `INITIAL_SCREEN_ACCENT_COLOR`（`#c2185b` = `rgb(194, 24, 91)`）はシェルの
- * クロームの一部として常に描かれる。** 具体的には (1) `<main data-testid="jxcel-shell">` の背景、
- * (2) `data-testid="jxcel-shell-chrome"` のヘッダ帯（アプリ名 `jxcel` を白字で出す。帯の高さは
- * 約 0.75rem + 文字なので上端 10 px 付近は必ずアクセント色である）。画面が領域を自前の色で
- * 覆っても、このヘッダ帯と領域の余白にアクセント色が残る。したがって 10.4 は
- * **画像中に `rgb(194, 24, 91)` が存在すること**、またはヘッダ帯の画素で確認できる
- * （1.4 の Implementation Notes の目印をそのまま保っている）。
+ * **アクセント色 `INITIAL_SCREEN_ACCENT_COLOR`（`#c2185b` = `rgb(194, 24, 91)`）は両方の外観で
+ * ヘッダ帯（`data-testid="jxcel-shell-chrome"`）の背景に使う。** 帯はアプリ名 `jxcel` を白字で
+ * 出し、高さは約 0.75rem + 文字なので上端 10 px 付近は必ずアクセント色である。画面が領域を
+ * 自前の色で覆っても、このヘッダ帯は常に残る。したがって 10.4 は **画像中に
+ * `rgb(194, 24, 91)` が存在すること**、またはヘッダ帯の画素で確認できる（1.4 の Implementation
+ * Notes の目印をそのまま保っている）。明暗の差はシェルの面と画面の面・文字色で付けるので、
+ * **外観によって目印が消えることはない**。
  *
  * # 後続タスクがここへ差し込む場所
  *
- * - **9.2（外観）**: このファイルの `<main>` / ヘッダの style の色を `./theme` の解決結果へ
- *   差し替える。`INITIAL_SCREEN_PANEL_COLOR` も theme 側へ移す。画面は 1 で述べたとおり、
- *   自前の配色を持たない。
  * - **9.3（画面単位のエラー隔離）**: `ShellRegion` の中の `<Screen … />` 1 式を
  *   `./ScreenBoundary` で包む。**境界の粒度は画面 1 つ**（`screen.id` を鍵に与える）。
  *   シェルのクロームと他の領域は包まない。
@@ -73,6 +82,7 @@
  *
  * 初期画面はタスク 1.4 が置いた実体をそのまま画面として登録した（`InitialScreen`）。**まだ
  * 実用画面ではない**（実用水準へ育てるのは下流のスペックであり、10.4 用の画面は 9.7 が足す）。
+ * 配色はタスク 9.2 が `./theme` のカスタムプロパティへ移した。
  */
 import type { ReactElement } from "react";
 
@@ -82,21 +92,27 @@ import {
   type ScreenProps,
   type ShellScreenRegistry,
 } from "./router";
-
-/** 初期画面の識別色。白背景・暗背景のどちらとも一致しないことを画素検査の根拠にする。 */
-export const INITIAL_SCREEN_ACCENT_COLOR = "#c2185b";
-
-/** 中央の面の背景色。アクセント色と対比させる。 */
-export const INITIAL_SCREEN_PANEL_COLOR = "#ffffff";
+import {
+  APPEARANCE_VARS,
+  useAppearance,
+  type AppearanceChoice,
+} from "./theme";
 
 /** 既定で表示される画面（1.4 の初期画面）の識別子。 */
 export const INITIAL_SCREEN_ID = "shell.initial";
 
 /**
+ * アクセント色（`#c2185b` = `rgb(194, 24, 91)`）。10.4 の画素検査の目印であり、定義は
+ * `./theme` にある。**10.4 が同じ名前で参照できるよう、ここからも再輸出する。**
+ */
+export { INITIAL_SCREEN_ACCENT_COLOR } from "./theme";
+
+/**
  * 1.4 の初期画面。**シェルのクロームを除いた領域の中身**だけを描く（画面の契約 2）。
  *
  * 実用画面ではない。3 OS の描画確認（10.4）が「無内容の白い窓ではない」ことを示せる最小の
- * 内容を持つ。9.7 が 3 OS 描画確認用の画面を足すまで、既定の表示はこれである。
+ * 内容を持つ。9.7 が 3 OS 描画確認用の画面を足すまで、既定の表示はこれである。配色は
+ * シェルが与えるカスタムプロパティ（`./theme`）に従う。
  */
 function InitialScreen(): ReactElement {
   return (
@@ -105,13 +121,15 @@ function InitialScreen(): ReactElement {
       style={{
         padding: "2rem 3rem",
         borderRadius: "0.5rem",
-        backgroundColor: INITIAL_SCREEN_PANEL_COLOR,
-        color: "#212121",
+        backgroundColor: `var(${APPEARANCE_VARS.screenPanel})`,
+        color: `var(${APPEARANCE_VARS.screenText})`,
         textAlign: "center",
       }}
     >
       <h1 style={{ margin: 0, fontSize: "2.5rem" }}>jxcel</h1>
-      <p style={{ margin: "0.75rem 0 0" }}>jxcel の初期画面（3 OS の描画確認用）</p>
+      <p style={{ margin: "0.75rem 0 0", color: `var(${APPEARANCE_VARS.screenMuted})` }}>
+        jxcel の初期画面（3 OS の描画確認用）
+      </p>
     </section>
   );
 }
@@ -131,6 +149,94 @@ export const SHELL_SCREEN_REGISTRY: ShellScreenRegistry = {
     },
   ],
 };
+
+/** 外観を選ぶ操作の 1 項目。 */
+interface AppearanceOption {
+  readonly choice: AppearanceChoice;
+  readonly label: string;
+  readonly description: string;
+  readonly testId: string;
+}
+
+/**
+ * 外観を選ぶ操作の項目。`system` は「OS の外観設定に追随する」、`light` / `dark` は
+ * 「OS の設定より優先する明示選択」である（要件 9.3、9.4）。
+ */
+const APPEARANCE_OPTIONS: readonly AppearanceOption[] = [
+  {
+    choice: "system",
+    label: "OS",
+    description: "OS の外観設定に追随する",
+    testId: "jxcel-appearance-system",
+  },
+  {
+    choice: "light",
+    label: "明",
+    description: "常に明色にする（OS の設定より優先）",
+    testId: "jxcel-appearance-light",
+  },
+  {
+    choice: "dark",
+    label: "暗",
+    description: "常に暗色にする（OS の設定より優先）",
+    testId: "jxcel-appearance-dark",
+  },
+];
+
+/**
+ * 外観を選ぶ最小の操作。**シェルのクロームの中に置く**（領域の中へは置かない）。
+ *
+ * 選択は `./theme` が先に反映し、その後で設定 `appearance.theme` へ保存する。保存に失敗しても
+ * この起動の間は選択が保たれるので、操作が無反応になることはない（`./theme` のモジュール doc）。
+ */
+function AppearanceControl({
+  choice,
+  setChoice,
+}: {
+  readonly choice: AppearanceChoice;
+  readonly setChoice: (choice: AppearanceChoice) => void;
+}): ReactElement {
+  return (
+    <nav
+      data-testid="jxcel-appearance-control"
+      aria-label="外観"
+      style={{ display: "flex", gap: "0.25rem" }}
+    >
+      {APPEARANCE_OPTIONS.map((option) => {
+        const active = option.choice === choice;
+        return (
+          <button
+            key={option.choice}
+            type="button"
+            data-testid={option.testId}
+            aria-pressed={active}
+            title={option.description}
+            onClick={() => {
+              setChoice(option.choice);
+            }}
+            style={{
+              font: "inherit",
+              fontSize: "0.75rem",
+              lineHeight: 1.4,
+              padding: "0.15rem 0.5rem",
+              borderRadius: "0.25rem",
+              cursor: "pointer",
+              color: active
+                ? `var(${APPEARANCE_VARS.controlActiveText})`
+                : `var(${APPEARANCE_VARS.shellChromeText})`,
+              backgroundColor: active
+                ? `var(${APPEARANCE_VARS.controlActiveBackground})`
+                : "transparent",
+              border: `1px solid var(${APPEARANCE_VARS.controlBorder})`,
+            }}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
 
 /**
  * 個別機能の画面が差し込まれる領域。
@@ -180,14 +286,16 @@ export function ShellRegion({ screen, navigate }: ShellRegionProps): ReactElemen
 }
 
 /**
- * シェルの器。クローム（アクセント色の背景とヘッダ帯）と、選択された画面が入る
+ * シェルの器。クローム（アクセント色のヘッダ帯と外観の操作）と、選択された画面が入る
  * [`ShellRegion`] を組み立てる。
  *
  * 遷移機構は `./router` の `useShellRouter` 1 つだけであり、本コンポーネントはその結果を
- * 領域へ渡すだけである。
+ * 領域へ渡すだけである。外観は `./theme` のカスタムプロパティに従い、本コンポーネントが
+ * 持つのは選択の表示と入口（[`AppearanceControl`]）だけである。
  */
 export function Layout(): ReactElement {
   const router = useShellRouter(SHELL_SCREEN_REGISTRY);
+  const appearance = useAppearance();
 
   return (
     <main
@@ -196,15 +304,15 @@ export function Layout(): ReactElement {
         minHeight: "100vh",
         display: "flex",
         flexDirection: "column",
-        backgroundColor: INITIAL_SCREEN_ACCENT_COLOR,
+        backgroundColor: `var(${APPEARANCE_VARS.shellSurface})`,
         fontFamily: "system-ui, sans-serif",
-        color: "#212121",
+        color: `var(${APPEARANCE_VARS.shellText})`,
       }}
     >
       {/*
-        シェル自身のクローム。**アプリ名とアクセント色を常に描く**ので、画面が何であっても
-        3 OS の画素検査（10.4）の目印が消えない。タスク 9.2 はここの色を theme の解決結果へ
-        差し替える。
+        シェル自身のクローム。**アプリ名とアクセント色を両方の外観で常に描く**ので、画面が
+        何であっても 3 OS の画素検査（10.4）の目印が消えない。外観を選ぶ操作もここに置く
+        （領域の中へは置かない。モジュール doc「外観」を参照）。
       */}
       <header
         data-testid="jxcel-shell-chrome"
@@ -214,16 +322,28 @@ export function Layout(): ReactElement {
           justifyContent: "space-between",
           gap: "1rem",
           padding: "0.75rem 1.5rem",
-          backgroundColor: INITIAL_SCREEN_ACCENT_COLOR,
-          color: "#ffffff",
+          backgroundColor: `var(${APPEARANCE_VARS.shellChrome})`,
+          color: `var(${APPEARANCE_VARS.shellChromeText})`,
         }}
       >
         <span style={{ fontSize: "1.25rem", fontWeight: 700 }}>jxcel</span>
         <span
-          data-testid="jxcel-shell-screen-title"
-          style={{ fontSize: "0.875rem", opacity: 0.85 }}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "1rem",
+          }}
         >
-          {router.current.title}
+          <span
+            data-testid="jxcel-shell-screen-title"
+            style={{ fontSize: "0.875rem", opacity: 0.85 }}
+          >
+            {router.current.title}
+          </span>
+          <AppearanceControl
+            choice={appearance.choice}
+            setChoice={appearance.setChoice}
+          />
         </span>
       </header>
 

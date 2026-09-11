@@ -15,6 +15,21 @@
         height: 100%;
         margin: 0;
       }
+      /*
+        スクリプトが動く前の下地。OS の外観設定に追随させる（タスク 9.2）。
+        明示選択は src/shell/theme.ts が解決し、解決後は <html> の data-appearance と
+        CSS カスタムプロパティが配色を決める。ここはその 1 フレーム前の下地であり、
+        色は theme.ts の --jxcel-shell-surface（light / dark）と一致させる。
+      */
+      html {
+        color-scheme: light dark;
+        background-color: #f4f4f6;
+      }
+      @media (prefers-color-scheme: dark) {
+        html {
+          background-color: #121216;
+        }
+      }
     </style>
   </head>
   <body>

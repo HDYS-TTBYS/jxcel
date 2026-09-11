@@ -9,7 +9,7 @@
  * マウントと起動時の前提確認だけを行う。
  *
  * 本ファイルはタスク 1.4 が実体を置いた。初期画面の領域定義はタスク 9.1 が
- * `shell/` 配下を育てて拡張する。
+ * `shell/` 配下を育てて拡張した。外観の解決（タスク 9.2）は `shell/theme` が持つ。
  */
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -17,6 +17,7 @@ import { createRoot } from "react-dom/client";
 import { installCloseVeto } from "./shell/closeVeto";
 import { Layout } from "./shell/Layout";
 import { installRenderHeartbeat } from "./shell/renderHeartbeat";
+import { bootstrapAppearance } from "./shell/theme";
 
 // `src/index.html` のマウント先。欠けたまま起動すると無内容のウィンドウが残るため、
 // 黙って握り潰さずに失敗させる（要件 10.2 の趣旨に沿う）。
@@ -32,14 +33,36 @@ if (container === null) {
 // `installCloseVeto` は例外を投げない（登録に失敗した場合はウィンドウは通常どおり閉じる）。
 void installCloseVeto();
 
-// 初回描画のハートビート（要件 10.1、10.2。タスク 8.2）。**マウントの直後に仕掛け、通知は
-// 描画フレームの中から送る** — 描画失敗を検出する仕組みは基盤側に無いので、フレームが実際に
-// 描かれたことを示せるのはこの経路だけである（`src/shell/renderHeartbeat.ts` のモジュール doc）。
-// 送信は例外を外へ出さず、届かなければ監視側が期限超過として不成立を記録して利用者に提示する。
-installRenderHeartbeat();
+// 初回描画のハートビートの送信側（要件 10.1、10.2。タスク 8.2）は、**外観の解決を待って
+// から、マウントの直前に 1 回だけ仕掛ける**（下の `mountShell`）。待つ前に仕掛けると、
+// 保存された外観を読んでいる間の空白のフレームで「描画が成立した」と報告してしまう。
+// 通知は描画フレームの中から送られ、届かなければ監視側が期限超過として不成立を記録して
+// 利用者に提示する（`src/shell/renderHeartbeat.ts` のモジュール doc）。
 
-createRoot(container).render(
-  <StrictMode>
-    <Layout />
-  </StrictMode>,
-);
+/**
+ * 外観を解決してから React をマウントする（要件 9.3、9.4。タスク 9.2）。
+ *
+ * **シェルの最初の描画を解決済みの外観で行うため、マウントを待たせる。** マウントが先だと、
+ * 保存された明示選択が届くまでの間だけ既定（OS 追随）の外観で描かれ、その後に切り替わる。
+ * `bootstrapAppearance` は自分で期限を切って必ず戻り、例外も外へ出さないので、**マウントが
+ * 行われない経路は無い**（`shell/theme` のモジュール doc を参照）。念のため外側でも受け止め、
+ * どのみち描画へ進む。
+ */
+async function mountShell(root: HTMLElement): Promise<void> {
+  try {
+    await bootstrapAppearance();
+  } catch (error: unknown) {
+    console.error("外観を初期化できなかった。OS に追随する外観で起動する", error);
+  }
+
+  // 通知の送信側は 1 つだけである（9.7 はこれを再利用し、2 つ目を足さない）。
+  installRenderHeartbeat();
+
+  createRoot(root).render(
+    <StrictMode>
+      <Layout />
+    </StrictMode>,
+  );
+}
+
+void mountShell(container);
