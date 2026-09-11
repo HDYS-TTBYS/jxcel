@@ -56,12 +56,31 @@ const TEMP_CREATE_ATTEMPTS: u32 = 16;
 /// 一時ファイルを作れない・書けない・同期できない、または `rename` できない場合に `io::Error`
 /// を返す。その場合 `target` は変更されていない。
 pub fn replace(target: &Path, bytes: &[u8]) -> io::Result<()> {
+    replace_with(target, |file| file.write_all(bytes))
+}
+
+/// [`replace`] の内容を呼び出し側が供給する形（要件 7.1）。
+///
+/// 診断の書き出し（tasks.md 4.5、`diagnostics::export`）が、連結する記録の合計をメモリに
+/// 載せずに同じ保証 — 一時ファイル → `sync_all` → `rename` — を使うための入口である。
+/// `write` には**対象と同一ディレクトリに作った一時ファイル**が渡され、`write` が戻った後で
+/// `flush` と `sync_all` を行ってから `rename` する。
+///
+/// # Errors
+///
+/// 一時ファイルを作れない、`write` が失敗した、同期できない、または `rename` できない場合に
+/// `io::Error` を返す。その場合 `target` は変更されていない（`write` が書いた途中の内容は
+/// 一時ファイルとともに破棄される）。
+pub fn replace_with<F>(target: &Path, write: F) -> io::Result<()>
+where
+    F: FnOnce(&mut File) -> io::Result<()>,
+{
     let directory = parent_dir(target)?;
     let (temp_path, mut file) = create_temp(directory)?;
     // 以降の失敗経路（書き込み・同期・置換のいずれか）で一時ファイルを残さない。
     let mut guard = TempGuard { path: temp_path.clone(), armed: true };
 
-    file.write_all(bytes)?;
+    write(&mut file)?;
     // `File` に対する `flush` は実質的に何もしないが、「書き切ってから同期する」という
     // 意図をコード上で明示しておく（永続化を担うのは `sync_all` である）。
     file.flush()?;

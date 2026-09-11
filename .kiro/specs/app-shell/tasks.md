@@ -171,7 +171,7 @@
   - _Boundary: DiagnosticsPolicy_
   - _Depends: 1.2_
 
-- [ ] 4.5 診断情報の書き出しと詳細度の保持を実装する
+- [x] 4.5 診断情報の書き出しと詳細度の保持を実装する
   - 記録をひとつのファイルにまとめて書き出す経路を用意する
   - 記録の詳細度を設定から読み書きできるようにする
   - **完了状態**: 書き出しを実行すると単一のファイルが生成され、詳細度の変更が設定に永続化されることがテストで確認できる
@@ -479,6 +479,11 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **4.5**: 書き出しは**単一ファイル**にまとめる。対象はログディレクトリ直下の `.log` **通常ファイルのみ**（`lstat` ベースなのでシンボリックリンクもディレクトリも除外）。順序は **mtime 昇順 + ファイル名タイブレーク**（合計順序なので同時刻でも決定的）。出力は 3 行のヘッダ + `===== <ファイル名> =====` の区切り + 内容そのまま（改行で終わっていなければ改行を足す）。**空ディレクトリも不在ディレクトリも成功し 1 ファイルを書く**（`files_merged == 0` と通知行で呼び出し側が区別する）。既存の宛先は `atomic::replace_with` で**原子的に置換**し、失敗時は宛先を変えない。**親ディレクトリは作らない**。メモリは 64 KiB チャンクで有界。
+- **4.5**: `settings/atomic.rs` に**ストリーミング版 `replace_with` を追加**し、`replace` はそれへ委譲する（`replace(&[u8])` では統合結果を全量メモリに持つことになるため。原子的保証の実装を二重化しないための選択）。`replace` の挙動は不変で 4.1 のテストもそのまま通る。
+- **4.5**: 詳細度は `SettingsKey::DiagnosticsLevel` の閉じた列挙を通し、**`Off < Error < Warn < Info < Debug < Trace`、既定 `Info`**。**壊れた保存値は既定へ落ちるが消去しない**（4.2 の「理解できないものを壊さない」原則の継承）。読み書きは設定ストア経由で、変更は `subscribe()` で観測できる。**5.2 が `log::LevelFilter` へ 1:1 で写像し、9.5 が既存の `diagnostics_*` コマンド名で利用者に出す**。
+- **4.5（テスト強度）**: `export_into_an_unwritable_directory_…` は**このコンテナが root で走るため自己スキップ**する。同等の失敗経路（読み取り専用 FS への出力・宛先の親が通常ファイル・宛先が非空ディレクトリ）は別テストで実測されている。
 
 - **4.4**: 保持方針の値が確定した。**`MAX_TOTAL_LOG_BYTES = 50_000_000`（十進の 50 MB。要件 8.5 の「50 MB 以下」を十進・二進どちらの読みでも満たすため二進の 50 MiB は採らない）**、`MAX_LOG_FILE_BYTES = 8_000_000`、`KEEP_SOME_ARCHIVED_FILES = 5`、`RETAINED_LOG_FILES = 6`、`MAX_RETAINED_LOG_BYTES = 48_000_000`（余裕 2 MB）。`const _: () = assert!(MAX_RETAINED_LOG_BYTES <= MAX_TOTAL_LOG_BYTES)` がコンパイル時に強制する（レビューで E0080 により load-bearing を実測）。
 - **4.4（5.2 が必ず守る前提）**: **`tauri-plugin-log` の `RotationStrategy::KeepSome(n)` は「アーカイブ n 個 + 実行中の 1 個」を保持する**（プラグインの `remove_old_files(keep_count - 1)` 直後にアクティブをアーカイブへ回す実装と、`keep_count` にアクティブを含めないという doc で確認済み）。したがって **5.2 は `max_file_size = MAX_LOG_FILE_BYTES`、`KeepSome(KEEP_SOME_ARCHIVED_FILES)` を渡すこと**。最悪保持量は `RETAINED_LOG_FILES × MAX_LOG_FILE_BYTES` であって `世代数 × ファイル上限` ではない（この取り違えで round-1 のレビューが棄却された）。余裕 2 MB は「ローテーションを起こした 1 レコード分だけ上限を超えて書かれうる」ことの吸収である。
