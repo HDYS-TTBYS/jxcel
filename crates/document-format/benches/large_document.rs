@@ -60,6 +60,7 @@ mod common;
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, Criterion};
+use document_format::container::{AtomicWriter, ContainerCodec};
 use document_format::parts::{to_parts, DocumentParts};
 use document_format::{
     Document, DocumentFormatApi, EntryName, IdFactory, SchemaPart, SUPPORTED_ROW_LIMIT,
@@ -205,5 +206,44 @@ fn large_document(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, large_document);
+/// 10 万行 × 30 列の `save` を 3 段に分けて計測する（予算判定には使わない）。
+///
+/// `save` は「パート構築（不変条件の検証・行の JSON 符号化・ダイジェスト）→ コンテナ化
+/// （ZIP と圧縮）→ 原子的書き込み（一時ファイル・`sync_all`・`rename`）」の 3 段である
+/// （`DocumentFormatApi::save`）。予算超過や回帰が起きたときに、どの段が時間を使って
+/// いるかを CI の記録から直接読めるようにする。各段の入力は測定の外で 1 回だけ作る。
+fn save_phases(c: &mut Criterion) {
+    let scratch = Scratch::new("bench_save_phases");
+    let sample = sample_with_rows(ROWS);
+    let parts = api().to_parts(&sample).expect("標本はパート集合へ取り出せる");
+    let bytes = ContainerCodec::encode(&parts).expect("標本は符号化できる");
+    let path = scratch.file("phases.jxcel");
+
+    let mut group = c.benchmark_group("save_phases");
+    group.sample_size(SAMPLE_SIZE);
+    group.warm_up_time(Duration::from_secs(3));
+    group.measurement_time(Duration::from_secs(10));
+
+    group.bench_function("1_to_parts", |b| {
+        b.iter(|| {
+            api()
+                .to_parts(std::hint::black_box(&sample))
+                .expect("標本はパート集合へ取り出せる")
+        })
+    });
+
+    group.bench_function("2_container_encode", |b| {
+        b.iter(|| ContainerCodec::encode(std::hint::black_box(&parts)).expect("標本は符号化できる"))
+    });
+
+    group.bench_function("3_atomic_commit", |b| {
+        b.iter(|| {
+            AtomicWriter::commit(&path, std::hint::black_box(&bytes)).expect("標本は書き込める")
+        })
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, large_document, save_phases);
 criterion_main!(benches);
