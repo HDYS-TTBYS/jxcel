@@ -287,7 +287,11 @@ pub fn app_data_dir() -> Result<PathBuf, SettingsError> {
 }
 
 /// 環境変数を非空のパスとして読む（空の値は未設定として扱う）。
-fn non_empty_env(lookup: &dyn Fn(&str) -> Option<OsString>, name: &str) -> Option<PathBuf> {
+///
+/// 診断の保存先（tasks.md 4.4）も macOS / Windows ではアプリケーションデータ領域とは別の
+/// 環境変数（`HOME` / `LOCALAPPDATA`）を読むため、この読み取り規則だけを `pub(crate)` で
+/// 共有する。4.1 のデータ領域の解決そのものは Linux の診断保存先だけが再利用する。
+pub(crate) fn non_empty_env(lookup: &dyn Fn(&str) -> Option<OsString>, name: &str) -> Option<PathBuf> {
     let value = lookup(name)?;
     if value.is_empty() {
         None

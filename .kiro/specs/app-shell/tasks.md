@@ -161,7 +161,7 @@
   - _Requirements: 7.4_
   - _Depends: 4.1_
 
-- [ ] 4.4 (P) 診断の保持方針と秘匿規則を実装する
+- [x] 4.4 (P) 診断の保持方針と秘匿規則を実装する
   - 保存先の解決と、場所を問い合わせる入口を用意する
   - 保持する記録の合計サイズの上限を 50 MB とする**方針値をここで持つ**。実際の記録機構への適用はアダプタ層が行う
   - ドキュメントのセル値とスキーマの内容が記録経路に触れられないよう、秘匿を型で強制する
@@ -479,6 +479,11 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **4.4**: 保持方針の値が確定した。**`MAX_TOTAL_LOG_BYTES = 50_000_000`（十進の 50 MB。要件 8.5 の「50 MB 以下」を十進・二進どちらの読みでも満たすため二進の 50 MiB は採らない）**、`MAX_LOG_FILE_BYTES = 8_000_000`、`KEEP_SOME_ARCHIVED_FILES = 5`、`RETAINED_LOG_FILES = 6`、`MAX_RETAINED_LOG_BYTES = 48_000_000`（余裕 2 MB）。`const _: () = assert!(MAX_RETAINED_LOG_BYTES <= MAX_TOTAL_LOG_BYTES)` がコンパイル時に強制する（レビューで E0080 により load-bearing を実測）。
+- **4.4（5.2 が必ず守る前提）**: **`tauri-plugin-log` の `RotationStrategy::KeepSome(n)` は「アーカイブ n 個 + 実行中の 1 個」を保持する**（プラグインの `remove_old_files(keep_count - 1)` 直後にアクティブをアーカイブへ回す実装と、`keep_count` にアクティブを含めないという doc で確認済み）。したがって **5.2 は `max_file_size = MAX_LOG_FILE_BYTES`、`KeepSome(KEEP_SOME_ARCHIVED_FILES)` を渡すこと**。最悪保持量は `RETAINED_LOG_FILES × MAX_LOG_FILE_BYTES` であって `世代数 × ファイル上限` ではない（この取り違えで round-1 のレビューが棄却された）。余裕 2 MB は「ローテーションを起こした 1 レコード分だけ上限を超えて書かれうる」ことの吸収である。
+- **4.4**: 診断の保存先は **Linux `$XDG_DATA_HOME/{id}/logs`（無ければ `$HOME/.local/share/{id}/logs`）／macOS `$HOME/Library/Logs/{id}`（`logs` 接尾辞なし）／Windows `%LOCALAPPDATA%/{id}/logs`**。**macOS と Windows は設定のデータ領域と違う**（設定は Application Support / ローミング `%APPDATA%`）ので `app_data_*` を盲目的に再利用せず明示解決する。環境変数が無い／空ならエラー（panic しない）。`log_dir()` はディレクトリを作らない（作成は 5.2 の登録時）。
+- **4.4**: 秘匿は `Redacted<T>`（中身を保持せず `PhantomData<T>` だけ）で強制し、記録経路に渡せる唯一の関数 `recorded_value` が固定のプレースホルダを返す。`Display` / `Debug` / `Serialize` / アクセサを一切実装していないため、**生値の受け渡しも整形もコンパイルできない**（`compile_fail` doctest 4 件 + sentinel の実行時テスト）。外部送信経路は存在せず、クレートの依存集合に HTTP/ネットワーク系クレートが無い。
 
 - **CI → 10.3 への申し送り（ユーザー決定 2026-09-11）**: 本リポジトリは private なので、GitHub-hosted ランナーは ubuntu / windows が **2 vCPU**、macOS が **3 コア（M1）**である（「4 コア以上」は public リポジトリだけ）。要件 1.3 / 6.8 の「SSD を搭載した 4 コア以上の一般的なデスクトップ環境」を満たすランナーは無い。ユーザーの決定は **「CI ランナーは要件環境より弱い保守的な代理として扱い、閾値は要件値の 2 秒のまま判定する。ランナーが弱いことを理由に閾値を緩めない」**。document-format の保存予算（2 秒）で先に確定し、その方式で 3 OS とも予算内に収めた（`.github/workflows/bench.yml` 冒頭の「計測環境」、document-format `design.md` の Performance Tests）。10.3 では `check-startup-budget.sh` をこの方針で書くこと。**Tauri の公式起動実測は macOS 1.564 秒で余裕が最も薄く**（research.md）、3 コアの M1 ランナーでは 2 秒を超える恐れがある。ゲートを入れる前に macOS ランナーで実測し、超えるなら閾値ではなく起動経路を直す。コメントに「ランナーは 4 コア以上」と書かない（document-format で一度誤っていた）
 - **CI（2026-09-11 の修正。app-shell の CI 段が GitHub で初めて走って 3 OS とも落ちたもの）**: ① `Swatinem/rust-cache` に `key: ${{ matrix.os }}` を加えた（自動キーは `Linux-x64` までしか区別せず、ubuntu-22.04 が 24.04 のキャッシュを復元して `GLIBC_2.39 not found` になった）② **シェルスクリプトで、変数の直後に全角文字が続く展開は必ず `${var}` と書く**（macOS の bash は `$target）` の全角括弧の先頭バイトまで変数名として読み、`set -u` で落ちる。`stage-sidecars.sh` と `check-x11-window.sh` を修正済み。10.x で足すスクリプトも同じ）③ `.gitattributes` で改行を LF に固定した（Windows のランナーは `core.autocrlf=true` でチェックアウトし、`bindings.ts` が CRLF になってドリフト検査が落ちた）④ `cargo test` に `--no-fail-fast` を付けた
