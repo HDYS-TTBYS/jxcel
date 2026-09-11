@@ -385,7 +385,7 @@
   - _Boundary: SharedAssets_
   - _Depends: 1.4_
 
-- [ ] 9.5 診断情報の利用者向け導線を実装する
+- [x] 9.5 診断情報の利用者向け導線を実装する
   - 記録の保存場所を利用者が確認できる導線を、メニューの登録口を通じて提示する
   - 診断情報の書き出しを利用者が要求できる導線を提示する
   - 記録の詳細度を利用者が変更できる導線を提示する
@@ -479,6 +479,14 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **9.5（3 つの導線）**: すべて **7.4 の登録口**から、トップレベル部分メニュー **「診断」** の 3 項目として提示する（`src-tauri/src/commands/diagnostics_cmds.rs` の `install()`、`lifecycle::run` の手順 4.3 の続きで 1 回だけ）。項目 id は `app-shell.diagnostics-log-location` / `-export` / `-verbosity`、ショートカットは `Ctrl+Shift+L/E/V`（macOS は `Cmd+Shift+…`）で既存（`Ctrl+Q` / `Ctrl+O` / 検証用 `Ctrl+Shift+J`）と競合しない（3 つを同時登録するテストで固定）。**提示は 9.1 の領域の中の画面**（`src/features/diagnostics/DiagnosticsScreen.tsx`、登録は `src/shell/Layout.tsx` に 1 件）で行い、Rust 側は 4.4/4.5 をそのまま呼ぶ 4 ハンドラ（`command_root!` に既存の `COMMAND_NAMES` 定数で 4 行追加）。
+- **9.5（ACL の前提・重要）**: **`diagnostics_*` は 4.5 が名前と中核ロジックを作ったが、ハンドラ登録と権限付与は 9.5 が行う**。`src-tauri/permissions/app.toml` の `app-shell` 集合に 4 件を足さないと **`removeUnusedCommands` が実コマンドを削る**（付与を 1 つ外すと CLI が `Removed unused commands from application: diagnostics_export` と出して落とすことを実測）。
+- **9.5（保存場所の提示）**: 画面が 4.4 の `log_dir()` の結果を**選択可能な文字列**として見せる（例 `/home/hdys/.local/share/com.jxcel.app/logs`、`XDG_DATA_HOME` を変えた起動ではそれに追随）。**ファイルマネージャやフォルダを開く操作は行わない**（アプリからプロセスを起動しない＝4.7 の境界）。ネイティブのメッセージ表示は 3 系統（GTK/NSAlert/Win32）を新規に書くことになるため採らない。
+- **9.5（書き出し）**: 宛先は **Rust が決める**（フロントエンドからパスを受け取らない）。`download_dir()` が実在すればそこ、無ければ `home_dir()`、どちらも無ければ封筒の失敗。ファイル名 `jxcel-diagnostics-<UNIX 秒>.log`、**単一ファイル**、既存の `app_shell::diagnostics::export` を `spawn_blocking` で呼ぶだけ（**2 つ目の実装は作らない**）。実測: 129,795 B の 1 ファイル（ヘッダ 3 行＋区切り 1 本）、**`files_merged == 0` でも 1 ファイル**（141 B、`# ファイル数: 0`）。
+- **9.5（詳細度・重大な落とし穴）**: **`tauri-plugin-log` の `Builder::level` は `fern::Dispatch` の水準を構築時に固定する**（`src/lib.rs:563-564`）。`log::set_max_level` は全体の上限を**下げることしかできない**ので、旧来の `.level(設定値)` では**実行中に詳細度を上げても記録が現れない**（9.5 はこれで棄却された）。**修理: `.level(...)` には常に上限（`to_level_filter(Trace)`）を渡し、実効フィルタを全体の上限 1 つに寄せる**。起動時は `apply_logging_level`（**手順 4.05**、構築直後）が、実行中は `diagnostics_verbosity_set` が、同じ写像で `log::set_max_level` を書き換える。実測（再起動なし）: `off → info` で 0 → 298 バイト、`info → debug` で DEBUG 行が出現、`debug → off` で増加 0。**`log` に `release_max_level_*` は入っていない**（`cargo tree -e features -i log`）ので release でも同じ機構が成立する。**5.2 の整合検査はこの前提を固定する形に更新済み**（受入上限が最大であること＋取り付いた記録機構が実際に Trace を受け入れること。どちらも load-bearing を実測）。**起動確認行は「詳細度=… / 受入上限=Trace」の両方を出す。**
+- **9.5（実アプリの UI を読み書きする手段・重要）**: **AT-SPI** で実アプリのアクセシビリティ木を読み（`Atspi.Text.get_text` で webview の DOM 文字列を取得）、メニュー項目と画面のボタンを action 呼び出しで駆動できる。9.5 の 3 導線のライブ検証はこの方法で行った（`XSendEvent` と並ぶ有力な手段。10.x の検証でも使える）。
+
 
 - **9.4（置き場）**: `src/shared/` は**デスクトップ内と LAN 配信の Web ページの両方で動く必要がある資産**の置き場。現時点の中身は **README だけ**（設計の木も README のみ）。TS の入口は意図的に置かない（用途の無いプレースホルダは死んだコードになり、検査の実効性は置き場の走査そのもので担保される）。README に**目的と、制約を破った結果**（`form-web-server` が成立しないこと）を書く。
 - **9.4（検査の実装・重要）**: `scripts/check-shared-assets.sh` は **TypeScript の構文木**を走査する（生テキストの正規表現ではないので**コメントや Markdown の散文を誤検出しない**。走査対象は `.ts .tsx .mts .cts .js .jsx .mjs .cjs`）。**境界規則は `checkBoundaryText` 1 つだけで、呼び出しも 1 箇所**（`isStringLiteralLike || isTemplateLiteralToken`）なので、**規則を場所ごとに掛け分ける非対称は構造的に再発しない**（9.4 は一度これで棄却された: リテラル変数に持った IPC 指定子が素通りし、`@tauri-apps` の同型だけが捕まっていた）。検出は ①`@tauri-apps` を含むリテラル（変数保持・サブパス・型のみ・require・動的 import・テンプレート）②アプリの IPC モジュール（相対解決した `../ipc/{client,bindings}`、**ディレクトリ形 `../ipc` / `../ipc/`**、入れ子の相対、および `/ipc/(client|bindings)` を含む非相対のパス様リテラル＝保守的に逸脱）③Tauri のグローバル（`__TAURI__` / `__TAURI_INTERNALS__` / `__TAURI_IPC__` / `transformCallback`。ドット・ブラケット・任意連鎖・分割代入）。

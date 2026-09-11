@@ -50,12 +50,19 @@
 //! - [`crate::watchdog`]: 初回描画の監視と判定（タスク 8.2）。フロントエンドが描画フレームの
 //!   中から呼ぶ `render_heartbeat` を持ち、判定・記録・8.3 の印を Tauri 非依存の中核
 //!   （`app_shell::render`）へ委ねる。
+//! - [`diagnostics_cmds`]: 診断の利用者向け導線（タスク 9.5）。保存場所の提示・書き出し・
+//!   詳細度の読み書きという 4 つのコマンドを持ち、**実体は Tauri 非依存の中核**
+//!   （`app_shell::diagnostics`。タスク 4.4 / 4.5）へ委ねる。あわせて 7.4 の登録口へ
+//!   3 つのメニュー項目（診断の部分メニュー）を足し、選択を
+//!   `DIAGNOSTICS_REQUESTED_EVENT` として対象ウィンドウへ送る。
 
 mod bulk;
+mod diagnostics_cmds;
 mod shell_cmds;
 
 use app_shell::ipc::command_names;
 
+pub use diagnostics_cmds::install as diagnostics_install;
 pub use shell_cmds::start_settings_notifications;
 
 /// 登録一覧から、ハンドラの根と「登録された名前」の一覧を同時に作る。
@@ -100,6 +107,10 @@ command_root! {
     command_names::BULK_ECHO => bulk::bulk_echo,
     command_names::CAN_CLOSE_WINDOW => crate::window::close::can_close_window,
     command_names::PICK_DOCUMENT_FILE => crate::dialog::pick_document_file,
+    command_names::DIAGNOSTICS_LOG_LOCATION => diagnostics_cmds::diagnostics_log_location,
+    command_names::DIAGNOSTICS_EXPORT => diagnostics_cmds::diagnostics_export,
+    command_names::DIAGNOSTICS_VERBOSITY_GET => diagnostics_cmds::diagnostics_verbosity_get,
+    command_names::DIAGNOSTICS_VERBOSITY_SET => diagnostics_cmds::diagnostics_verbosity_set,
 }
 
 #[cfg(test)]

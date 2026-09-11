@@ -27,6 +27,15 @@
 //! 起動時の確認は [`confirm_effective_logging`] が担う。手順の並びは [`run`] のとおりで、
 //! 記録機構は単一インスタンス（手順 2）の後・構築（手順 4）の前に登録する。
 //!
+//! **詳細度の適用先（2026-09-12。round-1 の棄却への対処）**: 詳細度は記録機構のディスパッチへは
+//! 渡さず、**全体の上限（`log::set_max_level`）1 つだけ**を実効のフィルタとする。ディスパッチの
+//! 水準（`tauri-plugin-log` の `.level(…)` → `fern::Dispatch::level`）は構築時に固定され、
+//! `log::set_max_level` は全体の上限を下げることしかできないため、そこへ設定値を渡すと
+//! **実行中に詳細度を上げても記録が現れない**（下げる方向だけが効く非対称）。したがって
+//! ディスパッチは [`dispatch_ceiling`]（最大）に固定し、起動時の適用は [`apply_logging_level`]
+//! （手順 4.05。受入上限を実行時に確認してから全体の上限を設定値へ）、実行中の変更は 9.5 の
+//! `diagnostics_verbosity_set` が担う。両者は [`to_level_filter`] の写像を共有する。
+//!
 //! タスク 5.3 が加えたのは**通信内容保護方針による外部ネットワーク経路の遮断と、その実効値の
 //! 起動時確認**である（要件 1.6、8.3）。方針そのものは `tauri.conf.json` の `app.security.csp`
 //! にあり、`connect-src` を通信境界（IPC）の宛先だけに限定する。取り出しは [`csp_config`]、
@@ -351,6 +360,19 @@ pub fn run() -> Result<(), StartupError> {
     //   同じだけ生きる（ウィンドウごとに立てない）。
     crate::watchdog::start_deadline_watch(app.handle());
 
+    // 手順 4.05: 記録機構の受入上限を確かめ、設定の詳細度を全体の上限として適用する
+    //   （要件 8.7。詳細度の実行中変更の棄却への対処）。
+    //   記録機構のロガーは直前の `Builder::build` で取り付けられ、その `setup` が
+    //   `log::set_max_level` をディスパッチの上限（[`dispatch_ceiling`] = 最大）へ設定する。
+    //   **ここで設定の詳細度を全体の上限へ上書きすることが、実効のフィルタを決める唯一の点で
+    //   ある**（`diagnostics_verbosity_set` が実行中に同じものを書き換える）。
+    //   詳細を `dispatch_ceiling` の doc と [`register_logging`] の doc に書いた理由により、
+    //   ディスパッチへ設定値を渡すと詳細度を上げる変更が効かなくなる。ここではその前提
+    //   （記録機構が最大を受け入れること）を実際に確かめてから適用する。
+    //   **手順 4.5 の起動行より前でなければならない** — あとへ動かすと、起動行の詳細度が
+    //   まだ全体の上限へ反映されていない。
+    apply_logging_level(&logging)?;
+
     // 手順 4.2: 設定変更の通知をフロントエンドへ届ける配線（要件 7.4。タスク 7.1）。
     //   共有実体（要件 7.3）へ 1 回だけ `subscribe()` し、専用スレッドが受信ループを回して
     //   変更のたびに全ウィンドウへ Tauri イベントを emit する。**構築の後に置く** — emit には
@@ -372,6 +394,15 @@ pub fn run() -> Result<(), StartupError> {
     //   パスを読まない**（`src-tauri/src/dialog.rs` の module doc）。9.6 の画面は同じ実装を
     //   コマンド（`pick_document_file`）から通る。
     dialog::install(app.handle());
+
+    // 手順 4.3 の続き: 診断の導線の登録（要件 8.1、8.6、8.7。タスク 9.5）。**7.4 と同じ登録口**
+    //   へ「診断」の部分メニューの 3 項目（保存場所の表示・書き出し・詳細度の変更）を足す。
+    //   選択されたときの処理は、7.5 が解決した活性化の対象ウィンドウへ
+    //   `DIAGNOSTICS_REQUESTED_EVENT` を送るだけであり、実際の提示と操作はフロントエンドの
+    //   診断画面（`src/features/diagnostics/`）が 4 つの `diagnostics_*` コマンドを通して行う
+    //   （4.5 の申し送り）。**この時点でウィンドウは 1 枚も無い**ので、送り先の解決は
+    //   活性化の時点（7.5 の `activation_target`）で行われる。
+    commands::diagnostics_install(app.handle());
 
     // 手順 4.4: 補助プロセスの出力を診断の記録先へ流す購読（要件 5.9。タスク 8.1）。
     //   **位置の根拠**: 記録機構のロガーは手順 4 の `Builder::build` で取り付けられるため、
@@ -755,8 +786,17 @@ struct LoggingConfig {
     retained_files: u64,
     /// 保持されうる合計バイト数。
     retained_bytes: u64,
-    /// 適用する詳細度（4.5 の設定値）。
+    /// 適用する詳細度（4.5 の設定値）。**実効のフィルタはこの値であり**、記録機構の
+    /// ディスパッチへは渡さない（渡すのは [`Self::dispatch_level`]）。
     level: DiagnosticsLevel,
+    /// 記録機構の `fern` ディスパッチへ渡す**受入上限**（[`dispatch_ceiling`] = 最大）。
+    ///
+    /// **実効のフィルタではなく、記録機構が受け入れる上限である。** 理由は [`register_logging`]
+    /// の doc にある（ディスパッチの水準は構築時に固定されるため、実効値をここへ渡すと
+    /// 実行中に詳細度を上げられなくなる）。[`confirm_logging_values`] が「実際に渡す値が最大で
+    /// あること」を、[`apply_logging_level`] が「取り付いた記録機構が実際に最大を受け入れる
+    /// こと」を確かめる。
+    dispatch_level: LevelFilter,
 }
 
 impl LoggingConfig {
@@ -777,6 +817,10 @@ impl LoggingConfig {
 /// 詳細度は 5.1 が開いた設定ストアから読む（要件 7.3。同じディレクトリの実体を共有し、
 /// 2 つ目のストアを開かない）。解釈できない値は [`DiagnosticsLevel::default`]（Info）に落ちる
 /// （4.5 の契約）。
+///
+/// **記録機構のディスパッチへ渡すのは [`dispatch_ceiling`] であり、設定の詳細度ではない。**
+/// 設定値は [`apply_logging_level`] が全体の上限（`log::set_max_level`）へ適用する
+/// （理由は [`register_logging`] の doc）。
 fn logging_config(log_dir: &Path, settings: &impl SettingsStore) -> LoggingConfig {
     LoggingConfig {
         directory: log_dir.to_path_buf(),
@@ -786,7 +830,22 @@ fn logging_config(log_dir: &Path, settings: &impl SettingsStore) -> LoggingConfi
         retained_files: diagnostics::RETAINED_LOG_FILES,
         retained_bytes: diagnostics::MAX_RETAINED_LOG_BYTES,
         level: DiagnosticsLevel::from_store(settings),
+        dispatch_level: dispatch_ceiling(),
     }
+}
+
+/// 記録機構の `fern` ディスパッチへ渡す受入上限。**常に最大（[`LevelFilter::Trace`]）である。**
+///
+/// 4.5 の閉じた列挙の最大 [`DiagnosticsLevel::Trace`] を 5.2 の写像（[`to_level_filter`]）で
+/// 写した値であり、**アプリが要求しうる最も細かい詳細度と一致する**。アプリはこれより細かい
+/// 水準を要求できないので、ディスパッチをこの上限にしておけば「利用者の選択」が記録機構に
+/// よって先回りして落とされることはない。
+///
+/// **最大であることが実行中の変更の前提である** — 記録機構のディスパッチの水準は構築時に
+/// 固定され、`log::set_max_level` は全体の上限を下げることしかできない。詳細は
+/// [`register_logging`] の doc。
+fn dispatch_ceiling() -> LevelFilter {
+    to_level_filter(DiagnosticsLevel::Trace)
 }
 
 /// 記録機構を登録する（要件 8.1、8.5）。
@@ -802,10 +861,33 @@ fn logging_config(log_dir: &Path, settings: &impl SettingsStore) -> LoggingConfi
 ///   は現行ファイルを除外する）。起動時に `remove_old_files(n)`、ローテーション直前には
 ///   アーカイブする 1 個分の余地を空けるため `remove_old_files(n - 1)` を呼ぶ。したがって
 ///   保持される総ファイル数は [`diagnostics::RETAINED_LOG_FILES`] = n + 1 = 6 である
-/// - `level`: 設定から読んだ詳細度を `log::LevelFilter` へ 1 対 1 で対応付けたもの
-///   （[`to_level_filter`]）
+/// - `level`: 記録機構のディスパッチへ渡す**受入上限**（[`dispatch_ceiling`] = 最大）。
+///   **設定から読んだ詳細度はここへ渡さない** — 実効のフィルタは [`apply_logging_level`] が
+///   書き込む `log::set_max_level` の 1 箇所だけである（下の「受入上限を最大にする理由」）
 ///
-/// 対象（`TargetKind`）は標準出力と方針の保存先の 2 つである。**フロントエンドへ転送する
+/// # 受入上限を最大にする理由（実行中の変更を両方向で効かせる）
+///
+/// `tauri-plugin-log` 2.9.1 は `.level(…)` を `fern::Dispatch::level` へ渡し
+/// （`src/lib.rs` の `Builder::level` → `self.dispatch = self.dispatch.level(level_filter)`）、
+/// そのディスパッチの水準は**構築時に固定される**（`acquire_logger` が
+/// `dispatch.into_log()` の結果を `attach_logger` へ渡し、`log::set_max_level` に並べて
+/// 取り付ける）。`log::set_max_level` は**全体の上限を下げることしかできない**ため、
+/// ディスパッチの水準を設定値にすると:
+///
+/// - 詳細度を**下げる**変更は効く（全体の上限がディスパッチより厳しくなる）
+/// - 詳細度を**上げる**変更は効かない（全体の上限を上げても、ディスパッチが先に落とす）
+///
+/// これは要件 8.7 の「利用者が変更できる」と、実行中に変更できるという
+/// [`crate::commands::diagnostics_cmds::diagnostics_verbosity_set`] の前提を破る
+/// （実際に round-1 のレビューで実測され棄却された）。したがってここではディスパッチを
+/// **アプリが要求しうる最大**に固定し、**実効のフィルタを全体の上限 1 つに寄せる**。
+/// [`apply_logging_level`]（構築の直後）と `diagnostics_verbosity_set`（実行中の変更）が
+/// 同じ写像（[`to_level_filter`]）でその 1 つを書き換えるので、起動時と実行中の解釈が
+/// 食い違う余地はない。
+///
+/// # 対象（`TargetKind`）
+///
+/// 標準出力と方針の保存先の 2 つである。**フロントエンドへ転送する
 /// `TargetKind::Webview` は含めない** — 記録をウェブビューへ届けるには各ウィンドウが
 /// `attachConsole` で購読する必要があり、本スペックのどのタスクもそれを要求していない。含めれば
 /// `log://log` イベントの購読とフロント側の実装が前提になり、capability を増やさずに済む現状を
@@ -826,16 +908,60 @@ fn register_logging(
         ])
         .max_file_size(config.max_file_bytes as u128)
         .rotation_strategy(RotationStrategy::KeepSome(config.archived_files))
-        .level(to_level_filter(config.level));
+        .level(config.dispatch_level);
     builder.plugin(logger.build())
 }
 
+/// 構築の直後に、記録機構が最大の詳細度を受け入れることを確かめ、設定の詳細度を**全体の
+/// 上限**へ適用する（要件 8.7。手順 4.05）。
+///
+/// 行うことは 2 つである:
+///
+/// 1. **記録機構が最大を受け入れることを実際に確かめる。** 全体の上限を一時的に最大へ上げて
+///    から `log::log_enabled!` を評価する。このマクロは全体の上限**と記録器自身の `enabled`**
+///    の両方を見るので、ディスパッチの水準が最大でなければ（例: 設定値へ固定する回帰が入れば）
+///    ここで偽になる。偽なら起動を中止する — **詳細度を上げられないまま「変更はすぐに効く」と
+///    表示する状態を作らない**ためである（round-1 の棄却理由そのもの）。
+/// 2. **設定の詳細度を全体の上限へ適用する。** ここから `app.run` までの記録が設定どおりに
+///    絞られる。以後の変更は `diagnostics_verbosity_set` が同じ `log::set_max_level` を
+///    書き換える（[`to_level_filter`] の写像を共有する）。
+///
+/// 記録機構のロガーは手順 4（`Builder::build`）で取り付けられるので、この手順は構築の後で
+/// なければならない。**手順 4.5 の [`confirm_effective_logging`] より前**に置くこと —
+/// あとへ動かすと、起動行の詳細度がまだ全体の上限へ反映されていない。
+///
+/// # Errors
+///
+/// 記録機構が最大の詳細度を受け入れないとき [`StartupError`]（前提「診断情報の保存先」）。
+fn apply_logging_level(config: &LoggingConfig) -> Result<(), StartupError> {
+    log::set_max_level(LevelFilter::Trace);
+    if !log::log_enabled!(log::Level::Trace) {
+        return Err(StartupError::new(
+            PREREQUISITE_DIAGNOSTICS,
+            format!(
+                "記録機構が最大の詳細度 (Trace) を受け入れない（受入上限として {:?} を指定したが、取り付いた記録機構がそれを反映していない）。実行中の詳細度の変更が効かなくなるため起動を中止する",
+                config.dispatch_level,
+            ),
+        ));
+    }
+    log::set_max_level(to_level_filter(config.level));
+    Ok(())
+}
+
 /// 実効設定が方針と一致し、かつ保存先をディレクトリとして使えることを構築の前に確かめる
-/// （要件 8.1、8.5）。
+/// （要件 8.1、8.5、8.7）。
 ///
 /// 4.4 のコンパイル時検査（`MAX_RETAINED_LOG_BYTES <= MAX_TOTAL_LOG_BYTES`）が方針値どうしの
 /// 不変条件の一次的な守りである。この関数は**実際に記録機構へ渡す値（[`LoggingConfig`]）が
 /// その方針値と一致し、保持の不変条件を満たすこと**を起動時に再確認する。
+///
+/// **2026-09-12 の追加（詳細度の実行中変更の棄却への対処）**: 記録機構へ渡す詳細度は実効値
+/// ではなく受入上限（[`dispatch_ceiling`] = 最大）になった。したがって照合の対象も
+/// 「渡す値が最大であること」であり、`dispatch_level` を最大以外に組み立てると（または
+/// 組み立てを書き換えると）ここで起動が止まる。**この照合は装飾ではない** —
+/// [`apply_logging_level`] の実行時確認と対になり、前者は「渡した値」を、後者は「取り付いた
+/// 記録機構が実際に受け入れる」ことを見る（片方だけでは、渡した値が正しくても記録器が別の水準で
+/// 取り付いた場合を捕まえられない）。
 ///
 /// # Errors
 ///
@@ -843,6 +969,16 @@ fn register_logging(
 /// [`StartupError`]（前提「診断情報の保存先」）。
 fn confirm_logging_values(config: &LoggingConfig) -> Result<(), StartupError> {
     let archived = config.archived_files as u64;
+    if config.dispatch_level != dispatch_ceiling() {
+        return Err(StartupError::new(
+            PREREQUISITE_DIAGNOSTICS,
+            format!(
+                "記録機構へ渡す受入上限が最大でない（渡す値={:?}、必要={:?}）。この状態では実行中に詳細度を上げても記録が現れない",
+                config.dispatch_level,
+                dispatch_ceiling(),
+            ),
+        ));
+    }
     if config.max_file_bytes != diagnostics::MAX_LOG_FILE_BYTES
         || archived != u64::from(diagnostics::KEEP_SOME_ARCHIVED_FILES)
         || config.retained_files != archived + 1
@@ -880,9 +1016,12 @@ fn confirm_logging_values(config: &LoggingConfig) -> Result<(), StartupError> {
 /// `log::…!` はどこにも残らないためである。行うことは 2 つ:
 ///
 /// 1. **実効設定の起動行を記録する** — 保存先、1 ファイル上限、アーカイブ世代数、保持総数、
-///    保持合計、詳細度を 1 行にまとめる。利用者・保守担当はこれで適用後の値を確認できる。
-///    加えて、詳細度が `Debug` 以上のときだけ現れる行を 1 つ置く（詳細度が実際にフィルタへ
-///    効いていることを、設定を変えて起動するだけで観察できるようにする）。
+///    保持合計、詳細度、受入上限を 1 行にまとめる。利用者・保守担当はこれで適用後の値を
+///    確認できる。**詳細度は実効のフィルタ（全体の上限）であり、受入上限は記録機構が受け入れる
+///    最大である** — 両者を並べて出すのは、実行中の変更が両方向で効く前提（受入上限が最大で
+///    あること）を起動行だけでも確認できるようにするためである。加えて、詳細度が `Debug` 以上の
+///    ときだけ現れる行を 1 つ置く（詳細度が実際にフィルタへ効いていることを、設定を変えて
+///    起動するだけで観察できるようにする）。
 /// 2. **記録中のファイルが方針の保存先に現れたことを確かめる** — プラグインは対象の `setup`
 ///    で記録中のファイルを開く（`RotatingFile::new` の `open_file`）ので、詳細度が `Off` でも
 ///    ファイルは作られる。現れなければ記録機構を適用できていない。
@@ -893,13 +1032,14 @@ fn confirm_logging_values(config: &LoggingConfig) -> Result<(), StartupError> {
 /// [`StartupError`]（前提「診断情報の保存先」）。**無言で劣化させない**（要件 1.4）。
 fn confirm_effective_logging(config: &LoggingConfig) -> Result<(), StartupError> {
     log::info!(
-        "診断の実効設定: 保存先={} / 1ファイル上限={} B / アーカイブ世代={} / 保持総数={} ファイル / 保持合計={} B / 詳細度={:?}",
+        "診断の実効設定: 保存先={} / 1ファイル上限={} B / アーカイブ世代={} / 保持総数={} ファイル / 保持合計={} B / 詳細度={:?} / 受入上限={:?}",
         config.directory.display(),
         config.max_file_bytes,
         config.archived_files,
         config.retained_files,
         config.retained_bytes,
         config.level,
+        config.dispatch_level,
     );
     // 詳細度が Debug 以上のときだけ残る確認行。4.5 の詳細度が実際にフィルタへ効いていることを、
     // 設定を変えて起動するだけで観察できるようにする。
@@ -929,7 +1069,13 @@ fn confirm_effective_logging(config: &LoggingConfig) -> Result<(), StartupError>
 ///
 /// 4.4 は `log` クレートに依存しない（Tauri 非依存のコアを保つ）ため、この対応付けはアダプタ層
 /// が持つ（`crates/app-shell/src/diagnostics.rs` の `DiagnosticsLevel` の doc）。
-fn to_level_filter(level: DiagnosticsLevel) -> LevelFilter {
+///
+/// **起動時の適用（5.2 の [`apply_logging_level`]。手順 4.05）と、実行中の変更（9.5 の
+/// `commands::diagnostics_cmds` の `diagnostics_verbosity_set`）が同じ写像を使う** —
+/// 2 つ目の対応表を持てば、起動時と実行中で水準の解釈が食い違いうる。**どちらも書き換える先は
+/// 全体の上限（`log::set_max_level`）1 つだけである**（記録機構のディスパッチは
+/// [`dispatch_ceiling`] に固定する。理由は [`register_logging`] の doc）。
+pub(crate) fn to_level_filter(level: DiagnosticsLevel) -> LevelFilter {
     match level {
         DiagnosticsLevel::Off => LevelFilter::Off,
         DiagnosticsLevel::Error => LevelFilter::Error,
@@ -2051,16 +2197,18 @@ fn start_verification_sidecar(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_to_char_boundary, confirm_csp_values, csp_config_from, format_crash_record,
-        record_once, render_fallback_record, vetoes_exit, write_crash_record, CrashRecord,
-        CspConfig, ExitControl, Residency, ABNORMAL_TERMINATION_RECORDING, MAX_CRASH_RECORD_BYTES,
+        clamp_to_char_boundary, confirm_csp_values, confirm_logging_values, csp_config_from,
+        dispatch_ceiling, format_crash_record, record_once, render_fallback_record, vetoes_exit,
+        write_crash_record, CrashRecord, CspConfig, ExitControl, LoggingConfig, Residency,
+        ABNORMAL_TERMINATION_RECORDING, LOG_FILE_STEM, MAX_CRASH_RECORD_BYTES,
     };
     #[cfg(feature = "verification-triggers")]
     use super::{parse_verification_trigger, VerificationAction};
+    use app_shell::diagnostics;
     use app_shell::render_fallback::{FallbackApplication, FallbackOrigin, FallbackOutcome};
     use std::sync::atomic::Ordering;
     use tauri::utils::config::Csp;
-    use tauri_plugin_log::log::Level;
+    use tauri_plugin_log::log::{Level, LevelFilter};
 
     /// 方針文字列から実効設定を組み立てる（本番の `csp_config` が `Config` から取り出すのと
     /// 同じ経路を通す。方針の解釈をテスト側で二重実装しないための入口である）。
@@ -2110,6 +2258,40 @@ mod tests {
         assert!(
             confirm_csp_values(&policy("default-src 'self'")).is_err(),
             "connect-src の記述漏れを検出しなければならない"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 記録機構へ渡す実効設定（タスク 5.2 / 9.5、要件 8.1・8.5・8.7）
+    // -----------------------------------------------------------------------
+
+    /// **受入上限が最大でなければ起動を止める**（[`confirm_logging_values`]）。
+    ///
+    /// 上限を設定値にすると、実行中に詳細度を上げても記録が現れない（9.5 の round-1 の
+    /// 棄却理由）。正しい組み立てが通り、最大でない上限だけが名指しで拒否されることを固定する。
+    /// 保存先は実在のディレクトリを使う（値の照合は保存先の検査より前に行われる）。
+    #[test]
+    fn the_plugin_dispatch_ceiling_must_be_the_maximum() {
+        let assembled = |dispatch_level| LoggingConfig {
+            directory: std::env::temp_dir(),
+            file_stem: LOG_FILE_STEM,
+            max_file_bytes: diagnostics::MAX_LOG_FILE_BYTES,
+            archived_files: diagnostics::KEEP_SOME_ARCHIVED_FILES as usize,
+            retained_files: diagnostics::RETAINED_LOG_FILES,
+            retained_bytes: diagnostics::MAX_RETAINED_LOG_BYTES,
+            level: diagnostics::DiagnosticsLevel::Info,
+            dispatch_level,
+        };
+
+        assert!(
+            confirm_logging_values(&assembled(dispatch_ceiling())).is_ok(),
+            "方針どおりに組み立てた実効設定は通らなければならない"
+        );
+        let error = confirm_logging_values(&assembled(LevelFilter::Info))
+            .expect_err("最大でない受入上限は拒否しなければならない");
+        assert!(
+            error.to_string().contains("受入上限"),
+            "何が最大でないかを名指しする: {error}"
         );
     }
 

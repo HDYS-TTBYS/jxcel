@@ -21,6 +21,12 @@
 //! - 8.2: 初回描画の通知の要求と応答、および三値の判定（[`RenderHeartbeatRequest`] /
 //!   [`RenderHeartbeatResponse`] / [`RenderVerdict`]）。**要求はウィンドウを運ばない** —
 //!   呼び出し元は Tauri が注入する `WebviewWindow` から取る（偽装できない。要件 4.6）
+//! - 9.5: 診断の導線の応答（[`DiagnosticsLogLocationResponse`] /
+//!   [`DiagnosticsExportResponse`] / [`DiagnosticsVerbosityResponse`] /
+//!   [`DiagnosticsVerbositySetRequest`]）と、詳細度の閉じた列挙（[`DiagnosticsLevel`]）、
+//!   およびメニューの活性化を画面へ引き渡すイベント（[`DIAGNOSTICS_REQUESTED_EVENT`] /
+//!   [`DiagnosticsRequestedEvent`] / [`DiagnosticsSection`]）。**実体は 4.4 / 4.5 にあり、
+//!   ここは境界の形だけを持つ**（`crates/app-shell/src/diagnostics.rs`）
 
 use serde::{Deserialize, Serialize};
 
@@ -317,6 +323,197 @@ pub struct PickDocumentFileResponse {
     pub outcome: DocumentPickOutcome,
 }
 
+// ---------------------------------------------------------------------------
+// 診断の導線（タスク 9.5。要件 8.1、8.6、8.7）
+// ---------------------------------------------------------------------------
+
+/// 記録の詳細度（タスク 9.5。要件 8.7）。**閉じた列挙である。**
+///
+/// 実体は Tauri 非依存の中核 [`crate::diagnostics::DiagnosticsLevel`] であり、この型は
+/// **境界の形**である（`ts-rs` の derive を付けてよい唯一の場所が本モジュールであるという
+/// 不変条件に従う。`RenderVerdict` と同じ扱い）。したがって境界の列挙と中核の列挙の間に
+/// 対応付けが必要であり、それは [`From`] の 2 方向（網羅的な `match`）が担う — **どちらかの
+/// 列挙に値を足すと、もう一方への写像がコンパイルエラーになる**（片側だけの追加を許さない）。
+///
+/// 詳細度の昇順は [`Ord`] が表す（`Off` < `Error` < `Warn` < `Info` < `Debug` < `Trace`）。
+/// 中核の列挙と同じ順序であり、[`DiagnosticsLevel::ALL`] がその閉じた集合を昇順で並べる。
+/// 利用者へは [`DiagnosticsVerbosityResponse::levels`] としてこの順序で渡すので、**画面は
+/// 並び順を自前で持たない**（tasks.md 4.5 の詳細度の契約）。
+///
+/// 直列化は中核と同じ小文字表現（`"off"` … `"trace"`）であり、設定ファイルに載る値と
+/// 境界を越える値の綴りが一致する（4.5 の `#[serde(rename_all = "lowercase")]`）。
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ts_rs::TS,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticsLevel {
+    /// 記録しない。
+    Off,
+    /// 失敗だけを記録する。
+    Error,
+    /// 失敗と警告を記録する。
+    Warn,
+    /// 失敗・警告・通常の出来事を記録する（既定）。
+    Info,
+    /// 開発時の詳細を記録する。
+    Debug,
+    /// 最も細かい記録。
+    Trace,
+}
+
+impl DiagnosticsLevel {
+    /// 閉じた列挙の全値を**詳細度の昇順**で並べたもの（[`Ord`] の順序と同じ）。
+    ///
+    /// 画面へ渡す [`DiagnosticsVerbosityResponse::levels`] の源であり、**「どの値があり、
+    /// どの順に並ぶか」の唯一の定義**である。値を足すときはここへも足す（足し忘れは
+    /// [`DiagnosticsLevel::ALL`] を走査するテストが捕まえる）。
+    pub const ALL: [Self; 6] = [
+        Self::Off,
+        Self::Error,
+        Self::Warn,
+        Self::Info,
+        Self::Debug,
+        Self::Trace,
+    ];
+}
+
+impl From<crate::diagnostics::DiagnosticsLevel> for DiagnosticsLevel {
+    /// 中核の詳細度を境界の形へ写す（**1 対 1**。tasks.md 4.5 の契約）。
+    fn from(level: crate::diagnostics::DiagnosticsLevel) -> Self {
+        use crate::diagnostics::DiagnosticsLevel as Core;
+        match level {
+            Core::Off => Self::Off,
+            Core::Error => Self::Error,
+            Core::Warn => Self::Warn,
+            Core::Info => Self::Info,
+            Core::Debug => Self::Debug,
+            Core::Trace => Self::Trace,
+        }
+    }
+}
+
+impl From<DiagnosticsLevel> for crate::diagnostics::DiagnosticsLevel {
+    /// 境界の詳細度を中核の形へ戻す（**1 対 1**）。要求（
+    /// [`DiagnosticsVerbositySetRequest`]）はこの向きを通る。
+    fn from(level: DiagnosticsLevel) -> Self {
+        match level {
+            DiagnosticsLevel::Off => Self::Off,
+            DiagnosticsLevel::Error => Self::Error,
+            DiagnosticsLevel::Warn => Self::Warn,
+            DiagnosticsLevel::Info => Self::Info,
+            DiagnosticsLevel::Debug => Self::Debug,
+            DiagnosticsLevel::Trace => Self::Trace,
+        }
+    }
+}
+
+/// 記録の保存場所の応答（タスク 9.5。要件 8.1、4.6）。
+///
+/// **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。`directory` は各 OS の規約で解決した
+/// 記録ディレクトリであり（4.4 の [`crate::diagnostics::log_dir`]）、**利用者に見せるための
+/// 文字列**である（境界では識別子も位置も文字列で運ぶ。表示できないバイト列は置換される）。
+/// この経路は保存場所を提示するだけで、場所を開いたり走査したりしない（要件 4.7）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct DiagnosticsLogLocationResponse {
+    /// 呼び出し元ウィンドウの文脈（要件 4.6）。
+    pub context: WindowContext,
+    /// 記録の保存場所（表示用の文字列）。
+    pub directory: String,
+}
+
+/// 書き出しに含めた記録の有無（タスク 9.5。要件 8.6）。
+///
+/// 4.5 の [`crate::diagnostics::ExportReport::files_merged`] は件数を数値で持つが、**境界へ
+/// 数値を出さない**（`crates/app-shell` の不変条件: 境界を越える値は文字列か、数値を含まない
+/// 閉じた列挙である）。利用者にとって必要な区別は「記録を連結した」か「記録が 1 つも無かった」か
+/// だけなので、件数ではなく**閉じた列挙**で運ぶ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticsExportRecords {
+    /// 記録が 1 つ以上あり、そのすべてを連結した。
+    Merged,
+    /// 記録が 1 つも無かった。**それでも書き出しは成功しており、宛先に 1 つのファイルがある**
+    /// （見出しと「記録は見つからなかった」の行だけ）。
+    Empty,
+}
+
+/// 記録の書き出しの応答（タスク 9.5。要件 8.6、4.6）。
+///
+/// **書き出しは 1 つのファイルにまとまる**（4.5 の [`crate::diagnostics::export`] の契約）。
+/// [`DiagnosticsExportRecords::Empty`] でも成功であり、その場合も `destination` に 1 つの
+/// ファイルができている（記録が無かったことを利用者へ伝えるための材料）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct DiagnosticsExportResponse {
+    /// 呼び出し元ウィンドウの文脈（要件 4.6）。
+    pub context: WindowContext,
+    /// 書き出したファイルの位置（表示用の文字列）。
+    pub destination: String,
+    /// 連結した記録の有無（`Empty` でも書き出しは成功している）。
+    pub records: DiagnosticsExportRecords,
+}
+
+/// 記録の詳細度の応答（タスク 9.5。要件 8.7、4.6）。
+///
+/// 読み取りと変更の**両方**がこの形を返す。`level` が現在の値（変更では変更後の値）であり、
+/// `levels` が選べる値の全体を**詳細度の昇順**で並べたものである（[`DiagnosticsLevel::ALL`]）。
+/// 画面はこの 2 つだけを見て「現在値の表示」と「選択肢の列挙」を行えるので、**選べる値の集合と
+/// 順序を画面側に写さない**（写すと中核の列挙と食い違う余地ができる）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct DiagnosticsVerbosityResponse {
+    /// 呼び出し元ウィンドウの文脈（要件 4.6）。
+    pub context: WindowContext,
+    /// 現在の詳細度（変更コマンドでは変更後の値）。
+    pub level: DiagnosticsLevel,
+    /// 選べる詳細度の全体（`Off` から `Trace` へ昇順）。
+    pub levels: Vec<DiagnosticsLevel>,
+}
+
+/// 記録の詳細度の変更要求（タスク 9.5。要件 8.7）。
+///
+/// 詳細度は**閉じた列挙 [`DiagnosticsLevel`] の値だけ**であり、任意の文字列は載らない。
+/// 列挙に無い値は `serde` の復元に失敗するため、コマンドの引数として境界を越えられない
+/// （その拒否はフロントエンド側のラッパが通信境界の失敗として扱う。tasks.md 2.4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct DiagnosticsVerbositySetRequest {
+    /// 設定する詳細度。
+    pub level: DiagnosticsLevel,
+}
+
+/// 診断の導線がメニューから要求されたことを伝える Tauri イベントの名前（タスク 9.5）。
+///
+/// `invoke` の宛先を持たないためコマンド名の配列（[`COMMAND_NAMES`]）には現れない。設定変更の
+/// 通知（[`SETTINGS_CHANGED_EVENT`]）と同じく、**生成物（`src/ipc/bindings.ts`）へ定数として
+/// 出す**ことで、フロントエンドが文字列リテラルを綴り間違える経路を塞ぐ（タスク 2.3 の
+/// ドリフト検査がこの定数もバイト比較する）。
+pub const DIAGNOSTICS_REQUESTED_EVENT: &str = "diagnostics_requested";
+
+/// 診断の導線のうち、利用者がメニューから選んだもの（タスク 9.5。要件 8.1、8.6、8.7）。
+///
+/// メニューの項目は 3 つの導線に 1 つずつ対応するので、活性化は**どれが選ばれたか**を運ぶ。
+/// 画面はこの値で該当の区画を示す（利用者にとっては「選んだ項目の場所が開く」ことになる）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticsSection {
+    /// 記録の保存場所の確認（要件 8.1）。
+    Location,
+    /// 記録の書き出し（要件 8.6）。
+    Export,
+    /// 記録の詳細度の変更（要件 8.7）。
+    Verbosity,
+}
+
+/// メニューの活性化を画面へ引き渡す通知（タスク 9.5）。
+///
+/// メニューの処理はイベントループのスレッドで走り、対象ウィンドウのフロントエンドへ届ける
+/// 必要がある。そこで 7.4 の登録口が受けた選択を、この 1 つのイベントとして**活性化の対象
+/// ウィンドウへ**送る（7.5 の振り向けの結果を使う。要件 3.5）。画面はこれを購読し、遷移と
+/// 区画の選択を行う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct DiagnosticsRequestedEvent {
+    /// 利用者が選んだ導線。
+    pub section: DiagnosticsSection,
+}
+
 /// TypeScript の生成物を再生成する、唯一の文書化されたコマンド（タスク 2.2）。
 ///
 /// 生成物のヘッダにもこの文字列を埋め込むため、定数として一箇所に持つ。実行ファイルは
@@ -359,11 +556,16 @@ fn command_names_constant() -> String {
     out
 }
 
-/// イベント名の定数を生成する（タスク 7.1。要件 7.4）。
+/// イベント名の定数を生成する（タスク 7.1 / 9.5。要件 7.4、8.1、8.6、8.7）。
 ///
-/// 設定変更の通知は `invoke` の宛先を持たないため [`command_names::COMMAND_NAMES`] には現れない
-/// が、**フロントエンドが文字列リテラルを綴り間違えない**ように、名前を生成物へ定数として出す。
-/// 生成物はタスク 2.3 のドリフト検査がバイト比較するので、名前の変更は生成のやり直しを強制する。
+/// 設定変更の通知（[`SETTINGS_CHANGED_EVENT`]）と診断の導線の要求
+/// （[`DIAGNOSTICS_REQUESTED_EVENT`]）は `invoke` の宛先を持たないため
+/// [`command_names::COMMAND_NAMES`] には現れないが、**フロントエンドが文字列リテラルを
+/// 綴り間違えない**ように、名前を生成物へ定数として出す。生成物はタスク 2.3 のドリフト検査が
+/// バイト比較するので、名前の変更は生成のやり直しを強制する。
+///
+/// 並びは**この配列の順序**であり、イベント名を足す側はここへ 1 行足す（名前の一覧を
+/// 生成物側で持たない）。
 fn event_names_constant() -> String {
     let mut out = String::new();
     out.push('\n');
@@ -373,9 +575,12 @@ fn event_names_constant() -> String {
     );
     out.push_str(" * フロントエンドはこの定数だけを参照する（文字列リテラルを書かない）。\n");
     out.push_str(" */\n");
-    out.push_str("export const SETTINGS_CHANGED_EVENT = \"");
-    out.push_str(SETTINGS_CHANGED_EVENT);
-    out.push_str("\";\n");
+    for (constant, event) in [
+        ("SETTINGS_CHANGED_EVENT", SETTINGS_CHANGED_EVENT),
+        ("DIAGNOSTICS_REQUESTED_EVENT", DIAGNOSTICS_REQUESTED_EVENT),
+    ] {
+        out.push_str(&format!("export const {constant} = \"{event}\";\n"));
+    }
     out
 }
 
@@ -472,6 +677,51 @@ fn concrete_settings_result(cfg: &ts_rs::Config) -> (String, String) {
     (NAME.to_owned(), text)
 }
 
+/// 記録の保存場所の応答の具体形（タスク 9.5）。 [`concrete_window_context_result`] と同じ理由で
+/// 置く。ペイロード型は [`DiagnosticsLogLocationResponse`] である。
+fn concrete_diagnostics_log_location_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "DiagnosticsLogLocationResult";
+    let mut text = String::from(
+        "// 記録の保存場所の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を\n\
+         // 名指ししないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<DiagnosticsLogLocationResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
+/// 記録の書き出しの応答の具体形（タスク 9.5）。 [`concrete_window_context_result`] と同じ理由で
+/// 置く。ペイロード型は [`DiagnosticsExportResponse`] である。
+fn concrete_diagnostics_export_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "DiagnosticsExportResult";
+    let mut text = String::from(
+        "// 記録の書き出しの応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を\n\
+         // 名指ししないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<DiagnosticsExportResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
+/// 記録の詳細度の応答の具体形（タスク 9.5）。 [`concrete_window_context_result`] と同じ理由で
+/// 置く。ペイロード型は [`DiagnosticsVerbosityResponse`] である（読み取りと変更で同じ形）。
+fn concrete_diagnostics_verbosity_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "DiagnosticsVerbosityResult";
+    let mut text = String::from(
+        "// 記録の詳細度の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を\n\
+         // 名指ししないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<DiagnosticsVerbosityResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
 /// 境界を越える型とコマンド名から、追跡対象の TypeScript（`src/ipc/bindings.ts`）を生成する
 /// （tasks.md 2.2、design.md「IpcContract」の Service Interface）。
 ///
@@ -499,6 +749,14 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<RenderVerdict>(&cfg),
         declared::<RenderHeartbeatRequest>(&cfg),
         declared::<RenderHeartbeatResponse>(&cfg),
+        declared::<DiagnosticsLevel>(&cfg),
+        declared::<DiagnosticsSection>(&cfg),
+        declared::<DiagnosticsRequestedEvent>(&cfg),
+        declared::<DiagnosticsLogLocationResponse>(&cfg),
+        declared::<DiagnosticsExportRecords>(&cfg),
+        declared::<DiagnosticsExportResponse>(&cfg),
+        declared::<DiagnosticsVerbosityResponse>(&cfg),
+        declared::<DiagnosticsVerbositySetRequest>(&cfg),
         declared::<IpcError>(&cfg),
         declared::<IpcResult<WindowContext, IpcError>>(&cfg),
         concrete_window_context_result(&cfg),
@@ -506,6 +764,9 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         concrete_can_close_window_result(&cfg),
         concrete_pick_document_file_result(&cfg),
         concrete_render_heartbeat_result(&cfg),
+        concrete_diagnostics_log_location_result(&cfg),
+        concrete_diagnostics_export_result(&cfg),
+        concrete_diagnostics_verbosity_result(&cfg),
     ];
     declarations.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -1029,5 +1290,210 @@ mod tests {
             ts.contains("手で編集しない"),
             "生成物であることの注意がヘッダに無い:\n{ts}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // 9.5: 診断の導線（詳細度の閉じた列挙・書き出しの応答・メニューの通知）
+    // ------------------------------------------------------------------
+
+    /// 境界の詳細度は**閉じた列挙**であり、`ALL` が全値を詳細度の昇順で並べること、および
+    /// 中核の列挙との写像が 1 対 1（往復して同じ値）であることを固定する。
+    ///
+    /// 中核へ値を足すと [`From`] の網羅的な `match` がコンパイルエラーになるので、ここが
+    /// 検査するのは「境界側の並びが中核の [`Ord`] と一致すること」である — 順序が食い違うと、
+    /// 画面に出る選択肢の並びが詳細度の順でなくなる。
+    #[test]
+    fn diagnostics_levels_are_closed_and_ordered() {
+        use crate::diagnostics::DiagnosticsLevel as Core;
+
+        assert_eq!(DiagnosticsLevel::ALL.len(), 6, "閉じた列挙の全値を並べる");
+
+        let mut previous: Option<Core> = None;
+        for level in DiagnosticsLevel::ALL {
+            let core: Core = level.into();
+            if let Some(previous) = previous {
+                assert!(
+                    previous < core,
+                    "{previous:?} の次に {core:?} が来ている（昇順でない）"
+                );
+            }
+            // 往復して同じ値へ戻ること（写像が 1 対 1 であることの実行時の証拠）。
+            assert_eq!(DiagnosticsLevel::from(core), level);
+            previous = Some(core);
+        }
+        assert_eq!(previous, Some(Core::Trace), "最後は最も細かい詳細度である");
+
+        // 中核の既定（4.5: `Info`）が境界でも同じ位置にあること。
+        let default: DiagnosticsLevel = Core::default().into();
+        assert_eq!(default, DiagnosticsLevel::Info);
+    }
+
+    /// 詳細度の綴りが中核と同じ小文字表現で境界を越えること、および生成物の型がその閉じた
+    /// 集合を文字列の合併型として出すことを固定する（要件 8.7）。
+    #[test]
+    fn diagnostics_levels_are_lowercase_strings_on_both_sides() {
+        let encoded = DiagnosticsLevel::ALL
+            .iter()
+            .map(|level| serde_json::to_value(level).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            encoded,
+            ["off", "error", "warn", "info", "debug", "trace"]
+                .into_iter()
+                .map(|name| serde_json::Value::String(name.to_owned()))
+                .collect::<Vec<_>>(),
+            "境界の詳細度は小文字の文字列で運ばれる"
+        );
+
+        let ts = generated::<DiagnosticsLevel>();
+        for name in ["off", "error", "warn", "info", "debug", "trace"] {
+            assert!(ts.contains(&format!("\"{name}\"")), "{ts}");
+        }
+        assert_no_any(&ts);
+        assert_no_numeric_type(&ts);
+    }
+
+    /// 詳細度の応答が**現在値と、選べる値の全体を昇順で**運ぶことを固定する。画面はこの 2 つ
+    /// だけを見て選択肢を組める（選べる値の集合と順序を画面側に写さない）。
+    #[test]
+    fn verbosity_response_lists_the_whole_enum_in_order() {
+        let response = DiagnosticsVerbosityResponse {
+            context: WindowContext {
+                window: WindowLabel::new("empty-1"),
+            },
+            level: DiagnosticsLevel::Debug,
+            levels: DiagnosticsLevel::ALL.to_vec(),
+        };
+        let encoded = serde_json::to_value(&response).unwrap();
+        assert_eq!(encoded["context"]["window"], "empty-1");
+        assert_eq!(encoded["level"], "debug");
+        assert_eq!(
+            encoded["levels"],
+            serde_json::json!(["off", "error", "warn", "info", "debug", "trace"])
+        );
+
+        // 変更の要求は列挙の値だけを受け付ける（任意の文字列は載らない）。
+        let request = DiagnosticsVerbositySetRequest {
+            level: DiagnosticsLevel::Trace,
+        };
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({ "level": "trace" })
+        );
+        let back: DiagnosticsVerbositySetRequest =
+            serde_json::from_value(serde_json::json!({ "level": "trace" })).unwrap();
+        assert_eq!(back, request);
+        assert!(
+            serde_json::from_value::<DiagnosticsVerbositySetRequest>(
+                serde_json::json!({ "level": "verbose" })
+            )
+            .is_err(),
+            "列挙に無い詳細度は境界を越えられない"
+        );
+    }
+
+    /// 書き出しの応答が**単一ファイルの位置と、記録の有無**を運ぶことを固定する。
+    /// `Empty` でも成功であり、その場合も宛先は 1 つである（4.5 の契約）。**境界に数値は出さない**
+    /// ので、件数は閉じた列挙で運ぶ。
+    #[test]
+    fn export_response_reports_one_destination_and_whether_records_existed() {
+        let response = DiagnosticsExportResponse {
+            context: WindowContext {
+                window: WindowLabel::new("doc-1"),
+            },
+            destination: "/home/user/ダウンロード/jxcel-diagnostics-1.log".to_owned(),
+            records: DiagnosticsExportRecords::Empty,
+        };
+        let encoded = serde_json::to_value(&response).unwrap();
+        assert_eq!(encoded["context"]["window"], "doc-1");
+        assert_eq!(
+            encoded["destination"],
+            "/home/user/ダウンロード/jxcel-diagnostics-1.log"
+        );
+        assert_eq!(encoded["records"], "empty");
+        assert_eq!(
+            serde_json::to_value(DiagnosticsExportRecords::Merged).unwrap(),
+            "merged"
+        );
+        assert_no_json_number(&encoded, "export");
+
+        let ts = generated::<DiagnosticsExportResponse>();
+        assert_no_numeric_type(&ts);
+        assert_no_any(&ts);
+
+        assert!(serde_json::to_value(&DiagnosticsLogLocationResponse {
+            context: WindowContext {
+                window: WindowLabel::new("doc-1"),
+            },
+            directory: "/home/user/.local/share/com.jxcel.app/logs".to_owned(),
+        })
+        .unwrap()["directory"]
+            .is_string());
+    }
+
+    /// メニューの活性化の通知が**選ばれた導線だけ**を運ぶことを固定する（要件 3.5 の
+    /// 振り向けで対象ウィンドウへ送るため、本文は種別だけである）。
+    #[test]
+    fn diagnostics_request_carries_only_the_section() {
+        let event = DiagnosticsRequestedEvent {
+            section: DiagnosticsSection::Export,
+        };
+        let encoded = serde_json::to_value(event).unwrap();
+        let object = encoded.as_object().expect("通知は対象でなければならない");
+        assert_eq!(
+            object
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["section"].into_iter().map(str::to_owned).collect()
+        );
+        assert_eq!(encoded["section"], "export");
+        assert_eq!(
+            serde_json::to_value(DiagnosticsSection::Location).unwrap(),
+            "location"
+        );
+        assert_eq!(
+            serde_json::to_value(DiagnosticsSection::Verbosity).unwrap(),
+            "verbosity"
+        );
+    }
+
+    /// 生成物が 9.5 の境界（型・封筒の具体形・イベント名）をすべて宣言していることを固定する。
+    #[test]
+    fn bindings_declare_the_diagnostics_surface() {
+        let ts = render_bindings().unwrap();
+        for declaration in [
+            "export type DiagnosticsLevel =",
+            "export type DiagnosticsSection =",
+            "export type DiagnosticsRequestedEvent =",
+            "export type DiagnosticsLogLocationResponse =",
+            "export type DiagnosticsExportResponse =",
+            "export type DiagnosticsVerbosityResponse =",
+            "export type DiagnosticsVerbositySetRequest =",
+            "export type DiagnosticsLogLocationResult = IpcResult<DiagnosticsLogLocationResponse, IpcError>;",
+            "export type DiagnosticsExportResult = IpcResult<DiagnosticsExportResponse, IpcError>;",
+            "export type DiagnosticsVerbosityResult = IpcResult<DiagnosticsVerbosityResponse, IpcError>;",
+            "export const DIAGNOSTICS_REQUESTED_EVENT = \"diagnostics_requested\";",
+        ] {
+            assert!(
+                ts.contains(declaration),
+                "生成物に `{declaration}` が無い:\n{ts}"
+            );
+        }
+        assert!(
+            ts.contains("\"kind\": \"Diagnostics\""),
+            "封筒の失敗の原因に診断の導線の種別が無い:\n{ts}"
+        );
+    }
+
+    /// 診断の失敗は**設定の失敗と区別できる**（要件 4.4）。種別が違えば `kind` も違う。
+    #[test]
+    fn diagnostics_failure_has_its_own_kind() {
+        let cause = IpcError::Diagnostics {
+            message: "保存先を解決できない".into(),
+        };
+        let value = serde_json::to_value(&cause).unwrap();
+        assert_eq!(value["kind"], "Diagnostics");
+        assert!(value["detail"]["message"].is_string());
     }
 }

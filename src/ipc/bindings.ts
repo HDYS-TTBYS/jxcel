@@ -28,6 +28,7 @@ export const COMMAND_NAMES = [
  * フロントエンドはこの定数だけを参照する（文字列リテラルを書かない）。
  */
 export const SETTINGS_CHANGED_EVENT = "settings_changed";
+export const DIAGNOSTICS_REQUESTED_EVENT = "diagnostics_requested";
 
 // ---------------------------------------------------------------------------
 // 境界を越える型（crates/app-shell/src/ipc/ の定義から ts-rs が生成）
@@ -52,6 +53,132 @@ verdict: WindowCloseVerdict, };
 // 終了可否の問い合わせの応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を
 // 名指ししないため、境界が名指しできる具体形を明示的に置く。
 export type CanCloseWindowResult = IpcResult<CanCloseWindowResponse, IpcError>;
+/**
+ * 書き出しに含めた記録の有無（タスク 9.5。要件 8.6）。
+ *
+ * 4.5 の [`crate::diagnostics::ExportReport::files_merged`] は件数を数値で持つが、**境界へ
+ * 数値を出さない**（`crates/app-shell` の不変条件: 境界を越える値は文字列か、数値を含まない
+ * 閉じた列挙である）。利用者にとって必要な区別は「記録を連結した」か「記録が 1 つも無かった」か
+ * だけなので、件数ではなく**閉じた列挙**で運ぶ。
+ */
+export type DiagnosticsExportRecords = "merged" | "empty";
+/**
+ * 記録の書き出しの応答（タスク 9.5。要件 8.6、4.6）。
+ *
+ * **書き出しは 1 つのファイルにまとまる**（4.5 の [`crate::diagnostics::export`] の契約）。
+ * [`DiagnosticsExportRecords::Empty`] でも成功であり、その場合も `destination` に 1 つの
+ * ファイルができている（記録が無かったことを利用者へ伝えるための材料）。
+ */
+export type DiagnosticsExportResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈（要件 4.6）。
+ */
+context: WindowContext, 
+/**
+ * 書き出したファイルの位置（表示用の文字列）。
+ */
+destination: string, 
+/**
+ * 連結した記録の有無（`Empty` でも書き出しは成功している）。
+ */
+records: DiagnosticsExportRecords, };
+// 記録の書き出しの応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を
+// 名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type DiagnosticsExportResult = IpcResult<DiagnosticsExportResponse, IpcError>;
+/**
+ * 記録の詳細度（タスク 9.5。要件 8.7）。**閉じた列挙である。**
+ *
+ * 実体は Tauri 非依存の中核 [`crate::diagnostics::DiagnosticsLevel`] であり、この型は
+ * **境界の形**である（`ts-rs` の derive を付けてよい唯一の場所が本モジュールであるという
+ * 不変条件に従う。`RenderVerdict` と同じ扱い）。したがって境界の列挙と中核の列挙の間に
+ * 対応付けが必要であり、それは [`From`] の 2 方向（網羅的な `match`）が担う — **どちらかの
+ * 列挙に値を足すと、もう一方への写像がコンパイルエラーになる**（片側だけの追加を許さない）。
+ *
+ * 詳細度の昇順は [`Ord`] が表す（`Off` < `Error` < `Warn` < `Info` < `Debug` < `Trace`）。
+ * 中核の列挙と同じ順序であり、[`DiagnosticsLevel::ALL`] がその閉じた集合を昇順で並べる。
+ * 利用者へは [`DiagnosticsVerbosityResponse::levels`] としてこの順序で渡すので、**画面は
+ * 並び順を自前で持たない**（tasks.md 4.5 の詳細度の契約）。
+ *
+ * 直列化は中核と同じ小文字表現（`"off"` … `"trace"`）であり、設定ファイルに載る値と
+ * 境界を越える値の綴りが一致する（4.5 の `#[serde(rename_all = "lowercase")]`）。
+ */
+export type DiagnosticsLevel = "off" | "error" | "warn" | "info" | "debug" | "trace";
+/**
+ * 記録の保存場所の応答（タスク 9.5。要件 8.1、4.6）。
+ *
+ * **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。`directory` は各 OS の規約で解決した
+ * 記録ディレクトリであり（4.4 の [`crate::diagnostics::log_dir`]）、**利用者に見せるための
+ * 文字列**である（境界では識別子も位置も文字列で運ぶ。表示できないバイト列は置換される）。
+ * この経路は保存場所を提示するだけで、場所を開いたり走査したりしない（要件 4.7）。
+ */
+export type DiagnosticsLogLocationResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈（要件 4.6）。
+ */
+context: WindowContext, 
+/**
+ * 記録の保存場所（表示用の文字列）。
+ */
+directory: string, };
+// 記録の保存場所の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を
+// 名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type DiagnosticsLogLocationResult = IpcResult<DiagnosticsLogLocationResponse, IpcError>;
+/**
+ * メニューの活性化を画面へ引き渡す通知（タスク 9.5）。
+ *
+ * メニューの処理はイベントループのスレッドで走り、対象ウィンドウのフロントエンドへ届ける
+ * 必要がある。そこで 7.4 の登録口が受けた選択を、この 1 つのイベントとして**活性化の対象
+ * ウィンドウへ**送る（7.5 の振り向けの結果を使う。要件 3.5）。画面はこれを購読し、遷移と
+ * 区画の選択を行う。
+ */
+export type DiagnosticsRequestedEvent = { 
+/**
+ * 利用者が選んだ導線。
+ */
+section: DiagnosticsSection, };
+/**
+ * 診断の導線のうち、利用者がメニューから選んだもの（タスク 9.5。要件 8.1、8.6、8.7）。
+ *
+ * メニューの項目は 3 つの導線に 1 つずつ対応するので、活性化は**どれが選ばれたか**を運ぶ。
+ * 画面はこの値で該当の区画を示す（利用者にとっては「選んだ項目の場所が開く」ことになる）。
+ */
+export type DiagnosticsSection = "location" | "export" | "verbosity";
+/**
+ * 記録の詳細度の応答（タスク 9.5。要件 8.7、4.6）。
+ *
+ * 読み取りと変更の**両方**がこの形を返す。`level` が現在の値（変更では変更後の値）であり、
+ * `levels` が選べる値の全体を**詳細度の昇順**で並べたものである（[`DiagnosticsLevel::ALL`]）。
+ * 画面はこの 2 つだけを見て「現在値の表示」と「選択肢の列挙」を行えるので、**選べる値の集合と
+ * 順序を画面側に写さない**（写すと中核の列挙と食い違う余地ができる）。
+ */
+export type DiagnosticsVerbosityResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈（要件 4.6）。
+ */
+context: WindowContext, 
+/**
+ * 現在の詳細度（変更コマンドでは変更後の値）。
+ */
+level: DiagnosticsLevel, 
+/**
+ * 選べる詳細度の全体（`Off` から `Trace` へ昇順）。
+ */
+levels: Array<DiagnosticsLevel>, };
+// 記録の詳細度の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を
+// 名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type DiagnosticsVerbosityResult = IpcResult<DiagnosticsVerbosityResponse, IpcError>;
+/**
+ * 記録の詳細度の変更要求（タスク 9.5。要件 8.7）。
+ *
+ * 詳細度は**閉じた列挙 [`DiagnosticsLevel`] の値だけ**であり、任意の文字列は載らない。
+ * 列挙に無い値は `serde` の復元に失敗するため、コマンドの引数として境界を越えられない
+ * （その拒否はフロントエンド側のラッパが通信境界の失敗として扱う。tasks.md 2.4）。
+ */
+export type DiagnosticsVerbositySetRequest = { 
+/**
+ * 設定する詳細度。
+ */
+level: DiagnosticsLevel, };
 /**
  * ファイル選択の結果（タスク 7.7。要件 2.4）。
  *
@@ -81,7 +208,7 @@ reason: string, };
  * 落ちる。利用側は `kind` で網羅的に分岐でき、原因ごとに異なる扱いを型で強制できる
  * （tasks.md 2.4）。
  */
-export type IpcError = { "kind": "Settings", "detail": { message: string, } } | { "kind": "Sidecar", "detail": { message: string, } } | { "kind": "Window", "detail": { message: string, } };
+export type IpcError = { "kind": "Settings", "detail": { message: string, } } | { "kind": "Sidecar", "detail": { message: string, } } | { "kind": "Window", "detail": { message: string, } } | { "kind": "Diagnostics", "detail": { message: string, } };
 /**
  * 境界を越えるすべてのコマンドが返す封筒（要件 4.2、4.4）。
  *

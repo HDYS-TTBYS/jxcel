@@ -64,8 +64,13 @@
  * - **9.7（3 OS 描画確認の最小画面）**: `src/features/smoke/` の 2 画面を `ScreenDefinition`
  *   として `SHELL_SCREEN_REGISTRY` に足す。**遷移機構には触れない**（足すだけで表示できる）。
  *   描画の通知（`./renderHeartbeat`）も再利用し、2 つ目の発信側を足さないこと。
- * - **9.4 / 9.5 / 9.6**: このファイルに領域を増やさない。配信先中立の資産は `src/shared/` に、
- *   診断の導線と空ウィンドウの操作は画面として登録する。
+ * - **9.5（診断の導線）— 実装済み**: `src/features/diagnostics/` の画面を `ScreenDefinition`
+ *   として `SHELL_SCREEN_REGISTRY` に足し（`initial` は変えない）、メニューの選択を画面へ
+ *   引き渡す購読を `installDiagnosticsRequests` で 1 回だけ張る（購読が持つのは**区画の
+ *   選択だけ**で、遷移は [`useShellRouter`] の `navigate` を通る）。**3 つの導線の提示と
+ *   操作は画面の中だけで完結する**ので、メニューが無い環境（素のブラウザ）でも使える。
+ * - **9.4 / 9.6**: このファイルに領域を増やさない。配信先中立の資産は `src/shared/` に、
+ *   空ウィンドウの操作は画面として登録する。
  *
  * # 遷移機構の確認手順（9.1 で実際に用いた再現手順）
  *
@@ -86,7 +91,7 @@
  * 実用画面ではない**（実用水準へ育てるのは下流のスペックであり、10.4 用の画面は 9.7 が足す）。
  * 配色はタスク 9.2 が `./theme` のカスタムプロパティへ移した。
  */
-import { useMemo, type ReactElement } from "react";
+import { useEffect, useMemo, type ReactElement } from "react";
 
 import {
   useShellRouter,
@@ -100,6 +105,11 @@ import {
   useAppearance,
   type AppearanceChoice,
 } from "./theme";
+import { DiagnosticsScreen } from "../features/diagnostics/DiagnosticsScreen";
+import {
+  DIAGNOSTICS_SCREEN_ID,
+  installDiagnosticsRequests,
+} from "../features/diagnostics/requests";
 
 /** 既定で表示される画面（1.4 の初期画面）の識別子。 */
 export const INITIAL_SCREEN_ID = "shell.initial";
@@ -140,7 +150,8 @@ function InitialScreen(): ReactElement {
 /**
  * シェルが差し込める画面の一覧。**画面を足すとは、この配列に 1 つ足すことに他ならない。**
  *
- * タスク 9.7 が `src/features/smoke/` の 2 画面をここへ足す（`initial` は変えない）。
+ * タスク 9.5 が診断の導線（`src/features/diagnostics/`）の画面を足し、タスク 9.7 が
+ * `src/features/smoke/` の 2 画面をここへ足す（`initial` は変えない）。
  */
 export const SHELL_SCREEN_REGISTRY: ShellScreenRegistry = {
   initial: INITIAL_SCREEN_ID,
@@ -149,6 +160,11 @@ export const SHELL_SCREEN_REGISTRY: ShellScreenRegistry = {
       id: INITIAL_SCREEN_ID,
       title: "初期画面",
       component: InitialScreen,
+    },
+    {
+      id: DIAGNOSTICS_SCREEN_ID,
+      title: "診断",
+      component: DiagnosticsScreen,
     },
   ],
 };
@@ -320,6 +336,15 @@ export function ShellRegion({
 export function Layout(): ReactElement {
   const router = useShellRouter(SHELL_SCREEN_REGISTRY);
   const appearance = useAppearance();
+
+  // メニューからの診断の導線（要件 8.1、8.6、8.7。タスク 9.5）。**登録するのは購読だけで
+  // あり、遷移は唯一の入口（`router.navigate`）へ委ねる** — 2 つ目の遷移機構を作らない
+  // （要件 9.2）。購読はマウント時に 1 回だけ張り、画面が表示されていない間に選ばれた
+  // メニュー項目も落とさない（選ばれた区画を示した状態でこの画面へ遷移する）。
+  useEffect(
+    () => installDiagnosticsRequests(router.navigate),
+    [router.navigate],
+  );
 
   // エラー提示の回復導線に出す「他の画面」。**表示中の画面自身は除く**（同じ画面へは
   // 「再試行」で戻る）。画面の集合はモジュール定数なので、現在の識別子だけが入力である。

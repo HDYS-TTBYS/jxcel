@@ -62,7 +62,27 @@ identifier = "allow-render-heartbeat"
 description = "初回描画の通知を受け取るコマンド（render_heartbeat）を許可する。呼び出し元ウィンドウは基盤が注入する引数から取るため、フロントエンドはウィンドウを偽装できず、通知できるのは自分の描画フレームに限られる（要件 4.6、10.1、10.2）。"
 commands.allow = ["render_heartbeat"]
 
+[[permission]]
+identifier = "allow-diagnostics-log-location"
+description = "記録の保存場所を提示するコマンド（diagnostics_log_location）を許可する。応答は解決済みのディレクトリの文字列だけで、場所を開いたり走査したりしない（要件 8.1、4.7）。"
+commands.allow = ["diagnostics_log_location"]
+
+[[permission]]
+identifier = "allow-diagnostics-export"
+description = "記録を 1 つのファイルへ書き出すコマンド（diagnostics_export）を許可する。宛先は Rust 側が決めるため、フロントエンドが任意のパスへ書く経路は生じない（要件 8.6、4.7）。"
+commands.allow = ["diagnostics_export"]
+
+[[permission]]
+identifier = "allow-diagnostics-verbosity-get"
+description = "記録の詳細度を読み取るコマンド（diagnostics_verbosity_get）を許可する。返るのは閉じた列挙の値と、選べる値の全体である（要件 8.7）。"
+commands.allow = ["diagnostics_verbosity_get"]
+
+[[permission]]
+identifier = "allow-diagnostics-verbosity-set"
+description = "記録の詳細度を変更するコマンド（diagnostics_verbosity_set）を許可する。受け付けるのは閉じた列挙の値だけで、任意の文字列は境界を越えられない（要件 8.7）。"
+commands.allow = ["diagnostics_verbosity_set"]
+
 [[set]]
 identifier = "app-shell"
 description = "app-shell が登録する自前コマンドの集合。capability はこの集合名だけを参照する。ファイルシステム系・シェル系の権限はここにも含めない（要件 4.7）。"
-permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file", "allow-render-heartbeat"]
+permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file", "allow-render-heartbeat", "allow-diagnostics-log-location", "allow-diagnostics-export", "allow-diagnostics-verbosity-get", "allow-diagnostics-verbosity-set"]

@@ -107,6 +107,8 @@ export function describeIpcError(error: IpcClientError): string {
       return `補助プロセスの失敗: ${error.detail.message}`;
     case "Window":
       return `ウィンドウの失敗: ${error.detail.message}`;
+    case "Diagnostics":
+      return `診断情報の失敗: ${error.detail.message}`;
     case "Frontend":
       return `通信境界の失敗: ${error.detail.message}`;
     default:
