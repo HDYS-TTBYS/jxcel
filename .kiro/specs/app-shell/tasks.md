@@ -345,7 +345,7 @@
   - _Boundary: RenderWatchdog_
   - _Depends: 6.1, 7.1_
 
-- [ ] 8.3 描画の代替経路を次回起動時に適用する機構を実装する
+- [x] 8.3 描画の代替経路を次回起動時に適用する機構を実装する
   - **回避策の環境変数は描画基盤の初期化前に設定する必要があり、検出した時点では既に手遅れである**。したがって検出時は設定に印を残し、次回の起動で構築の前に読んで適用する
   - 起動順序のタスクが確保した場所に、判定と適用の処理を埋める
   - 適用した事実を診断情報に記録する。描画の成立が観測できたら印を消す
@@ -480,9 +480,15 @@
 
 ## Implementation Notes
 
+- **8.3（機構・重要）**: 読みと適用は起動順序の手順 1（`reserve_render_fallback_point`）で行う。**設定ストアを自前で開き**（`init_diagnostics` と同じ実体を `Weak` レジストリ経由で共有するので二重には開かない）、印を読み、**`Builder::build` より前＝GTK/WebKit のコードが動く前に `std::env::set_var` で適用する**。失敗しても起動は続く（`FallbackOutcome::unreadable()`）。**記録は手順 4.8**（記録器が存在した後）。単一インスタンスの登録位置と残留掃除の位置は 5.1 のまま動かしていない。**起動順序はこの形で固定**。
+- **8.3（Decision 7 の遵守・重要）**: **特定の変数に賭けない。**採用する並びは `crates/app-shell/src/render_fallback.rs` の `LINUX_POLICY`（現在は `WEBKIT_DISABLE_DMABUF_RENDERER=1` の 1 件）だけが決め、候補と費用の対照は同じファイルの `CANDIDATES` にある（DMA-BUF の高速経路を捨てる／ハードウェア支援を切る／性能を落とさないという報告がある、の 3 種）。**差し替えは `LINUX_POLICY` を書き換えるだけ**で機構も記録形式も変えなくてよい。Windows / macOS では何も適用しない（`RenderPlatform` で分岐）。
+- **8.3（印の状態機械・重要）**: **`NoPaint` → true（立てる）／`Painted` → false（消す）／`SoftwareRaster` → 既存の印を保つ**。`SoftwareRaster` で消すと、回避策の下でソフトウェア描画に落ちる環境で「適用 → 消す → `NoPaint` → 立てる」の振動になるため（8.2 の当初の規則をここで改めた）。**残る振動**: 採用中の回避策の下でも `Painted`（通常のラスタライザ）が出る環境では、**適用 → `Painted` で消える → 次の起動は不適用で `NoPaint` → また適用**という**起動ごとの交互の振動**が残る（このホストで実測）。これは印を 1 つの真偽値に固定して消去を `Painted` の観測に結びつけた設計の帰結であり、要件 10.3 の文言どおり。**消すには「適用した起動での成功」と「適用しない起動での成功」を区別する状態が要る（設計変更）**。`design.md` の「Revalidation Triggers」に記録済み。
+- **8.3**: 適用した事実は診断へ info の 1 行（**どの変数にどの値を適用したか**を特定できる）。印が無ければ**何も適用しない**（無条件適用の禁止。`cargo test` のヘッドレス検査 `a_clear_mark_applies_nothing` が固定）。注意書きの「次回の起動で代替経路を試みます」は**この段で真になった**ため復活させ、8.2 側の再混入防止テストもそれに合わせて更新している。
+
+
 - **8.2（契約・重要）**: 通知コマンド `render_heartbeat` の結果は 3 つ。**(a) 初回の通知** → 判定を確定し記録。**(b) 2 回目以降／期限超過の後に届いた通知** → 判定・記録・印のいずれも動かさず、確定済みの判定を `Ok` で返し、**期限超過後なら提示（題名と注意書き）だけを取り下げる**。**(c) 監視していない（未知、または期限より前に破棄された）ウィンドウ** → 封筒の失敗腕 `IpcError::Window`（理由にラベル）。**「期限超過後」は (c) ではなく (b)**（`expire_due` は項目を削除せず判定を書き込むだけなので、その後の通知も `AlreadyDecided` に落ちる）。**この 3 分岐を doc と実装で必ず一致させること**（8.2 は一度ここで棄却された。9.7 / 10.x が doc を正本として読む）。
 - **8.2（判定と期限）**: `FIRST_PAINT_DEADLINE = 3 秒`（ウィンドウ生成から）。起動予算 2 秒（要件 1.3）に対し、ウィンドウ生成は起動の途中なので通知は期限より前に届く（余裕 ≥ 1 秒）。判定は Tauri 非依存の `crates/app-shell/src/render.rs`（実画面なしで検証するため）: 通知＋ラスタライザがソフトウェア実装の綴りに一致 → `SoftwareRaster`／通知あり（一致しない・取得できない）→ `Painted`／期限内に通知なし → `NoPaint`。境界の列挙 `RenderVerdict` だけは ts-rs の都合で `ipc/mod.rs`。
-- **8.2（8.3 への申し送り・重要）**: 印は **`SettingsKey::RenderFallback`（`render.fallback`、全体で 1 つの真偽値）**。意味は「直近に確定した判定が `NoPaint`」。**書くのは `RenderWatchdog` だけ**（`NoPaint` で true、`Painted` / `SoftwareRaster` で false。同値なら書かず、未設定のまま false も書かない）。8.3 は `app_shell::render::render_fallback_pending(&FileSettingsStore)` で読む（8.3 は書かない）。**注意 2 点**: (i) 現行の起動順は `reserve_render_fallback_point`（手順 1）が設定ストアを開く `init_diagnostics`（手順 3）より前なので、8.3 はストアを自前で開くか順序を調整する必要がある。(ii) 印は全体で 1 つなので、混在時（一方の窓が `NoPaint`、他方が `Painted`）は後の `Painted` で false に戻りうる。
+- **8.2（8.3 への申し送り・重要）**: 印は **`SettingsKey::RenderFallback`（`render.fallback`、全体で 1 つの真偽値）**。意味は「直近に確定した判定が `NoPaint`」。**書くのは `RenderWatchdog` だけ**で、規則は **`NoPaint` で true / `Painted` で false（消去） / `SoftwareRaster` は既存の印をそのまま保つ**（`SoftwareRaster` で下ろすと、回避策の下でソフトウェア描画に落ちる環境で適用と不適用が交互に振動するため。**8.2 の当初の規則は `SoftwareRaster` でも下ろすものだったが、8.3 がこの形に改めた**）。同値なら書かず、未設定のまま false も書かない。8.3 は `app_shell::render::render_fallback_pending(&FileSettingsStore)` で読む（8.3 は書かない）。**注意 2 点**: (i) 現行の起動順は `reserve_render_fallback_point`（手順 1）が設定ストアを開く `init_diagnostics`（手順 3）より前なので、8.3 はストアを自前で開くか順序を調整する必要がある（8.3 はストアを自前で開き、同じ実体を共有する形で解決した）。(ii) 印は全体で 1 つなので、混在時（一方の窓が `NoPaint`、他方が `Painted`）は後の `Painted` で false に戻りうる。
 - **8.2（利用者に見えるもの・重要）**: 期限超過時は **(1) OS が描くネイティブの題名**を「jxcel — 描画が成立しませんでした（<経過> ミリ秒待機 / <label>）」に変え、**(2) WebKit が描けるなら全画面の注意書き**を `document.createElement` ＋ **CSSOM** で組んで出す（**アプリのバンドルも CSS も参照しない**）。**CSP `style-src 'self'` は `setAttribute("style", …)` を遮断する**ため、位置も色も CSSOM で与える（**`'unsafe-inline'` を足してはならない**。`the_notice_script_depends_on_no_application_asset` が退行を固定）。加えて診断へ error 1 行。終了も待機もしない。文言は**現時点で真のことだけ**を述べる（8.3 が入るまで「代替経路を試みます」と書かない。`the_notice_states_only_what_is_true_now` が再混入を防ぐ）。
 - **8.2**: 送信側は `src/shell/renderHeartbeat.ts` の `installRenderHeartbeat()`（`main.tsx` で結線）**1 本のみ**。**9.7 はこれを再利用し、2 本目を足してはならない**（両方が通知すると先着が判定を確定するため、どちらが先かは環境依存になる）。JS の引数鍵は `{ request: { renderer } }`（**実測: 鍵が違うと拒否され期限超過になる**）。`UNMASKED_RENDERER_WEBGL` はこのホストの WebKitGTK では汎用の `Apple GPU` を返すため、**ソフトウェア実装の綴りは実機では観測できない**（ヘッドレスのテストが唯一の証拠）。
 - **8.2（検証用の引き金）**: `verification-triggers` の下に `JXCEL_VERIFICATION_SUPPRESS_HEARTBEAT=1`（フロントエンドの通知を抑止して期限超過を起こす）。既定ビルドには識別子も文言も入らない（バイト検索で確認済み）。**10.4 はこの引き金で NoPaint の経路を 3 OS で確認できる。**

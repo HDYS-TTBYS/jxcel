@@ -2057,9 +2057,7 @@ mod tests {
     };
     #[cfg(feature = "verification-triggers")]
     use super::{parse_verification_trigger, VerificationAction};
-    use app_shell::render_fallback::{
-        FallbackApplication, FallbackOrigin, FallbackOutcome, RenderFallback,
-    };
+    use app_shell::render_fallback::{FallbackApplication, FallbackOrigin, FallbackOutcome};
     use std::sync::atomic::Ordering;
     use tauri::utils::config::Csp;
     use tauri_plugin_log::log::Level;
@@ -2390,10 +2388,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn applied_outcome(origin: FallbackOrigin) -> FallbackOutcome {
-        let fallback = RenderFallback {
-            variable: "WEBKIT_DISABLE_DMABUF_RENDERER",
-            value: "1",
-        };
+        // 適用の並びは `LINUX_POLICY` が唯一の源である（変数名をここへ書き写すと、
+        // 表を差し替えたときに記録の検査だけが古い名前を固定してしまう）。
+        let fallback = app_shell::render_fallback::LINUX_POLICY[0];
         FallbackOutcome {
             pending: Some(true),
             applied: vec![FallbackApplication {
