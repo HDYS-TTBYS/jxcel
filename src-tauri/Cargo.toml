@@ -66,3 +66,20 @@ tauri-plugin-log = "2.9.1"
 # `tauri_build::build()` の実体。ウィンドウ設定の検証・capability スキーマの生成・
 # ACL マニフェストの生成・`externalBin` の複製を担う（BuildPipeline）。
 tauri-build = { version = "2.6.3", features = [] }
+
+[features]
+# **検証専用の引き金を有効にする（既定では無効）。**
+#
+# 有効にすると環境変数 `JXCEL_VERIFICATION_EXIT_AFTER_MS` が働き、指定した時間後に
+# 「明示的な終了」「意図的なパニック」「補助プロセスの起動」「ウィンドウ生成の失敗」の
+# いずれかを起こす（`lifecycle.rs` の `arm_verification_exit_trigger`、`window/mod.rs` の
+# `force_creation_failure`）。**配布物（release）に検証専用の環境変数の読み取りを入れない**
+# ため、既定では無効にしてある（tasks.md 5.4 の申し送り。7.4 が「終了」メニュー項目を
+# 配線したことに伴う片付け）。
+#
+# 検証時は明示的に有効にする:
+#   cargo test  -p jxcel --features verification-triggers
+#   cargo build -p jxcel --features verification-triggers
+# `cfg(debug_assertions)` では不十分である — 配布物としての実検証（release ビルド）が
+# できなくなるため、非既定の feature で括る。
+verification-triggers = []

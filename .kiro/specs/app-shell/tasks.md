@@ -291,7 +291,7 @@
   - _Requirements: 4.7_
   - _Depends: 7.1_
 
-- [ ] 7.4 (P) メニューの登録口とプラットフォーム差の吸収を実装する
+- [x] 7.4 (P) メニューの登録口とプラットフォーム差の吸収を実装する
   - 個別機能がメニュー項目を登録できる登録口を用意し、選択されたときに登録元へ通知する
   - **アプリ全体で 1 つのメニューしか持てないプラットフォームでは、ウィンドウ単位のメニュー設定が非対応である**。その環境ではアプリ全体のメニューを 1 つ構築する
   - その環境ではトップレベル項目をすべて部分メニューとする。単独の項目は無視される
@@ -479,6 +479,13 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **7.4**: 登録口は `src-tauri/src/menu.rs` の `MenuRegistry`（managed・1 インスタンス）。`register(app, MenuItemSpec::new(owner, item, path, label, handler).with_accelerator("Ctrl+S"))`。**登録の同一性は (所有者, 項目) の組**（再登録は更新＝冪等）、**項目 id はアプリ全体で一意**（衝突は `ItemIdConflict`）。通知は登録時に渡したハンドラを、**実イベント（`on_menu_event`）とテストが共有する唯一の seam `MenuRegistry::dispatch(item, window)`** が呼ぶ（テスト専用の並行経路は無い）。`MenuModel` / `SubmenuNode` / `MenuNode` により構築結果を GUI 無しで検査でき、順序は決定的。
+- **7.4**: プラットフォーム差は `MenuPlacement` / `PLACEMENT` / `apply` の**1 箇所**。**macOS は `AppHandle::set_menu` でアプリ全体の 1 つ**を構築し、**トップレベルはすべて部分メニュー**（最初の部分メニューはアプリケーションメニューへ畳み込まれる。順序で先頭に固定）。**単独のトップレベル項目は表現自体が不可能**で、`MenuPath::new([])` は `BareTopLevelItem` として**登録時に拒否**する（黙って消えない）。**Linux / Windows はウィンドウ単位**で、`window::build_window` の 1 箇所から `attach_to_window` を呼ぶため**後から作られるウィンドウにも付く**（起動時・受け渡し・Dock すべて）。
+- **7.4**: アクセラレータの一意性検査は**この段で行う**（`with_accelerator` が 4.6 の `Accelerator::parse` で正規化して登録、クロス所有者の衝突は両側を含むエラーで返し状態は不変、同一所有者の再登録は冪等、アクセラレータを外して再登録するとコードが解放される）。**プラットフォームへ渡すのは解決済みの綴り**（4.6 の契約どおり `CmdOrCtrl` は拒否）。7.5 は表示の作り込みとフォーカス先への振り向けを担う。
+- **7.4**: Quit 項目（`app-shell.quit`）を同じ登録口で登録し、そのハンドラが **5.4 の `request_exit`** を呼ぶ（終了メニューの配線）。
+- **7.4（片付け義務の履行・重要）**: 検証専用の引き金を**非既定の cargo feature `verification-triggers`** で括った（`#[cfg(feature = "verification-triggers")]`）。**配布物（既定ビルド）には環境変数の読み取りが存在しない**。検証時は `--features verification-triggers` を明示すること（`npx tauri build --no-bundle --features verification-triggers` など）。5.4 の申し送りはこれで完了。
+- **7.4（このホストでの観測）**: Linux では GTK のメニューバーが**外部から観測できる**（クライアント領域の上端 0〜61 行に暗い帯と CJK の字形）。`attach_to_window` の呼び出しを一時的に外すと帯が消えるため、**7.4 のコードが作っている**ことが対照実験で確認されている。3 OS の確認は 10.6。
 
 - **7.3**: `src-tauri/permissions/app.toml` に**自前コマンドの権限**を定義する（`allow-settings-get` / `allow-settings-set` / `allow-bulk-echo` と集合 `app-shell`）。`capabilities/default.json` は `permissions: ["core:default", "app-shell"]`、`windows: ["doc-*", "empty-*"]`。`tauri.conf.json` に `build.removeUnusedCommands: true`。
 - **7.3（重要）**: **`__app-acl__` が存在すると、自前コマンドは ACL 対象になり、かつ「どの capability も許可していない登録済みコマンド」は拒否ではなくビルド時に削除される**（実測: 削除ビルドの `allowed-commands.json` に 3 コマンドだけが残り、未許可の登録コマンドはリテラルごと消える）。**したがって登録するコマンドは必ず許可も与えること**（片方だけでは動かない）。

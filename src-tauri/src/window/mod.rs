@@ -34,7 +34,9 @@
 //! 生成の失敗は他のウィンドウの動作を中断させない（要件 2.10）。[`open`] の非同期タスクは
 //! 失敗を記録して登録を取り消して戻るだけで、パニックも `?` の伝播もイベントループへ届かない
 //! （タスクのパニックは非同期ランタイムが隔離し、返った `JoinHandle` を捨てているため外へ
-//! 出ない）。強制的に失敗させる検証用の入口は [`force_creation_failure`] にある。
+//! 出ない）。強制的に失敗させる検証用の入口は `force_creation_failure` にあり、
+//! **`verification-triggers` feature でのみコンパイルされる**（既定のビルドには検証専用の
+//! 経路が入らない。tasks.md 5.4 の申し送り）。
 //!
 //! 子モジュール [`close`]（終了拒否の仲介 / タスク 7.6）は 1.3 が置いた骨組みのままである。
 //! [`geometry`]（位置とサイズの記憶 / 要件 2.7 / タスク 6.3）は生成の初期値（[`build_window`]）
@@ -116,10 +118,10 @@ pub fn open<R: Runtime>(app: &AppHandle<R>, request: WindowRequest) {
 fn spawn_creation<R: Runtime>(app: AppHandle<R>, state: WindowState) {
     tauri::async_runtime::spawn(async move {
         let label = state.label().as_str().to_owned();
-        // **検証専用**の強制失敗（通常は `None`）。`Some` のときは確保したラベルの代わりに既存の
-        // ラベルで構築し、**通常の生成経路の失敗側の分岐**（登録の取り消しと報告）をそのまま
-        // 通す。設定するのは [`force_creation_failure`] だけである。
-        let target = forced_failure_label().unwrap_or_else(|| label.clone());
+        // 生成に使うラベル。**検証専用の引き金（`verification-triggers` feature）が有効なとき
+        // だけ**、確保したラベルの代わりに意図的に衝突するラベルへ差し替わる。既定のビルドでは
+        // 確保したラベルがそのまま返る（分岐ごと消える）。
+        let target = creation_target(&label);
         match build_window(&app, &target) {
             Ok(window) => {
                 focus(&window);
@@ -171,6 +173,11 @@ fn build_window<R: Runtime>(app: &AppHandle<R>, label: &str) -> tauri::Result<We
     }
     let window = builder.build()?;
     geometry::remember_created(&window);
+    // メニューを付ける（要件 3.1, 3.6。タスク 7.4）。**ここがウィンドウ生成の唯一の場所**なので、
+    // 後から作られるウィンドウ（起動時・二重起動の引き継ぎ・Dock クリック）にもメニューが付く。
+    // ウィンドウ単位のメニューを持てないプラットフォーム（macOS）では何もしない — アプリ全体の
+    // メニューは `menu::install` が設定済みである（[`crate::menu::attach_to_window`] の doc）。
+    crate::menu::attach_to_window(&window);
     Ok(window)
 }
 
@@ -219,6 +226,13 @@ pub fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
 /// ウィンドウが現れるまでブロッキング用の実行器で待つ。**メインスレッドも同期のコールバックも
 /// 塞がない**（待つのは検証用のブロッキングタスクの中だけである）。呼ぶのは検証専用の引き金
 /// （`JXCEL_VERIFICATION_EXIT_AFTER_MS` の `fail-window`）だけであり、通常の起動では通らない。
+/// # 既定のビルドには存在しない
+///
+/// **この関数は `verification-triggers` feature でのみコンパイルされる**（tasks.md 5.4 の
+/// 申し送り — 7.4 が「終了」メニュー項目を配線したことに伴い、検証専用の引き金を配布物から
+/// 外す）。したがって [`spawn_creation`] のラベルの差し替え（[`creation_target`]）も既定では
+/// 確保したラベルをそのまま返すだけになる。
+#[cfg(feature = "verification-triggers")]
 pub fn force_creation_failure<R: Runtime>(app: &AppHandle<R>) {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -251,14 +265,30 @@ pub fn force_creation_failure<R: Runtime>(app: &AppHandle<R>) {
 /// 通常は `None` であり、そのとき [`spawn_creation`] は確保したラベルで構築する。`Some` の間だけ
 /// 検証用の失敗経路に入る。**設定するのは [`force_creation_failure`] だけで、`spawn_creation` が
 /// 取り出して直ちに `None` に戻す**（一度きり）。
+#[cfg(feature = "verification-triggers")]
 static FORCED_FAILURE_LABEL: Mutex<Option<String>> = Mutex::new(None);
 
 /// [`FORCED_FAILURE_LABEL`] を取り出す（取り出したら `None` に戻す）。通常は `None`。
+#[cfg(feature = "verification-triggers")]
 fn forced_failure_label() -> Option<String> {
     FORCED_FAILURE_LABEL
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .take()
+}
+
+/// 生成に使うラベル。**既定のビルドでは確保したラベルをそのまま返す。**
+///
+/// `verification-triggers` feature が有効なときだけ、検証専用の引き金
+/// （[`force_creation_failure`]）が置いた「意図的に衝突するラベル」を優先する。この差し替えが
+/// あることで、通常の生成経路（[`spawn_creation`]）の**失敗側の分岐をそのまま**通して実測
+/// できる（検証専用の失敗経路を別に持たない）。
+fn creation_target(label: &str) -> String {
+    #[cfg(feature = "verification-triggers")]
+    let target = forced_failure_label().unwrap_or_else(|| label.to_owned());
+    #[cfg(not(feature = "verification-triggers"))]
+    let target = label.to_owned();
+    target
 }
 
 // ---------------------------------------------------------------------------

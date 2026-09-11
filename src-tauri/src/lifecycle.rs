@@ -85,9 +85,21 @@
 //! `doc-<連番>` / `empty-<連番>` であり、5.1 が暫定で使っていた `handover-<連番>` はここで
 //! 規約へ収束した。
 //!
+//! タスク 7.4 が加えたのは**メニューの登録口の管理状態・選択の通知経路・起動時の構築**である
+//! （要件 3.1、3.2、3.6）。[`menu::MenuRegistry`] をアプリ全体で 1 実体だけ置き、すべての
+//! メニューイベントを 1 つのハンドラ [`menu::on_menu_event`] で受ける（登録元への通知は
+//! `menu::MenuRegistry::dispatch` の 1 本だけを通る）。構築の後（手順 4.2、[`menu::install`]）に
+//! 組み込みの「終了」項目を登録してメニューを配置する — その処理は 5.4 の唯一の終了入口
+//! [`request_exit`] を呼ぶ。**ウィンドウ単位のメニューは生成時**（`window::build_window` →
+//! [`menu::attach_to_window`]）に付くので、後から作られるウィンドウ（引き継ぎ・Dock クリック）も
+//! メニューを持つ。個別機能は `app.state::<menu::MenuRegistry>()` から自分の項目を足す。
+//!
 //! 本ファイルがまだ持たないもの（各タスクがここへ書き込む）:
 //!
-//! - タスク 7.4 / 7.5: メニューの「終了」項目。[`request_exit`] を呼ぶこと。
+//! - タスク 7.5: メニュー項目へのショートカットの割り当てと表示、フォーカス先ウィンドウへの
+//!   振り向け、フォーカス移動のたびの有効・無効の更新（要件 3.3、3.5）。**7.4 は登録口と
+//!   プラットフォーム差の吸収までである** — 組み込みの「終了」項目にもショートカットはまだ
+//!   付いていない（5.4 の申し送りどおり 7.5 が与える）。
 //! - タスク 8.3: 描画の代替経路の判定と適用（要件 10.3）。
 //!   [`reserve_render_fallback_point`] の中身を埋める。
 //! - タスク 9.6: ドキュメントを関連付けていないウィンドウの操作導線（新規作成・既存ファイルを
@@ -109,14 +121,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use app_shell::diagnostics::{self, DiagnosticsLevel};
 use app_shell::settings::{self, FileSettingsStore, RecoveredFrom, SettingsStore};
+// 検証専用の引き金（`verification-triggers` feature）だけが使う 2 つ。既定のビルドでは
+// インポートごと消える（配布物に検証専用の経路を入れない）。
+#[cfg(feature = "verification-triggers")]
 use app_shell::sidecar::integrity::BUILD_TARGET_TRIPLE;
-use app_shell::sidecar::{SidecarKind, SidecarSpec, SidecarSupervisor, Supervisor};
+#[cfg(feature = "verification-triggers")]
+use app_shell::sidecar::SidecarSpec;
+use app_shell::sidecar::{SidecarKind, SidecarSupervisor, Supervisor};
 use tauri::utils::config::{Csp, CspDirectiveSources};
 use tauri::{AppHandle, Manager, RunEvent};
 use tauri_plugin_log::log::{self, LevelFilter};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 
 use crate::commands;
+use crate::menu;
 use crate::ports::DocumentHostPort;
 use crate::window::{self, WindowRegistry, WindowRequest};
 
@@ -239,6 +257,10 @@ pub fn run() -> Result<(), StartupError> {
     // 生成（[`window::open`]）が登録し、破棄の通知（[`window::on_window_event`]）が取り除く。
     // ウィンドウ単位の状態管理機構は基盤側に無いため、ここで自前の写像を管理状態として置く。
     let builder = builder.manage(WindowRegistry::new());
+    // メニューの登録口（要件 3.1・3.2・3.6。タスク 7.4）。アプリ全体で 1 実体だけ置き、
+    // 個別機能は `app.state::<MenuRegistry>()` から `register` を呼んで自分の項目を足す。
+    // **このポートがメニューの唯一の登録口である**（`menu.rs` のモジュール doc を参照）。
+    let builder = builder.manage(menu::MenuRegistry::new());
     // ドキュメント所有者への委譲点（要件 2.1・2.6。タスク 6.2）。**常に許可し、パスを
     //   受け取っても何もしない既定実装**をアプリ全体で 1 実体だけ置く。終了拒否の仲介
     //   （7.6）とネイティブファイル選択（7.7）は `app.state::<DocumentHostPort>()` から
@@ -250,6 +272,11 @@ pub fn run() -> Result<(), StartupError> {
     // 破棄の通知をレジストリへ流す。**全ウィンドウに効く**（`tauri.conf.json` の宣言の有無に
     // よらず、`WebviewWindowBuilder` で作ったウィンドウにもマネージャ経由で結線される）。
     let builder = builder.on_window_event(window::on_window_event);
+    // メニュー選択の通知経路（要件 3.2。タスク 7.4）。**ハンドラは 1 つだけ**で、すべての
+    // メニューイベントをここで受ける（ウィンドウ単位のメニューでもアプリ全体のメニューでも、
+    // 基盤はグローバルなリスナを呼ぶ。tauri 2.11.5 の `EventLoopMessage::MenuEvent` の処理）。
+    // 登録元への通知は `menu::MenuRegistry::dispatch` の 1 本だけを通る（テストも同じ関数）。
+    let builder = builder.on_menu_event(menu::on_menu_event);
     // 設定の共有実体（要件 7.3。タスク 7.1）。**`StartupState` が持つ `Arc` と同じ実体**を
     // コマンド面の管理状態としても置く。`Manager::manage<T>()` は型ごとに 1 実体なので、
     // ここで別の `open` を呼んではならない（同じディレクトリのストアが 2 つになる）。
@@ -286,6 +313,14 @@ pub fn run() -> Result<(), StartupError> {
     //   `AppHandle` が要り、ウィンドウは `RunEvent::Ready`（手順 6）以降に現れる。購読前の変更は
     //   再生されない（4.3）ため、起動直後に設定を書き換える経路よりも前に購読を張っておく。
     commands::start_settings_notifications(app.handle(), &settings_store);
+
+    // 手順 4.2: メニューの構築と配置（要件 3.1・3.2・3.6。タスク 7.4）。組み込みの「終了」項目を
+    //   登録口（`MenuRegistry`）へ登録し、メニューを組み立ててプラットフォームの配置先へ置く
+    //   （macOS はアプリ全体で 1 つ、Windows / Linux はウィンドウ単位）。**この時点ではウィンドウが
+    //   1 枚も無い**（起動時のウィンドウは手順 6 の `RunEvent::Ready` が作る）ため、Windows /
+    //   Linux ではウィンドウへの付与は生成時（`window::build_window` → `menu::attach_to_window`）
+    //   に行われる。個別機能はこの後 `app.state::<MenuRegistry>()` から自分の項目を足せる。
+    menu::install(app.handle());
 
     // 手順 4.5: 記録機構の実効設定を起動時に確認する（要件 8.1、8.5）。起動行を記録し、
     //   記録中のファイルが方針の保存先に現れたことを確かめる。書けなければ診断の保存先の
@@ -1425,25 +1460,33 @@ fn present_existing_or_create(app: &AppHandle) {
 /// 検証専用の引き金が読む環境変数の名前。
 ///
 /// **通常の利用環境に存在しないことを狙った名前である。**値の書式は `[<動作>:]<ミリ秒>` で、
-/// 設定されているときだけ [`arm_verification_exit_trigger`] がその時間後に指定された動作を行う。
+/// 設定されているときだけ `arm_verification_exit_trigger` がその時間後に指定された動作を行う。
 ///
-/// - `<ミリ秒>` だけ（5.4 から続く書式。例 `1500`）: [`VerificationAction::Exit`]
+/// - `<ミリ秒>` だけ（5.4 から続く書式。例 `1500`）: `VerificationAction::Exit`
 /// - `exit:<ミリ秒>`: 同上（明示形）
-/// - `panic:<ミリ秒>`（5.5 が足した形）: [`VerificationAction::Panic`] — **意図的なパニックで
+/// - `panic:<ミリ秒>`（5.5 が足した形）: `VerificationAction::Panic` — **意図的なパニックで
 ///   プロセスを異常終了させ、異常終了の記録（要件 8.2）を実測するために使う**
-/// - `sidecar:<ミリ秒>`（5.6 が足した形）: [`VerificationAction::Sidecar`] — **監督を直接呼んで
+/// - `sidecar:<ミリ秒>`（5.6 が足した形）: `VerificationAction::Sidecar` — **監督を直接呼んで
 ///   補助プロセスを 1 つ起動し、その ms 後に通常終了する**。終了時に補助プロセスが残らないこと
 ///   （要件 5.6）を実測するために使う
-/// - `fail-window:<ミリ秒>`（6.1 が足した形）: [`VerificationAction::FailWindow`] — **ウィンドウの
+/// - `fail-window:<ミリ秒>`（6.1 が足した形）: `VerificationAction::FailWindow` — **ウィンドウの
 ///   生成を意図的に失敗させ、その ms 後に通常終了する**。失敗が報告され、既に開いている他の
 ///   ウィンドウが動作し続けること（要件 2.10）を実測するために使う
 ///
-/// **動作の選択を別の環境変数に分けない。**分けると「検証専用の引き金」の片付けが 2 箇所に
-/// なってしまう。7.4 / 7.5 が片付ける対象はこの 1 つ（+ [`arm_verification_exit_trigger`] と
-/// [`VerificationAction`]）である。
+/// # 片付け（タスク 7.4）— 非既定の cargo feature で括った
+///
+/// 5.4 の申し送りは「**7.4 / 7.5 が Quit メニューを配線した時点で削除するか、非既定の cargo
+/// feature で括ること**（`cfg(debug_assertions)` だけでは不十分 — 配布形態の実検証ができなく
+/// なるため）」を要求する。7.4 がメニューの「終了」項目を配線したので、**削除せず feature で
+/// 括った** — 削除すると 5.5 / 5.6 / 6.1 が tasks.md に記録した検証手順（意図的な異常終了、
+/// 補助プロセスの起動、生成失敗の隔離）が成立しなくなるためである。3 OS の配布物の既定の
+/// ビルド（`src-tauri/Cargo.toml` の `verification-triggers` は非既定）には、環境変数の読み取り
+/// 自体が入らない。検証時は `--features verification-triggers` を明示する。
+#[cfg(feature = "verification-triggers")]
 const VERIFY_EXIT_ENV: &str = "JXCEL_VERIFICATION_EXIT_AFTER_MS";
 
-/// 検証専用の引き金が起こす動作（[`VERIFY_EXIT_ENV`] の `<動作>` 部分）。
+/// 検証専用の引き金が起こす動作（`VERIFY_EXIT_ENV` の `<動作>` 部分）。
+#[cfg(feature = "verification-triggers")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VerificationAction {
     /// 明示的な終了（5.4 の既存の動作。[`request_exit`] を呼ぶ）。
@@ -1461,6 +1504,7 @@ enum VerificationAction {
     FailWindow,
 }
 
+#[cfg(feature = "verification-triggers")]
 impl VerificationAction {
     /// 環境変数の値に書ける名前を解釈する。解釈できない名前は `None`（無視する）。
     fn parse(name: &str) -> Option<Self> {
@@ -1484,11 +1528,12 @@ impl VerificationAction {
     }
 }
 
-/// [`VERIFY_EXIT_ENV`] の値を `(<動作>, <ミリ秒>)` に解釈する。**純粋関数**であり、
+/// `VERIFY_EXIT_ENV` の値を `(<動作>, <ミリ秒>)` に解釈する。**純粋関数**であり、
 /// 書式をテストで固定する（`tests::the_verification_trigger_...`）。
 ///
 /// **動作を書かない値は 5.4 と同じ「明示的な終了」を意味する**（後方互換）。解釈できない値は
 /// `None` を返し、呼び出し元が無視する（**配布物の既定の振る舞いを変えない**）。
+#[cfg(feature = "verification-triggers")]
 fn parse_verification_trigger(value: &str) -> Option<(VerificationAction, u64)> {
     let (action, delay) = match value.split_once(':') {
         Some((action, delay)) => (VerificationAction::parse(action.trim())?, delay),
@@ -1593,8 +1638,8 @@ pub fn request_exit(app: &AppHandle) {
 /// それ以外のイベント（`WindowEvent::CloseRequested` を含む）は処理しない。ウィンドウを
 /// 閉じてよいかの仲介は 7.6 が所有し、ここは「閉じられた後の帰結」だけを決める。
 /// 起動完了時の [`RunEvent::Ready`] では起動要求に対応するウィンドウを 1 枚開き
-/// （[`open_startup_window`]。タスク 6.1）、検証専用の終了の引き金
-/// （[`arm_verification_exit_trigger`]）を用意する（環境変数が無ければ何もしない）。
+/// （[`open_startup_window`]。タスク 6.1）、検証専用の引き金が有効なビルドではそれを用意する
+/// （既定のビルドには存在しない。`verification-triggers` feature）。
 ///
 /// **このコールバックは同期文脈である**（イベントループのメインスレッド）。したがって
 /// ウィンドウの生成をここで直接行ってはならない — [`window::open`] が生成を非同期ランタイムへ
@@ -1611,10 +1656,12 @@ fn handle_run_event(app: &AppHandle, event: RunEvent) {
                 api.prevent_exit();
             }
         }
-        // 起動の完了時に、起動要求に対応するウィンドウを 1 枚開き（タスク 6.1）、検証専用の
-        // 引き金を用意する。環境変数が無ければ引き金は何もしない。
+        // 起動の完了時に、起動要求に対応するウィンドウを 1 枚開く（タスク 6.1）。検証専用の
+        // 引き金（`verification-triggers` feature）が有効なビルドでは、続けてそれを用意する
+        // （環境変数が無ければ何もしない）。
         RunEvent::Ready => {
             open_startup_window(app);
+            #[cfg(feature = "verification-triggers")]
             arm_verification_exit_trigger(app);
         }
         // 通常終了でプロセスが終わる直前の最後の同期点（要件 5.6。タスク 5.6）。
@@ -1727,6 +1774,9 @@ fn handle_reopen(app: &AppHandle, has_visible_windows: bool) {
 ///
 /// **名前は 5.4 のままにしてある**（tasks.md の 5.4 の申し送りが片付け対象としてこの名前を
 /// 指しているため）。動作は 4 つを選べるが、仕組みは 1 つのままである。
+/// **この関数は既定のビルドには存在しない**（`verification-triggers` feature。`VERIFY_EXIT_ENV`
+/// の doc「片付け」を参照）。
+#[cfg(feature = "verification-triggers")]
 fn arm_verification_exit_trigger(app: &AppHandle) {
     let Ok(value) = std::env::var(VERIFY_EXIT_ENV) else {
         return;
@@ -1778,6 +1828,7 @@ fn arm_verification_exit_trigger(app: &AppHandle) {
 ///
 /// 起動の失敗は記録に残す（**検証の失敗を無言にしない**）。失敗してもアプリは通常終了の経路へ
 /// 進むので、終了時の終了処理そのものは実測できる。
+#[cfg(feature = "verification-triggers")]
 fn start_verification_sidecar(app: &AppHandle) {
     let executable = verification_sidecar_path();
     let spec = SidecarSpec {
@@ -1809,6 +1860,7 @@ fn start_verification_sidecar(app: &AppHandle) {
 /// `usr/share/jxcel/sidecar-smoke`）を返す経路に置き換わる。それまでは、このリポジトリの
 /// 検証で 1.7 が配置した原本だけを指す（語幹は [`SidecarKind::as_str`]、接尾辞は
 /// [`BUILD_TARGET_TRIPLE`] と Windows の `.exe`。tasks.md 1.7 の命名規約と同じ組み立て）。
+#[cfg(feature = "verification-triggers")]
 fn verification_sidecar_path() -> PathBuf {
     let suffix = if BUILD_TARGET_TRIPLE.contains("windows") {
         ".exe"
@@ -1834,10 +1886,11 @@ fn verification_sidecar_path() -> PathBuf {
 mod tests {
     use super::{
         clamp_to_char_boundary, confirm_csp_values, csp_config_from, format_crash_record,
-        parse_verification_trigger, record_once, vetoes_exit, write_crash_record, CrashRecord,
-        CspConfig, ExitControl, Residency, VerificationAction, ABNORMAL_TERMINATION_RECORDING,
-        MAX_CRASH_RECORD_BYTES,
+        record_once, vetoes_exit, write_crash_record, CrashRecord, CspConfig, ExitControl,
+        Residency, ABNORMAL_TERMINATION_RECORDING, MAX_CRASH_RECORD_BYTES,
     };
+    #[cfg(feature = "verification-triggers")]
+    use super::{parse_verification_trigger, VerificationAction};
     use std::sync::atomic::Ordering;
     use tauri::utils::config::Csp;
 
@@ -2068,9 +2121,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 検証専用の引き金（タスク 5.4 / 5.5）
+    // 検証専用の引き金（タスク 5.4 / 5.5。**`verification-triggers` feature でのみ存在する**）
     // -----------------------------------------------------------------------
 
+    #[cfg(feature = "verification-triggers")]
     #[test]
     fn the_verification_trigger_keeps_the_plain_integer_meaning() {
         // 5.4 が文書化した書式（整数だけ）は「明示的な終了」のままである（後方互換）。
@@ -2084,6 +2138,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "verification-triggers")]
     #[test]
     fn the_verification_trigger_can_select_an_intentional_panic() {
         // 5.5 が足した形。**同じ環境変数のまま**動作を選べる（片付けは 1 箇所）。
@@ -2101,6 +2156,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "verification-triggers")]
     #[test]
     fn the_verification_trigger_can_start_a_sidecar() {
         // 5.6 が足した形。**同じ環境変数のまま**補助プロセスを起動した状態を作れる
@@ -2115,6 +2171,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "verification-triggers")]
     #[test]
     fn the_verification_trigger_can_fail_a_window_creation() {
         // 6.1 が足した形。**同じ環境変数のまま**生成の失敗を起こせる（片付けは 1 箇所のまま。
@@ -2129,6 +2186,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "verification-triggers")]
     #[test]
     fn an_uninterpretable_verification_trigger_selects_nothing() {
         // 解釈できない値では**何もしない**（配布物の既定の振る舞いを変えない）。
