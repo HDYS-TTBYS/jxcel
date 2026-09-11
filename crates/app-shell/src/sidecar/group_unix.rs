@@ -23,7 +23,7 @@
 //! [`super::supervisor`] の `terminate` が行い、ここは信号を送るだけである。
 
 use std::io;
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitStatus};
 
 /// 子を新しいプロセスグループのリーダーにする。`spawn` の直前に呼ぶ。
 pub(crate) fn configure(command: &mut Command) {
@@ -90,6 +90,48 @@ impl Group {
             // 対象が既に存在しない。冪等な成功として扱う（2 回目の終了処理を許す）。
             Some(libc::ESRCH) => Ok(()),
             _ => Err(error),
+        }
+    }
+}
+
+/// 子の終了をブロックして待つ（Unix）。
+///
+/// `Child::try_wait` をループで叩く（ポーリングする）代わりに `waitpid(2)` で眠る。終了の検出が
+/// 即時になり、通知（要件 5.7）が子の死後ただちに届く。待機中に CPU を消費しない。
+///
+/// **この待機は子を回収する。** 同じ子に対して `Child::try_wait` / `Child::wait` を併用しては
+/// ならない（回収済みの子には `ECHILD` を返す）。監督側の生存判定は、この待機が記録する終了
+/// 状態（`supervisor` の `ExitState`）だけを見る。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Waiter {
+    /// 回収対象の子の識別子。
+    pid: libc::pid_t,
+}
+
+impl Waiter {
+    /// `configure` 済みの、起動直後の子に対する待機を作る。
+    pub(crate) fn new(child: &Child) -> io::Result<Self> {
+        Ok(Waiter {
+            pid: child.id() as libc::pid_t,
+        })
+    }
+
+    /// 子が終了するまでブロックし、終了状態を返す。
+    pub(crate) fn wait(&self) -> io::Result<ExitStatus> {
+        use std::os::unix::process::ExitStatusExt;
+
+        loop {
+            let mut status: libc::c_int = 0;
+            let reaped = unsafe { libc::waitpid(self.pid, &mut status, 0) };
+            if reaped == self.pid {
+                return Ok(ExitStatus::from_raw(status));
+            }
+            let error = io::Error::last_os_error();
+            // 信号による割り込みは再試行する（`waitpid` は `EINTR` を返しうる）。
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(error);
         }
     }
 }

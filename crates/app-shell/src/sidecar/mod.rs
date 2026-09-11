@@ -12,7 +12,8 @@
 //! `get` の引数、`orphan_sweep` の実行ファイル名照合が共有する唯一の識別子である。
 //!
 //! タスク 1.2 が骨組みと共有の列挙を置き、3.1 が整合性検査、3.2 が起動・共有・再起動、
-//! 3.3 がプラットフォーム別の終了保証を追加した。tasks.md 3.5（残留の掃除）が残っている。
+//! 3.3 がプラットフォーム別の終了保証、3.4 が行単位の出力取得と予期せぬ終了の通知を
+//! 追加した。tasks.md 3.5（残留の掃除）が残っている。
 
 #[cfg(unix)]
 pub mod group_unix;
@@ -23,8 +24,8 @@ pub mod orphan_sweep;
 pub mod supervisor;
 
 pub use supervisor::{
-    IntegrityVerifier, ShutdownError, SidecarHandle, SidecarSpec, SidecarSupervisor, SpawnError,
-    Supervisor,
+    IntegrityVerifier, ShutdownError, SidecarEvent, SidecarExit, SidecarHandle, SidecarSpec,
+    SidecarStream, SidecarSupervisor, SpawnError, Supervisor,
 };
 
 /// 補助プロセスの種類。どの実行ファイルを、どの名前で同梱し、どのプロセスを監督するかを

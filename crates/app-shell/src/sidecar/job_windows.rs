@@ -27,9 +27,9 @@ use std::io;
 use std::mem::{size_of, zeroed};
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitStatus};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Console::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
@@ -37,7 +37,9 @@ use windows_sys::Win32::System::JobObjects::{
     TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
-use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+use windows_sys::Win32::System::Threading::{
+    GetExitCodeProcess, WaitForSingleObject, CREATE_NEW_PROCESS_GROUP, INFINITE,
+};
 
 /// 子を新しいプロセスグループで起動する。`spawn` の直前に呼ぶ。
 ///
@@ -159,5 +161,49 @@ impl Drop for Group {
         // ハンドルを閉じる。`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` により、閉じた時点でジョブ内の
         // プロセスはカーネルによって終了させられる（明示的な強制段を経なかった場合の backstop）。
         unsafe { CloseHandle(self.job) };
+    }
+}
+
+/// 子の終了をブロックして待つ（Windows）。
+///
+/// `Child::try_wait` をループで叩く（ポーリングする）代わりに `WaitForSingleObject` で眠る。
+/// 終了の検出が即時になり、通知（要件 5.7）が子の死後ただちに届く。待機中に CPU を消費しない。
+///
+/// 保持するのは**借用したプロセスハンドル**である。`std::process::Child` が生存している限り
+/// 有効であり、監督は待機スレッドが終わるまで `Child` を保持する `Arc` を握り続ける。
+///
+/// **この待機は `Child::try_wait` / `Child::wait` と併用しない。** 監督側の生存判定は、この
+/// 待機が記録する終了状態（`supervisor` の `ExitState`）だけを見る。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Waiter {
+    /// 子のプロセスハンドル（`Child` が保持するものを借用する）。
+    handle: HANDLE,
+}
+
+// `HANDLE` は生ポインタだが、カーネルオブジェクトの識別子にすぎず、待機と終了コードの取得は
+// スレッドセーフである。待機スレッドへ移すために `Send` / `Sync` を与える（`Group` と同じ理由）。
+unsafe impl Send for Waiter {}
+unsafe impl Sync for Waiter {}
+
+impl Waiter {
+    /// 起動直後の子に対する待機を作る。
+    pub(crate) fn new(child: &Child) -> io::Result<Self> {
+        Ok(Waiter {
+            handle: child.as_raw_handle() as HANDLE,
+        })
+    }
+
+    /// 子が終了するまでブロックし、終了状態を返す。
+    pub(crate) fn wait(&self) -> io::Result<ExitStatus> {
+        use std::os::windows::process::ExitStatusExt;
+
+        if unsafe { WaitForSingleObject(self.handle, INFINITE) } != WAIT_OBJECT_0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut code: u32 = 0;
+        if unsafe { GetExitCodeProcess(self.handle, &mut code) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(ExitStatus::from_raw(code))
     }
 }

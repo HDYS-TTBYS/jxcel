@@ -120,7 +120,7 @@
   - _Requirements: 5.6_
   - _Depends: 3.2_
 
-- [ ] 3.4 予期せぬ終了の通知と出力の取得を実装する
+- [x] 3.4 予期せぬ終了の通知と出力の取得を実装する
   - 標準出力と標準エラー出力を行単位で取得し、順序を保って通知する
   - プロセスが予期せず終了した事実を利用側へ通知する。**アプリケーション本体を巻き込んで終了させない**
   - 終了の通知は、そのプロセスの最後の出力の後に届くようにする
@@ -479,6 +479,13 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **3.4**: イベントは `SidecarEvent::Output { kind, stream, line }` と `SidecarEvent::Exited { kind, status }`。`status` の具体型 `SidecarExit`（`Deliberate` / `Unexpected`）が由来を担う（design の `status` をフィールド追加なしで具体化したもの）。判定は**監視が記録した終了状態**を基準にするので、**意図的な終了が `Unexpected` として報告されることは構造的に無い**（逆に、自力で死んだ直後に `shutdown_all` が走り監視が未記録だと `Deliberate` 側に倒れる＝安全側）。
+- **3.4**: 購読は購読者ごとの**無限容量 `std::sync::mpsc`** を `Mutex<Vec<Sender>>` に登録する方式。取りこぼしは無いが**遅い購読者はメモリを消費する**。**配布は登録簿のロックを保持しない**ため、購読者が監督へ再入しても循環しない（ロック順: 登録簿 → 子 → 終了状態 → 購読者表。`kill` だけが子を保持したまま終了状態を見る）。
+- **3.4**: **`Exited` は当該プロセスの最後の出力より後に届くことを構造で保証**する（監視スレッドが stdout / stderr の両 reader を join してから publish）。その帰結として、**孫が stdout パイプを保持したまま生存していると `Exited` は孫の終了まで遅れる**（モジュール doc に明記。孫の終了は 5.6 / 3.5 の担当）。
+- **3.4**: 行の意味論は **`BufRead::lines` と完全等価**（上限で断片化する点だけが違い）。上限 `MAX_LINE_BYTES = 64 KiB` を超える行は順序を保って断片化される。実装は「確定していない `\r` を `held_cr` に退避し、内容と確定するまで断片へ入れない」方式で、**末尾の `\r` を無条件に落とす実装にしてはならない**（round-1/round-2 のレビューで 2 回棄却された失敗クラス）。**回帰防止は `fragments_reconstruct_to_bufread_lines_for_every_string`（`{x, \r, \n}` 長さ 7 以下 × 上限 1〜8 × 読み取り分割 2 種 = 52,480 件を `std::io::BufReader::lines` と突き合わせる参照等価テスト）**。レビューでは独立に 578 万件へ拡張して不一致 0 を確認済み。
+- **3.4（8.1 への契約）**: `Output` の `line` は**行そのものとは限らない**。上限に達した断片は、その直後が内容と確定するまで配送されない。**断片が完全な行か長い行の先頭かを呼び出し側が区別できない**ため、8.1 の診断購読は「終端された断片までを連結して 1 行」として扱うこと。UTF-8 不正は lossy 変換される。また `mark_exited` は reader の join より先に走るため、**再起動をまたぐと新しい子の `Output` が前の子の `Exited` より先に届きうる**（イベントは `kind` しか持たない）。呼び出し側は現在のインスタンスへの帰属を仮定してはならない。
+- **3.4**: `SidecarHandle::kill()` は `ExitState::Exited` でガードするが、**プラットフォームの Waiter が `waitpid` / `WaitForSingleObject` で回収してから `mark_exited` が記録するまでの窓**では回収済み識別子へ信号を送りうる（PID 再利用には数万回の生成が必要で実害はほぼ無い、と文書化）。
 
 - **3.3**: Unix は spawn 時に `pre_exec` + `setpgid(0,0)` で**子を独自のプロセスグループに入れ**、終了は `killpg` でグループ宛に `SIGTERM` → 猶予 → `SIGKILL`。pid 宛の `kill` に退行すると孫が残る（レビューで実測: `killpg` を `kill` に変えると孫が生存してテストが落ちる）。Windows は Job Object に `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` を設定して spawn 直後に割り当て、強制段は `TerminateJobObject`。**カーネルが強制するのでアプリの異常終了後も有効な唯一の機構**である（design の根拠）。
 - **3.3**: `shutdown_all()` を追加（`ShutdownError`、`DEFAULT_GRACE = 3s`、テストは `with_grace` で短縮）。冪等・有界・登録表を空にする。`sweep_orphans` は 3.5 のまま未実装。

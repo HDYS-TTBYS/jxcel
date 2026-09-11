@@ -1,4 +1,5 @@
-//! 補助プロセスの起動・共有・再起動と、起動失敗の区別（要件 5.4、5.5、5.8、tasks.md 3.2）。
+//! 補助プロセスの起動・共有・再起動、起動失敗の区別、終了保証、出力の取得と予期せぬ終了の通知
+//! （要件 5.4、5.5、5.6、5.7、5.8、5.9、tasks.md 3.2〜3.4）。
 //!
 //! **完了状態**（同じ種類への要求を並行して 10 回出しても起動したプロセスが 1 つであること）を、
 //! 実プロセスで固定する。実際に起動するのは配置規約（tasks.md 1.7）が置く原本
@@ -19,8 +20,10 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -30,7 +33,8 @@ use std::process::Command;
 
 use app_shell::sidecar::integrity::{IntegrityError, BUILD_TARGET_TRIPLE, EXPECTED_DIGESTS};
 use app_shell::sidecar::supervisor::{
-    SidecarHandle, SidecarSpec, SidecarSupervisor, SpawnError, Supervisor,
+    SidecarEvent, SidecarHandle, SidecarSpec, SidecarStream, SidecarSupervisor, SpawnError,
+    Supervisor,
 };
 use app_shell::sidecar::SidecarKind;
 
@@ -1007,5 +1011,502 @@ fn shutdown_all_returns_promptly_when_the_child_is_already_dead() {
     assert!(
         supervisor.get(SidecarKind::Smoke).is_none(),
         "終了処理の後に登録簿が空になっていない"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 出力の取得と予期せぬ終了の通知（要件 5.7、5.9、tasks.md 3.4）
+// ---------------------------------------------------------------------------
+
+/// 出来事を期限付きで 1 つ受け取る。期限切れは panic する（無限に待たない）。
+fn recv_event(receiver: &Receiver<SidecarEvent>, timeout: Duration, context: &str) -> SidecarEvent {
+    receiver
+        .recv_timeout(timeout)
+        .unwrap_or_else(|error| panic!("{context}: 出来事を期限内に受け取れない: {error}"))
+}
+
+/// 失敗報告に載せる、受け取った出来事の末尾の並び。件数が多くても報告が肥大しないよう
+/// 直近の数件だけを保持する。
+fn push_tail(tail: &mut Vec<String>, entry: String) {
+    const TAIL: usize = 8;
+    if tail.len() == TAIL {
+        tail.remove(0);
+    }
+    tail.push(entry);
+}
+
+/// 予期せぬ終了の事実が購読側へ届き、監督側が巻き込まれて終了しない（要件 5.7、tasks.md 3.4 の
+/// 完了状態）。
+///
+/// 外部から子の識別子へ `SIGKILL` を送る（[`SidecarHandle::kill`] は子の識別子への `SIGKILL`
+/// であり、監督側の終了処理を経由しない）。その後、(a) 当該種類の `Exited` が届くこと、
+/// (b) 監督が生存し続け、`get` が終了した子を生存として報告せず、`ensure` が新しい子を起動
+/// できること、(c) 再起動後も出力の購読が機能すること（読み取り機構が子の死で壊れていない）
+/// を確かめる。(c) が無いと、読み取りスレッドが子の終了で panic して黙って止まっていても
+/// 気づけない。
+#[test]
+fn unexpected_exit_is_notified_and_the_supervisor_survives() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("unexpected_exit_is_notified_and_the_supervisor_survives");
+        return;
+    };
+
+    let supervisor = Supervisor::new();
+    let events = supervisor.subscribe();
+    let spec = sidecar_spec(&executable);
+
+    let handle = supervisor.ensure(&spec).expect("起動できる");
+    let first_pid = handle.pid();
+    let _guard = SidecarGuard::new(handle.clone());
+
+    // 起動行が届く（読み取りが張られていることの確認を兼ねる）。
+    let started = recv_event(&events, Duration::from_secs(10), "起動行");
+    assert!(
+        matches!(
+            &started,
+            SidecarEvent::Output { kind: SidecarKind::Smoke, stream: SidecarStream::Stdout, line }
+                if line.starts_with("sidecar-smoke ready")
+        ),
+        "標準出力の起動行が届いていない: {started:?}"
+    );
+
+    // 外部からの強制終了。監督側の終了処理は通さない。
+    handle.kill().expect("子を強制終了できる");
+
+    // (a) 予期せぬ終了の通知が届く。監督が巻き込まれて終了していればここへ到達しない。
+    let status = loop {
+        match recv_event(&events, Duration::from_secs(10), "終了通知") {
+            SidecarEvent::Exited { kind, status } => {
+                assert_eq!(kind, SidecarKind::Smoke, "終了通知の種類が違う");
+                break status;
+            }
+            SidecarEvent::Output { .. } => {}
+        }
+    };
+    assert!(
+        !status.is_deliberate(),
+        "外部からの強制終了を意図的な終了として報告した: {status:?}"
+    );
+
+    // (b) 監督は生存し、終了した子を生存として報告しない。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while supervisor.get(SidecarKind::Smoke).is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "終了した子を get が生存として報告し続けている"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let second = supervisor
+        .ensure(&spec)
+        .expect("強制終了の後も改めて起動できる");
+    let _second_guard = SidecarGuard::new(second.clone());
+    assert_ne!(
+        second.pid(),
+        first_pid,
+        "終了後の ensure が新しいプロセスを起動していない"
+    );
+
+    // (c) 再起動後も出力の購読が機能する。
+    let mut stdin = second.take_stdin().expect("標準入力を取得できる");
+    writeln!(stdin, "after-restart").expect("標準入力へ書ける");
+    stdin.flush().expect("flush できる");
+    let echoed = loop {
+        match recv_event(&events, Duration::from_secs(10), "再起動後の出力") {
+            SidecarEvent::Output {
+                stream: SidecarStream::Stdout,
+                line,
+                ..
+            } if line == "echo: after-restart" => break line,
+            _ => {}
+        }
+    };
+    assert_eq!(echoed, "echo: after-restart");
+}
+
+/// 出力を行単位で取得し、終了通知が**その子の最後の出力の後**に届く（要件 5.9、tasks.md 3.4
+/// 「終了の通知は、そのプロセスの最後の出力の後に届く」）。
+///
+/// 読み取り側の上限（64 KiB）を大きく超える 1 行を子へ送る。子はその応答（同じ長さの 1 行）を
+/// 書き切る最中に標準出力のパイプの前で止まるため、**強制終了の時点で未読の行がパイプに残る**。
+/// 読み取り側を join してから通知を出す実装では、残った断片が届いた後に通知が出る。join を
+/// 怠る実装では通知が先に出て、`Exited` の後に断片が現れる。応答の断片が届き始めたことを
+/// 観測してから強制終了するので、固定の待ちに頼らない。
+#[test]
+fn every_output_line_is_delivered_before_the_exit_event() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("every_output_line_is_delivered_before_the_exit_event");
+        return;
+    };
+
+    let supervisor = Supervisor::new();
+    let events = supervisor.subscribe();
+
+    // 読み続けない購読を多数登録する（配布は購読者ごとに複製を作るので読み取り側が遅くなる）。
+    // これにより子は標準出力へ書き切れずにパイプの前で止まり、**強制終了の時点で未読の断片が
+    // 残る状態**を確実に作れる。読み続けない購読がいても、他の購読への配布と順序は影響を
+    // 受けないことの確認も兼ねる（送信路は無限容量で、`send` はブロックしない）。
+    const SLOW_SUBSCRIBERS: usize = 32;
+    let _slow: Vec<Receiver<SidecarEvent>> = (0..SLOW_SUBSCRIBERS)
+        .map(|_| supervisor.subscribe())
+        .collect();
+
+    let handle = supervisor
+        .ensure(&sidecar_spec(&executable))
+        .expect("起動できる");
+    let _guard = SidecarGuard::new(handle.clone());
+
+    // 起動行を受け取る（読み取りが張られていることを確認する）。
+    let ready = recv_event(&events, Duration::from_secs(10), "起動行");
+    assert!(
+        matches!(
+            &ready,
+            SidecarEvent::Output {
+                stream: SidecarStream::Stdout,
+                ..
+            }
+        ),
+        "起動行が標準出力として届いていない: {ready:?}"
+    );
+
+    // 上限を大きく超える 1 行を送る。子が応答を書き切る最中に強制終了するので、パイプには
+    // 読み取り側が未消費の断片が残る。
+    const HUGE: usize = 8 * 1024 * 1024;
+    let mut stdin = handle.take_stdin().expect("標準入力を取得できる");
+    let block = vec![b'x'; 64 * 1024];
+    for _ in 0..(HUGE / block.len()) {
+        stdin.write_all(&block).expect("標準入力へ書ける");
+    }
+    stdin.write_all(b"\n").expect("行末を書ける");
+    stdin.flush().expect("flush できる");
+
+    // 応答の断片が届き始めてから強制終了する（子がまだ書き切っていないことを観測してから
+    // 終了させる）。
+    for index in 0..4 {
+        let event = recv_event(&events, Duration::from_secs(20), "応答の断片");
+        assert!(
+            matches!(
+                &event,
+                SidecarEvent::Output {
+                    stream: SidecarStream::Stdout,
+                    ..
+                }
+            ),
+            "{index} 番目の応答の断片が標準出力として届いていない: {event:?}"
+        );
+    }
+    handle.kill().expect("子を強制終了できる");
+
+    let mut outputs_before_exit = 0usize;
+    let mut tail: Vec<String> = Vec::new();
+    let status = loop {
+        match recv_event(&events, Duration::from_secs(20), "終了通知まで") {
+            SidecarEvent::Output { kind, stream, line } => {
+                outputs_before_exit += 1;
+                push_tail(
+                    &mut tail,
+                    format!("Output({kind}/{stream:?}) {} バイト", line.len()),
+                );
+            }
+            SidecarEvent::Exited { status, .. } => {
+                push_tail(&mut tail, format!("Exited({status:?})"));
+                break status;
+            }
+        }
+    };
+
+    // 通知の後に届く出力を拾う（join を怠る実装ではここで現れる）。
+    let mut outputs_after_exit = 0usize;
+    let drain_deadline = Instant::now() + Duration::from_millis(250);
+    loop {
+        match events.recv_timeout(Duration::from_millis(50)) {
+            Ok(SidecarEvent::Output { line, .. }) => {
+                outputs_after_exit += 1;
+                push_tail(&mut tail, format!("Output(after exit) {} バイト", line.len()));
+            }
+            Ok(SidecarEvent::Exited { .. }) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) if Instant::now() >= drain_deadline => break,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+
+    // 主張は順序だけである。**終了通知の後に出力が届いてはならない。** 読み取り側を join
+    // しない実装では、強制終了の時点でパイプに残っていた断片がここで現れる。
+    assert_eq!(
+        outputs_after_exit, 0,
+        "終了通知の後に出力が届いた（順序が守られていない）。通知の前 {outputs_before_exit} 件、\
+         後 {outputs_after_exit} 件。末尾の並び: {tail:?}"
+    );
+    eprintln!(
+        "順序: 出力 {outputs_before_exit} 件 → Exited({status:?})。通知後の出力 {outputs_after_exit} 件。\
+         末尾の並び: {tail:?}"
+    );
+}
+
+/// 内容 `length` バイト（`x` の連続）+ 終端からなる入力を作る。
+#[cfg(unix)]
+fn x_line(length: usize, terminator: &[u8]) -> Vec<u8> {
+    let mut line = vec![b'x'; length];
+    line.extend_from_slice(terminator);
+    line
+}
+
+/// 実パイプ越しに、読み取りの上限の前後で CRLF が分かれても `\r` が漏れず・落ちず、余分な
+/// 空の出力も出ないことを確かめる（レビューで実測された回帰の固定）。
+///
+/// `sidecar-smoke` の応答は LF 終端なので、入力をそのまま流す `/bin/cat` を相手役に使う
+/// （整合性検査は差し替える。ここで確かめるのは機構であり配布物の検証ではない）。送る内容は
+/// 上限の前後の `\r\n`、**内容の `\r` が行末の `\r\n` と連続する場合**、CRLF のみの空行である。
+#[cfg(unix)]
+#[test]
+fn crlf_at_the_pipe_cap_is_trimmed_end_to_end() {
+    let _serial = serialize();
+
+    let cat = Path::new("/bin/cat");
+    if !cat.is_file() {
+        eprintln!(
+            "crlf_at_the_pipe_cap_is_trimmed_end_to_end をスキップします: {} が無い",
+            cat.display()
+        );
+        return;
+    }
+
+    let supervisor = Supervisor::with_verifier(Arc::new(|_, _| Ok(())));
+    let events = supervisor.subscribe();
+    let mut spec = sidecar_spec(cat);
+    spec.args.clear();
+    let handle = supervisor.ensure(&spec).expect("起動できる");
+    let _guard = SidecarGuard::new(handle.clone());
+    let mut stdin = handle.take_stdin().expect("標準入力を取得できる");
+
+    // 読み取りの上限（`MAX_LINE_BYTES` = 64 KiB。supervisor の私有定数なので値を直接書く）。
+    let cap = 64 * 1024;
+    // 内容の `\r` と行末の `\r\n` が連続する入力（`\r\r\n` の 1 バイト目は内容である）。
+    let mut content_cr = vec![b'x'; cap - 1];
+    content_cr.push(b'\r');
+    let inputs: Vec<Vec<u8>> = vec![
+        x_line(cap - 1, b"\r\n"),
+        x_line(cap, b"\r\n"),
+        x_line(cap + 1, b"\r\n"),
+        x_line(cap - 1, b"\r\r\n"),
+        b"\r\n".to_vec(),
+    ];
+    for input in &inputs {
+        stdin.write_all(input).expect("標準入力へ書ける");
+    }
+    stdin.flush().expect("flush できる");
+    // 標準入力を閉じて cat を終了させる（読み取りは EOF で終わる）。
+    drop(stdin);
+
+    let mut observed: Vec<Vec<u8>> = Vec::new();
+    loop {
+        match recv_event(&events, Duration::from_secs(20), "断片と終了通知") {
+            SidecarEvent::Output { line, .. } => observed.push(line.into_bytes()),
+            SidecarEvent::Exited { .. } => break,
+        }
+    }
+
+    // 上限未満・ちょうど・超過（上限 + 1 バイト）・内容 `\r` を含む上限ちょうど・空行。
+    let lengths: Vec<usize> = observed.iter().map(Vec::len).collect();
+    assert_eq!(
+        lengths,
+        vec![cap - 1, cap, cap, 1, cap, 0],
+        "CRLF の境界で断片の分かれ方が違う（観測 {lengths:?}、観測内容 {observed:?}）"
+    );
+    // 内容の `\r` は残り、行末の `\r` は落ちる。空行は空の断片として届く（正当である）。
+    assert_eq!(
+        observed[4], content_cr,
+        "内容の `\\r` が行末の `\\r` と一緒に落ちている"
+    );
+    for (index, fragment) in observed.iter().enumerate() {
+        if index != 4 {
+            assert!(
+                !fragment.contains(&b'\r'),
+                "{index} 番目の断片に行末の `\\r` が漏れている（{} バイト）",
+                fragment.len()
+            );
+        }
+    }
+}
+
+/// 標準出力と標準エラーを、どちらの流れかが分かる形で取得する（要件 5.9）。
+///
+/// 正常な子の起動行は標準出力へ、引数が不正なときの使い方は標準エラーへ出る（1.6 の仕様）。
+/// どちらの経路も検証用の補助プロセスを変更せずに到達できる。
+#[test]
+fn stdout_and_stderr_are_captured_with_distinct_streams() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("stdout_and_stderr_are_captured_with_distinct_streams");
+        return;
+    };
+
+    let supervisor = Supervisor::new();
+    let events = supervisor.subscribe();
+
+    // 1. 正常な子: 起動行は標準出力。
+    let handle = supervisor
+        .ensure(&sidecar_spec(&executable))
+        .expect("起動できる");
+    let _guard = SidecarGuard::new(handle.clone());
+    let ready = recv_event(&events, Duration::from_secs(10), "標準出力の起動行");
+    match &ready {
+        SidecarEvent::Output {
+            stream: SidecarStream::Stdout,
+            line,
+            ..
+        } => assert!(
+            line.starts_with("sidecar-smoke ready"),
+            "起動行の内容が違う: {line:?}"
+        ),
+        other => panic!("起動行が標準出力として届いていない: {other:?}"),
+    }
+
+    handle.kill().expect("子を強制終了できる");
+    loop {
+        if let SidecarEvent::Exited { .. } = recv_event(&events, Duration::from_secs(10), "終了通知")
+        {
+            break;
+        }
+    }
+
+    // 2. 引数が不正な子: 使い方は標準エラーへ出て、終了コード 2 で終わる（1.6 の仕様）。
+    let mut invalid = sidecar_spec(&executable);
+    invalid.args = vec!["--not-a-real-flag".to_string()];
+    let failing = supervisor.ensure(&invalid).expect("起動自体は成功する");
+    let _failing_guard = SidecarGuard::new(failing.clone());
+
+    let mut saw_stderr = false;
+    let status = loop {
+        match recv_event(&events, Duration::from_secs(10), "使い方と終了通知") {
+            SidecarEvent::Output {
+                stream: SidecarStream::Stderr,
+                line,
+                ..
+            } => {
+                assert!(!line.trim().is_empty(), "標準エラーの空行は取得対象にならない");
+                if line.contains("使い方") {
+                    saw_stderr = true;
+                }
+            }
+            SidecarEvent::Output {
+                stream: SidecarStream::Stdout,
+                ..
+            } => {}
+            SidecarEvent::Exited { status, .. } => break status,
+        }
+    };
+    assert!(
+        saw_stderr,
+        "引数が不正なときの使い方が標準エラーとして取得できていない"
+    );
+    assert_eq!(
+        status.status().and_then(|status| status.code()),
+        Some(2),
+        "使い方の終了コードは 2 である: {status:?}"
+    );
+}
+
+/// 2 つの独立した購読のそれぞれに出来事が届く（tasks.md 3.4「複数の購読側」）。
+#[test]
+fn two_independent_subscribers_both_receive_the_events() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("two_independent_subscribers_both_receive_the_events");
+        return;
+    };
+
+    let supervisor = Supervisor::new();
+    let first = supervisor.subscribe();
+    let second = supervisor.subscribe();
+    let handle = supervisor
+        .ensure(&sidecar_spec(&executable))
+        .expect("起動できる");
+    let _guard = SidecarGuard::new(handle.clone());
+    let mut stdin = handle.take_stdin().expect("標準入力を取得できる");
+
+    writeln!(stdin, "hello").expect("標準入力へ書ける");
+    stdin.flush().expect("flush できる");
+
+    // 両方の購読が同じ出来事を受け取るまで待ってから強制終了する（応答が届く前に終了すると
+    // 何を主張しているのか分からなくなる）。
+    for (name, events) in [("1 人目", &first), ("2 人目", &second)] {
+        let mut saw_ready = false;
+        let mut saw_echo = false;
+        while !(saw_ready && saw_echo) {
+            match recv_event(events, Duration::from_secs(10), name) {
+                SidecarEvent::Output {
+                    stream: SidecarStream::Stdout,
+                    line,
+                    ..
+                } => {
+                    if line.starts_with("sidecar-smoke ready") {
+                        saw_ready = true;
+                    }
+                    if line == "echo: hello" {
+                        saw_echo = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    handle.kill().expect("子を強制終了できる");
+
+    for (name, events) in [("1 人目", &first), ("2 人目", &second)] {
+        let status = loop {
+            match recv_event(events, Duration::from_secs(10), name) {
+                SidecarEvent::Exited { status, .. } => break status,
+                SidecarEvent::Output { .. } => {}
+            }
+        };
+        assert!(
+            !status.is_deliberate(),
+            "{name} が強制終了を意図的な終了として受け取った: {status:?}"
+        );
+    }
+}
+
+/// `shutdown_all`（要件 5.6）による意図的な終了は、予期せぬ終了（要件 5.7）と区別できる形で
+/// 通知される。
+///
+/// 決定: `shutdown_all` も `Exited` を出す。区別は `status` の値（`SidecarExit`）が担うため、
+/// アプリケーション自身の終了処理が「予期せぬクラッシュ」として解釈されることはない。逆に
+/// 終了の由来を通知しないと、利用側は「通知が無い = 生存している」と解釈せざるを得ず、
+/// 子が消えたことを知る手段が無くなる。
+#[test]
+fn deliberate_shutdown_is_distinguishable_from_an_unexpected_exit() {
+    let _serial = serialize();
+    let Some(executable) = staged_original() else {
+        skip_staged("deliberate_shutdown_is_distinguishable_from_an_unexpected_exit");
+        return;
+    };
+
+    let supervisor = Supervisor::new().with_grace(Duration::from_millis(200));
+    let events = supervisor.subscribe();
+    let handle = supervisor
+        .ensure(&sidecar_spec(&executable))
+        .expect("起動できる");
+    let _guard = SidecarGuard::new(handle.clone());
+
+    supervisor.shutdown_all().expect("終了処理が成功する");
+
+    let status = loop {
+        match recv_event(&events, Duration::from_secs(10), "終了通知") {
+            SidecarEvent::Exited { status, .. } => break status,
+            SidecarEvent::Output { .. } => {}
+        }
+    };
+    assert!(
+        status.is_deliberate(),
+        "shutdown_all による予期せぬ終了として報告された: {status:?}"
+    );
+    assert!(
+        status.status().is_some(),
+        "終了状態が取得できていない: {status:?}"
     );
 }
