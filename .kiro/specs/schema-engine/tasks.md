@@ -200,7 +200,7 @@
   - _Requirements: 2.6, 7.1, 7.2, 7.3, 7.4, 7.5, 7.6_
   - _Depends: 2.2, 2.3_
 
-- [ ] 6.2 書き込み経路ごとの判定を実装する
+- [x] 6.2 書き込み経路ごとの判定を実装する
   - 画面上の入力とマクロからの書き込みを編集経路、フォームからの送信を収集経路として分類する
   - 編集経路では違反を報告したうえで、呼び出し元が保持できる値を返す
   - 収集経路では受け入れられないという判定を返す。**送信を止める処理は行わない**
@@ -405,3 +405,11 @@
 - 6.1 の申し送り: `Int` → `decimal` は design の字面「`scale` に収まれば」より強く **`precision` も検査する**（タスクの「桁の収まらない変換」と、変換後は適合するという不変条件に必要）。
 - 6.1 の申し送り: `decimal::scan` は指数が `i64` を超える入力で `None` を返すため、アンダーフローの判定には使っていない（その経路で見逃す）。判定は仮数部だけを走査し、確保を増やさない。
 - 6.1 の申し送り: design「Testing Strategy」の統合テスト `tests/coercion.rs` は作っていない（design の Integration Tests 一覧に無く、Unit Tests の `Coercer` の項に従って `coerce/mod.rs` 内にテストを置いた。5.3 の `references.rs` と同じ扱い）。
+
+- **6.2 の裁定（8.1 が読むこと）— `WriteVerdict` の形**: 設計は**平坦な 3 変種**（`Accepted` / `AcceptedWithViolations` / `Rejected`）を定めるが、実装は `WriteVerdict::Edit(EditVerdict)` / `Collect(CollectVerdict)` の**経路ごとの型の和**にした。理由はタスク 6.2 の明示要求（「編集経路が拒否を返さないこと、収集経路が違反つきの受理を返さないことが**型の上で保証されている**」）であり、平坦な 3 変種では `Edit` が `Rejected` を、`Collect` が `AcceptedWithViolations` を返せる形が型として表現できてしまう。`EditVerdict` は `Accepted` / `AcceptedWithViolations` のみ、`CollectVerdict` は `Accepted` / `Rejected` のみであり、**タスクの要求が design の形より優先される**。design の `WriteVerdict` の記述はこの形に読み替えること。
+- 6.2 の申し送り: `validate_write(origin, schema, values)` は**純関数**である。送信を止める処理も、その呼び出しも持たない（design「拒否の実行はしない」。止めるのは `form-web-server`）。
+- 6.2 の申し送り: 強制と検証の順序は**両経路とも coerce → validate**（design「System Flows / 書き込み経路の判定」）。
+- 6.2 の申し送り: **行を跨ぐ性質（一意性・参照の実在）は `validate_write` では判定しない**。引数に `Document` が無いため**構造的に判定不能**であり、一括経路が持つ。編集直後に重複を知りたい呼び出し元は `validate_columns` でその列だけを舐め直す。
+- **6.2 の裁定（5.4 / 8.1 が読むこと）— `ViolationReport` の API 変更**: 1.3 / 5.4 で承認した `ViolationReport` を**シート非依存**（`new(options)` / `finish(sheet)` / `into_violations`）へ変えた。5.1 の申し送り（違反理由の写像を写し取らない）を満たすために `cell::validate_row` を再利用するための変更であり、`SheetReport` の構築内容は同一である。呼び出し元はすべて追随済み（旧 API の残骸なし）。5.4 の振る舞い（順序・上限・総件数・`invalid_rows`）は変わっていない。
+- 6.2 の申し送り: 要件 10.2（1 セルの判定が 16 ミリ秒以内）は**テスト内の計測**として確かめている。**CI の予算ゲートには載せない**（タスクの明示要求。1 セルの判定は予算に対して桁違いに小さく、ゲートにする価値がない）。
+- 6.2 の既知の非ブロッキング所見: `the_classification_has_exactly_the_edit_and_the_collect_paths` は変種の等値比較のみで実質トートロジーである。ただし `WriteOrigin` の網羅マッチ（`edit_form` / `collect_form`）が既に存在するため、3 変種目を足せばコンパイルは壊れる（保証は型が担っており、テストの弱さは実害が無い）。16ms のテストは「1 セル」と称しつつ 30 セル（うち 29 は `Null`）を判定している（より厳しい側なので要件は満たす）。

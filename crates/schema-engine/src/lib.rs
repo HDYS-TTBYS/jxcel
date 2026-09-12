@@ -37,6 +37,8 @@
 //! （`compile::plan` の `ColumnValidator`）を置いた。タスク 4.3 が同じ層に型定義参照の
 //! 解決と循環の検出（`compile::resolve` の `resolve` / `Resolver`）を足した。タスク 6.1 が
 //! 型強制の層 [`coerce`] の変換の規則表（`coerce` / `coerce_by` / `Coercion`）を置いた。
+//! タスク 6.2 が書き込み経路の層 [`write`] の経路ごとの判定（`WriteOrigin` /
+//! `EditVerdict` / `CollectVerdict` / `WriteVerdict` と `validate_write`）を置いた。
 
 pub mod coerce;
 pub mod compile;
@@ -45,3 +47,4 @@ pub mod error;
 pub mod registry;
 pub mod types;
 pub mod validate;
+pub mod write;

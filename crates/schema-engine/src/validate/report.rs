@@ -482,8 +482,12 @@ impl SheetReport {
 /// 検証の走査（タスク 5.4）が本型へ違反を押し込み、最後に [`ViolationReport::finish`] で
 /// [`SheetReport`] に確定する。**上限に達したあとも押し込みは受け付け、総件数と違反を持つ
 /// 行の一覧だけを更新する**（報告の大きさを上限に閉じ込めつつ、数え落とさないため）。
+///
+/// 蓄積そのものは**シートに属さない**。違反が属するシートが決まるのは確定のときであり、
+/// 書き込み経路（タスク 6.2）は行に属さない値（`row: None`）を集めるため、蓄積の段が
+/// シートを要求すると判定の入口が無くなる。したがってシートは
+/// [`ViolationReport::finish`] へ渡す。
 pub struct ViolationReport {
-    sheet: SheetId,
     limit: Option<usize>,
     violations: Vec<Violation>,
     total: usize,
@@ -491,10 +495,9 @@ pub struct ViolationReport {
 }
 
 impl ViolationReport {
-    /// シートと条件を与えて蓄積を始める。
-    pub fn new(sheet: SheetId, options: &ValidationOptions) -> Self {
+    /// 条件を与えて蓄積を始める。
+    pub fn new(options: &ValidationOptions) -> Self {
         Self {
-            sheet,
             limit: options.violation_limit(),
             violations: Vec::new(),
             total: 0,
@@ -542,16 +545,25 @@ impl ViolationReport {
         std::mem::take(&mut self.violations)
     }
 
+    /// 蓄積した違反をそのまま取り出す（書き込み経路。タスク 6.2）。
+    ///
+    /// シートに属さない判定（[`ViolationReport::new`] で集めたもの）の結果を取り出す唯一の
+    /// 経路である。違反の位置と理由（要件 6.4）だけを返し、総件数と違反を持つ行の一覧は
+    /// 捨てる — 行に属さない値の違反は行の一覧を持たないためである。
+    pub(crate) fn into_violations(self) -> Vec<Violation> {
+        self.violations
+    }
+
     /// ここまでに加えた違反の総件数。
     #[inline]
     pub fn total(&self) -> usize {
         self.total
     }
 
-    /// 結果を確定する。
-    pub fn finish(self) -> SheetReport {
+    /// 結果を確定する。違反が属するシートは確定のときに与える。
+    pub fn finish(self, sheet: SheetId) -> SheetReport {
         SheetReport {
-            sheet: self.sheet,
+            sheet,
             violations: self.violations,
             total_violations: self.total,
             invalid_rows: self.invalid_rows,
@@ -866,13 +878,13 @@ mod tests {
         let row_a = row_id(ROW_A);
         let row_b = row_id(ROW_B);
 
-        let mut report = ViolationReport::new(sheet, &ValidationOptions::capped(2));
+        let mut report = ViolationReport::new(&ValidationOptions::capped(2));
         report.push(type_mismatch(row_a, 0, "数量"));
         report.push(type_mismatch(row_a, 1, "単価"));
         report.push(type_mismatch(row_b, 0, "数量"));
         assert_eq!(3, report.total(), "総件数が蓄積の途中で数えられていない");
 
-        let report = report.finish();
+        let report = report.finish(sheet);
         assert_eq!(sheet, report.sheet());
         assert_eq!(
             2,
@@ -892,12 +904,12 @@ mod tests {
         );
 
         // 上限がなければすべて保持し、切り詰められない。
-        let mut unlimited = ViolationReport::new(sheet, &ValidationOptions::unlimited());
+        let mut unlimited = ViolationReport::new(&ValidationOptions::unlimited());
         unlimited.extend([
             type_mismatch(row_a, 0, "数量"),
             type_mismatch(row_b, 1, "単価"),
         ]);
-        let unlimited = unlimited.finish();
+        let unlimited = unlimited.finish(sheet);
         assert_eq!(2, unlimited.violations().len());
         assert_eq!(2, unlimited.total_violations());
         assert!(!unlimited.is_truncated());
@@ -921,10 +933,10 @@ mod tests {
         );
 
         // 上限 0 でも総件数と違反を持つ行の一覧は保たれる（呼び出し元は印を付けられる）。
-        let mut report = ViolationReport::new(sheet, &ValidationOptions::capped(0));
+        let mut report = ViolationReport::new(&ValidationOptions::capped(0));
         report.push(type_mismatch(row_a, 0, "数量"));
         report.push(type_mismatch(row_b, 0, "数量"));
-        let report = report.finish();
+        let report = report.finish(sheet);
         assert!(report.violations().is_empty());
         assert_eq!(2, report.total_violations());
         assert!(report.is_truncated());

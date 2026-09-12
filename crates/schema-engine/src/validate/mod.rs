@@ -111,10 +111,10 @@ fn validate(
     selected: Option<&[ColumnIndex]>,
     options: &ValidationOptions,
 ) -> SheetReport {
-    let mut report = ViolationReport::new(sheet, options);
+    let mut report = ViolationReport::new(options);
     let Some(target) = doc.sheet_by_id(sheet) else {
         // 文書に無いシート（削除されたシートを指した場合）は検証する行を持たない。
-        return report.finish();
+        return report.finish(sheet);
     };
     let rows = target.rows();
 
@@ -145,7 +145,7 @@ fn validate(
 
     // 第 1 段: 行ごとの値の判定。行の並び順に流し、その行の第 2 段の違反を併合する。
     // 確保するのは 1 行分だけである（モジュール docs「2 段の併合」）。
-    let mut scratch = ViolationReport::new(sheet, &ValidationOptions::unlimited());
+    let mut scratch = ViolationReport::new(&ValidationOptions::unlimited());
     for row in rows {
         let mut violations = value_violations(schema, row, selected, &mut scratch);
         if let Some(mut extra) = cross_by_row.remove(&row.id()) {
@@ -170,7 +170,7 @@ fn validate(
         "第 2 段の違反が行の一覧の外の行を指した"
     );
 
-    report.finish()
+    report.finish(sheet)
 }
 
 /// 1 行分の第 1 段の違反を取り出す（`scratch` は行ごとに使い回す）。

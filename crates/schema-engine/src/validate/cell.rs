@@ -372,9 +372,9 @@ mod tests {
 
     /// 指定した行識別子で 1 行を検証して結果を確定する。
     fn validate_at(schema: &CompiledSchema, row: RowId, values: &[CellValue]) -> SheetReport {
-        let mut report = ViolationReport::new(sheet_id(), &ValidationOptions::unlimited());
+        let mut report = ViolationReport::new(&ValidationOptions::unlimited());
         validate_row(schema, Some(row), values, &mut report);
-        report.finish()
+        report.finish(sheet_id())
     }
 
     /// 値なしの上限に依らず 1 件ずつ検証する（無制限）。
@@ -783,7 +783,7 @@ mod tests {
 
         let row_a = row_id(ROW);
         let row_b = row_id(ROW_2);
-        let mut report = ViolationReport::new(sheet_id(), &ValidationOptions::unlimited());
+        let mut report = ViolationReport::new(&ValidationOptions::unlimited());
         validate_row(
             &schema,
             Some(row_a),
@@ -801,7 +801,7 @@ mod tests {
             ],
             &mut report,
         );
-        let report = report.finish();
+        let report = report.finish(sheet_id());
 
         let found: Vec<(Option<RowId>, usize, &ViolationReason)> = report
             .violations()
@@ -966,7 +966,7 @@ mod tests {
 
         let row_a = row_id(ROW);
         let row_b = row_id(ROW_2);
-        let mut report = ViolationReport::new(sheet_id(), &ValidationOptions::unlimited());
+        let mut report = ViolationReport::new(&ValidationOptions::unlimited());
         validate_row(
             &schema,
             Some(row_a),
@@ -979,7 +979,7 @@ mod tests {
             &[text("fine"), CellValue::Int(5), text("ok")],
             &mut report,
         );
-        let report = report.finish();
+        let report = report.finish(sheet_id());
 
         assert_eq!(
             2,
