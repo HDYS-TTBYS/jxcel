@@ -164,6 +164,49 @@ use crate::ports::DocumentHostPort;
 use crate::sidecar_host::{self, SidecarHost};
 use crate::window::{self, WindowRegistry, WindowRequest};
 
+// ---------------------------------------------------------------------------
+// Linux / X11 のスレッド前提（起動の最初に 1 回だけ満たす）
+// ---------------------------------------------------------------------------
+
+/// Linux の X11 で **複数のスレッドから Xlib を使う**ための前提を満たす（`XInitThreads`）。
+///
+/// **これが無いと、ウィンドウ生成の最中にプロセスが abort する。** GTK / WebKit / GDK は
+/// 内部で複数のスレッドから X の接続へ触れる（本アプリは [`window::open`] の非同期生成も
+/// 持つ）。`XInitThreads` を Xlib の最初の利用より前に呼んでいないと、Xlib は接続の
+/// 利用が交錯した時点で診断を出して abort する。実測（CI の ubuntu-22.04 ランナー、
+/// 描画の検証の段）:
+///
+/// ```text
+/// [xcb] Unknown sequence number while processing reply
+/// [xcb] Most likely this is a multi-threaded client and XInitThreads has not been called
+/// jxcel: ../../src/xcb_io.c:730: _XReply: Assertion `!xcb_xlib_threads_sequence_lost' failed.
+/// ```
+///
+/// **呼ぶ位置が意味を持つ。** `XInitThreads` は「まだ 1 度も Xlib を呼んでいない」ときにだけ
+/// 効くので、GTK / WebKit のコードが動く [`tauri::Builder::build`]（手順 4）より前に、
+/// 起動の先頭で 1 回だけ呼ぶ。X11 を使わない環境（Wayland / macOS / Windows）では
+/// 読み込むだけで実害は無い（X の接続は開かない）。
+#[cfg(target_os = "linux")]
+fn ensure_x11_threads() {
+    use std::sync::Once;
+
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: `XInitThreads` は引数も戻り値も持たない Xlib の初期化関数である。
+        // ここは Xlib の最初の利用より前であり、`Once` で 1 回だけ呼ぶ。
+        unsafe {
+            XInitThreads();
+        }
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[link(name = "X11")]
+unsafe extern "C" {
+    /// Xlib に「複数スレッドから使われる」ことを宣言する（`X11/Xlib.h`）。
+    fn XInitThreads() -> std::os::raw::c_int;
+}
+
 /// 起動を継続できない前提の名前: アプリケーションデータ領域（設定の保存先）。
 const PREREQUISITE_APP_DATA: &str = "アプリケーションデータ領域";
 
@@ -249,6 +292,11 @@ const _: () = assert!(
 /// 起動を継続できない前提が満たされないとき [`StartupError`] を返す。呼び出し元（`main`）は
 /// [`report_startup_failure`] でメッセージを提示し、非 0 の終了コードで終える（要件 1.4）。
 pub fn run() -> Result<(), StartupError> {
+    // 手順 0: Linux / X11 のスレッド前提（[`ensure_x11_threads`]）。**Xlib の最初の利用より
+    //   前でなければ効かない**ので、GTK / WebKit が動く手順 4 より前のここで満たす。
+    #[cfg(target_os = "linux")]
+    ensure_x11_threads();
+
     // 手順 1: 描画の代替経路の適用（要件 10.3。タスク 8.3）。
     //   回避策の環境変数は GTK / WebKit のコードが動く前に設定しなければならない。GTK /
     //   WebKit のランタイムは手順 4 の `Builder::build` で生成される（tauri の `Runtime::new`）。
