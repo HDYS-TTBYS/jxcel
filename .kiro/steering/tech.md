@@ -12,7 +12,7 @@
 
 - **Language**: Rust（バックエンド / ドメイン）、TypeScript（フロントエンド / マクロ）
 - **Shell**: Tauri v2 — Windows は WebView2、macOS は WKWebView、Linux は WebKitGTK
-- **配布**: 単一実行ファイル。Windows / macOS は OS 標準 WebView に乗る真の単一 exe、Linux は WebKitGTK 同梱の AppImage。**サイズは WebKitGTK だけで約 76MB、言語サーバとその実行環境を含めると 150〜200MB を見込む**（`app-shell` の CI が実測を記録する）
+- **配布**: 単一実行ファイル。Windows / macOS は OS 標準 WebView に乗る真の単一 exe、Linux は WebKitGTK 同梱の AppImage。**実測（`app-shell`）: Linux の AppImage は約 81MB、deb は約 4.7MB**（WebKitGTK を含む）。言語サーバとその実行環境を加えると 150〜200MB を見込む
 
 ## Key Libraries
 
@@ -32,6 +32,8 @@
 | 識別子 | `ulid` | 行・シート・型定義の識別子。時刻順序を持ち、並べ替えで不変 |
 | Rust⇔TS 型共有 | `ts-rs` | `tauri-specta` を却下（JSON を通さない生バイト経路を型付けできず、生成物に `any` が入り、2023 年から RC のまま） |
 | フロントエンド | React + Vite（SPA） | `monaco-languageclient` の一次ラッパが React のみ。canvas グリッドの実績も React 前提。Tauri は SSR 非対応 |
+| ネイティブダイアログ | `gtk` 0.18（Linux） / `rfd` 0.17（Windows / macOS） | **`tauri-plugin-dialog` は使わない** — 全版で `tauri-plugin-fs` を非オプション依存に持ち（下記「禁止依存」を壊す）、Linux の実装は親ウィンドウを渡せない。直接使えばどちらも回避でき、親ウィンドウの指定が確実になる |
+| ログ | `tauri-plugin-log` 2.9.1 | 追記型のローテーション・保持世代・1 ファイル上限を設定で与えられる。**`Builder::level` は基盤の水準を構築時に固定する** ため、詳細度を実行中に**上げる**には「受入上限を最大にし、実効フィルタを全体の上限 1 つに寄せる」形が要る（片方だけでは下げる変更しか効かない） |
 
 ## Development Standards
 
@@ -42,6 +44,8 @@
 - `zip` **≥ 2.3.0** — RUSTSEC-2025-0168（展開時のシンボリックリンク経由の任意ファイル書き込み）。`zip-extract` / `zip_next` はメンテ終了フォークのため使用禁止。現在の解決版は 8.x
 - `tauri` **≥ 2.11.3** — 2.11.1 に security fix 2 件（`AppManifest` 未設定時に自前コマンドの ACL が迂回される、Windows の `.localhost` サフィックスによる origin 混同）。2.11.3 で起動性能が改善
 - `tauri-plugin-single-instance` **≥ 2.4.3** — macOS のスレッドブロック不具合の修正版
+
+**禁止依存（下限ではなく「不在」を固定する）**: `tauri-plugin-fs` / `-shell` / `-store` / `-dialog` を依存ツリーに入れない。**フロントエンドから任意のファイルとプロセスへ到達する経路を作らないための第一の制御**であり、`scripts/check-forbidden-plugins.sh` が機械的に守る。capability を絞るのは第二の制御で、**両方要る**（権限は「与え忘れ」で壊れるが、依存は入れた時点で経路が存在する）。ネイティブダイアログが上表で `gtk` / `rfd` を直接使うのはこの制約のためである。
 
 CI に `cargo audit` を必須とする。本プロジェクトは advisory 履歴を持つ crate に依存しているため、これは形式的な要件ではない。
 
@@ -54,20 +58,32 @@ CI に `cargo audit` を必須とする。本プロジェクトは advisory 履�
 - 性能要件を持つ機能はベンチマークを伴うこと（例: 10 万行で開く 3 秒 / 保存 2 秒）
 - **性能予算は CI のゲートにすること。**計測して記録するだけでは回帰は止まらない
 - **不変条件は検査スクリプトにすること。**目視確認で守る規則は、いずれ守られなくなる（`scripts/` に置き CI から呼ぶ。structure.md 参照）
+- **GUI・配布物・プラットフォーム差を含む主張は、実物を起動して観測した結果で裏付けること。**単体テストは回帰の網であって受入の証明ではない
+- **観測できないことは未確認として書くこと。**「CI で確認する」は確認済みではない。残るリスクを明示する
+- 検証専用のコードは非既定の feature（Rust）／ビルド時の定数（フロントエンド）で切り、**出荷物に残さない**。残っていないことを検査で固定する
+- GUI と 3 OS の検証の具体的な規約は `.kiro/steering/verification.md` に置く
 
 ## Development Environment
 
-Cargo ワークスペース（`crates/*`）と 3 OS の CI が稼働している。GUI 側（`src-tauri/` と `src/`）は `app-shell` の実装で追加され、その時点で本節にコマンドを追記する。
+Cargo ワークスペース（`crates/*` + `src-tauri`）とフロントエンド（`src/`）、3 OS の CI が稼働している。**配布物は必ず Tauri CLI 経由で作る** — 素の `cargo build` は開発用の形になり、フロントエンドを埋め込まない（白いウィンドウになる）。
 
 | 目的 | コマンド |
 |---|---|
 | ビルド | `cargo build --workspace --all-targets` |
-| テスト | `cargo test --workspace` |
+| テスト | `cargo test --workspace --no-fail-fast` |
 | 決定性の検証（3 OS でバイト一致） | `cargo test -p document-format --test determinism` |
+| 生成物のドリフト | `cargo test -p app-shell --test bindings_drift` |
+| 生成物の再生成 | `cargo run -p app-shell --bin generate-bindings` |
+| フロントエンドの型検査 / lint / ビルド | `npm run typecheck` / `npm run lint` / `npm run build` |
 | ベンチマーク | `cargo bench --workspace -- --save-baseline=main` |
 | 性能予算の判定 | `bash scripts/check-bench-budget.sh` |
+| 起動時間予算の判定 | `bash scripts/check-startup-budget.sh` |
 | 依存下限の検査 | `bash scripts/check-zip-floor.sh Cargo.lock` |
 | 脆弱性検査 | `cargo audit` |
+| 配布物の生成 | `npx tauri build --bundles <形式>` |
+| 検証用の形の生成 | `JXCEL_VERIFICATION_BUILD=1 npx tauri build --no-bundle --features verification-triggers` |
+
+**不変条件の検査は `scripts/check-*.sh` に揃っている**（依存下限・性能予算・起動時間・生成物のドリフト・権限の逸脱・配信先中立な資産の依存・コアクレートの tauri 非依存・禁止プラグイン・コマンドと権限の一致・出荷物への検証コード混入・配布物の補助プロセス整合性・3 OS の実画面検証）。**規約と一覧の考え方は `.kiro/steering/verification.md` に置く。**
 
 `Cargo.lock` は追跡する。jxcel はライブラリではなくアプリケーションであり、下記の依存下限を固定する方針は lockfile が追跡されていて初めて意味を持つ。
 

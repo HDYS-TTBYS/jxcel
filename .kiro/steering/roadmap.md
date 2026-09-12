@@ -41,12 +41,12 @@ JSON をファイル実体とする、データベースとして運用可能な
 チェックボックスは**実装完了**を表す。仕様だけが先行している状態はここに書く。
 
 - `document-format` — 実装完了（38 サブタスク）
-- `app-shell` — 実装は 56/56 サブタスクが完了し、最終検証の是正まで入っている（883c6fc、2026-09-12）。tasks.md のタスクグループ見出し 10 件のチェックだけが未確定なので、下のチェックボックスは保留にしている
+- `app-shell` — 実装完了（56 サブタスク）。4 次元の feature 検証（全スイート＋起動の実測 / 要件被覆 / 設計整合と境界 / 横断統合）で一度 **NO-GO** となり、欠けていた検証成果物・出荷物に混入した検証コード・強制検査の欠落・設計の記述のずれを是正して **GO**（2026-09-12）。**ローカルで閉じられない残り（macOS / Windows の実行時、コード署名、3 OS の配布物）は CI の実行で確認する**
 - 他 12 本 — `brief.md` のみ
 
 ## Specs (dependency order)
 - [x] document-format -- zip + JSON のドキュメント形式と File/Sheet/Schema/Row のドキュメントモデル。Dependencies: none
-- [ ] app-shell -- Tauri v2 の器、IPC 境界、サイドカー基盤、3 OS ビルドパイプライン。Dependencies: none
+- [x] app-shell -- Tauri v2 の器、IPC 境界、サイドカー基盤、3 OS ビルドパイプライン。Dependencies: none
 - [ ] schema-engine -- ネスト可能な型システム、ANY、検証と型強制、スキーマ移行。Dependencies: document-format
 - [ ] data-grid -- 10 万行の仮想化グリッド、型別セルエディタ、共有 undo スタック。Dependencies: app-shell, schema-engine
 - [ ] schema-editor -- スキーマのツリー編集 UI と変更の影響プレビュー。Dependencies: app-shell, schema-engine
