@@ -71,6 +71,15 @@
  *   操作は画面の中だけで完結する**ので、メニューが無い環境（素のブラウザ）でも使える。
  * - **9.4 / 9.6**: このファイルに領域を増やさない。配信先中立の資産は `src/shared/` に、
  *   空ウィンドウの操作は画面として登録する。
+ * - **9.6（空ウィンドウの操作導線）— 実装済み**: `src/features/empty/` の画面を
+ *   `ScreenDefinition` として登録し、**`initial` をその画面にする**。理由は、この画面が
+ *   唯一、ウィンドウの関連付け（要件 2.2）に応じて提示を変える画面だからである —
+ *   レジストリの `initial` は 1 つの識別子であり、ウィンドウごとに初期画面を選ぶ仕組みは
+ *   9.1 に無い。関連付けの有無は画面が `window_document_state` で尋ねて分岐する。
+ *   **ドキュメントの画面は下流スペックの持ち物であり、ここでは装わない**（関連付けが
+ *   あるウィンドウには、その事実だけを提示する）。1.4 の初期画面は `screens` に残る
+ *   （消さない。9.7 のスモーク画面も `screens` へ足すだけで、`initial` の選び方は
+ *   この画面が引き続き持つ）。
  *
  * # 遷移機構の確認手順（9.1 で実際に用いた再現手順）
  *
@@ -110,8 +119,16 @@ import {
   DIAGNOSTICS_SCREEN_ID,
   installDiagnosticsRequests,
 } from "../features/diagnostics/requests";
+import {
+  EmptyWindowScreen,
+  EMPTY_WINDOW_SCREEN_ID,
+} from "../features/empty/EmptyWindowScreen";
 
-/** 既定で表示される画面（1.4 の初期画面）の識別子。 */
+/**
+ * 1.4 が置いた初期画面（`InitialScreen`）の識別子。**9.6 以降は既定で表示される画面ではない**
+ * （既定は `EMPTY_WINDOW_SCREEN_ID` の画面）。それでも登録を残すのは、消すと 1.4 の画面
+ * （3 OS の描画確認の最小内容）が到達不能になるためである。
+ */
 export const INITIAL_SCREEN_ID = "shell.initial";
 
 /**
@@ -150,12 +167,22 @@ function InitialScreen(): ReactElement {
 /**
  * シェルが差し込める画面の一覧。**画面を足すとは、この配列に 1 つ足すことに他ならない。**
  *
- * タスク 9.5 が診断の導線（`src/features/diagnostics/`）の画面を足し、タスク 9.7 が
- * `src/features/smoke/` の 2 画面をここへ足す（`initial` は変えない）。
+ * タスク 9.5 が診断の導線（`src/features/diagnostics/`）の画面を足し、9.6 が空ウィンドウの
+ * 操作導線（`src/features/empty/`）の画面を足して `initial` をそこへ移し、タスク 9.7 が
+ * `src/features/smoke/` の 2 画面をここへ足す。
+ *
+ * **`initial` が 1 つの識別子であることは 9.1 の契約である**（ウィンドウごとに初期画面を
+ * 選ぶ仕組みは無い）。関連付けに応じて提示を変えるのは 9.6 の画面自身の責務であり、
+ * この配列は「最初にどの画面を領域へ差し込むか」だけを決める。
  */
 export const SHELL_SCREEN_REGISTRY: ShellScreenRegistry = {
-  initial: INITIAL_SCREEN_ID,
+  initial: EMPTY_WINDOW_SCREEN_ID,
   screens: [
+    {
+      id: EMPTY_WINDOW_SCREEN_ID,
+      title: "ドキュメント",
+      component: EmptyWindowScreen,
+    },
     {
       id: INITIAL_SCREEN_ID,
       title: "初期画面",

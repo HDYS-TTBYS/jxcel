@@ -51,7 +51,13 @@
 //! 始め、破棄の通知で [`crate::watchdog::forget_watch`] が取り消す（**期限より前に閉じられた
 //! ウィンドウを不成立として記録しない**）。実体は Tauri 非依存の中核
 //! （`app_shell::render`）にあり、ここは呼ぶだけである。
+//!
+//! 子モジュール [`association`]（タスク 9.6）は、**このレジストリに記録された関連付けを
+//! 境界へ写す** `window_document_state` コマンドを持つ。ドキュメントを関連付けていない
+//! ウィンドウにだけ操作の導線を提示するための判定材料であり、**判定は接頭辞ではなく写像の
+//! 記録から取る**（`attach` は記録を書き換えない。同モジュールの doc を参照）。
 
+pub(crate) mod association;
 pub(crate) mod close;
 mod geometry;
 

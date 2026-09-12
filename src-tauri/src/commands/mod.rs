@@ -55,6 +55,10 @@
 //!   （`app_shell::diagnostics`。タスク 4.4 / 4.5）へ委ねる。あわせて 7.4 の登録口へ
 //!   3 つのメニュー項目（診断の部分メニュー）を足し、選択を
 //!   `DIAGNOSTICS_REQUESTED_EVENT` として対象ウィンドウへ送る。
+//! - ウィンドウの関連付けを問い合わせる [`crate::window::association`]（タスク 9.6）は、
+//!   ドキュメントを関連付けていないウィンドウに操作の導線を提示するための判定材料である。
+//!   呼び出し元ウィンドウの関連付けを 6.1 のレジストリから読む `window_document_state` を
+//!   持ち、**実体がウィンドウのライフサイクル側にある**ためコマンド関数もそこに置く。
 
 mod bulk;
 mod diagnostics_cmds;
@@ -111,6 +115,7 @@ command_root! {
     command_names::DIAGNOSTICS_EXPORT => diagnostics_cmds::diagnostics_export,
     command_names::DIAGNOSTICS_VERBOSITY_GET => diagnostics_cmds::diagnostics_verbosity_get,
     command_names::DIAGNOSTICS_VERBOSITY_SET => diagnostics_cmds::diagnostics_verbosity_set,
+    command_names::WINDOW_DOCUMENT_STATE => crate::window::association::window_document_state,
 }
 
 #[cfg(test)]

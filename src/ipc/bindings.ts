@@ -21,6 +21,7 @@ export const COMMAND_NAMES = [
   "diagnostics_export",
   "diagnostics_verbosity_get",
   "diagnostics_verbosity_set",
+  "window_document_state",
 ] as const;
 
 /**
@@ -406,6 +407,39 @@ window: WindowLabel, };
 // コマンド応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を名指ししない
 // ため、境界が名指しできる具体形を明示的に置く。
 export type WindowContextResult = IpcResult<WindowContext, IpcError>;
+/**
+ * ウィンドウとドキュメントの関連付けの状態（タスク 9.6。要件 2.1、2.2）。**閉じた列挙である。**
+ *
+ * 要件 2.2 が操作の導線を提示する対象は「ドキュメントを関連付けていないウィンドウ」であり、
+ * その判定はウィンドウの生成時に確定した関連付け（レジストリの写像）から取る。**ラベルの
+ * 接頭辞（`empty-` / `doc-`）からは判定しない** — 接頭辞は割り当て順の規約であって関連付けの
+ * 事実ではなく、`attach` は記録された関連付けを書き換えないため両者が食い違いうる
+ * （9.6 の画面のモジュール doc を参照）。
+ *
+ * **パスは運ばない。** 問いは関連付けの有無だけであり、どのドキュメントかは所有者
+ * （下流スペック）が持つ（[`DocumentPickOutcome`] と同じ方針）。
+ */
+export type WindowDocumentState = "unassociated" | "associated";
+/**
+ * 関連付けの問い合わせの応答（タスク 9.6。要件 2.2、4.6）。
+ *
+ * **呼び出し元ウィンドウの文脈を必ず含む。**呼び出し元は Tauri が注入する `WebviewWindow`
+ * から得るので、**フロントエンドがウィンドウの識別子を payload で申告する経路は存在しない**
+ * （偽装できない。要件 4.6、tasks.md 7.1）。**要求の型は無い**（操作対象のウィンドウだけが
+ * 入力であり、それは基盤が注入する。[`PickDocumentFileResponse`] と同じ形）。
+ */
+export type WindowDocumentStateResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈（要件 4.6）。
+ */
+context: WindowContext, 
+/**
+ * 関連付けの状態（要件 2.1、2.2）。
+ */
+state: WindowDocumentState, };
+// 関連付けの問い合わせの応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を
+// 名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type WindowDocumentStateResult = IpcResult<WindowDocumentStateResponse, IpcError>;
 /**
  * 境界を越えるウィンドウの識別子（要件 4.2、4.6）。
  *

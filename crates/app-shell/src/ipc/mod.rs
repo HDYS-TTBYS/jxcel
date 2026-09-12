@@ -323,6 +323,40 @@ pub struct PickDocumentFileResponse {
     pub outcome: DocumentPickOutcome,
 }
 
+/// ウィンドウとドキュメントの関連付けの状態（タスク 9.6。要件 2.1、2.2）。**閉じた列挙である。**
+///
+/// 要件 2.2 が操作の導線を提示する対象は「ドキュメントを関連付けていないウィンドウ」であり、
+/// その判定はウィンドウの生成時に確定した関連付け（レジストリの写像）から取る。**ラベルの
+/// 接頭辞（`empty-` / `doc-`）からは判定しない** — 接頭辞は割り当て順の規約であって関連付けの
+/// 事実ではなく、`attach` は記録された関連付けを書き換えないため両者が食い違いうる
+/// （9.6 の画面のモジュール doc を参照）。
+///
+/// **パスは運ばない。** 問いは関連付けの有無だけであり、どのドキュメントかは所有者
+/// （下流スペック）が持つ（[`DocumentPickOutcome`] と同じ方針）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+pub enum WindowDocumentState {
+    /// 関連付けが無い。**この状態のウィンドウが新規作成と既存ファイルを開く操作を提示する**
+    /// （要件 2.2）。
+    Unassociated,
+    /// ドキュメントが関連付けられている。
+    Associated,
+}
+
+/// 関連付けの問い合わせの応答（タスク 9.6。要件 2.2、4.6）。
+///
+/// **呼び出し元ウィンドウの文脈を必ず含む。**呼び出し元は Tauri が注入する `WebviewWindow`
+/// から得るので、**フロントエンドがウィンドウの識別子を payload で申告する経路は存在しない**
+/// （偽装できない。要件 4.6、tasks.md 7.1）。**要求の型は無い**（操作対象のウィンドウだけが
+/// 入力であり、それは基盤が注入する。[`PickDocumentFileResponse`] と同じ形）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct WindowDocumentStateResponse {
+    /// 呼び出し元ウィンドウの文脈（要件 4.6）。
+    pub context: WindowContext,
+    /// 関連付けの状態（要件 2.1、2.2）。
+    pub state: WindowDocumentState,
+}
+
 // ---------------------------------------------------------------------------
 // 診断の導線（タスク 9.5。要件 8.1、8.6、8.7）
 // ---------------------------------------------------------------------------
@@ -647,6 +681,21 @@ fn concrete_pick_document_file_result(cfg: &ts_rs::Config) -> (String, String) {
     (NAME.to_owned(), text)
 }
 
+/// 関連付けの問い合わせの応答の具体形（タスク 9.6）。 [`concrete_window_context_result`] と
+/// 同じ理由で置く。ペイロード型は [`WindowDocumentStateResponse`] である。
+fn concrete_window_document_state_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "WindowDocumentStateResult";
+    let mut text = String::from(
+        "// 関連付けの問い合わせの応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を\n\
+         // 名指ししないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<WindowDocumentStateResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
 /// 初回描画の通知の応答の具体形（タスク 8.2）。 [`concrete_window_context_result`] と同じ理由で
 /// 置く。ペイロード型は [`RenderHeartbeatResponse`] である。
 fn concrete_render_heartbeat_result(cfg: &ts_rs::Config) -> (String, String) {
@@ -746,6 +795,8 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<CanCloseWindowResponse>(&cfg),
         declared::<DocumentPickOutcome>(&cfg),
         declared::<PickDocumentFileResponse>(&cfg),
+        declared::<WindowDocumentState>(&cfg),
+        declared::<WindowDocumentStateResponse>(&cfg),
         declared::<RenderVerdict>(&cfg),
         declared::<RenderHeartbeatRequest>(&cfg),
         declared::<RenderHeartbeatResponse>(&cfg),
@@ -763,6 +814,7 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         concrete_settings_result(&cfg),
         concrete_can_close_window_result(&cfg),
         concrete_pick_document_file_result(&cfg),
+        concrete_window_document_state_result(&cfg),
         concrete_render_heartbeat_result(&cfg),
         concrete_diagnostics_log_location_result(&cfg),
         concrete_diagnostics_export_result(&cfg),

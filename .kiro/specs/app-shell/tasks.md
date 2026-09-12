@@ -394,7 +394,7 @@
   - _Requirements: 8.1, 8.6, 8.7_
   - _Depends: 4.5, 7.4, 9.1_
 
-- [ ] 9.6 ドキュメントを関連付けていないウィンドウの操作導線を実装する
+- [x] 9.6 ドキュメントを関連付けていないウィンドウの操作導線を実装する
   - 新規作成と既存ファイルを開く操作を、ドキュメントを関連付けていないウィンドウに提示する
   - 既存ファイルを開く操作はファイル選択の経路につなぐ
   - **完了状態**: ドキュメントを指定せずに起動したウィンドウから、新規作成と既存ファイルを開く操作の両方に到達できる
@@ -479,6 +479,14 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **9.6（関連付けの判定・重要）**: 新しいコマンド **`window_document_state`** が、**注入された `WebviewWindow` のラベル**について 6.1 の `WindowRegistry::document_of` の記録をそのまま返す（payload からは受け取らない）。**ラベル接頭辞（`empty-` / `doc-`）による推測は不十分** — 7.7 の `attach` は記録を書き換えない（6.2 のポートには `may_close` / `attach` しか無く、`attach` は記録に触れない）ため、後からドキュメントが結び付いた空ウィンドウでも古い推測のままになる。**`ports.rs` は無変更**。
+- **9.6（提示）**: 画面は `src/features/empty/EmptyWindowScreen.tsx`（シェルの登録簿に 1 件追加）。ドキュメントの無いウィンドウでは `data-shell-screen=empty-window` で見出し「ドキュメントが関連付けられていません」＋**「新規作成」「既存ファイルを開く…」**の 2 操作を出す。ドキュメントのあるウィンドウでは関連付けの注記だけで操作は出さない（**ドキュメント画面は下流スペックの持ち場であり、偽の UI を作らない**）。
+- **9.6（新規作成は正直に）**: ドキュメントを所有する機能がまだ無いので、押しても**「このアプリケーションには、ドキュメントを所有する機能がまだ組み込まれていません」という段落を出すだけ**（コマンドを呼ばず、ログも出さず、ウィンドウも作らない＝**偽の成功をしない**。黙って何もしないのでもない）。
+- **9.6（開く経路）**: 7.7 の `pick_document_file` を**生成された名前**で呼ぶ。実測: 選択器は**操作したウィンドウに親子付け**（`WM_TRANSIENT_FOR` = そのウィンドウ、`_NET_WM_STATE_MODAL`、`_NET_WM_WINDOW_TYPE_DIALOG`）、選んだ位置は委譲先へ届く（検証用宿主が `[検証] 引き渡しを受けた: ウィンドウ = … 位置 = …`）、取り消しは「利用者が選択を取り消した」。**画面の文言は「引き渡し済み／取り消し／拒否／通信失敗」で区別できる**（`data-document-state`）。**本機能はパスを読まない**（7.7 の契約を維持）。
+- **9.6（コマンド面の連鎖・再確認）**: `COMMAND_NAMES` は 11 件（**追加はちょうど 1 件**）、境界型＋結果型＋**`bindings.ts` 再生成**（ドリフト検査が緑）、`command_root!` 登録、**ACL の付与**（付与を外すと CLI が `Removed unused commands from application: window_document_state` と出して 10 件に落ちる＝pruning の生存を両方向で実測）。
+- **9.6（既知の穴・申し送り）**: **拒否された `attach` を実機で起こす引き金は無い**（7.7 の検証用宿主は常に成功する）。分岐は写像の単体テストと型の網羅で固定しており、実機の表示は未確認。**3 OS の実測は 10.x**。StrictMode により開発ビルドでは関連付けの問い合わせが 2 回走る（無害）。
+
 
 - **9.5（3 つの導線）**: すべて **7.4 の登録口**から、トップレベル部分メニュー **「診断」** の 3 項目として提示する（`src-tauri/src/commands/diagnostics_cmds.rs` の `install()`、`lifecycle::run` の手順 4.3 の続きで 1 回だけ）。項目 id は `app-shell.diagnostics-log-location` / `-export` / `-verbosity`、ショートカットは `Ctrl+Shift+L/E/V`（macOS は `Cmd+Shift+…`）で既存（`Ctrl+Q` / `Ctrl+O` / 検証用 `Ctrl+Shift+J`）と競合しない（3 つを同時登録するテストで固定）。**提示は 9.1 の領域の中の画面**（`src/features/diagnostics/DiagnosticsScreen.tsx`、登録は `src/shell/Layout.tsx` に 1 件）で行い、Rust 側は 4.4/4.5 をそのまま呼ぶ 4 ハンドラ（`command_root!` に既存の `COMMAND_NAMES` 定数で 4 行追加）。
 - **9.5（ACL の前提・重要）**: **`diagnostics_*` は 4.5 が名前と中核ロジックを作ったが、ハンドラ登録と権限付与は 9.5 が行う**。`src-tauri/permissions/app.toml` の `app-shell` 集合に 4 件を足さないと **`removeUnusedCommands` が実コマンドを削る**（付与を 1 つ外すと CLI が `Removed unused commands from application: diagnostics_export` と出して落とすことを実測）。

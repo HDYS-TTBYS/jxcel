@@ -67,6 +67,17 @@ pub const DIAGNOSTICS_VERBOSITY_GET: &str = "diagnostics_verbosity_get";
 /// 記録の詳細度を変更する（タスク 9.5 の導線。実体はタスク 4.5。要件 8.7）。
 pub const DIAGNOSTICS_VERBOSITY_SET: &str = "diagnostics_verbosity_set";
 
+/// 呼び出し元ウィンドウにドキュメントが関連付けられているかを返す（タスク 9.6。要件 2.1、2.2）。
+///
+/// 関連付けの実体はウィンドウの生成時に確定し、レジストリ（`window/mod.rs` の
+/// `WindowRegistry`）がラベルを鍵とする写像として保持する。**ラベルの接頭辞からは推測しない** —
+/// 接頭辞は割り当て順の規約であり、`attach` は記録された関連付けを書き換えないため、
+/// 接頭辞と記録された事実が食い違いうる（9.6 の画面のモジュール doc を参照）。
+///
+/// **パスは境界を越えない。** このコマンドが答えるのは関連付けの有無だけであり、どの
+/// ドキュメントかは所有者（下流スペック）が持つ（7.7 の `DocumentPickOutcome` と同じ方針）。
+pub const WINDOW_DOCUMENT_STATE: &str = "window_document_state";
+
 /// フロントエンドから呼び出せるコマンド名の一覧（要件 4.1、4.2）。
 ///
 /// `src-tauri` のハンドラ登録（タスク 7.1）と TypeScript の生成物（タスク 2.2）の**両方**が
@@ -82,4 +93,5 @@ pub const COMMAND_NAMES: &[&str] = &[
     DIAGNOSTICS_EXPORT,
     DIAGNOSTICS_VERBOSITY_GET,
     DIAGNOSTICS_VERBOSITY_SET,
+    WINDOW_DOCUMENT_STATE,
 ];

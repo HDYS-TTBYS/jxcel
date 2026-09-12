@@ -82,7 +82,12 @@ identifier = "allow-diagnostics-verbosity-set"
 description = "記録の詳細度を変更するコマンド（diagnostics_verbosity_set）を許可する。受け付けるのは閉じた列挙の値だけで、任意の文字列は境界を越えられない（要件 8.7）。"
 commands.allow = ["diagnostics_verbosity_set"]
 
+[[permission]]
+identifier = "allow-window-document-state"
+description = "呼び出し元ウィンドウにドキュメントが関連付けられているかを返すコマンド（window_document_state）を許可する。呼び出し元ウィンドウは基盤が注入する引数から取るためフロントエンドはウィンドウを偽装できず、返るのは関連付けの有無だけでパスは境界を越えない（要件 2.1、2.2、4.6）。"
+commands.allow = ["window_document_state"]
+
 [[set]]
 identifier = "app-shell"
 description = "app-shell が登録する自前コマンドの集合。capability はこの集合名だけを参照する。ファイルシステム系・シェル系の権限はここにも含めない（要件 4.7）。"
-permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file", "allow-render-heartbeat", "allow-diagnostics-log-location", "allow-diagnostics-export", "allow-diagnostics-verbosity-get", "allow-diagnostics-verbosity-set"]
+permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file", "allow-render-heartbeat", "allow-diagnostics-log-location", "allow-diagnostics-export", "allow-diagnostics-verbosity-get", "allow-diagnostics-verbosity-set", "allow-window-document-state"]
