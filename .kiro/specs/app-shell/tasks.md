@@ -430,7 +430,7 @@
   - _Requirements: 6.4, 6.5, 6.6_
   - _Depends: 1.5, 1.7, 3.1, 8.1_
 
-- [ ] 10.3 起動時間の計測と予算ゲートを実装する
+- [x] 10.3 起動時間の計測と予算ゲートを実装する
   - 起動から操作可能なウィンドウが表示されるまでの時間を 3 OS で計測する
   - 予算を超えたらパイプラインを落とす
   - **予算に対して最も余裕がないプラットフォームを基準に判断する**。支配的なコストは画面基盤の初期化であり、こちらの実装ではない
@@ -479,6 +479,12 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **10.3（計測の定義・重要）**: 区間は **「配布物を起動した瞬間 → タイトル一致かつ最小寸法（既定 100×100）のウィンドウを観測した瞬間」**。終点は 1.5 の既存検出点そのもの（「操作可能」の代理として許容される。初回描画そのものは 8.2 の 3 秒期限が別途担保する）。**0.1 秒ポーリングなので値は実際より最大 1 粒度だけ大きく出る（保守側）。** Linux は `check-x11-window.sh` 内で `nohup "$app"` の直前に時計を取り（**`xvfb-run` / Xvfb の起動は区間に含めない** — 要件が測るのは配布物の起動時間）、`date +%s%N` が無ければ exit 2（秒精度の値を黙って書かない）。macOS は Swift スパイクが `Process.run()` の直前に計時を始める（**起動もスパイクが行う** — シェルで外から計ると `swift` インタプリタの起動が混ざる）。Windows は `Start-Process -PassThru` 直後に OS 記録の `$p.StartTime` を始点に取る。**残る限界**: `xwininfo -root -tree` は未マップのウィンドウも列挙するため、原理的には realize の時点で一致しうる（実測では一致した行は mutter が**管理下のウィンドウにのみ作る**フレーム行であり、実害は無視できる。記録として残す）。
+- **10.3（判定器）**: `scripts/check-startup-budget.sh`。計測ファイル `target/startup-measurements.txt` の `<プラットフォーム>=<ミリ秒>` 行（`linux=` / `macos=` / `windows=`）を読み、**0 = 全予算内 / 1 = 予算超過（プラットフォーム名と超過量）/ 2 = 計測値が無い・解釈できない（不在・空・`=` 欠落・不正名・非整数）**。**予算は引数の既定 2000 ms（要件 1.3 / 6.8）で、CI は引数なしで呼ぶ＝閾値は CI から差し替えられない**（上書き引数はローカル再現専用）。**無言で通る経路は無い**（計測が無いランナーは自分の予算段で落ちる。段に `if:` を付けない）。値と余裕は判定器も各 OS の段も echo するので、**3 OS の値が CI 出力に現れる**。
+- **10.3（判定の場所・重要）**: **判定はランナーごとに閉じる**（各ランナーが自分の 1 値を判定）。3 値を 1 か所へ持ち寄るにはジョブ新設かジョブ間依存が必要で、**要件 6.2（プラットフォーム別の独立した検証系統を新設しない）に反する**。判定器が複数行をすべて検査して 1 つでも超えれば 1 を返すので、要件 6.8（超過でパイプラインを落とす）は各ジョブが担当分を落とすことで満たされる。**これは既存の `bench.yml` + `check-bench-budget.sh` と同じ構造**（ランナーごとに自分の計測を判定）。
+- **10.3**: このホストでの実測は AppImage 直接実行 **214 ms**、`APPIMAGE_EXTRACT_AND_RUN=1` で 213〜433 ms（CI ランナーの値ではない）。超過の証明は**閾値を編集せず**、段の入力形式そのものに `windows=2500` を書いて段のコマンドを実行 → `VIOLATION windows 2500 ms > 予算 2000 ms（超過 500 ms）` / exit 1。
+
 
 - **10.2（検査器）**: `scripts/check-sidecar-integrity.sh <配布物> <配布物内のパス> [<同梱前の原本>] [<起動タイムアウト秒>]`。配布物は `*.AppImage` / `*.deb` / ディレクトリのみ（他は exit 2）。**判定は `cmp -s`（バイト比較）**で、診断に**両者の SHA-256 とサイズ**を出す（`sha256sum` → `shasum -a 256` → `openssl dgst -sha256`。算出不能なら比較の前に exit 2）。**一致だけでは通らない** — `crates/sidecar-smoke` の実挙動（`--idle` が `sidecar-smoke ready pid=<id> mode=idle` を 1 行出して待機）に合わせ、その正規表現が期限内（既定 10 秒）に現れることをもって起動と見なす（**バイト一致だが起動行を出さないダミーで exit 1 を実測**）。起動したプロセスと一時展開先は EXIT/INT/TERM のトラップで必ず片付ける。**終了コード: 0 = 一致＋起動＋サイズ記録 / 1 = 検証失敗（不一致・実行ファイル不在・実行権限なし・起動しない・展開失敗）/ 2 = 入力が使えない**。**サイズは常に 3 種（配布物・取り出した実行ファイル・同梱前の原本）**を出し、macOS の段は dmg、Windows の段は NSIS インストーラのサイズも出す。**Linux は AppImage と deb の両方**を検証する（8.1 が deb の `files` を足したため）。CI の段は 3 OS それぞれにあり（Linux は AppImage→deb、macOS は `Contents/MacOS/sidecar-smoke`、Windows は `/S` 導入後の `%LOCALAPPDATA%\jxcel\sidecar-smoke.exe`）、**すべて同じ検査器を呼ぶ**。
 - **10.2（macOS の重大な欠陥とその解決・重要）**: **`bundle.macOS.signingIdentity: "-"` があると、バンドラが同梱した外部バイナリを再署名するため、同梱物のバイトは同梱前の原本と一致し得ない**（`tauri-bundler` の `macos/app.rs` が `sign_paths` に外部バイナリを入れ、`sign.rs` が `--options runtime` 付きで `codesign --force -s -` を実行する。`hardenedRuntime` の既定は true）。**これは要件 6.5 だけでなく 3.1 の実行時整合性検査も壊す**（`build.rs` の期待値は同梱前の原本から作るので、macOS では `SidecarHost::ensure` が常に拒否される＝実機能の停止）。**ユーザーの決定に従い、`scripts/stage-sidecars.sh` が macOS でステージ直後に原本を事前署名する**（`codesign --force -s - --options runtime <tmp>/sidecar-smoke`。**一時ディレクトリ内で同梱名 `sidecar-smoke` として署名してから `<語幹>-<トリプル>` として据える**）。これでバンドラの再署名がバイト中立になり、6.5 と 3.1 が同時に成立する。**`-i` を明示してはならない** — Apple の Security 実装では識別子は `recommendedIdentifier`（拡張子を除いた basename）に ad-hoc の一意 suffix を足したもので、`-i` を渡すと suffix が落ちて bundled 側と食い違う。`--keychain` / `--entitlements` はどちらも渡さない（identity `-` と entitlements 未設定のため）。**mirror した各オプションは上流ソース（tauri-bundler 2.9.4 / tauri-macos-sign 2.3.4 / tauri-utils 2.9.3、tauri-cli 2.11.4 が固定）で確認済み。Linux / Windows はバイト不変**（記録用 `codesign` を PATH 先頭に置いても呼ばれないことを実測）。**macOS のバイト中立性だけは CI での確認が必須**（成功の条件は両側の sha256 一致と exit 0。失敗すればこの方式が成立しないので、そのときは署名を外す判断に戻る）。

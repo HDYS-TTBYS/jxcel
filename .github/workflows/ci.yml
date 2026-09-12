@@ -3,6 +3,9 @@
 #   - test : Linux / macOS / Windows の 3 OS マトリクスでビルドとテストを実行し、
 #     さらに 3 プラットフォーム分の配布物（バンドル）を生成して、起動とウィンドウの表示を
 #     確認し、成果物として保存する（tasks.md 1.5。要件 6.1, 6.7）。
+#     起動から操作可能なウィンドウが表示されるまでの時間を計測し、要件値の 2 秒を
+#     超えていればパイプラインを失敗させる（tasks.md 10.3。要件 1.3, 6.8）。計測は
+#     各 OS の起動検証の段が行い、判定は scripts/check-startup-budget.sh が行う。
 #     サイドカーの同梱原本は `scripts/stage-sidecars.sh`（唯一の文書化された手順）で
 #     配布物生成の前に配置する（tasks.md 1.7。要件 5.1）。
 #     本スペックはこの既存マトリクスを拡張する。**プラットフォーム別のワークフローを
@@ -268,17 +271,26 @@ jobs:
       # 検査本体は POSIX sh の `scripts/check-x11-window.sh`（ローカルでも同じものを実行できる）。
       # 対象は生成した AppImage（`target/release/bundle/appimage/*.AppImage`）。
       # FUSE が使えないランナーでは `APPIMAGE_EXTRACT_AND_RUN=1`（展開実行）へ退避する。
+      #
+      # 同じ段が**起動からウィンドウ表示までの時間**も計測する（tasks.md 10.3 /
+      # 要件 1.3, 6.8）。検査器は計測値を `target/startup-measurements.txt` に
+      # `linux=<ミリ秒>` として書き、CI の出力にも出す。仮想ディスプレイや xvfb-run の
+      # 起動は計測区間に含めない（要件が測るのは配布物の起動時間であり、検証基盤の
+      # 起動時間ではない）。再試行がある場合、**権威があるのは成功した試行の値**である
+      # （失敗した試行はファイルに触れない）。
       - name: Verify bundle opens a window (Linux / Xvfb)
         if: runner.os == 'Linux'
         run: |
           set -- target/release/bundle/appimage/*.AppImage
           appimage=$1
+          measure=target/startup-measurements.txt
+          rm -f "$measure"
           if ! xvfb-run -a --server-args="-screen 0 1280x1024x24" \
-               sh scripts/check-x11-window.sh "$appimage" jxcel 60; then
+               sh scripts/check-x11-window.sh "$appimage" jxcel 60 100 100 "$measure"; then
             echo "FUSE 経由で起動できなかったため、APPIMAGE_EXTRACT_AND_RUN=1 で再試行します" >&2
             export APPIMAGE_EXTRACT_AND_RUN=1
             xvfb-run -a --server-args="-screen 0 1280x1024x24" \
-              sh scripts/check-x11-window.sh "$appimage" jxcel 60
+              sh scripts/check-x11-window.sh "$appimage" jxcel 60 100 100 "$measure"
           fi
 
       # 起動の検証（macOS）。**追加のランナー設定は不要**だが、Apple Silicon では
@@ -290,6 +302,12 @@ jobs:
       # できる（GitHub-hosted macOS ランナー上での GUI アプリ起動の実例がある）。
       # 観測は CoreGraphics の `CGWindowListCopyWindowInfo` で行う。画面収録の許可を
       # 要する情報（ウィンドウ名）は使わず、所有者 pid・レイヤー・寸法だけで判定する。
+      #
+      # 同じスパイクが**起動からウィンドウ表示までの時間**も計測する（tasks.md 10.3 /
+      # 要件 1.3, 6.8）。計測区間の始点を起動の瞬間に取るため、**アプリの起動も
+      # スパイク自身が行う**（シェルが先に起動してから `swift` の起動を待つと、
+      # 待った分だけ計測値が小さく出る）。値は `target/startup-measurements.txt` に
+      # `macos=<ミリ秒>` として書き、CI の出力にも出す。
       - name: Verify bundle opens a window (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -298,21 +316,57 @@ jobs:
           APP="target/release/bundle/macos/jxcel.app/Contents/MacOS/jxcel"
           SPIKE="$RUNNER_TEMP/check-window.swift"
           LOG="$RUNNER_TEMP/jxcel-macos.log"
+          MEASURE="target/startup-measurements.txt"
           if [ ! -x "$APP" ]; then
             echo "NG: 配布物の実行ファイルがありません: $APP" >&2
             exit 1
           fi
+          rm -f "$MEASURE"
           cat > "$SPIKE" <<'SWIFT'
           import CoreGraphics
           import Darwin
           import Foundation
 
-          // 起動したアプリの pid を引き、そのプロセスが所有する通常レイヤー（0）の
-          // 100x100 以上のウィンドウが現れるまで最大 60 秒待つ。
-          let pid = Int32(CommandLine.arguments[1])!
-          let deadline = Date().addingTimeInterval(60)
+          // 起動から操作可能なウィンドウが現れるまでの時間を計測する（tasks.md 10.3）。
+          //
+          // アプリの起動は**このスパイク自身**が行う。計測区間の始点を起動の瞬間に
+          // 取れるのはここだけである。シェルが `nohup ... &` してから `swift`
+          // （インタプリタ）の起動を待って計時を始めると、アプリが先に動き出した分
+          // だけ計測値が**小さく**出る（＝予算判定が甘くなる）。逆にシェル側で
+          // `swift` の前後を計るとインタプリタの起動時間が混ざって**大きく**出る。
+          // 始点は `Process.run()` の直前、終点は対象 pid の通常レイヤー（0）の
+          // 100x100 以上のウィンドウを観測した時刻である。観測は 0.1 秒ごと。
+          let appPath = CommandLine.arguments[1]
+          let logPath = CommandLine.arguments[2]
+          let measurePath = CommandLine.arguments[3]
+          let timeoutSeconds = 60.0
+
+          _ = FileManager.default.createFile(atPath: logPath, contents: nil)
+          let process = Process()
+          process.executableURL = URL(fileURLWithPath: appPath)
+          if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: logPath)) {
+              process.standardOutput = handle
+              process.standardError = handle
+          }
+
+          let start = Date()
+          do {
+              try process.run()
+          } catch {
+              FileHandle.standardError.write("NG: アプリを起動できません: \(error)\n".data(using: .utf8)!)
+              exit(1)
+          }
+          let pid = process.processIdentifier
+          let deadline = start.addingTimeInterval(timeoutSeconds)
+
+          func stop() {
+              process.terminate()
+              Thread.sleep(forTimeInterval: 0.5)
+              if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+          }
+
           while Date() < deadline {
-              if kill(pid, 0) != 0 {
+              if !process.isRunning {
                   FileHandle.standardError.write("NG: アプリがウィンドウを出す前に終了しました\n".data(using: .utf8)!)
                   exit(1)
               }
@@ -323,25 +377,28 @@ jobs:
                       guard let b = w[kCGWindowBounds as String] as? [String: Any],
                             let width = b["Width"] as? Double, let height = b["Height"] as? Double,
                             width >= 100, height >= 100 else { continue }
-                      print("OK: ウィンドウ \(Int(width))x\(Int(height)) が現れました (pid=\(pid))")
+                      // 計測値は「観測した時刻」なので、実際の表示より最大 0.1 秒
+                      // 大きく出る（保守側）。
+                      let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
+                      try? "macos=\(elapsedMs)\n".write(toFile: measurePath, atomically: true, encoding: .utf8)
+                      print("OK: ウィンドウ \(Int(width))x\(Int(height)) が現れました (pid=\(pid), 起動から \(elapsedMs) ms)")
+                      print("計測値: macos=\(elapsedMs)（書き出し先 \(measurePath)）")
+                      stop()
                       exit(0)
                   }
               }
-              Thread.sleep(forTimeInterval: 1.0)
+              Thread.sleep(forTimeInterval: 0.1)
           }
-          FileHandle.standardError.write("NG: 60 秒以内にウィンドウが現れませんでした\n".data(using: .utf8)!)
+          FileHandle.standardError.write("NG: \(Int(timeoutSeconds)) 秒以内にウィンドウが現れませんでした\n".data(using: .utf8)!)
+          stop()
           exit(1)
           SWIFT
-          nohup "$APP" >"$LOG" 2>&1 &
-          pid=$!
           status=0
-          swift "$SPIKE" "$pid" || status=$?
+          swift "$SPIKE" "$APP" "$LOG" "$MEASURE" || status=$?
           if [ "$status" -ne 0 ]; then
             echo "--- アプリの出力 ---" >&2
             cat "$LOG" >&2 || true
           fi
-          kill "$pid" 2>/dev/null || true
-          wait "$pid" 2>/dev/null || true
           exit "$status"
 
       # 起動の検証（Windows）。**仮想ディスプレイのような追加設定は不要**である。
@@ -354,6 +411,12 @@ jobs:
       # `currentUser` なので導入先は `%LOCALAPPDATA%\jxcel\jxcel.exe` になる。
       # WebView2 ランタイムが導入されていない場合は、インストーラが bootstrapper を
       # 取得して `/silent /install` で導入する（既定の downloadBootstrapper）。
+      #
+      # 同じポーリングが**起動からウィンドウ表示までの時間**も計測する（tasks.md 10.3 /
+      # 要件 1.3, 6.8）。計測区間の始点は OS が記録したプロセス生成時刻
+      # （`Process.StartTime`）である。`Start-Process` の戻りを待ってから計ると
+      # その待ち時間の分だけ計測値が小さく出る。値は `target/startup-measurements.txt`
+      # に `windows=<ミリ秒>` として書き、CI の出力にも出す。
       - name: Verify bundle opens a window (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -370,19 +433,51 @@ jobs:
           }
           if (-not (Test-Path $exe)) { throw "導入された実行ファイルが見つかりません" }
 
+          $measure = "target/startup-measurements.txt"
+          if (Test-Path $measure) { Remove-Item $measure -Force }
           $p = Start-Process -FilePath $exe -PassThru
+          $start = $p.StartTime
           $deadline = (Get-Date).AddSeconds(60)
           $title = $null
           while ((Get-Date) -lt $deadline) {
-            Start-Sleep -Milliseconds 500
+            Start-Sleep -Milliseconds 100
             if ($p.HasExited) { throw "アプリがウィンドウを出す前に終了しました (exit=$($p.ExitCode))" }
             $p.Refresh()
             if ($p.MainWindowHandle -ne 0) { $title = $p.MainWindowTitle; break }
           }
           if (-not $title) { throw "60 秒以内にウィンドウが現れませんでした" }
           if ($title -notmatch "jxcel") { throw "予期しないウィンドウタイトル: $title" }
-          Write-Host "OK: ウィンドウ '$title' が現れました (pid=$($p.Id))"
+          # 計測値は「観測した時刻」なので、実際の表示より最大 0.1 秒大きく出る（保守側）。
+          $elapsedMs = [int]((Get-Date) - $start).TotalMilliseconds
+          Set-Content -Path $measure -Value "windows=$elapsedMs" -Encoding ascii
+          Write-Host "OK: ウィンドウ '$title' が現れました (pid=$($p.Id), 起動から $elapsedMs ms)"
+          Write-Host "計測値: windows=$elapsedMs（書き出し先 $measure）"
           Stop-Process -Id $p.Id -Force
+
+      # 起動時間の予算判定（tasks.md 10.3 / 要件 1.3, 6.8）。
+      #
+      # 予算は**要件値の 2 秒**（SSD を搭載した 4 コア以上の一般的なデスクトップ環境で、
+      # 起動から操作可能なウィンドウの表示まで）。判定は POSIX sh の
+      # `scripts/check-startup-budget.sh` が行い、**引数なしで呼ぶ**（計測ファイルの場所も
+      # 予算の閾値も既定値であり、CI から差し替えられない）。3 OS で同じスクリプトを使う。
+      #
+      # この段は `if:` を付けず 3 OS すべてで走る。各ランナーは自分の OS の起動検証だけを
+      # 実行しており、**そのランナーが計測した 1 つの値**を判定する。マトリクスの 3 ジョブの
+      # 出力（先の 3 つの起動検証の段と本スクリプトの両方）を合わせて 3 OS の計測値が CI の
+      # 出力に現れ、予算超過のプラットフォームがあればそのランナーのこの段が非 0 で終わって
+      # パイプライン全体が失敗する（要件 6.8）。3 つの値を 1 か所へ持ち寄って判定するには
+      # ジョブの新設かジョブ間の依存が要り、**要件 6.2（プラットフォーム別の独立した検証
+      # 系統を新設しない）に反する**ため、判定はランナーごとに閉じる。
+      #
+      # 余裕が最も薄いのは macOS（research.md の公式実測 1.564 秒）であり、実質的に最初に
+      # 鳴るのは macOS の段である。判定は特定の 1 プラットフォームに絞らず、全計測値を同じ
+      # 要件予算で行う（余裕最小のものが収まれば他も収まる、を系として満たす）。
+      #
+      # 終了コード: 0 = 予算内 / 1 = 予算超過 / 2 = 計測値が無い・解釈できない。
+      # 2 は「計測が走らなかった」ことを無言で通さないための失敗である。
+      - name: Startup time budget (2s from launch to operable window)
+        shell: bash
+        run: bash scripts/check-startup-budget.sh
 
       # ---------------------------------------------------------------------
       # 配布物の検証（tasks.md 10.2 / 要件 6.4, 6.5, 6.6）
