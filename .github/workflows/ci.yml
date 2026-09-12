@@ -384,6 +384,109 @@ jobs:
           Write-Host "OK: ウィンドウ '$title' が現れました (pid=$($p.Id))"
           Stop-Process -Id $p.Id -Force
 
+      # ---------------------------------------------------------------------
+      # 配布物の検証（tasks.md 10.2 / 要件 6.4, 6.5, 6.6）
+      #
+      # 生成した配布物から補助プロセスの実行ファイルを取り出し、起動できることを確かめ、
+      # 同梱前の原本とバイト一致することを確かめ、サイズを出力に記録する。
+      #
+      # **これはバンドル処理が同梱した実行ファイルを書き換える既知の問題に対する恒久的な
+      # 検出器である。**Linux の標準の同梱機構（`externalBin`）は `usr/bin` 配下の ELF を
+      # 無条件に書き換える（tauri-apps/tauri#5189）。1.7 はそれを避けて `usr/share/jxcel/`
+      # へ置く決定をした。その回避配置が破れた日に、静かにではなく明確に落ちるのがこの段である。
+      #
+      # 検査本体は POSIX sh の `scripts/check-sidecar-integrity.sh`（3 OS で同じものを使う）。
+      # 終了コードは 0 = 検証成功 / 1 = 検証失敗（不一致・実行権限の欠落・起動不能・配布物内に
+      # 不在）/ 2 = 入力が使えない（配布物・原本・ホストのトリプルが解決できない）。非 0 は
+      # そのままパイプラインの失敗になる（無言で通る経路は無い）。
+      #   - 比較  : `cmp` による直接のバイト比較を判定に使う。両者の sha256 も表示するので、
+      #             不一致は両方のパスと両方のダイジェストつきで診断できる。**この比較は
+      #             3 OS で共有の 1 実装であり、macOS / Windows も同じ失敗の仕方をする。**
+      #   - 起動  : 取り出した実行ファイルを起動し、`crates/sidecar-smoke`（1.6）が `--idle` で
+      #             出す `sidecar-smoke ready pid=<識別子> mode=idle` の起動行が現れることを
+      #             確かめる。**バイト一致だけでは足りない**（一致していても起動できるとは限らない）。
+      #   - サイズ: 配布物と取り出した実行ファイルのバイト数を出力する（要件 6.6）。macOS の
+      #             dmg と Windows の NSIS インストーラは検証対象そのものではない配布物なので、
+      #             各段で別に記録する。
+      #
+      # 取り出し方は配布物の形式ごとに分ける:
+      #   - Linux  : AppImage は `--appimage-extract`（バンドル済みの実行ファイルを起動せずに
+      #              取り出す。FUSE を要さない。`APPIMAGE_EXTRACT_AND_RUN` は展開実行＝起動の
+      #              ための経路であり、取り出しには使えない）。deb は `dpkg-deb -x`。
+      #              **AppImage と deb の両方を検証する** — 8.1 が `bundle.linux.deb.files` を
+      #              足したため、どちらも 5.1 の「配布物」である。片方だけでは deb の同梱が
+      #              無検査になる。どちらも `usr/share/jxcel/sidecar-smoke` に置かれる。
+      #   - macOS  : バンドル済みの `.app` の中（`Contents/MacOS/sidecar-smoke`）。`externalBin`
+      #              のトリプル接尾辞はバンドル時に外れる（1.7）。macOS では bundler が外部
+      #              バイナリを**必ず再署名する**（tauri-bundler 2.9.4 の macos/app.rs:99-105 が
+      #              外部バイナリを `SignTarget{is_an_executable:true}` として署名対象に入れ、
+      #              macos/sign.rs:46-73 と tauri-macos-sign 2.3.4 の keychain.rs:207-249 が
+      #              `codesign --force -s - --options runtime` を実行する。`hardenedRuntime` の
+      #              既定は true: tauri-utils 2.9.3 src/config.rs:682。entitlements は未設定なので
+      #              渡されない: 同 config.rs:684）。**その再署名がバイトを変えないのは、staging の
+      #              時点で原本を同じ条件で事前署名してあるからである** — `scripts/stage-sidecars.sh`
+      #              が、識別子が署名対象のファイル名から導かれること（Apple Security
+      #              signer.cpp:158-175）に合わせて、同梱名 `sidecar-smoke` と同じベース名の
+      #              一時コピーに `codesign --force -s - --options runtime` を掛けてから配置する。
+      #              これにより 6.5 のバイト比較が成立し、3.1 の実行時の整合性検査（期待値は
+      #              事前署名済みの原本から算出される。`crates/app-shell/build.rs`）も macOS で
+      #              成立する。**この一致を実測できるのはこの段だけ**（CI が唯一の確認の場で
+      #              あり、staging 側はコードで機構を固定している）。検査は緩めない
+      #              （要件 6.5 は無条件である）。
+      #              なお `.app` 自体の署名（app.rs:122-132）は同梱済みの副実行ファイルの
+      #              バイトを書き換えない（入れ子の署名は外側から内側の順に付き、既に署名済みの
+      #              入れ子は再署名されない）。
+      #   - Windows: NSIS インストーラを `/S` で導入した先（`%LOCALAPPDATA%\jxcel`。既定の
+      #              installMode は `currentUser`）。**導入は直前の「Verify bundle opens a
+      #              window (Windows)」が済ませているので、この段は導入を繰り返さない。**
+      #              サイドカーは実行ファイルの隣にトリプル接尾辞を外して置かれる（8.1）。
+      #
+      # macOS と Windows の段はこの環境（Linux）では実行できず、静的評価のみである。
+      # 抽出・比較・起動の検査は 3 OS で同じスクリプトが走るので、CI が実測する。
+      # ---------------------------------------------------------------------
+
+      - name: Verify bundled sidecar (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -eu
+          # グロブが一致しなければリテラルのまま残り、検査が入力の不在として 2 で落ちる。
+          set -- target/release/bundle/appimage/*.AppImage
+          appimage=$1
+          set -- target/release/bundle/deb/*.deb
+          deb=$1
+          bash scripts/check-sidecar-integrity.sh "$appimage" usr/share/jxcel/sidecar-smoke
+          bash scripts/check-sidecar-integrity.sh "$deb" usr/share/jxcel/sidecar-smoke
+
+      - name: Verify bundled sidecar (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -eu
+          for dmg in target/release/bundle/dmg/*.dmg; do
+            echo "配布物 (dmg) のサイズ: ${dmg}: $(wc -c < "$dmg") バイト"
+          done
+          bash scripts/check-sidecar-integrity.sh \
+            target/release/bundle/macos/jxcel.app \
+            Contents/MacOS/sidecar-smoke
+
+      - name: Verify bundled sidecar (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          if [ -z "${LOCALAPPDATA:-}" ]; then
+            echo "NG: LOCALAPPDATA が設定されていません" >&2
+            exit 2
+          fi
+          for setup in target/release/bundle/nsis/*-setup.exe; do
+            echo "配布物 (NSIS インストーラ) のサイズ: ${setup}: $(wc -c < "$setup") バイト"
+          done
+          # 既定の installMode は currentUser なので導入先は %LOCALAPPDATA%\jxcel である
+          # （直前の段が /S で導入済み）。Git Bash の bash からは `$LOCALAPPDATA` がそのまま
+          # 見え、MSYS のランタイムは `\` と `/` のどちらの区切りも受け付ける。
+          bash scripts/check-sidecar-integrity.sh "${LOCALAPPDATA}/jxcel" sidecar-smoke.exe
+
       # 成果物の保存（要件 6.7）。名前は `jxcel-bundle-<runner os>` で安定させ、1 回の
       # 実行で 3 プラットフォーム分を取得できるようにする。`if-no-files-found: error`
       # により、バンドルが生成されていなければこの段でパイプラインを落とす。

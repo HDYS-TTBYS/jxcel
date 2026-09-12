@@ -421,7 +421,7 @@
   - _Requirements: 4.3, 4.7, 9.6_
   - _Depends: 1.5, 2.3, 7.3, 9.4_
 
-- [ ] 10.2 配布物の検証を CI に組み込む
+- [x] 10.2 配布物の検証を CI に組み込む
   - 生成した配布物から補助プロセスの実行ファイルを取り出し、起動できることを検証する
   - 取り出したファイルが同梱前と同一の内容であることを検証し、異なればパイプラインを落とす
   - 各プラットフォームの配布物のサイズを出力に記録する
@@ -479,6 +479,11 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **10.2（検査器）**: `scripts/check-sidecar-integrity.sh <配布物> <配布物内のパス> [<同梱前の原本>] [<起動タイムアウト秒>]`。配布物は `*.AppImage` / `*.deb` / ディレクトリのみ（他は exit 2）。**判定は `cmp -s`（バイト比較）**で、診断に**両者の SHA-256 とサイズ**を出す（`sha256sum` → `shasum -a 256` → `openssl dgst -sha256`。算出不能なら比較の前に exit 2）。**一致だけでは通らない** — `crates/sidecar-smoke` の実挙動（`--idle` が `sidecar-smoke ready pid=<id> mode=idle` を 1 行出して待機）に合わせ、その正規表現が期限内（既定 10 秒）に現れることをもって起動と見なす（**バイト一致だが起動行を出さないダミーで exit 1 を実測**）。起動したプロセスと一時展開先は EXIT/INT/TERM のトラップで必ず片付ける。**終了コード: 0 = 一致＋起動＋サイズ記録 / 1 = 検証失敗（不一致・実行ファイル不在・実行権限なし・起動しない・展開失敗）/ 2 = 入力が使えない**。**サイズは常に 3 種（配布物・取り出した実行ファイル・同梱前の原本）**を出し、macOS の段は dmg、Windows の段は NSIS インストーラのサイズも出す。**Linux は AppImage と deb の両方**を検証する（8.1 が deb の `files` を足したため）。CI の段は 3 OS それぞれにあり（Linux は AppImage→deb、macOS は `Contents/MacOS/sidecar-smoke`、Windows は `/S` 導入後の `%LOCALAPPDATA%\jxcel\sidecar-smoke.exe`）、**すべて同じ検査器を呼ぶ**。
+- **10.2（macOS の重大な欠陥とその解決・重要）**: **`bundle.macOS.signingIdentity: "-"` があると、バンドラが同梱した外部バイナリを再署名するため、同梱物のバイトは同梱前の原本と一致し得ない**（`tauri-bundler` の `macos/app.rs` が `sign_paths` に外部バイナリを入れ、`sign.rs` が `--options runtime` 付きで `codesign --force -s -` を実行する。`hardenedRuntime` の既定は true）。**これは要件 6.5 だけでなく 3.1 の実行時整合性検査も壊す**（`build.rs` の期待値は同梱前の原本から作るので、macOS では `SidecarHost::ensure` が常に拒否される＝実機能の停止）。**ユーザーの決定に従い、`scripts/stage-sidecars.sh` が macOS でステージ直後に原本を事前署名する**（`codesign --force -s - --options runtime <tmp>/sidecar-smoke`。**一時ディレクトリ内で同梱名 `sidecar-smoke` として署名してから `<語幹>-<トリプル>` として据える**）。これでバンドラの再署名がバイト中立になり、6.5 と 3.1 が同時に成立する。**`-i` を明示してはならない** — Apple の Security 実装では識別子は `recommendedIdentifier`（拡張子を除いた basename）に ad-hoc の一意 suffix を足したもので、`-i` を渡すと suffix が落ちて bundled 側と食い違う。`--keychain` / `--entitlements` はどちらも渡さない（identity `-` と entitlements 未設定のため）。**mirror した各オプションは上流ソース（tauri-bundler 2.9.4 / tauri-macos-sign 2.3.4 / tauri-utils 2.9.3、tauri-cli 2.11.4 が固定）で確認済み。Linux / Windows はバイト不変**（記録用 `codesign` を PATH 先頭に置いても呼ばれないことを実測）。**macOS のバイト中立性だけは CI での確認が必須**（成功の条件は両側の sha256 一致と exit 0。失敗すればこの方式が成立しないので、そのときは署名を外す判断に戻る）。
+- **10.2（実測の型）**: ローカルでは AppImage と deb を実際にビルドし、`sha256（配布物内）= sha256（同梱前）= 66edb745…1214a`・`OK: 起動しました: sidecar-smoke ready pid=… mode=idle`・サイズ（AppImage 81,181,176 B / deb 4,691,564 B）を確認。不一致（1 バイト反転）→ exit 1 で両パス・両 digest、「バンドル処理が実行ファイルを書き換えています」を提示。**「落ちるべきときに落ちる」ことを先に測るのがこの種のタスクの RED 相当**。
+
 
 - **10.1（追加した 5 段・重要）**: 既存の `test` ジョブ（3 OS マトリクス）の **`Build` の直後・`Test` の直前**に 5 段を追加。**`if:` 条件は付けず 3 OS すべてで走らせる**（structure.md の「検査スクリプトは 3 OS のランナーで同じものが走る」に従う。加えて**プラットフォーム別の依存節は他 OS では見えない**ため、1 OS だけでは他ターゲット向けの tauri 依存を見逃す。capability 検査も各ランナーが生成した実物を見られる）。**ジョブもワークフローも新設していない**（要件 6.2）。
   1. `cargo test -p app-shell --test bindings_drift` — 生成物のドリフト（**ワークスペース全体のテストにも含まれるが、不変条件を名指しで落とすために独立の段にする**。`Test` より前なので最初に名指しで落ちる）。
