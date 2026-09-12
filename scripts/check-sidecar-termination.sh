@@ -9,11 +9,13 @@
 # <起動タイムアウト秒> の既定は 60。
 #
 # 終了コード: 0 = 全条件で残存 0 / 1 = 検証失敗（残存あり・起動しない・期限内に終わらない） /
-# 2 = 入力が使えない（引数・DISPLAY・検証用の形でない・解決先の補助プロセスが無い）。
+# 2 = 入力が使えない（引数・Linux での DISPLAY 不在・検証用の形でない・解決先の補助プロセスが無い）。
 #
 # # 前提（満たさなければ exit 2。**無言で通る経路を作らない**）
 #
-#   - `DISPLAY` があること。GUI アプリなので X が要る（CI は `xvfb-run` の下で呼ぶ）。
+#   - **Linux だけ** `DISPLAY` があること（GUI アプリを起動するのに X が要る。CI は
+#     `xvfb-run` の下で呼ぶ）。**macOS は AppKit であり X を使わないのでこの前提は課さない**
+#     （`DISPLAY` は通常未設定である）。
 #   - 検証用の形であること（`strings` で `JXCEL_VERIFICATION_EXIT_AFTER_MS` の存在を確かめる）。
 #   - **8.1 の解決規則が指す補助プロセスが実行できること**:
 #       Linux : `<アプリのディレクトリ>/../share/jxcel/sidecar-smoke`（deb / システム
@@ -82,11 +84,6 @@ if [ ! -x "$app" ]; then
   exit 2
 fi
 
-if [ -z "${DISPLAY:-}" ]; then
-  echo "NG: DISPLAY がありません（GUI アプリ。CI は xvfb-run の下で呼ぶ）" >&2
-  exit 2
-fi
-
 case $(uname -s) in
   Linux) os_mode=linux ;;
   Darwin) os_mode=macos ;;
@@ -95,6 +92,16 @@ case $(uname -s) in
     exit 2
     ;;
 esac
+
+# **`DISPLAY` は Linux だけの前提である。** Linux では GUI アプリを起動するのに X が要る
+# （CI は `xvfb-run` の下で呼ぶ）が、**macOS は AppKit であり X を使わない**（通常 `DISPLAY` は
+# 未設定）。以前はこの検査を**プラットフォームの判定より前**に行っていたため、macOS の段が
+# 必ず exit 2 で落ちていた（実測: 2026-09-12 の macOS のランナー。手前の段が落ちていた間は
+# 露見していなかった）。
+if [ "$os_mode" = linux ] && [ -z "${DISPLAY:-}" ]; then
+  echo "NG: DISPLAY がありません（GUI アプリ。CI は xvfb-run の下で呼ぶ）" >&2
+  exit 2
+fi
 
 # 配布物（既定のビルド）は環境変数の読み取りを持たない。**検証用の形でなければ落とす**
 # （配布物を渡すと 1 条件も成立しないのに、補助プロセスが現れないことを「残存 0」と
