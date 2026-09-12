@@ -48,7 +48,7 @@
   - _Requirements: 2.1, 2.2, 2.5, 2.7, 9.1_
   - _Boundary: TypeCatalog_
 
-- [ ] 2.2 (P) 10 進数の桁検査と正準化を実装する
+- [x] 2.2 (P) 10 進数の桁検査と正準化を実装する
   - 符号・整数部・小数点・小数部・指数を 1 パスで走査し、有効桁数と小数点以下の桁数を数える
   - 宣言された桁数に揃えた正準形を作り、その上で順序比較を行う（範囲制約と一意制約が使う）
   - **保存される文字列を変えない**。正準形は比較のためだけに作る
@@ -317,3 +317,9 @@
 - 2.1 の申し送り（4.1 / 4.2 / 5.1 が読むこと）: `TypeKind::accepts` は `AcceptedVariants::Delegated`（`custom`）に対して**適合を返す**。これは変種段階の判断であり、実際の 2 値判定は `CustomType::validate`（4.1）が持つ。`Delegated` を適合の確定と解釈してはならない。また `CellValue::Null` は変種段階で常に適合（受理の可否は列の `required` が決める）。
 - 2.1 で `src/types/{mod,decimal,datetime,text}.rs` が宣言済み（`decimal` / `datetime` / `text` は骨格のみ。中身は 2.2 / 2.3 / 2.4）。
 - 2.1 の申し送り: qlty の rustfmt は `pub mod` をアルファベット順に並べる。宣言順を固定したい場合はコメントで意図を残すこと。
+- **2.2 の裁定（4.2 / 5.2 / 5.1 / 7.x が読むこと）**: `DecimalDigits::fits` は**書かれた形の桁数**で判定する。すなわち `decimal(2,1)` は `"1.5"` を適合、`"1.50"` を違反とする（値は同じ）。これは意図した挙動である — `Decimal` は**逐語で往復する**契約を持ち、保存される文字列を書き換えられないため、宣言より長い小数表記を黙って受理すると「表記が宣言に合わない値」が残る。丸めも情報の損失になる（要件 7.2）。design は適合規則を明記していないが、この選択は「情報が失われる変換をしない」と整合する唯一の側である。
+- 2.2 の申し送り: `types::decimal` の公開面は `DecimalDigits`（宣言と `accepts`）/ `DecimalScan` + `scan` / `DecimalCanonical` + `canonicalize` に分かれている。design のコンポーネント表は `DecimalDigits` を「桁検査・正準化・順序」と要約しているが Rust のインターフェースは固定していない。
+- 2.2 の申し送り: 正準形は**宣言された scale に依存しない値厳密形**であり、順序の全順序を与える（design の記述より強い。`scale` を要しない）。
+- 2.2 の申し送り: `DecimalDigits::new` は `precision >= 1 && scale <= precision` を要求し `Option` を返す。`SchemaError` に 10 進数の桁数専用の変種は無いため、3.1 / 3.2 は `None` を `MalformedDeclaration` へ落とす（位置と理由を運べる唯一の変種）。
+- 2.2 の申し送り: 文法外の `CellValue::Decimal`（例 `"abc"`）は違反になる。`ViolationReason` では `PrecisionExceeded { expected: Expected::Decimal { precision, scale }, actual }` が該当する。
+- 2.2 の既知の非ブロッキング所見: `decimal.rs` の `impossible_digit_declarations_are_rejected` に同一の assert が 1 行重複している。
