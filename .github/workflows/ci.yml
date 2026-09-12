@@ -1367,11 +1367,18 @@ jobs:
               return lines[offset...].filter { $0.range(of: pattern, options: .regularExpression) != nil }.count
           }
 
-          /// その pid が所有するウィンドウの**識別子の集合**（`kCGWindowNumber`）。
+          /// その pid が所有する**画面に出ている**ウィンドウの識別子の集合（`kCGWindowNumber`）。
           ///
           /// 数ではなく集合を使うのは、**入れ替わり**（1 枚消えて別の 1 枚が現れる）も
-          /// 数え落とさないためである。フィルタは「通常レイヤー（0）で 100x100 以上」であり、
-          /// 起動検証（1.5）・描画検証（10.4）と同じ観測である。
+          /// 数え落とさないためである。フィルタは「通常レイヤー（0）・100x100 以上・
+          /// **`kCGWindowIsOnscreen` が真・`kCGWindowAlpha` が正**」であり、**利用者に見えている
+          /// トップレベルウィンドウ**だけを数える。
+          ///
+          /// **「画面に出ている」を条件に加えた理由**（実測: 2026-09-12 の macOS のランナー）:
+          /// `.optionAll` の一覧にはプロセスが持つ**見えないウィンドウ**も含まれ、レイヤーと
+          /// 大きさだけのフィルタではそれも数えてしまう。実際、ウィンドウを 1 枚も開いていない
+          /// 状態（閉じた後）でも一覧に残る 1 枚があり、`0 枚になるのを待つ` 検査が偽の失敗に
+          /// なった。1.5 / 10.4 の段は「1 枚以上ある」ことしか見ないので影響を受けていない。
           func windowIds(of pid: pid_t) -> Set<Int> {
               guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
                   return []
@@ -1380,6 +1387,8 @@ jobs:
               for window in list {
                   guard let owner = window[kCGWindowOwnerPID as String] as? Int, owner == Int(pid) else { continue }
                   guard let layer = window[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
+                  guard let onscreen = window[kCGWindowIsOnscreen as String] as? Bool, onscreen else { continue }
+                  guard let alpha = window[kCGWindowAlpha as String] as? Double, alpha > 0 else { continue }
                   guard let bounds = window[kCGWindowBounds as String] as? [String: Any],
                         let width = bounds["Width"] as? Double, let height = bounds["Height"] as? Double,
                         width >= 100, height >= 100 else { continue }
@@ -1601,6 +1610,10 @@ jobs:
           let docLabel = docLabelLine.components(separatedBy: "label=").last?.components(separatedBy: " ").first ?? "(不明)"
           note("検証 (b): ウィンドウ数=\(secondWindows)（1 つ目=\(firstWindows) から 1 増えた。同じ pid のウィンドウを数えている）")
           note("検証 (b): 新しいウィンドウのラベル=\(docLabel)（doc-* ＝ ドキュメント付き。ラベルは記録が出す）")
+          // **その時点のウィンドウの一覧を残す**（増減があったとき、何が増えたのかを事後に分かる
+          // ようにする。実測: 2026-09-12 の macOS のランナーで集合が [62, 67] → [62, 67, 68] と
+          // 増えた）。
+          note("検証 (b): 1 つ目のプロセスのウィンドウ: \(describeWindows(of: first.processIdentifier))")
           note("検証 (b): 記録（引き継ぎ）: \(handover)")
 
           note("検証 (a): 引数なしで再度実行する（既にあるウィンドウを前面に出すだけで、新しいウィンドウを作らない）")
@@ -1628,6 +1641,7 @@ jobs:
               fail("引数なしの 2 つ目の起動の後、ウィンドウの集合が \(describe(setBeforeArgless)) に落ち着きませんでした（起動後 0.5 秒ごとの 5 標本: \(afterSamples.map(describe).joined(separator: " → ")) / 落ち着き待ちの最後の観測 \(describe(setAfterArgless)) / その時点の全ウィンドウ: \(describeWindows(of: first.processIdentifier))）— 新しいウィンドウを作ってはならない")
           }
           note("検証 (a): 引数なしの 2 つ目の起動も終了コード 0 で終わり、ウィンドウの集合=\(describe(setAfterArgless))（起動前と同じ \(secondWindows) 枚）のまま変わらない")
+          note("検証 (a): 引数なしの起動の後のウィンドウ: \(describeWindows(of: first.processIdentifier))")
           note("検証 (a): 記録（引数なしの引き継ぎ）: \(argless)")
 
           note("検証: 配布物のインスタンスを片付ける")
@@ -2130,35 +2144,33 @@ jobs:
       #       配布物に検証専用の項目が現れないことも要求する。
       #     * (1) 通知 — `GetMenuItemID` でコマンド識別子を取り、`PostMessage(hwnd, WM_COMMAND,
       #       id, 0)` で**実際に活性化**する（muda のウィンドウサブクラスが `WM_COMMAND` の
-      #       LOWORD を項目の識別子として解決し、tauri 2.11.5 は `msg_hook` で
-      #       `TranslateAcceleratorW` を各メニューの `haccel` に当てるので、クリックもキー入力も
-      #       同じ経路を通る）。記録の 2 行を要求する。
+      #       LOWORD を項目の識別子として解決し、そこから登録元 → 対象ウィンドウの解決へ渡る。
+      #       **キー入力が届く場合も同じ経路である** — ただし下の (2) のとおり、Windows では
+      #       キーがこのホストウィンドウへ届かない）。記録の 2 行を要求する。
       #     * (2) フォーカス — 検証用の形を 2 枚開き、`SetForegroundWindow` で前面にしたうえで
-      #       `Ctrl+Shift+J` を送り、対象が前面のウィンドウと一致し、移すと追随することを要求する。
-      #       **キーは「修飾キーを実際に押したまま、対象ウィンドウへ `WM_KEYDOWN`/`WM_KEYUP` を
-      #       送る」形で届ける**（`JxcelMenuApi.SendShortcutTo`）。理由:
-      #         - アクセラレータを解釈するのは**ホストウィンドウのメッセージループ**である
-      #           （tauri 2.11.5 の `msg_hook` が `TranslateAcceleratorW(msg.hwnd, haccel, msg)`
-      #           を呼ぶ）。この関数は修飾キーを `GetKeyState` で見て、一致すれば **`msg.hwnd` へ
-      #           `WM_COMMAND` を送る**（Wine の実装で確認: `win32u/menu.c` の
-      #           `translate_accelerator`）。したがって修飾キーは実際に押す必要があり、鍵そのものは
-      #           アクセラレータ表を持つウィンドウへ届ける必要がある。
+      #       **アクセラレータが生むのと同じメッセージ**（`WM_COMMAND` を `wParam = 0x10000 |
+      #       コマンド識別子` で）を送り、対象が前面のウィンドウと一致し、移すと追随することを
+      #       要求する。**キーそのものは送らない**:
+      #         - `TranslateAcceleratorW` は、一致したアクセラレータについて `WM_COMMAND` を
+      #           `wParam = 0x10000 | cmd` で送る（Wine の `win32u/menu.c` の
+      #           `translate_accelerator` で確認）。つまりこの段が送るメッセージは、
+      #           **アクセラレータが作用したときにホストウィンドウへ届くものそのもの**である
+      #           （(1) が送るのはメニューのクリックが生む `wParam = cmd` の形）。
       #         - **Windows の WebView2 は自分の子ウィンドウにキーボードフォーカスを持ち、
-      #           アクセラレータキーを自分の経路で消費する**ため、`keybd_event` によるグローバルな
-      #           キー注入はホストウィンドウのアクセラレータ表へ届かない（上流の既知の制限:
-      #           tauri-apps/wry#451。仮に `msg.hwnd` が子ウィンドウになれば `WM_COMMAND` も
-      #           子へ送られ、muda のサブクラスは親に付いているので解決されない）。
-      #           実測（2026-09-12 の Windows のランナー）: グローバル注入では記録行が 1 行も
-      #           現れなかった — **素の利用者がキーを押しても同じ**である。
-      #           この段が測るのは「アクセラレータが基盤へ登録され、活性化の経路（メッセージ
-      #           ループ → `TranslateAcceleratorW` → `WM_COMMAND` → muda → 登録元）が働くこと」
-      #           と「対象がフォーカスに追随すること」であり、**WebView2 がキーを消費する事象
-      #           そのものではない**（Linux の段が `XSendEvent` で合成イベントを送るのと同じ判断。
-      #           `XTEST` はそのツールキットに届かない）。
+      #           アクセラレータキーを自分の経路で消費する**ため、キーはホストウィンドウの
+      #           アクセラレータ表へ届かない（上流の既知の制限: tauri-apps/wry#451）。
+      #           実測（2026-09-12 の Windows のランナー）: `keybd_event` によるグローバルな注入でも、
+      #           修飾キーを押したまま `WM_KEYDOWN` を送る形でも、**記録行が 1 行も現れなかった**
+      #           — **素の利用者がキーを押しても同じ**である。したがってこの段は
+      #           **アクセラレータ表の照合そのものを主張しない**（実キーでの実測は Linux の段が
+      #           `XSendEvent` で担う — `XTEST` はそのツールキットに届かない）。
+      #       この段が実測するのは、活性化が muda のサブクラス → 登録元 → 対象ウィンドウの解決へ
+      #       到達し、**対象がフォーカスに追随すること**（要件 3.5）である。
+      #       1 枚目・2 枚目それぞれのメニューに**アクセラレータ付きの項目が乗っていること**も
+      #       ここで読む（(1) と同じ検査。ウィンドウ単位のメニューはウィンドウごとに組み立てられる）。
       #       **前面化できない環境では主張しない** —
       #       `GetForegroundWindow` で確認し、効かなければ「注入できず」と出力して (2) を飛ばす
-      #       （偽の緑を作らない。10.5 の macOS (c) と同じ型）。**キー入力そのものを実測するのは
-      #       この段と Linux の段だけである。**
+      #       （偽の緑を作らない。10.5 の macOS (c) と同じ型）。
       #     * (3) 表示の表記 — 上で読んだ**実際のメニュー項目の文字列**（`Ctrl+Q` など）で確かめる。
       #     * 限界: ランナーは素の利用者機ではない（10.4 と同じ）。
       #   - **macOS（アプリ全体のメニューの記録 + `menu.rs` のテスト）** — ネイティブのメニューを
@@ -2397,11 +2409,11 @@ jobs:
           echo "検証（後始末）: jxcel のプロセスは残っていない（ゾンビを除いて 0 件）"
 
       # Windows の段（tasks.md 10.6）。配布物のメニューバーを Win32 で読み、`WM_COMMAND` で
-      # 実際に活性化し、検証用の形の 2 枚でフォーカス先への作用を実測する。**ショートカットは
-      # 「修飾キーを実際に押したまま対象ウィンドウへ `WM_KEYDOWN`/`WM_KEYUP` を送る」形で届ける**
-      # （`SendShortcutTo`。Windows の WebView2 がアクセラレータキーを自分の経路で消費するため、
-      # グローバルなキー注入はホストのアクセラレータ表へ届かない — 上流の制限 tauri-apps/wry#451。
-      # 詳細は下の 10.6 の節の (2)）。**`EnumWindows` は
+      # 実際に活性化し、検証用の形の 2 枚でフォーカス先への作用を実測する。**キーは送らない** —
+      # Windows の WebView2 がアクセラレータキーを自分の経路で消費するため、キーはホストウィンドウの
+      # アクセラレータ表へ届かない（上流の制限 tauri-apps/wry#451。詳細と実測は下の節の (2)）。
+      # 代わりに**アクセラレータが生むのと同じメッセージ**を送る（`Send-AcceleratorActivation`）。
+      # **`EnumWindows` は
       # 所有者 pid と**題名の完全一致**で絞る（単一インスタンスのプラグインは同じ pid に可視の
       # 隠しウィンドウ `com.jxcel.app-siw` を作るため、10.5 と同じ前提が要る）。
       - name: Verify menu items and shortcuts (Windows)
@@ -2452,18 +2464,9 @@ jobs:
             '  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int command);',
             '  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);',
             '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
-            '  [DllImport("user32.dll")] public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);',
-            '  [DllImport("user32.dll")] public static extern uint MapVirtualKeyW(uint code, uint mapType);',
             '  public const uint MF_BYPOSITION = 0x400;',
             '  public const uint WM_COMMAND = 0x0111;',
-            '  public const uint WM_KEYDOWN = 0x0100;',
-            '  public const uint WM_KEYUP = 0x0101;',
-            '  public const uint KEYEVENTF_KEYUP = 0x0002;',
-            '  public const uint MAPVK_VK_TO_VSC = 0x0;',
             '  public const int SW_RESTORE = 9;',
-            '  public const byte VK_CONTROL = 0x11;',
-            '  public const byte VK_SHIFT = 0x10;',
-            '  public const byte VK_J = 0x4A;',
             '  public static List<IntPtr> WindowsOf(int ownerPid, string title) {',
             '    var result = new List<IntPtr>();',
             '    EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {',
@@ -2483,32 +2486,6 @@ jobs:
             '    var text = new StringBuilder(512);',
             '    GetMenuStringW(menu, (uint)position, text, text.Capacity, MF_BYPOSITION);',
             '    return text.ToString();',
-            '  }',
-            '  /// <summary>',
-            '  /// Ctrl+Shift+J を **<paramref name="hwnd"/> のメッセージとして** 送る。',
-            '  /// 修飾キー（Ctrl / Shift）は keybd_event で実際に押し、そのあと対象ウィンドウへ',
-            '  /// WM_KEYDOWN/WM_KEYUP を送る。**キーそのものをグローバルに注入しない**理由:',
-            '  /// アクセラレータを解釈するのはホストウィンドウのメッセージループであり',
-            '  /// （tauri の msg_hook → TranslateAcceleratorW）、Windows の WebView2 は自分の',
-            '  /// 子ウィンドウにキーボードフォーカスを持ってアクセラレータキーを自分の経路で',
-            '  /// 消費するため、グローバルな注入はホストのアクセラレータ表へ届かない',
-            '  /// （上流の既知の制限: tauri-apps/wry#451）。wm 修飾キーは GetKeyState で見られる',
-            '  /// ので実際に押し、J はアクセラレータ表を持つ側へ届ける。',
-            '  /// </summary>',
-            '  public static void SendShortcutTo(IntPtr hwnd) {',
-            '    keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);',
-            '    keybd_event(VK_SHIFT, 0, 0, UIntPtr.Zero);',
-            '    // **アプリのスレッドが修飾キーを読んでから J を送る。** GetMessage で読んだ時点で',
-            '    // そのスレッドのキー状態が変わる（GetKeyState はスレッドごと）。',
-            '    System.Threading.Thread.Sleep(300);',
-            '    uint scan = MapVirtualKeyW(VK_J, MAPVK_VK_TO_VSC);',
-            '    long bits = 1L | ((long)scan << 16);',
-            '    PostMessage(hwnd, WM_KEYDOWN, new IntPtr(VK_J), new IntPtr(bits));',
-            '    System.Threading.Thread.Sleep(100);',
-            '    PostMessage(hwnd, WM_KEYUP, new IntPtr(VK_J), new IntPtr(bits | (1L << 30) | (1L << 31)));',
-            '    System.Threading.Thread.Sleep(100);',
-            '    keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);',
-            '    keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);',
             '  }',
             '}'
           ) -join "`n"
@@ -2620,6 +2597,29 @@ jobs:
             }
             Write-Host "OK: Win32: $Menu > $Item （コマンド識別子=$($items[$Item])）"
           }
+          # **アクセラレータが生むのと同じメッセージ**を送る（`WM_COMMAND` を
+          # `wParam = 0x10000 | コマンド識別子` で）。`TranslateAcceleratorW` は一致した
+          # アクセラレータについて `send_message(hwnd, WM_COMMAND, 0x10000 | cmd, 0)` を行う
+          # （Wine の `win32u/menu.c` の `translate_accelerator` で確認）。**つまりこの段が送る
+          # メッセージは、アクセラレータが作用したときにホストウィンドウへ届くものそのものである**
+          # （メニューをクリックしたときの `WM_COMMAND` は `wParam = cmd` であり、通知ビットが
+          # 無い — 10.6 の (1) はそちらを送っている）。
+          #
+          # **キーそのものは送らない。** Windows の WebView2 は自分の子ウィンドウにキーボード
+          # フォーカスを持ってアクセラレータキーを自分の経路で消費するため、キーはホスト
+          # ウィンドウのアクセラレータ表へ届かない（上流の既知の制限: tauri-apps/wry#451。
+          # 実測: 2026-09-12 の Windows のランナーでは `keybd_event` のグローバル注入でも、
+          # 修飾キーを押したまま `WM_KEYDOWN` を送る形でも、記録行が 1 行も現れなかった）。
+          # **この段が実測するのは、活性化が muda のサブクラス → 登録元 → 対象ウィンドウの解決へ
+          # 到達し、対象がフォーカスに追随すること**である（アクセラレータ表の照合そのものは
+          # 測らない — それは Linux の段が実キーで測る）。
+          function Send-AcceleratorActivation {
+            param([IntPtr]$Handle, [int]$ItemId)
+            if (-not [JxcelMenuApi]::PostMessage($Handle, [JxcelMenuApi]::WM_COMMAND, [IntPtr](0x10000 -bor $ItemId), [IntPtr]::Zero)) {
+              throw "アクセラレータの活性化（WM_COMMAND 0x10000|${ItemId}）を送れませんでした"
+            }
+          }
+
           # そのウィンドウを前面へ出せたかを返す（**効かなければ主張しない**）。
           function Set-ForegroundChecked {
             param([IntPtr]$Handle)
@@ -2717,12 +2717,21 @@ jobs:
             Write-Host "検証 2/2: 1 枚目: ラベル=empty-1 ハンドル=$(Get-HandleLabel -Handles $firstHandles)"
 
             $subPhase = @(Get-RecordLines).Count
+            # **1 枚目のメニューにもアクセラレータが乗っていること**（配布物と同じ検査。ウィンドウ単位の
+            # メニューはウィンドウごとに組み立てられる）。
+            $firstMenu = Wait-Menu -Handle $firstHandles[0]
+            if ($firstMenu -eq [IntPtr]::Zero) {
+              Show-RecordTail
+              throw "1 枚目のウィンドウにメニューバーがありません（GetMenu が 0 のまま 30 秒待ちました）"
+            }
+            $firstTree = Get-MenuTree -Menu $firstMenu
+            Assert-MenuItem $firstTree "ファイル" "検証: 対象ウィンドウを記録`tCtrl+Shift+J" "1 枚目（ウィンドウ単位のメニュー）"
             if (-not (Set-ForegroundChecked -Handle $firstHandles[0])) {
               Write-Host "限界: 1 枚目を前面にできなかった（SetForegroundWindow が効かない環境）。フォーカス先への作用の実測は Linux の段が担う。"
             } else {
-              [JxcelMenuApi]::SendShortcutTo($firstHandles[0])
+              Send-AcceleratorActivation -Handle $firstHandles[0] -ItemId $firstTree["ファイル"]["検証: 対象ウィンドウを記録`tCtrl+Shift+J"]
               $emptyHit = Find-RecordLine -Skip $subPhase -Pattern "\[検証\] ショートカットが作用した対象ウィンドウ=empty-1$" -Seconds 10
-              if (-not $emptyHit) { throw "1 枚目にフォーカスしたときのショートカットの対象が empty-1 として記録に現れません（ショートカットが作用していないか、対象がフォーカスと一致していません）" }
+              if (-not $emptyHit) { throw "1 枚目にフォーカスしたときの活性化の対象が empty-1 として記録に現れません（活性化が届いていないか、対象がフォーカスと一致していません）" }
               if ((Get-RecordCount -Skip $subPhase -Pattern "\[検証\] ショートカットが作用した対象ウィンドウ=doc-1$") -ne 0) {
                 throw "1 枚目にフォーカスしたのに doc-1 へ作用しました"
               }
@@ -2757,7 +2766,7 @@ jobs:
             if (-not (Set-ForegroundChecked -Handle $newHandles[0])) {
               Write-Host "限界: 2 枚目を前面にできなかった（SetForegroundWindow が効かない環境）。フォーカス先への作用の実測は Linux の段が担う。"
             } else {
-              [JxcelMenuApi]::SendShortcutTo($newHandles[0])
+              Send-AcceleratorActivation -Handle $newHandles[0] -ItemId $secondTree["ファイル"]["検証: 対象ウィンドウを記録`tCtrl+Shift+J"]
               $docHit = Find-RecordLine -Skip $subPhase2 -Pattern "\[検証\] ショートカットが作用した対象ウィンドウ=$docLabel$" -Seconds 10
               if (-not $docHit) { throw "2 枚目にフォーカスしたときのショートカットの対象が $docLabel として記録に現れません（フォーカス先へ振り向いていない）" }
               if ((Get-RecordCount -Skip $subPhase2 -Pattern "\[検証\] ショートカットが作用した対象ウィンドウ=$docLabel$") -ne 1) {
@@ -2771,7 +2780,7 @@ jobs:
               # フォーカスを 1 枚目へ戻すと対象も戻ること（追随すること）。
               $subPhase3 = @(Get-RecordLines).Count
               if (Set-ForegroundChecked -Handle $firstHandles[0]) {
-                [JxcelMenuApi]::SendShortcutTo($firstHandles[0])
+                Send-AcceleratorActivation -Handle $firstHandles[0] -ItemId $firstTree["ファイル"]["検証: 対象ウィンドウを記録`tCtrl+Shift+J"]
                 $backHit = Find-RecordLine -Skip $subPhase3 -Pattern "\[検証\] ショートカットが作用した対象ウィンドウ=empty-1$" -Seconds 10
                 if (-not $backHit) { throw "フォーカスを 1 枚目へ戻したときの対象が empty-1 として記録に現れません（フォーカスの移動に追随していない）" }
                 if ((Get-RecordCount -Skip $subPhase3 -Pattern "\[検証\] ショートカットが作用した対象ウィンドウ=$docLabel$") -ne 0) {
@@ -2792,7 +2801,7 @@ jobs:
             throw "後始末の後に常駐しているインスタンスが残っています"
           }
           Write-Host "検証（後始末）: 常駐インスタンス数=0（残存プロセスなし）"
-          Write-Host "OK: Windows: 配布物のメニューバー（項目とアクセラレータの文字列）・WM_COMMAND による活性化の通知・2 枚のウィンドウのフォーカス先への作用を検証した"
+          Write-Host "OK: Windows: 配布物のメニューバー（項目とアクセラレータの文字列）・WM_COMMAND による活性化の通知・2 枚のウィンドウでのフォーカス追随を検証した（キーそのものは WebView2 が消費するため送っていない）"
       # ---------------------------------------------------------------------
       # 補助プロセスの終了保証の検証（tasks.md 10.7 / 要件 5.6）
       #
