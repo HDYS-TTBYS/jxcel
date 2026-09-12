@@ -28,7 +28,11 @@
 //! この順に足す。タスク 1.2 が層の鎖の最左 [`error`] を置き、タスク 1.3 が検証層
 //! [`validate`] の 4 つのサブモジュールと違反の表現を置いた。タスク 2.1 が型カタログ
 //! [`types`] と、その下に 10 進数・日時・文字列の 3 つのサブモジュールを宣言した。
+//! タスク 3.1 が宣言層 [`declaration`] のデータ構造（`Schema` / `ColumnDecl` /
+//! `FieldDecl` / `TypeDecl` / `Constraints`）を置いた。宣言テキストの解析と正準出力は
+//! タスク 3.2 / 3.3 が `declaration::codec` に足す。
 
+pub mod declaration;
 pub mod error;
 pub mod types;
 pub mod validate;
