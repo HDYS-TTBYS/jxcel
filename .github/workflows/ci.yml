@@ -2361,13 +2361,21 @@ jobs:
             exit 1
           fi
           echo "検証（配置の記録）: $line"
+          # **期待する位置は macOS の慣習に従う**（Linux / Windows の段とは違う）:
+          # 組み込みの「終了」と検証専用の項目は **`builtin_quit_path()` が macOS では
+          # アプリケーションメニュー（`jxcel`）を指す**ため、そこへ置かれる
+          # （`menu.rs` の `builtin_quit_path` と、それを固定するクレートのテスト
+          # `the_builtin_quit_item_is_placed_in_the_platform_conventional_submenu`）。
+          # ファイルメニューに入るのは「開く…」だけであり、診断の 3 項目は 診断 に入る。
+          # **以前この一覧は Linux / Windows と同じ「ファイル > 終了」を要求していた** —
+          # macOS のアプリ全体のメニューでは成立せず、この段が初めて走った 2026-09-12 に露見した。
           for expected in \
             "配置=アプリ全体" \
             "項目数=7" \
             "app-shell.open-document(ファイル > 開く…, ショートカット=super+KeyO)" \
-            "app-shell.quit(ファイル > 終了, ショートカット=super+KeyQ)" \
-            "verification.document-only(ファイル > 検証: ドキュメント付きのみ, ショートカット=(なし))" \
-            "verification.probe(ファイル > 検証: 対象ウィンドウを記録, ショートカット=shift+super+KeyJ)" \
+            "app-shell.quit(jxcel > 終了, ショートカット=super+KeyQ)" \
+            "verification.document-only(jxcel > 検証: ドキュメント付きのみ, ショートカット=(なし))" \
+            "verification.probe(jxcel > 検証: 対象ウィンドウを記録, ショートカット=shift+super+KeyJ)" \
             "app-shell.diagnostics-export(診断 > 診断情報を書き出す…, ショートカット=shift+super+KeyE)" \
             "app-shell.diagnostics-log-location(診断 > 記録の保存場所を表示, ショートカット=shift+super+KeyL)" \
             "app-shell.diagnostics-verbosity(診断 > 記録の詳細度…, ショートカット=shift+super+KeyV)"
