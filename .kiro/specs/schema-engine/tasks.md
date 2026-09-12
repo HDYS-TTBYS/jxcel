@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. Foundation: クレートの足場・横断型・共有の道具
-- [ ] 1.1 クレートをワークスペースへ追加し、tauri 非依存を検査に載せる
+- [x] 1.1 クレートをワークスペースへ追加し、tauri 非依存を検査に載せる
   - `crates/schema-engine/` をライブラリクレートとして作り、ワークスペースの `members` に登録する
   - `document-format` への path 依存、`serde` / `serde_json`（`float_roundtrip`, `raw_value`）、`thiserror`、`jiff`、`regex` を依存に追加する
   - `jiff` はタイムゾーンデータベースを同梱する feature を有効にしない（実行ファイルのサイズに直接効くため）
@@ -300,3 +300,10 @@
   - _Requirements: 11.5, 11.6_
   - _Boundary: TypeRegistry, CellValidator_
   - _Depends: 9.1_
+
+## Implementation Notes
+
+- **開発機の cargo は podman ラッパである**（`~/.local/bin/cargo` → `podman run localhost/rustdev:1.98`）。作業ツリーを同一絶対パスへ bind mount して走るため、git worktree でもそのまま使える。ただし同イメージに rustfmt コンポーネントが無く `cargo fmt` が使えない。整形はホストの rustfmt 1.98.1（`--edition 2021`）を直接掛けて確認する。
+- **ワークスペース全体の `cargo build`/`cargo test` は走らせない**。`src-tauri` が Tauri 依存をコンパイルするため。対象は常に `-p schema-engine` に限定する。
+- `scripts/check-core-deps.sh` は引数なしだと `app-shell` を検査する。負の対照（`check-core-deps.sh jxcel` が tauri 一族を検出して exit 1）で検査器が生きていることを確認できる。
+- 1.1 の裁定: `crates/schema-engine` はまだ誰からも呼ばれない新規クレートであり、実行時に切り替える消費者経路が無い。Feature Flag Protocol のフラグは dead code になるだけなので導入せず、標準の RED → GREEN を使う（RED の証拠は各タスクで必須のまま）。

@@ -1,0 +1,72 @@
+[package]
+name = "schema-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "jxcel スキーマエンジン: 型カタログ・検証・型強制・スキーマ変更（Tauri 非依存のドメインクレート）"
+
+# ---------------------------------------------------------------------------
+# 依存方針（design.md「Allowed Dependencies」・steering structure.md / tech.md 準拠）
+#
+# 1. tauri 禁止: この Cargo.toml に tauri を追加してはならない。推移的依存も不可であり、
+#    `cargo tree -p schema-engine` のどこにも tauri（および `tauri-*` / `tauri_*`）が
+#    現れてはならない。GUI を起動せずにテストできることが層の分離の前提である
+#    （structure.md「Rust ドメインクレート」）。機械検査は CI の
+#    `bash scripts/check-core-deps.sh schema-engine` が行う（tasks.md 1.1）。
+# 2. 依存してよい兄弟ドメインクレートは document-format のみ: 依存の向きは
+#    `document-format → schema-engine → (data-grid / schema-editor / macro-runtime /
+#    export-templates / form-builder)` の一方向であり、逆流を許容しない
+#    （design.md「Architecture Integration」「Allowed Dependencies」）。`custom-types` は
+#    本クレートに依存する側であり、本クレートは `custom-types` を知らない
+#    （structure.md「拡張点は所有者と実装者を分ける」）。`src-tauri`（Tauri アダプタ）へも
+#    依存しない。
+# 3. jiff の feature を固定する: 既定 feature にはタイムゾーンデータベース（tzdb）を
+#    同梱する feature と、システムのタイムゾーンを読む `tz-system` が含まれる。IANA の
+#    注釈つきの値（`jiff` の `Zoned`）を初版で扱わないため、これらはすべて落とす
+#    （tzdb の同梱は単一実行ファイルのサイズに直接効く。design.md「Technology Stack」・
+#    research.md）。`perf-inline` だけは既定と同じ計測特性を保つため残す。
+# 4. serde_json の feature: `float_roundtrip`（f64 リテラルの読みをビット単位で一致させる）
+#    と `raw_value`（不透明ペイロードの中身を verbatim に扱う公認機構）のみを有効化する。
+#    **`serde_json::Value` を内部表現にしない**（document-format の規約を引き継ぐ）。
+# 5. 逐語で往復する値をライブラリに通さない: 10 進数は文字列としてそのまま往復する契約を
+#    持つため、10 進数のクレート（rust_decimal / bigdecimal / fastnum）を加えない。桁数の
+#    検査と順序比較は ASCII の 1 パス走査で足りる（tech.md「Dependency Floors」・
+#    design.md「Technology Stack」の「採らなかったもの」）。
+# ---------------------------------------------------------------------------
+[dependencies]
+# 上流のドメインクレート（依存グラフの根）。Document / Sheet / Row / CellValue /
+# SchemaPart / 各識別子型を読み書きに使う（design.md「Allowed Dependencies」）。
+document-format = { path = "../document-format" }
+# スキーマ宣言テキストの解析と正準出力（design.md「Technology Stack」）。
+serde = { version = "1.0", features = ["derive"] }
+# 上記依存方針 4 の 2 feature のみ。宣言は `float_roundtrip` により
+# 環境に依らず同じ解釈になり、不透明ペイロードの中身は `RawValue` で verbatim に扱える。
+serde_json = { version = "1.0", features = ["float_roundtrip", "raw_value"] }
+# 宣言を拒否する理由（SchemaError）と、実行時の失敗を判別可能な列挙として導出する
+# （要件 1.5, 1.6, 1.7, 3.5, 3.6, 4.8, 11.4）。文脈のみを持ち、表示用の文言を持たない。
+thiserror = "2.0"
+# 日時の厳密な解釈と正準表記（要件 2.4, 7.3）。tzdb を同梱する feature は有効にしない
+# （上記依存方針 3）。
+jiff = { version = "0.2", default-features = false, features = ["std", "perf-inline"] }
+# 文字列列の長さと書式（パターン）の制約（要件 4.5）。有限オートマトンで線形時間が
+# 構成上保証され、後方参照・先読みはコンパイル時に落ちる（ReDoS が原理的に起きない）。
+regex = "1.13"
+
+[dev-dependencies]
+# 10 万行 × 30 列の全件検証の予算（1 秒。要件 10.1, 10.3）を計測するベンチハーネス。
+criterion = "0.8"
+
+[lib]
+name = "schema_engine"
+path = "src/lib.rs"
+# libtest 自動ベンチターゲットを無効化し、criterion のフラグが cargo bench に
+# ファンアウトしても壊れないようにする（crates/document-format/Cargo.toml と同じ形）。
+bench = false
+
+# criterion ベンチターゲット（harness 直結）。実測（10 万行 × 30 列の全件検証と、
+# 一意制約を持つ列 1 本だけの再検証）は tasks.md 9.1 の標本と 9.2 の計測が
+# benches/large_sheet.rs に入れる。ここはハーネスの動作確認用の最小スケフォールドである。
+[[bench]]
+name = "large_sheet"
+harness = false

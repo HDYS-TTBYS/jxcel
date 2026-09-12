@@ -7,12 +7,17 @@
 #   適用範囲は `crates/` 配下のドメインクレートに限る。`src-tauri/` は Tauri に接続する
 #   アダプタクレートであり、`tauri` / `tauri-build` を持つことが役割そのものであるため、
 #   本規則の対象外とする（design.md「Allowed Dependencies」）。
-# - 他の jxcel ドメインクレートへの依存を持たないこと
-#   （document-format は依存グラフの最下層 = ルートクレートである）。
+# - 兄弟の jxcel ドメインクレートへの依存は**一方向**に限ること。`document-format` は
+#   依存グラフの最下層（ルートクレート）であり、**下流のドメインクレートはこれに依存して
+#   よい**（正典は `crates/document-format/Cargo.toml` の注記。例:
+#   `schema-engine → document-format`）。逆に `document-format` から下流のドメインクレート
+#   への依存は不可である。GUI を持たないドメインクレート同士は、この向きを守る限り
+#   依存してよい。
 [workspace]
 resolver = "2"
 members = [
     "crates/document-format",
+    "crates/schema-engine",
     "crates/app-shell",
     "crates/sidecar-smoke",
     "src-tauri",

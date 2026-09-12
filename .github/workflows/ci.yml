@@ -225,6 +225,17 @@ jobs:
         shell: bash
         run: bash scripts/check-core-deps.sh app-shell
 
+      # schema-engine も同じ検査に載せる（tasks.md 1.1。design.md「Modified Files」、
+      # structure.md「検査器は対象を引数で受け取る形にし、クレートを足したら CI の段も足す」）。
+      # 検査器 `check-core-deps.sh` は引数でパッケージ名を取る汎用のものであり、
+      # 2026-09-12 時点では app-shell にしか掛かっていなかった。依存グラフの根である
+      # document-format の上に載るドメインクレートも、tauri（`tauri-*` / `tauri_*` を含む）を
+      # 推移的に持たないことを要求される（`cargo tree` の normal / build / dev の 3 辺、
+      # 全 feature を走査する）。
+      - name: Check core crate does not depend on tauri (schema-engine)
+        shell: bash
+        run: bash scripts/check-core-deps.sh schema-engine
+
       # ファイルシステム系・シェル系のプラグインが依存ツリーに無いことの検査（要件 4.7 の
       # 制御の第 1 段、tasks.md 1.3）。**推移的依存まで見る**。上の `check-core-deps.sh` は
       # **ドメインコアクレート**（`crates/*`）が tauri 一族に依存しないことを検査するが、
