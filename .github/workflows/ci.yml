@@ -2104,26 +2104,18 @@ jobs:
           # 展開先を変えた後（`cd` の後）でも同じファイルを指せるよう絶対パスにする。
           appimage=$(CDPATH='' cd -- "$(dirname -- "$appimage")" && pwd)/$(basename -- "$appimage")
 
-          # **配布物の AppImage を展開し、低レベルライブラリはホストのものを使う。**
-          # AppImage が同梱する a11y スタックでは、AT-SPI の `GetActions` への応答を
-          # 組み立てる際に libdbus が `Array or variant type requires that type end_struct
-          # be written, but string was written.` で abort し、**アプリがツリーの読み取り中に
-          # 消える**（実測: 同梱ライブラリで起動した AppImage は `GetActions` の 1 回目で死ぬ。
-          # 同じ実行ファイルを展開してホストのライブラリで起動すると全項目を読める）。
-          # **この段が確かめるのは配布物のメニューの内容**であり、同梱ライブラリの組み合わせ
-          # ではない（自己完結性そのものは 10.3 / 10.4 の起動検証と
-          # `check-shipping-bundle.sh` が担う）。したがって**実行ファイルそのものは配布物の
-          # ものを展開して使い**、その下のライブラリだけをホストへ委ねる。
-          shipping_dir="$RUNNER_TEMP/jxcel-10-6-shipping"
-          rm -rf "$shipping_dir"
-          mkdir -p "$shipping_dir"
-          ( cd "$shipping_dir" && "$appimage" --appimage-extract >/dev/null )
-          shipping="$shipping_dir/squashfs-root/usr/bin/jxcel"
-          if [ ! -x "$shipping" ]; then
-            echo "NG: 配布物を展開した実行ファイルがありません: $shipping" >&2
-            exit 2
-          fi
-          export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          # **配布物の AppImage をそのまま起動する。** この段が確かめるのは**配布物のメニューの
+          # 内容**であり、同梱ライブラリの組み合わせではない（自己完結性そのものは 10.3 / 10.4 の
+          # 起動検証と `check-shipping-bundle.sh` が担う）。
+          #
+          # **a11y スタックを入れ替える処置（AppImage の展開＋ホストのライブラリ）は要らない。**
+          # 以前それを足したのは、検査器が `org.a11y.atspi.Action.GetActions` を呼んでいて、
+          # **22.04 の libatk-bridge 2.38 がそれで被検体を abort させる**ためだった
+          # （`scripts/check-menu-shortcut.sh` の「キーバインドは AT-SPI から読まない」を参照。
+          # 同梱のものでもホストのものでも 2.38 なので、入れ替えでは直らない）。
+          # **この段は `GetActions` を呼ばない**ので、配布物をそのまま使える。
+          # FUSE が使えないランナーでは起動の置き場が `APPIMAGE_EXTRACT_AND_RUN=1` へ退避する。
+          shipping="$appimage"
           document="$RUNNER_TEMP/jxcel-10-6-document.txt"
           # 7.7 は位置を読まないが、渡す位置は実在させる（検査側も実在を要求する）。
           printf 'jxcel 10.6 の検証で開くドキュメント（内容は読まれない。tasks.md 7.7）\n' > "$document"
@@ -2427,6 +2419,33 @@ jobs:
             param([object]$Handles)
             return ((@($Handles) | ForEach-Object { '0x{0:x}' -f $_.ToInt64() }) -join ' ')
           }
+          function Wait-Menu {
+            # **メニューバーが付くのを待つ。** アプリは**ウィンドウを出した後**にメニューを付ける
+            # — `WebviewWindowBuilder::build()` が戻ってから（WebView2 の初期化の後）
+            # `Window::set_menu` を呼ぶため、ウィンドウが列挙できるようになった直後の 1 回の
+            # `GetMenu` は 0 を返しうる（実測: ウィンドウの出現は起動から 162 ms、初回描画は
+            # 583 ms。メニューの付与はその間）。**1 回読んで 0 なら失敗**としていたため、
+            # ウィンドウを観測した直後の読みが偽の失敗になっていた（2026-09-12 の CI の実測）。
+            param([IntPtr]$Handle, [int]$Seconds = 30)
+            $deadline = (Get-Date).AddSeconds($Seconds)
+            while ((Get-Date) -lt $deadline) {
+              $menu = [JxcelMenuApi]::GetMenu($Handle)
+              if ($menu -ne [IntPtr]::Zero) { return $menu }
+              Start-Sleep -Milliseconds 100
+            }
+            return [IntPtr]::Zero
+          }
+          function Show-RecordTail {
+            # メニューが付かなかったときの原因（アプリが付与に失敗したのか、付ける前に
+            # 終わったのか）は記録にしか現れないので、失敗の直前に出す。
+            if (Test-Path $record) {
+              Write-Host "--- 診断記録（末尾）: $record ---"
+              Get-Content -Path $record -Encoding UTF8 -ErrorAction SilentlyContinue |
+                Select-Object -Last 40 | ForEach-Object { Write-Host $_ }
+            } else {
+              Write-Host "--- 診断記録: $record（存在しません） ---"
+            }
+          }
           # メニューバーを「部分メニュー名 → (項目の文字列 → コマンド識別子)」として読む。
           function Get-MenuTree {
             param([IntPtr]$Menu)
@@ -2485,8 +2504,11 @@ jobs:
             if ($shippingHandles.Count -ne 1) { throw "配布物のウィンドウが $($shippingHandles.Count) 枚あります（1 枚であるべき）" }
             Write-Host "検証 1/2: 配布物: ウィンドウ '$title' pid=$($shipping.Id) ハンドル=$(Get-HandleLabel -Handles $shippingHandles)"
 
-            $menu = [JxcelMenuApi]::GetMenu($shippingHandles[0])
-            if ($menu -eq [IntPtr]::Zero) { throw "配布物のウィンドウにメニューバーがありません（GetMenu が 0）" }
+            $menu = Wait-Menu -Handle $shippingHandles[0]
+            if ($menu -eq [IntPtr]::Zero) {
+              Show-RecordTail
+              throw "配布物のウィンドウにメニューバーがありません（GetMenu が 0 のまま 30 秒待ちました）"
+            }
             $tree = Get-MenuTree -Menu $menu
             Write-Host "OK: Win32: 配布物のウィンドウのメニューバーを読んだ（部分メニュー: $($tree.Keys -join ', ')）"
             Assert-MenuItem $tree "ファイル" "開く…`tCtrl+O" "配布物"
@@ -2561,8 +2583,11 @@ jobs:
             $docLabel = (($docLine -split "label=")[1] -split " ")[0]
 
             # **2 枚目のウィンドウにも自分用のメニューバーがある**（ウィンドウ単位の配置。要件 3.6）。
-            $secondMenu = [JxcelMenuApi]::GetMenu($newHandles[0])
-            if ($secondMenu -eq [IntPtr]::Zero) { throw "2 枚目のウィンドウにメニューバーがありません（ウィンドウ単位のメニューが付いていない）" }
+            $secondMenu = Wait-Menu -Handle $newHandles[0]
+            if ($secondMenu -eq [IntPtr]::Zero) {
+              Show-RecordTail
+              throw "2 枚目のウィンドウにメニューバーがありません（ウィンドウ単位のメニューが付いていない。GetMenu が 0 のまま 30 秒待ちました）"
+            }
             $secondTree = Get-MenuTree -Menu $secondMenu
             Assert-MenuItem $secondTree "ファイル" "検証: 対象ウィンドウを記録`tCtrl+Shift+J" "2 枚目（ウィンドウ単位のメニュー）"
             Write-Host "検証 2/2: 2 枚目: ラベル=$docLabel ハンドル=$(Get-HandleLabel -Handles $newHandles)（1 枚目とは別のハンドル）"

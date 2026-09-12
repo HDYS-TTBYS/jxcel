@@ -19,12 +19,13 @@
 #
 #   (1) **登録した項目がメニューに現れ、選択が登録元へ通知される** — 配布物を起動し、**AT-SPI** で
 #       実アプリのアクセシビリティ木を読む（9.5 が実測した手段。`[menu bar] → [menu] ファイル /
-#       診断 → [menu item] …`）。項目ごとに**基盤（GTK）が報告するキーバインド**も読むので、
-#       「表示の綴り」はアプリの自己申告ではなく**プラットフォームの表記**（`<Primary>` など）で
-#       確かめられる。続けて `org.a11y.atspi.Action.DoAction` で 1 つの項目を**実際に活性化**し、
-#       記録に現れる 2 行（`メニュー項目が選択された: 登録元=… 項目=… 対象ウィンドウ=…` と、
-#       登録元が送った `診断の導線の要求を送った: ウィンドウ = … / 導線 = …`）を要求する。
-#       **配布物に対して行う**ので、配布物のメニューそのものが読まれ、駆動される。
+#       診断 → [menu item] …`）。続けて `org.a11y.atspi.Action.DoAction` で 1 つの項目を
+#       **実際に活性化**し、記録に現れる 2 行（`メニュー項目が選択された: 登録元=… 項目=…
+#       対象ウィンドウ=…` と、登録元が送った `診断の導線の要求を送った: ウィンドウ = … /
+#       導線 = …`）を要求する。**配布物に対して行う**ので、配布物のメニューそのものが読まれ、
+#       駆動される。
+#       **`GetActions`（項目ごとのキーバインドの読み取り）は呼ばない** — 理由は下の
+#       「キーバインドは AT-SPI から読まない」。表示の綴りの証拠は (3) と (2) が担う。
 #   (2) **フォーカスされているウィンドウにだけショートカットが作用する** — 検証用の形を起動し、
 #       ドキュメント付きの 2 枚目を単一インスタンスの引き継ぎで開く。`XSetInputFocus` で
 #       フォーカスを移し、`XSendEvent`（`event_mask=0`。7.5 の実測手段。**XTEST はこの
@@ -32,12 +33,30 @@
 #       `[検証] ショートカットが作用した対象ウィンドウ=…` が**フォーカス中のラベルと一致する**
 #       ことを要求する。続けて**もう 1 枚へフォーカスを移して同じことを行い**、対象が追随する
 #       こと（および 1 回の押下で作用するのは 1 枚だけであること）を見る。
+#       **キーを実際に送って作用を要求するので、この段は「そのショートカットが基盤に登録され、
+#       配信されること」の実測である**（表示の綴りそのものではない）。
 #   (3) **ショートカットの表示がプラットフォームの表記に従う** — 検証用の形が残す
 #       `[検証] メニューを配置した: 配置=… 項目=…` の行を読み、**各部分メニューの位置・表示名・
 #       基盤へ渡した綴り（正準形）・配置方式**を要求する。Linux / Windows の正準形は `ctrl+…`、
 #       macOS は `super+…`（＝`Cmd`）であり、**同じ論理ショートカットがプラットフォームごとの
-#       綴りへ解決されていること**がここに現れる。あわせて (1) の AT-SPI のキーバインド
-#       （GTK が報告する `<Primary>…`）を突き合わせる。
+#       綴りへ解決されていること**がここに現れる。
+#
+# # キーバインドは AT-SPI から読まない（`GetActions` を呼んではならない）
+#
+# 以前は項目ごとに `org.a11y.atspi.Action.GetActions` を呼び、**GTK が報告するキーバインド**
+# （`<Primary>q` など）を読んでいた。**これは 10.6 の Linux 段では成立しない。**
+#
+#   - CI が固定している**最も古い対象環境（ubuntu-22.04）の `libatk-bridge-2.0.so.0` は 2.38.0**
+#     であり、その `impl_GetActions` は `a(sss)` の構造体へ**4 つ目の文字列**を書こうとする。
+#     libdbus は型の不一致で `Array or variant type requires that type end_struct be written,
+#     but string was written.` を出して **abort する** — つまり `GetActions` を 1 回呼ぶだけで
+#     **被検体のアプリ自身が死ぬ**（呼び出し側からは「相手が返事の前に D-Bus から消えた」と
+#     見える）。上流の修正（GNOME/at-spi2-core `dc0dc331`、2022-04-07）は 2.38 より後であり、
+#     22.04 には入らない。**アプリのバグではなく、ランナーの a11y スタックの性質である**
+#     （配布物が同梱する a11y スタックでも、ホストのものを読ませても 2.38 なので同じ）。
+#   - したがって**表示の綴りの証拠は (3) の記録（アプリが基盤へ渡した解決済みの綴り）と
+#     (2) のキー送出（そのショートカットが実際に作用する）で取る**。ポップアップの字形そのものは
+#     7.5 がホストで画素により実測済みである（こちらはランナーで再現できない）。
 #
 # # 証拠が何を証明し、何を証明しないか
 #
@@ -52,12 +71,15 @@
 #     どのウィンドウのウィジェットが反応したかは見ていない。**それでも「フォーカスと一致する
 #     こと」「フォーカスを移すと追随すること」は、この 1 行の比較で成立する。**
 #   - (3) の「表示」は**基盤へ渡した綴りまで**である。GTK が描く字形（`Ctrl+Shift+L`）そのものは
-#     アプリの記録には現れない（7.5 はポップアップの画素で確かめた）。この検査は
-#     (1) の GTK のキーバインド報告と突き合わせることで、**基盤がその綴りを受理して
-#     メニュー項目のアクセラレータとして保持していること**までを証明する。
+#     アプリの記録には現れない（7.5 がポップアップの画素で確かめた）。(1) の AT-SPI の読みからは
+#     **キーバインドを読まない**（上の「キーバインドは AT-SPI から読まない」）。
 #   - **配布物（既定のビルド）は検証専用の引き金を読まない**（9.7 の片付けの規約）ので、
 #     (1) は配布物で、(2)(3) は検証用の形で測る。段はその 2 つを別の引数で受け取る。
 #     配布物の記録に検証専用の行が 1 つも現れないことも (1) で確かめる。
+#   - **AT-SPI の呼び出しが失敗したら、アプリの出力と記録を添えて落ちる**（`atspi` の wrapper）。
+#     読み取りの失敗の原因（アプリが消えた・橋が落ちた・D-Bus が拒否した）は、被検体の出力に
+#     しか現れないことがある — 実際、上の `GetActions` の abort はこの wrapper が無い間は
+#     見えなかった。
 #
 # # 記録の読み方
 #
@@ -382,28 +404,17 @@ PRUNE_ROLES = {"scroll pane", "document web", "document frame", "table", "text"}
 
 EXPECTED = {
     "shipping": {
-        "ファイル": {
-            "開く…": (("primary",), "o"),
-            "終了": (("primary",), "q"),
-        },
-        "診断": {
-            "診断情報を書き出す…": (("primary", "shift"), "e"),
-            "記録の保存場所を表示": (("primary", "shift"), "l"),
-            "記録の詳細度…": (("primary", "shift"), "v"),
-        },
+        "ファイル": ("開く…", "終了"),
+        "診断": ("診断情報を書き出す…", "記録の保存場所を表示", "記録の詳細度…"),
     },
     "verification": {
-        "ファイル": {
-            "開く…": (("primary",), "o"),
-            "終了": (("primary",), "q"),
-            "検証: 対象ウィンドウを記録": (("primary", "shift"), "j"),
-            "検証: ドキュメント付きのみ": ((), None),
-        },
-        "診断": {
-            "診断情報を書き出す…": (("primary", "shift"), "e"),
-            "記録の保存場所を表示": (("primary", "shift"), "l"),
-            "記録の詳細度…": (("primary", "shift"), "v"),
-        },
+        "ファイル": (
+            "開く…",
+            "終了",
+            "検証: 対象ウィンドウを記録",
+            "検証: ドキュメント付きのみ",
+        ),
+        "診断": ("診断情報を書き出す…", "記録の保存場所を表示", "記録の詳細度…"),
     },
 }
 # 配布物（既定のビルド）に現れてはならない検証専用の項目（7.4 / 7.5 の片付けの規約）。
@@ -461,13 +472,10 @@ class Atspi:
     def name(self, dest, path):
         return self.property(dest, path, ACCESSIBLE, "Name")
 
-    def keybinding(self, dest, path):
-        actions = self.call(dest, path, ACTION, "GetActions")
-        if not actions:
-            return ""
-        # 基盤は `名前;説明;キーバインド` の形で返す（GTK の実装）。最後の区切りだけを取る。
-        return str(actions[0][2]).split(";")[-1].strip()
-
+    # **`GetActions`（キーバインドの読み取り）は持たない。** 呼ぶとランナー（ubuntu-22.04 の
+    # libatk-bridge 2.38）では被検体が abort する（ファイル冒頭の
+    # 「キーバインドは AT-SPI から読まない」を参照）。活性化（`DoAction`）は別の経路であり、
+    # 返り値も真偽値だけなので使える。
     def do_action(self, dest, path, index=0):
         return self.call(dest, path, ACTION, "DoAction", "i", str(index))
 
@@ -499,12 +507,10 @@ def walk(atspi, app):
             role = atspi.role(dest, path)
         except RuntimeError as error:
             ng(f"AT-SPI のロールを読めませんでした（{dest} {path}）: {error}")
-        entry = {"role": role, "name": "", "keybinding": "", "depth": depth}
+        entry = {"role": role, "name": "", "depth": depth}
         if role in ("menu bar", "menu", "menu item"):
             try:
                 entry["name"] = atspi.name(dest, path)
-                if role == "menu item":
-                    entry["keybinding"] = atspi.keybinding(dest, path)
             except RuntimeError as error:
                 ng(f"AT-SPI の項目を読めませんでした（{dest} {path}）: {error}")
             nodes.append(entry)
@@ -520,7 +526,7 @@ def walk(atspi, app):
 
 
 def menus(nodes):
-    """`menu bar` の直下の `menu` ごとに、項目名 → キーバインド を集める。"""
+    """`menu bar` の直下の `menu` ごとに、項目名を順に集める。"""
     found = {}
     bar_depth = None
     for node in nodes:
@@ -533,33 +539,10 @@ def menus(nodes):
     for node in nodes:
         if node["role"] == "menu" and node["depth"] == bar_depth + 1:
             current = node["name"]
-            found.setdefault(current, {})
+            found.setdefault(current, [])
         elif node["role"] == "menu item" and current is not None and node["depth"] == bar_depth + 2:
-            found[current][node["name"]] = node["keybinding"]
+            found[current].append(node["name"])
     return found
-
-
-def normalize(binding):
-    """GTK の報告を比較できる形にする（`<Primary>` を小文字の `primary` に、他も小文字に）。"""
-    return binding.lower()
-
-
-def check_binding(item, binding, modifiers, key):
-    text = normalize(binding)
-    if key is None:
-        if text != "":
-            ng(f"AT-SPI: {item} にキーバインドがあってはならないが {binding!r} が付いています")
-        return f"{item}=（キーバインドなし）"
-    if not text.endswith(key):
-        ng(f"AT-SPI: {item} のキーバインド {binding!r} がキー {key!r} で終わっていません")
-    for modifier in modifiers:
-        # `<Primary>` は GTK の「主修飾キー」表記（Linux / Windows は Ctrl、macOS は Command）。
-        if modifier == "primary":
-            if "primary" not in text and "control" not in text and "meta" not in text:
-                ng(f"AT-SPI: {item} のキーバインド {binding!r} に主修飾キーがありません")
-        elif modifier not in text:
-            ng(f"AT-SPI: {item} のキーバインド {binding!r} に {modifier} がありません")
-    return f"{item}={binding}"
 
 
 def verify(mode, app_name, timeout):
@@ -575,10 +558,10 @@ def verify(mode, app_name, timeout):
     for menu, items in expected.items():
         if menu not in found:
             ng(f"AT-SPI: 部分メニュー {menu!r} がメニューバーにありません（あるのは {sorted(found)}）")
-        for item, (modifiers, key) in items.items():
+        for item in items:
             if item not in found[menu]:
-                ng(f"AT-SPI: {menu!r} に項目 {item!r} がありません（あるのは {sorted(found[menu])}）")
-            print("OK: AT-SPI: " + check_binding(f"{menu} > {item}", found[menu][item], modifiers, key))
+                ng(f"AT-SPI: {menu!r} に項目 {item!r} がありません（あるのは {found[menu]}）")
+            print(f"OK: AT-SPI: {menu} > {item}（項目が現れる）")
     if found.get("診断") is not None and len(found["診断"]) != DIAGNOSTICS_ITEMS:
         ng(f"AT-SPI: 診断の部分メニューの項目が {len(found['診断'])} 個です（{DIAGNOSTICS_ITEMS} 個であるべき）")
     if mode == "shipping":
@@ -598,10 +581,7 @@ def tree(app_name, timeout):
         ng(f"AT-SPI にアプリ {app_name!r} が現れませんでした（{timeout} 秒）")
     for node in walk(atspi, app):
         indent = "  " * node["depth"]
-        if node["role"] == "menu item":
-            print(f"{indent}{node['role']} | {node['name']!r} | {node['keybinding']!r}")
-        else:
-            print(f"{indent}{node['role']} | {node['name']!r}")
+        print(f"{indent}{node['role']} | {node['name']!r}")
     return 0
 
 
@@ -774,6 +754,15 @@ if __name__ == "__main__":
 PY
 }
 
+# AT-SPI の呼び出し。**失敗したら、アプリの出力と記録を添えて落ちる。** 読み取りの失敗の原因
+# （アプリが消えた・アクセシビリティの橋が落ちた・D-Bus が呼び出しを拒否した）は被検体の出力に
+# しか現れないことがある — 実際、22.04 の libatk-bridge の `GetActions` がアプリを abort させて
+# いたことは、この wrapper（とその wrapper が呼ぶ `report_failure`）を足すまで見えなかった
+# （ファイル冒頭の「キーバインドは AT-SPI から読まない」を参照）。
+atspi() {
+  atspi_run "$@" || report_failure "AT-SPI の呼び出しが失敗した（$*）"
+}
+
 echo "診断記録: $record"
 echo "配布物: $app"
 echo "検証用の形: $verify_app"
@@ -791,12 +780,12 @@ fi
 echo "前提: '${title}' のウィンドウは検証の前に 1 枚も無い"
 
 # ---------------------------------------------------------------------------
-# (1) 配布物: メニュー項目の出現・ショートカットの表示・選択の通知
+# (1) 配布物: メニュー項目の出現・選択の通知（表示の綴りは (3) が担う）
 # ---------------------------------------------------------------------------
 
 phase_shipping=$(record_lines)
 
-echo "検証 1/3: 配布物を起動し、AT-SPI でメニュー木を読む（項目の出現とショートカットの表示）"
+echo "検証 1/3: 配布物を起動し、AT-SPI でメニュー木を読む（項目の出現）"
 nohup "$app" >"$x11_log" 2>&1 &
 x11_pid=$!
 launched_pids="$launched_pids $x11_pid"
@@ -817,12 +806,12 @@ echo "検証 1/3: 配布物のウィンドウ: $(printf '%s\n' "$x11_window_line
 
 # **活性化の対象を決めるのは活性化の時点のフォーカスである**（7.5）。AT-SPI の活性化の前に
 # フォーカスを確定させる（ウィンドウマネージャの有無に依存しない）。
-atspi_run x11-focus "$shipping_id"
+atspi x11-focus "$shipping_id"
 
 echo "AT-SPI（配布物）: メニュー木"
-atspi_run atspi-tree
+atspi atspi-tree
 echo "AT-SPI（配布物）: 期待の検査"
-atspi_run atspi-verify-shipping
+atspi atspi-verify-shipping
 
 # 記録に検証専用の行が現れないこと（9.7 の片付けの規約。既定のビルドは検証専用の記録を出さない）。
 if [ "$(record_count "$phase_shipping" "$placement_marker")" -ne 0 ]; then
@@ -831,7 +820,7 @@ fi
 echo "検証 1/3: 配布物の記録に検証専用の配置の行は現れない（0 件）"
 
 echo "検証 1/3: 診断 > 記録の保存場所を表示 を AT-SPI で活性化する（選択が登録元へ通知されること）"
-atspi_run atspi-activate "記録の保存場所を表示"
+atspi atspi-activate "記録の保存場所を表示"
 
 notified=$(wait_record "$phase_shipping" "メニュー項目が選択された: 登録元=app-shell 項目=app-shell.diagnostics-log-location 対象ウィンドウ=" 10 || true)
 if [ -z "$notified" ]; then
@@ -890,13 +879,13 @@ echo "検証 2/3: 1 枚目: ラベル=empty-1 識別子=0x$(printf '%s' "$first_
 # 割り当てた `Ctrl+Shift+J` を基盤が保持していること（これから駆動するショートカット）を
 # 確かめてから駆動する。
 echo "AT-SPI（検証用の形）: 期待の検査"
-atspi_run atspi-verify-verification
+atspi atspi-verify-verification
 
 # 1 枚目へフォーカスし、ショートカットを送る。**対象ウィンドウが empty-1 であること**を要求する。
 # **印は送る前に取る**（作用の行は送った直後に書かれる）。
 first_phase=$(record_lines)
-atspi_run x11-focus "$first_id"
-atspi_run x11-shortcut "$first_id"
+atspi x11-focus "$first_id"
+atspi x11-shortcut "$first_id"
 empty_hit=$(wait_record "$first_phase" "${probe_marker}empty-1$" 10 || true)
 if [ -z "$empty_hit" ]; then
   report_failure "1 枚目にフォーカスしたときのショートカットの対象が empty-1 として記録に現れません（ショートカットが作用していないか、対象がフォーカスと一致していません）"
@@ -948,8 +937,8 @@ echo "検証 2/3: 2 枚目: ラベル=${doc_label} 識別子=0x$(printf '%s' "$s
 
 # 2 枚目へフォーカスし、同じショートカットを送る。**対象が 2 枚目へ移ること**を要求する。
 second_phase=$(record_lines)
-atspi_run x11-focus "$second_id"
-atspi_run x11-shortcut "$second_id"
+atspi x11-focus "$second_id"
+atspi x11-shortcut "$second_id"
 doc_hit=$(wait_record "$second_phase" "${probe_marker}${doc_label}$" 10 || true)
 if [ -z "$doc_hit" ]; then
   report_failure "2 枚目にフォーカスしたときのショートカットの対象が ${doc_label} として記録に現れません（フォーカス先へ振り向いていない）"
@@ -967,8 +956,8 @@ echo "検証 2/3: 2 枚目のショートカットは 2 枚目だけに作用し
 
 # フォーカスを 1 枚目へ戻すと、対象も戻ること（追随すること）。
 back_phase=$(record_lines)
-atspi_run x11-focus "$first_id"
-atspi_run x11-shortcut "$first_id"
+atspi x11-focus "$first_id"
+atspi x11-shortcut "$first_id"
 back_hit=$(wait_record "$back_phase" "${probe_marker}empty-1$" 10 || true)
 if [ -z "$back_hit" ]; then
   report_failure "フォーカスを 1 枚目へ戻したときのショートカットの対象が empty-1 として記録に現れません（フォーカスの移動に追随していない）"
