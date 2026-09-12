@@ -34,7 +34,8 @@
 //! タスク 3.3 が同じモジュールに正準出力（`schema_to_text` / `type_definition_to_text`）
 //! を足した。タスク 4.1 が登録層 [`registry`] の拡張インターフェース（`CustomType` /
 //! `TypeRegistry`）を置いた。タスク 4.2 がコンパイル層 [`compile`] の列 1 本分の検証器
-//! （`compile::plan` の `ColumnValidator`）を置いた。
+//! （`compile::plan` の `ColumnValidator`）を置いた。タスク 4.3 が同じ層に型定義参照の
+//! 解決と循環の検出（`compile::resolve` の `resolve` / `Resolver`）を足した。
 
 pub mod compile;
 pub mod declaration;
