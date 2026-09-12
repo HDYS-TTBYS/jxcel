@@ -622,7 +622,7 @@ jobs:
           $elapsedMs = [int]((Get-Date) - $start).TotalMilliseconds
           Set-Content -Path $measure -Value "windows=$elapsedMs" -Encoding ascii
           Write-Host "OK: ウィンドウ '$title' が現れました (pid=$($p.Id), 起動から $elapsedMs ms)"
-          Write-Host "計測値: windows=$elapsedMs（書き出し先 $measure）"
+          Write-Host "計測値: windows=${elapsedMs}（書き出し先 ${measure}）"
           Stop-Process -Id $p.Id -Force
 
       # 起動時間の予算判定（tasks.md 10.3 / 要件 1.3, 6.8）。
@@ -874,7 +874,7 @@ jobs:
           appout="$RUNNER_TEMP/jxcel-app-output.log"
           mkdir -p "$(dirname "$record")"
           echo "診断記録: $record"
-          echo "アプリの出力: $appout（記録とは別ファイル）"
+          echo "アプリの出力: ${appout}（記録とは別ファイル）"
           spike="$RUNNER_TEMP/check-render.swift"
           cat > "$spike" <<'SWIFT'
           import CoreGraphics
@@ -1108,13 +1108,13 @@ jobs:
                   $actual = if ($match.Success) { $match.Groups[1].Value } else { "（報告なし）" }
                   if (-not $Expected) { break }
                   if ($actual -eq $Expected) { break }
-                  throw "${What}: 描画は成立しましたが、描画された画面が期待と一致しません: 期待 screen=$Expected / 実際 screen=$actual（起動時の指定が登録簿に無いか、描画が既定の画面へ落ちています）"
+                  throw "${What}: 描画は成立しましたが、描画された画面が期待と一致しません: 期待 screen=$Expected / 実際 screen=${actual}（起動時の指定が登録簿に無いか、描画が既定の画面へ落ちています）"
                 }
               }
               if (-not $heartbeat) { throw "${What}: 初回描画の成立行が 20 秒以内に現れませんでした（初回描画が成立していない）" }
               Write-Host "初回描画: $heartbeat"
               if ($Expected) {
-                Write-Host "描画された画面: $actual（期待 $Expected）"
+                Write-Host "描画された画面: ${actual}（期待 ${Expected}）"
                 # 要求の行は**証明ではなく起動の識別**として出す（あれば。配布物は出さない）。
                 foreach ($line in (Get-Content -Path $record -Encoding UTF8)) {
                   if ($line -like "*検証用の初期画面を指定した: screen=$Expected*") { Write-Host "初期画面の指定: $line" }
@@ -1736,8 +1736,14 @@ jobs:
           Add-Type -TypeDefinition $windowApi
 
           function Get-HandleLabel {
-            param([System.Collections.IEnumerable]$Handles)
-            return (($Handles | ForEach-Object { '0x{0:x}' -f $_.ToInt64() }) -join ' ')
+            # **`[object]` で受けて `@()` で包む。** PowerShell は 1 要素の配列を関数の戻り値で
+            # スカラー（`IntPtr`）へ開いてしまうため、`IEnumerable` で受けると
+            # 「1 枚だけのとき」に引数の型変換で落ちる（実測: Windows のメニュー検査。
+            # `Wait-Windows` が 1 枚を返した時点で
+            # `Cannot convert the "655462" value of type "System.IntPtr" to type
+            # "System.Collections.IEnumerable"`）。
+            param([object]$Handles)
+            return ((@($Handles) | ForEach-Object { '0x{0:x}' -f $_.ToInt64() }) -join ' ')
           }
           function Get-InstanceCount {
             return @(Get-Process -Name "jxcel" -ErrorAction SilentlyContinue).Count
@@ -1843,7 +1849,7 @@ jobs:
           if (-not $docLabelLine) { throw "新しいウィンドウが label=doc-*（ドキュメント付き）として記録に現れません" }
           $docLabel = (($docLabelLine -split "label=")[1] -split " ")[0]
           Write-Host "検証 (b): ウィンドウ数=$($secondHandles.Count)（1 つ目=$($firstHandles.Count) から 1 増えた） 既存のハンドル=$(Get-HandleLabel -Handles $firstHandles) は残っている"
-          Write-Host "検証 (b): 新しいウィンドウのラベル=$docLabel（doc-* ＝ ドキュメント付き。ラベルは記録が出す）"
+          Write-Host "検証 (b): 新しいウィンドウのラベル=${docLabel}（doc-* ＝ ドキュメント付き。ラベルは記録が出す）"
           Write-Host "検証 (b): 記録（引き継ぎ）: $handover"
 
           Write-Host "検証 (a): 引数なしで再度実行する（既にあるウィンドウを前面に出すだけで、新しいウィンドウを作らない）"
@@ -1924,7 +1930,7 @@ jobs:
           }
           Write-Host "検証 (c): 拒否 — ウィンドウは残り（$(Get-HandleLabel -Handles $denyHandles)）、プロセス pid=$($denied.Id) も生存"
           Write-Host "検証 (c): 記録（拒否の往復）: $denyLine"
-          Write-Host "検証 (c): 拒否の往復の回数=$roundTrips（1 回の終了要求につき 1 回）"
+          Write-Host "検証 (c): 拒否の往復の回数=${roundTrips}（1 回の終了要求につき 1 回）"
 
           Stop-Instance $denied
           if (-not (Wait-WindowsGone -OwnerPid $denied.Id -Seconds 60)) {
@@ -2097,12 +2103,43 @@ jobs:
           appimage=$1
           # 展開先を変えた後（`cd` の後）でも同じファイルを指せるよう絶対パスにする。
           appimage=$(CDPATH='' cd -- "$(dirname -- "$appimage")" && pwd)/$(basename -- "$appimage")
+
+          # **配布物の AppImage を展開し、低レベルライブラリはホストのものを使う。**
+          # AppImage が同梱する a11y スタックでは、AT-SPI の `GetActions` への応答を
+          # 組み立てる際に libdbus が `Array or variant type requires that type end_struct
+          # be written, but string was written.` で abort し、**アプリがツリーの読み取り中に
+          # 消える**（実測: 同梱ライブラリで起動した AppImage は `GetActions` の 1 回目で死ぬ。
+          # 同じ実行ファイルを展開してホストのライブラリで起動すると全項目を読める）。
+          # **この段が確かめるのは配布物のメニューの内容**であり、同梱ライブラリの組み合わせ
+          # ではない（自己完結性そのものは 10.3 / 10.4 の起動検証と
+          # `check-shipping-bundle.sh` が担う）。したがって**実行ファイルそのものは配布物の
+          # ものを展開して使い**、その下のライブラリだけをホストへ委ねる。
+          shipping_dir="$RUNNER_TEMP/jxcel-10-6-shipping"
+          rm -rf "$shipping_dir"
+          mkdir -p "$shipping_dir"
+          ( cd "$shipping_dir" && "$appimage" --appimage-extract >/dev/null )
+          shipping="$shipping_dir/squashfs-root/usr/bin/jxcel"
+          if [ ! -x "$shipping" ]; then
+            echo "NG: 配布物を展開した実行ファイルがありません: $shipping" >&2
+            exit 2
+          fi
+          export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           document="$RUNNER_TEMP/jxcel-10-6-document.txt"
           # 7.7 は位置を読まないが、渡す位置は実在させる（検査側も実在を要求する）。
           printf 'jxcel 10.6 の検証で開くドキュメント（内容は読まれない。tasks.md 7.7）\n' > "$document"
 
-          if command -v at-spi-bus-launcher >/dev/null 2>&1; then
-            echo "AT-SPI: at-spi-bus-launcher あり（at-spi2-core が導入されている）"
+          # `at-spi-bus-launcher` はディストリビューションによって PATH 上に無く
+          # `/usr/libexec` に置かれる（実測: ubuntu-22.04 のランナー）。
+          at_spi_launcher=""
+          for candidate in at-spi-bus-launcher /usr/libexec/at-spi-bus-launcher \
+                           /usr/lib/at-spi2-core/at-spi-bus-launcher; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+              at_spi_launcher=$candidate
+              break
+            fi
+          done
+          if [ -n "$at_spi_launcher" ]; then
+            echo "AT-SPI: at-spi-bus-launcher あり（$at_spi_launcher。at-spi2-core が導入されている）"
           else
             echo "AT-SPI: at-spi-bus-launcher が無い（at-spi2-core が無い。メニューの AT-SPI 読みは成立しない）" >&2
           fi
@@ -2115,26 +2152,22 @@ jobs:
               xvfb-run -a --server-args="-screen 0 1280x1024x24" \
                 dbus-run-session -- env GTK_MODULES=gail:atk-bridge \
                 sh scripts/check-menu-shortcut.sh \
-                  "$appimage" "$_verify" jxcel 60 100 100 "$record" "$document"
+                  "$shipping" "$_verify" jxcel 60 100 100 "$record" "$document"
             else
               xvfb-run -a --server-args="-screen 0 1280x1024x24" \
                 env GTK_MODULES=gail:atk-bridge \
                 sh scripts/check-menu-shortcut.sh \
-                  "$appimage" "$_verify" jxcel 60 100 100 "$record" "$document"
+                  "$shipping" "$_verify" jxcel 60 100 100 "$record" "$document"
             fi
           }
 
           echo "検証: 配布物のメニュー項目（AT-SPI）・選択の通知・フォーカス先への作用・解決済みの綴り"
-          if ! run_check target/release/jxcel; then
-            echo "FUSE 経由で配布物を起動できなかったため、APPIMAGE_EXTRACT_AND_RUN=1 で再試行します" >&2
-            export APPIMAGE_EXTRACT_AND_RUN=1
-            run_check target/release/jxcel
-          fi
+          run_check target/release/jxcel
 
           # 反証: 検証用の形の代わりに配布物を渡す（7.5 の検証専用の項目が無い）。
           echo "反証: 検証用の形の代わりに配布物を渡す（検証専用の項目が無いので非 0 で落ちるはず）"
           rc=0
-          output=$(run_check "$appimage" 2>&1) || rc=$?
+          output=$(run_check "$shipping" 2>&1) || rc=$?
           printf '%s\n' "$output" | tail -n 20
           if [ "$rc" -eq 0 ]; then
             echo "NG: 検証専用の項目が無いのに検査が成功してしまった（検査が項目を本当に見ていない）" >&2
@@ -2163,7 +2196,7 @@ jobs:
           output="$RUNNER_TEMP/jxcel-10-6-macos-output.log"
           mkdir -p "$(dirname "$record")" "$(dirname "$output")"
           echo "診断記録: $record"
-          echo "アプリの出力: $output（記録とは別ファイル）"
+          echo "アプリの出力: ${output}（記録とは別ファイル）"
           verify="target/release/jxcel"
           if [ ! -x "$verify" ]; then
             echo "NG: 検証用の形の実行ファイルがありません: $verify" >&2
@@ -2241,7 +2274,7 @@ jobs:
           # （終了したプロセスが名前を保持しても常駐してはいない。10.5 の Linux 検査と同じ判断）。
           cleanup
           if kill -0 "$pid" 2>/dev/null; then
-            echo "NG: 後始末の後に jxcel（pid=$pid）が残っています" >&2
+            echo "NG: 後始末の後に jxcel（pid=${pid}）が残っています" >&2
             exit 1
           fi
           remaining=$(ps -Ao stat=,comm= | awk '$1 !~ /^Z/ && $2 == "jxcel" { n += 1 } END { print n + 0 }')
@@ -2275,7 +2308,7 @@ jobs:
           }
           if (-not (Test-Path $installed)) { throw "導入された実行ファイルが見つかりません: $installed" }
           $verify = "target/release/jxcel.exe"
-          if (-not (Test-Path $verify)) { throw "検証用の形が見つかりません: $verify（--features verification-triggers のビルドではない）" }
+          if (-not (Test-Path $verify)) { throw "検証用の形が見つかりません: ${verify}（--features verification-triggers のビルドではない）" }
           $document = Join-Path $env:RUNNER_TEMP "jxcel-10-6-document.txt"
           Set-Content -Path $document -Value "jxcel 10.6 の検証で開くドキュメント（内容は読まれない。tasks.md 7.7）" -Encoding UTF8
 
@@ -2385,8 +2418,14 @@ jobs:
             if ($Target) { $Target.WaitForExit(10000) | Out-Null }
           }
           function Get-HandleLabel {
-            param([System.Collections.IEnumerable]$Handles)
-            return (($Handles | ForEach-Object { '0x{0:x}' -f $_.ToInt64() }) -join ' ')
+            # **`[object]` で受けて `@()` で包む。** PowerShell は 1 要素の配列を関数の戻り値で
+            # スカラー（`IntPtr`）へ開いてしまうため、`IEnumerable` で受けると
+            # 「1 枚だけのとき」に引数の型変換で落ちる（実測: Windows のメニュー検査。
+            # `Wait-Windows` が 1 枚を返した時点で
+            # `Cannot convert the "655462" value of type "System.IntPtr" to type
+            # "System.Collections.IEnumerable"`）。
+            param([object]$Handles)
+            return ((@($Handles) | ForEach-Object { '0x{0:x}' -f $_.ToInt64() }) -join ' ')
           }
           # メニューバーを「部分メニュー名 → (項目の文字列 → コマンド識別子)」として読む。
           function Get-MenuTree {
@@ -2467,7 +2506,7 @@ jobs:
             Write-Host "検証 1/2: 診断 > 記録の保存場所を表示 を WM_COMMAND で活性化する（選択が登録元へ通知されること）"
             $itemId = $tree["診断"]["記録の保存場所を表示`tCtrl+Shift+L"]
             if (-not [JxcelMenuApi]::PostMessage($shipping.MainWindowHandle, [JxcelMenuApi]::WM_COMMAND, [IntPtr]$itemId, [IntPtr]::Zero)) {
-              throw "WM_COMMAND を送れませんでした（コマンド識別子=$itemId）"
+              throw "WM_COMMAND を送れませんでした（コマンド識別子=${itemId}）"
             }
             $notified = Find-RecordLine -Skip $phaseShipping -Pattern "メニュー項目が選択された: 登録元=app-shell 項目=app-shell.diagnostics-log-location " -Seconds 10
             if (-not $notified) { throw "活性化の通知の行（メニュー項目が選択された: 登録元=app-shell 項目=app-shell.diagnostics-log-location …）が記録に現れません" }
@@ -2647,7 +2686,7 @@ jobs:
         shell: bash
         run: |
           set -eu
-          # 8.1 の解決規則（Linux は `usr/share/jxcel/sidecar-smoke`。AppImage は $APPDIR、
+          # 8.1 の解決規則（Linux は `usr/share/jxcel/sidecar-smoke`。AppImage は ${APPDIR}、
           # それ以外は実行ファイルの 1 つ上の `share/jxcel`）に合わせ、**検証用の形から見た
           # 解決先**へ staging した原本を複製する（deb / システムインストールと同じ形）。
           # `tauri-build` は Linux では externalBin を複製しないため、この段が要る。
@@ -2691,7 +2730,7 @@ jobs:
         run: |
           $verify = "target\release\jxcel.exe"
           $sidecarPath = "target\release\sidecar-smoke.exe"
-          if (-not (Test-Path $verify)) { throw "検証用の形が見つかりません: $verify（--features verification-triggers のビルドではない）" }
+          if (-not (Test-Path $verify)) { throw "検証用の形が見つかりません: ${verify}（--features verification-triggers のビルドではない）" }
           if (-not (Test-Path $sidecarPath)) { throw "8.1 の解決先の補助プロセスが見つかりません: $sidecarPath" }
           $expected = (Resolve-Path $sidecarPath).Path
           $record = Join-Path $env:LOCALAPPDATA "com.jxcel.app\logs\jxcel.log"
@@ -2776,7 +2815,7 @@ jobs:
             Write-Host "(b) 強制終了の前の一覧:"
             Show-Sidecars "(b) 強制終了の前"
             $killed = $p.Id
-            Write-Host "(b) アプリ（pid=$killed）へ Stop-Process -Force を送る（終了処理は走らない）"
+            Write-Host "(b) アプリ（pid=${killed}）へ Stop-Process -Force を送る（終了処理は走らない）"
             $sw = [Diagnostics.Stopwatch]::StartNew()
             Stop-Process -Id $p.Id -Force
             $p.WaitForExit(10000) | Out-Null
@@ -3070,8 +3109,8 @@ jobs:
           $verify = "target\release\jxcel.exe"
           $dist = Join-Path $env:LOCALAPPDATA "jxcel\jxcel.exe"
           $recordPath = Join-Path $env:LOCALAPPDATA "com.jxcel.app\logs\jxcel.log"
-          if (-not (Test-Path $verify)) { throw "検証用の形が見つかりません: $verify（--features verification-triggers のビルドではない）" }
-          if (-not (Test-Path $dist)) { throw "配布物が見つかりません: $dist（1.5 の段の /S 導入が先に必要）" }
+          if (-not (Test-Path $verify)) { throw "検証用の形が見つかりません: ${verify}（--features verification-triggers のビルドではない）" }
+          if (-not (Test-Path $dist)) { throw "配布物が見つかりません: ${dist}（1.5 の段の /S 導入が先に必要）" }
           Write-Host "診断記録: $recordPath"
 
           # 1 行あたりのバイト数と行数の一覧（`scripts/check-bulk-transfer.sh` と同じ値。検査器は
@@ -3136,7 +3175,7 @@ jobs:
                 if ($bytes -le 0) { throw "($Phase) 行数 $rows の期待バイト数が 0 以下です（ペイロードが空である）" }
                 $calls = Get-Count -Skip $skip -Pattern ("jxcel::commands::bulk.*受信バイト数 = " + $bytes + "$")
                 if ($calls -ne 1) {
-                  throw "($Phase) 行数 $rows（期待 $bytes B）の bulk_echo の記録行が 1 行ではありません（観測 $calls 行。1 回の呼び出しで受け渡せていないか、重複しています）"
+                  throw "($Phase) 行数 ${rows}（期待 $bytes B）の bulk_echo の記録行が 1 行ではありません（観測 $calls 行。1 回の呼び出しで受け渡せていないか、重複しています）"
                 }
                 $results = @(Get-Lines -Skip $skip | Where-Object {
                   $_ -match ('"rows":' + $rows + '[,}]') -and
@@ -3146,7 +3185,7 @@ jobs:
                   $_ -match '"invocations":1[,}]'
                 })
                 if ($results.Count -ne 1) {
-                  throw "($Phase) 行数 $rows（期待 $bytes B）の一括転送の結果が 1 行ではありません（観測 $($results.Count) 行。送信・受信のバイト数・バイト一致・呼び出し回数 1 のいずれかが期待と一致しません）"
+                  throw "($Phase) 行数 ${rows}（期待 $bytes B）の一括転送の結果が 1 行ではありません（観測 $($results.Count) 行。送信・受信のバイト数・バイト一致・呼び出し回数 1 のいずれかが期待と一致しません）"
                 }
                 Write-Host "($Phase) 行数=$rows 呼び出し回数=1 期待バイト数=$bytes / $($results[0])"
               }
