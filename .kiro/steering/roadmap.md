@@ -41,7 +41,7 @@ JSON をファイル実体とする、データベースとして運用可能な
 チェックボックスは**実装完了**を表す。仕様だけが先行している状態はここに書く。
 
 - `document-format` — 実装完了（38 サブタスク）
-- `app-shell` — 仕様完了（requirements / design / tasks、56 サブタスク）。実装未着手
+- `app-shell` — 実装は 56/56 サブタスクが完了し、最終検証の是正まで入っている（883c6fc、2026-09-12）。tasks.md のタスクグループ見出し 10 件のチェックだけが未確定なので、下のチェックボックスは保留にしている
 - 他 12 本 — `brief.md` のみ
 
 ## Specs (dependency order)
@@ -65,6 +65,11 @@ JSON をファイル実体とする、データベースとして運用可能な
 - **Wave 2**: schema-engine
 - **Wave 3**: data-grid, schema-editor, macro-runtime, version-control, export-templates, form-builder
 - **Wave 4**: custom-types, macro-stdlib, macro-editor-lsp, formula-engine, form-web-server
+
+**Wave は目安であり、実際に着手できるかは各スペックの Dependencies が決める**。2026-09-12 時点で
+依存が満たされているのは `schema-engine` と `version-control` の 2 本である（version-control の依存は
+document-format と app-shell だけで、schema-engine を待たない。Wave 3 に置いてあるのは束ねの都合である）。
+残り 10 本はいずれも schema-engine か macro-runtime を待つ。
 
 **MVP**: Wave 1 + Wave 2 + data-grid + schema-editor。この時点で「開いて・型を定義して・編集して・保存できる型付きスプレッドシート」が成立する。
 
