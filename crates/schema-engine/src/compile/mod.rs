@@ -323,6 +323,27 @@ impl CompiledSchema {
         self.defaults.get(column.index())?.as_ref()
     }
 
+    /// 行を追加するときの初期値の列（要件 4.2, 4.3）。
+    ///
+    /// 宣言された既定値を列の並び順に並べ、既定値が宣言されていない列には値なし
+    /// （[`CellValue::Null`]）を与える。返す列の長さは**常に**
+    /// [`CompiledSchema::column_count`] と一致する — 行の値は列の添字で並ぶため
+    /// （design.md「Data Models / Domain Model」の不変条件）、使用不能な列も含めて
+    /// すべての列に値が 1 つずつ入る。
+    ///
+    /// **行の追加そのものは本クレートの仕事ではない。** 上流の `Document::add_row` が行を
+    /// 発行し、`Document::set_row_values` がこの値を書く（design.md「Public API Layer /
+    /// SchemaEngineApi」の `default_row`）。本クレートは値だけを供給する。
+    ///
+    /// 既定値の適合はコンパイル時に検査済みであるため（要件 4.8）、ここでは
+    /// [`CompiledSchema::default_value`] が返す検査済みの値をそのまま複製する。
+    pub fn default_row(&self) -> Vec<CellValue> {
+        self.defaults
+            .iter()
+            .map(|value| value.clone().unwrap_or(CellValue::Null))
+            .collect()
+    }
+
     /// 一意制約を持つ列の添字（要件 4.6, 4.7）。
     ///
     /// 使用不能な列は含まない — 一意性の比較に要る正準形を作る手段が、未登録の拡張型には
@@ -1817,5 +1838,138 @@ mod tests {
             }
             other => panic!("入れ子のフィールドの不適合な既定値が通った: {other:?}"),
         }
+    }
+
+    /// 行を追加するときの初期値の列を、宣言された既定値から組み立て、既定値の無い列へ
+    /// 値なしを与える（要件 4.2, 4.3。design.md「Public API Layer / SchemaEngineApi」の
+    /// `default_row`）。
+    #[test]
+    fn the_default_row_assembles_declared_defaults_and_nulls_for_the_rest() {
+        let definitions = vec![definition(
+            def_id(),
+            declared(TypeKind::Int, Constraints::default()),
+        )];
+        let mut directly_declared = column("数量", declared(TypeKind::Int, Constraints::default()));
+        directly_declared.default = Some(CellValue::Int(5));
+        let mut behind_ref = column("参照の既定値", TypeDecl::Ref(def_id()));
+        behind_ref.default = Some(CellValue::Int(7));
+        let mut custom_default = column(
+            "郵便番号",
+            declared(
+                TypeKind::Custom,
+                Constraints {
+                    custom_type: Some(CUSTOM_ID.into()),
+                    ..Constraints::default()
+                },
+            ),
+        );
+        custom_default.default = Some(CellValue::Text("〒100-0001".into()));
+        let root = schema(vec![
+            directly_declared,
+            column(
+                "既定値なし",
+                declared(TypeKind::Text, Constraints::default()),
+            ),
+            behind_ref,
+            custom_default,
+        ]);
+        let compiled = compile_declaration(&root, &definitions, &registry_with_postal_code())
+            .expect("標本は計画へ落ちる");
+
+        assert_eq!(
+            vec![
+                CellValue::Int(5),
+                // 既定値が宣言されていない列は値なしになる（要件 4.3 の後段）。
+                CellValue::Null,
+                // 参照の先の型で適合を検査済みの既定値もそのまま供給される（要件 4.8）。
+                CellValue::Int(7),
+                // 拡張型の既定値も同じ経路で供給される（要件 4.8, 11.2）。
+                CellValue::Text("〒100-0001".into()),
+            ],
+            compiled.default_row()
+        );
+    }
+
+    /// 供給された初期値の長さが常に列数と一致する（要件 4.3）。行の値は列の添字で並ぶため
+    /// （design.md「Data Models / Domain Model」の不変条件）、既定値の有無・使用不能な列・
+    /// 入れ子の列が混ざっても長さは動かない。
+    #[test]
+    fn the_default_row_length_always_matches_the_column_count() {
+        // 列を 1 本も宣言していないルートスキーマ（新規シートの初期状態。要件 1.8）。
+        let empty = compile_declaration(&schema(Vec::new()), &[], &TypeRegistry::new())
+            .expect("列 0 本の宣言は受理される");
+        assert!(empty.default_row().is_empty());
+        assert_eq!(empty.column_count(), empty.default_row().len());
+
+        // 使用不能な列（未知の `kind`。要件 11.7）と入れ子の列を含む標本。
+        let mut unknown = column("未知", declared(TypeKind::Int, Constraints::default()));
+        unknown.ty = TypeDecl::Kind {
+            kind: DeclaredKind::Unknown("future-kind".into()),
+            constraints: Constraints::default(),
+        };
+        let mut with_default = column("既定値", declared(TypeKind::Int, Constraints::default()));
+        with_default.default = Some(CellValue::Int(1));
+        let root = schema(vec![
+            with_default,
+            column(
+                "入れ子",
+                declared(TypeKind::Object, catalog_constraints(TypeKind::Object)),
+            ),
+            unknown,
+            column(
+                "配列",
+                declared(TypeKind::Array, catalog_constraints(TypeKind::Array)),
+            ),
+        ]);
+        let compiled = compile_declaration(&root, &[], &TypeRegistry::new())
+            .expect("使用不能な列があってもコンパイルは成功する");
+
+        assert_eq!(4, compiled.column_count());
+        assert_eq!(4, compiled.default_row().len());
+        assert!(compiled.is_unusable(ColumnIndex::new(2)));
+        // 使用不能な列には既定値が無いため値なしが与えられる。他の列の既定値は保たれる。
+        assert_eq!(CellValue::Int(1), compiled.default_row()[0]);
+        assert_eq!(CellValue::Null, compiled.default_row()[2]);
+    }
+
+    /// 行の追加そのものは上流のドキュメントモデルの経路で行い、本クレートは値だけを供給
+    /// する（要件 4.3。design.md「Public API Layer / SchemaEngineApi」の
+    /// `default_row` の注意）。
+    #[test]
+    fn the_supplied_defaults_are_written_through_the_upstream_row_path() {
+        let mut with_default = column("数量", declared(TypeKind::Int, Constraints::default()));
+        with_default.default = Some(CellValue::Int(5));
+        let root = schema(vec![
+            with_default,
+            column("備考", declared(TypeKind::Text, Constraints::default())),
+        ]);
+        let root_text = schema_to_text(&root).expect("標本のルートは正準形を持つ");
+        let envelope = format!(r#"{{"root":{root_text},"types":[]}}"#);
+
+        let mut document = Document::new();
+        let sheet = document.add_sheet("標本");
+        document
+            .set_sheet_columns(sheet, vec!["数量".to_owned(), "備考".to_owned()])
+            .expect("標本のシートは実在する");
+        document
+            .set_root_schema(
+                sheet,
+                SchemaPart::parse(&envelope).expect("標本は妥当なエンベロープ"),
+            )
+            .expect("標本のシートは実在する");
+        let compiled = compile(&document.sheets()[0], &TypeRegistry::new())
+            .expect("シートのルートスキーマから計画が組み立てられる");
+
+        // 上流の経路で行を発行し、供給された初期値をそのまま書く。
+        let row = document.add_row(sheet).expect("標本のシートは実在する");
+        document
+            .set_row_values(sheet, row, compiled.default_row())
+            .expect("標本の行はシートに属する");
+
+        assert_eq!(
+            &[CellValue::Int(5), CellValue::Null],
+            document.sheets()[0].rows()[0].values(),
+            "供給された初期値が上流の行の値になっていない"
+        );
     }
 }
