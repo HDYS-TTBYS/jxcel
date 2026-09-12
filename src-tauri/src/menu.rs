@@ -1107,14 +1107,48 @@ where
     focused.into_iter().next()
 }
 
+/// そのウィンドウが**前面（Win32 の `GetForegroundWindow`）**であるか。Windows 以外では常に偽。
+///
+/// **Windows でこれが要る理由**（実測: 2026-09-12 の Windows のランナー）: 基盤（tao 0.35.3）の
+/// `Window::is_focused` は `is_active && is_focused` を返し、後者の Win32 の**キーボード
+/// フォーカス**は **WebView2 の子ウィンドウがフォーカスを持つ通常の状態で偽になる**（親は
+/// `WM_KILLFOCUS` を受け取る。`tao-0.35.3/src/platform_impl/windows/window_state.rs` の
+/// `has_active_focus`）。したがって `is_focused` だけでは、**ウィンドウが前面にあっても
+/// 対象が無い**と判定してしまう（CI の 10.6 の段が `対象ウィンドウ=(対象なし)` を実測した）。
+/// 利用者が見て「操作対象」であるのは前面のウィンドウなので、前面の一致も「フォーカスされて
+/// いる」とみなす。
+///
+/// Linux の `is_focused` は GTK のトップレベルがアクティブかを返すので足り、macOS はアプリ
+/// 全体のメニューしか持たないためこの経路を使わない（対象はフォーカスのウィンドウである）。
+#[cfg(not(target_os = "windows"))]
+fn is_foreground<R: Runtime>(_window: &WebviewWindow<R>) -> bool {
+    false
+}
+
+/// そのウィンドウが前面であるか（Windows。上の doc を参照）。
+#[cfg(target_os = "windows")]
+fn is_foreground<R: Runtime>(window: &WebviewWindow<R>) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    let Ok(hwnd) = window.hwnd() else {
+        return false;
+    };
+    // SAFETY: `GetForegroundWindow` は引数を取らず、現在の前面ウィンドウを返すだけの読み取りで
+    // ある（呼び出し元スレッドのウィンドウを要求しない）。
+    let foreground = unsafe { GetForegroundWindow() };
+    foreground.0 == hwnd.0
+}
+
 /// 現在フォーカスされているウィンドウを**その時点で**観測する。
 ///
 /// [`select_focused`]（選び方の唯一の実装）に実行中のウィンドウを渡すだけである。
+/// **Windows では前面のウィンドウも「フォーカスされている」とみなす**（[`is_foreground`] の
+/// doc に理由と実測）。
 fn focused_window<R: Runtime>(app: &AppHandle<R>) -> Option<WindowLabel> {
     select_focused(app.webview_windows().values().map(|window| {
         (
             WindowLabel::new(window.label()),
-            window.is_focused().unwrap_or(false),
+            window.is_focused().unwrap_or(false) || is_foreground(window),
         )
     }))
 }

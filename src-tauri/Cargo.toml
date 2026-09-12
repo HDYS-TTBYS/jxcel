@@ -80,6 +80,23 @@ gtk = { version = "0.18", features = ["v3_24"] }
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 rfd = { version = "0.17", default-features = false }
 
+# **Windows**: メニュー選択の対象ウィンドウを解決するために前面ウィンドウを問い合わせる
+# （要件 3.6、7.5。`src-tauri/src/menu.rs` の `is_foreground`）。
+#
+# tao 0.35.3 の `is_focused` は `is_active && is_focused` であり、Win32 のキーボード
+# フォーカスの側は **WebView2 の子ウィンドウがフォーカスを持つ通常の状態で偽になる**
+# （親は `WM_KILLFOCUS` を受け取る。`tao-0.35.3/src/platform_impl/windows/window_state.rs` の
+# `has_active_focus`）。実測（2026-09-12 の Windows のランナー）: `WM_COMMAND` でメニュー項目を
+# 活性化しても対象が `(対象ウィンドウなし)` になった。**利用者が見て「操作対象」であるのは
+# 前面のウィンドウ**なので、`GetForegroundWindow` との一致も「フォーカスされている」とみなす。
+#
+# **`Cargo.lock` に新しいパッケージは増えない** — `tauri` 2.11.5 が同じ版（0.61）を同じ
+# feature（`Win32_UI_WindowsAndMessaging`）付きで既に解決している（`tauri` の Cargo.toml の
+# `[target."cfg(windows)".dependencies.windows]`）。**Linux / macOS では宣言しない**ので、
+# それらのビルドには現れない。
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
 [build-dependencies]
 # `tauri_build::build()` の実体。ウィンドウ設定の検証・capability スキーマの生成・
 # ACL マニフェストの生成・`externalBin` の複製を担う（BuildPipeline）。

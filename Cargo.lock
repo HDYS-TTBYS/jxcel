@@ -2186,6 +2186,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-log",
  "tauri-plugin-single-instance",
+ "windows",
 ]
 
 [[package]]
