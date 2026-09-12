@@ -246,6 +246,13 @@ record_last() {
 }
 
 # 記録の `<開始行数>` より後に正規表現が現れた回数。
+#
+# **`awk -v` を使わない。** `awk -v p="…"` は**代入の値のバックスラッシュを解釈してしまう**ため、
+# 呼び出し側が渡す退避つきの角括弧（`probe_marker` の `\[検証\]`。`grep -E` に渡す前提）が
+# 素の `[検証]`（＝文字クラス）になり、**一致件数が常に 0 になる**（実測: 2026-09-12 の Linux の
+# ランナー。`awk: warning: escape sequence '\[' treated as plain '['` を出したうえで
+# 「2 枚目にフォーカスしたときの作用が 1 回ではありません（0 回）」と偽の失敗になった）。
+# `grep -E` は他の 2 つ（`record_find` / `record_last`）と同じ解釈であり、件数もそのまま数える。
 record_count() {
   _from=$1
   _pattern=$2
@@ -253,7 +260,8 @@ record_count() {
     echo 0
     return 0
   fi
-  tail -n "+$((_from + 1))" "$record" 2>/dev/null | awk -v p="$_pattern" '$0 ~ p { n += 1 } END { print n + 0 }'
+  # 一致が無ければ `grep -c` は 0 を出して非 0 終了する（`set -e` の下でも落ちないように受ける）。
+  tail -n "+$((_from + 1))" "$record" 2>/dev/null | grep -c -E "$_pattern" || true
 }
 
 # 記録に一致行が現れるのを待つ（最大 <秒>）。現れれば行を出して終了 0。

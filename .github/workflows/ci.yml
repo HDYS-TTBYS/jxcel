@@ -1218,13 +1218,16 @@ jobs:
           rm -rf "$extract"
           mkdir -p "$extract"
           ( cd "$extract" && "$appimage" --appimage-extract 'usr/bin/jxcel' >/dev/null )
-          if strings -a "$extract/squashfs-root/usr/bin/jxcel" | grep -q 'JXCEL_VERIFICATION'; then
+          # **`strings -a … | grep -q` を使わない**（`grep -q` が早く読むのをやめると `strings` が
+          # EPIPE で非 0 終了し、`pipefail` の下では一致していても pipeline が失敗する。macOS の
+          # 段で実際に偽の失敗になった。`grep -c` は最後まで読む）。
+          if [ "$(strings -a "$extract/squashfs-root/usr/bin/jxcel" | grep -c 'JXCEL_VERIFICATION' || true)" -ne 0 ]; then
             echo "NG: 配布物の実行ファイルに検証専用の識別子が入っています" >&2
             strings -a "$extract/squashfs-root/usr/bin/jxcel" | grep 'JXCEL_VERIFICATION' >&2
             exit 1
           fi
           rm -rf "$extract"
-          if ! strings -a target/release/jxcel | grep -q 'JXCEL_VERIFICATION_DENY_CLOSE'; then
+          if [ "$(strings -a target/release/jxcel | grep -c 'JXCEL_VERIFICATION_DENY_CLOSE' || true)" -eq 0 ]; then
             echo "NG: 検証用の形に JXCEL_VERIFICATION_DENY_CLOSE がありません（--features verification-triggers のビルドではない）" >&2
             exit 1
           fi
@@ -1278,11 +1281,19 @@ jobs:
           fi
           # 配布物に検証専用の識別子が入っていないこと（5.4 の片付けの規約）と、検証用の形には
           # 入っていること。(c) が実測するのは検証用の形である。
-          if strings -a "$dist" | grep -q 'JXCEL_VERIFICATION'; then
-            echo "NG: 配布物の実行ファイルに検証専用の識別子が入っています" >&2
+          #
+          # **`strings -a … | grep -q` を使わない。** `grep -q` は一致した時点で読むのをやめる
+          # （＝書き手のパイプを閉じる）ので、`strings` が EPIPE で非 0 終了し、`set -o pipefail`
+          # の下では**一致していても pipeline が失敗する**（実測: 2026-09-12 の macOS のランナー。
+          # Xcode の `strings` が `error: … strings: failed to flush output` を出し、
+          # 下の「DENY_CLOSE が無い」が**偽の失敗**になった）。**`grep -c` は最後まで読む**。
+          dist_markers=$(strings -a "$dist" | grep -c 'JXCEL_VERIFICATION' || true)
+          if [ "$dist_markers" -ne 0 ]; then
+            echo "NG: 配布物の実行ファイルに検証専用の識別子が入っています（$dist_markers 件）" >&2
             exit 1
           fi
-          if ! strings -a "$verify" | grep -q 'JXCEL_VERIFICATION_DENY_CLOSE'; then
+          verify_markers=$(strings -a "$verify" | grep -c 'JXCEL_VERIFICATION_DENY_CLOSE' || true)
+          if [ "$verify_markers" -eq 0 ]; then
             echo "NG: 検証用の形に JXCEL_VERIFICATION_DENY_CLOSE がありません（--features verification-triggers のビルドではない）" >&2
             exit 1
           fi
