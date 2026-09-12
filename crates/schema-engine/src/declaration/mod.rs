@@ -73,6 +73,8 @@ use crate::types::decimal::DecimalDigits;
 use crate::types::TypeKind;
 use document_format::{CellValue, SheetId, TypeDefId};
 
+pub mod codec;
+
 /// ルートスキーマの宣言（本機能が所有する `root` ペイロードの中身。design.md
 /// 「スキーマ宣言の文法」）。
 ///

@@ -29,8 +29,9 @@
 //! [`validate`] の 4 つのサブモジュールと違反の表現を置いた。タスク 2.1 が型カタログ
 //! [`types`] と、その下に 10 進数・日時・文字列の 3 つのサブモジュールを宣言した。
 //! タスク 3.1 が宣言層 [`declaration`] のデータ構造（`Schema` / `ColumnDecl` /
-//! `FieldDecl` / `TypeDecl` / `Constraints`）を置いた。宣言テキストの解析と正準出力は
-//! タスク 3.2 / 3.3 が `declaration::codec` に足す。
+//! `FieldDecl` / `TypeDecl` / `Constraints`）を置いた。タスク 3.2 が不透明ペイロードの
+//! 文法の解析（`declaration::codec` の `parse_schema` / `parse_type_definition`）を置いた。
+//! 正準出力はタスク 3.3 が `declaration::codec` に足す。
 
 pub mod declaration;
 pub mod error;
