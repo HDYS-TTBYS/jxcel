@@ -18,6 +18,7 @@ import { installCloseVeto } from "./shell/closeVeto";
 import { Layout } from "./shell/Layout";
 import { installRenderHeartbeat } from "./shell/renderHeartbeat";
 import { bootstrapAppearance } from "./shell/theme";
+import { installVerificationBulkTransfer } from "./shell/verificationBulk";
 
 // `src/index.html` のマウント先。欠けたまま起動すると無内容のウィンドウが残るため、
 // 黙って握り潰さずに失敗させる（要件 10.2 の趣旨に沿う）。
@@ -57,6 +58,11 @@ async function mountShell(root: HTMLElement): Promise<void> {
 
   // 通知の送信側は 1 つだけである（9.7 はこれを再利用し、2 つ目を足さない）。
   installRenderHeartbeat();
+
+  // 検証専用: 大きなペイロードの一括転送の駆動側（要件 4.5。タスク 10.8）。**既定のビルドの
+  // 起動では何もしない**（検証ビルドの初期化スクリプトが載せたグローバルがあるときだけ働く）。
+  // 転送は初回描画の後に回るので、8.2 のハートビートと起動予算（10.3）は変わらない。
+  installVerificationBulkTransfer();
 
   createRoot(root).render(
     <StrictMode>

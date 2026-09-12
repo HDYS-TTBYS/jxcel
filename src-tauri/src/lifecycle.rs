@@ -404,6 +404,14 @@ pub fn run() -> Result<(), StartupError> {
     //   活性化の時点（7.5 の `activation_target`）で行われる。
     commands::diagnostics_install(app.handle());
 
+    // 手順 4.3 の続き（検証専用）: 一括転送の結果を診断の記録へ流すリスナ（要件 4.5。タスク
+    //   10.8）。フロントエンド（`src/shell/verificationBulk.ts`）が `bulk_echo` の往復を検めた
+    //   結果をイベントで送るので、ここで受けて記録の 1 行に写す。**記録機構のロガーは手順 4 で
+    //   取り付け済み**であり、この位置なら転送（ウィンドウの読み込み後）より前に購読が張られる。
+    //   **既定のビルドにはこの購読もイベント名も存在しない**（`verification-triggers` feature）。
+    #[cfg(feature = "verification-triggers")]
+    register_bulk_result_listener(app.handle());
+
     // 手順 4.4: 補助プロセスの出力を診断の記録先へ流す購読（要件 5.9。タスク 8.1）。
     //   **位置の根拠**: 記録機構のロガーは手順 4 の `Builder::build` で取り付けられるため、
     //   それより前では `log::…!` がどこにも残らない。逆にこれより後では、補助プロセスを
@@ -2103,6 +2111,39 @@ fn handle_reopen(app: &AppHandle, has_visible_windows: bool) {
     }
     log::info!("Dock のクリックを受け付け、ウィンドウを提示し直す");
     present_existing_or_create(app);
+}
+
+/// 検証専用: フロントエンドが行った一括転送の結果を受け取るイベントの名前（タスク 10.8）。
+///
+/// **`src/shell/verificationBulk.ts` の `BULK_RESULT_EVENT` と同じ綴りでなければならない。**
+/// 既定のビルドにはどちらか一方しか存在しない検証専用の対の契約である。
+#[cfg(feature = "verification-triggers")]
+const VERIFY_BULK_RESULT_EVENT: &str = "jxcel-verification-bulk-result";
+
+/// 検証専用: 一括転送の結果を診断の記録へ 1 行で残す（要件 4.5。タスク 10.8）。
+///
+/// フロントエンド（`src/shell/verificationBulk.ts`）が行数の一覧ごとに `invokeRaw("bulk_echo", …)`
+/// を **1 回**呼び、往復の同一性を検めた結果（行数・送信バイト数・受信バイト数・バイト一致・
+/// **呼び出し回数**）をこのイベントで送る。ここはそれを受けて記録へ写すだけである。
+///
+/// **記録に内容は書かない**（要件 8.4）。運ばれるのはバイト数と真偽値だけであり、ドキュメントの
+/// 値ではない。イベントの本文は `emit` が直列化した JSON 文字列であるため、**解釈せずにそのまま
+/// 1 行として写す**（検査器 `scripts/check-bulk-transfer.sh` が数値と真偽値を読む。`serde_json` を
+/// 直接依存に足さないための選択でもある）。
+///
+/// **別の事実が独立に記録へ残る**: `bulk_echo` 自身が呼び出しごとに受信バイト数を記録する
+/// （7.2）。検査器は**呼び出し回数をそちらの行数から数え**、ここに書かれた自己申告と突き合わせる
+/// （自己申告だけを大きく書いても通らない）。
+///
+/// **この関数は既定のビルドには存在しない**（`verification-triggers` feature）。したがって
+/// 配布物にはイベント名も購読も入らず、フロントエンドが送っても誰も受け取らない。
+#[cfg(feature = "verification-triggers")]
+fn register_bulk_result_listener(app: &AppHandle) {
+    use tauri::Listener;
+
+    app.listen(VERIFY_BULK_RESULT_EVENT, |event| {
+        log::info!("一括転送の結果: {}", event.payload());
+    });
 }
 
 /// 明示的な終了（[`request_exit`]）、意図的なパニック、または補助プロセスの起動を、環境変数で

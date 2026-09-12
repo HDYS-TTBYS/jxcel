@@ -189,12 +189,14 @@ fn build_window<R: Runtime>(app: &AppHandle<R>, label: &str) -> tauri::Result<We
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::default())
         .title(WINDOW_TITLE)
         .inner_size(width, height);
-    // 検証専用: 初期画面の選択（要件 10.4 / タスク 9.7）。**既定のビルドではこの分岐ごと
-    // 消える**ので、配布物の初期画面は常に 9.6 の空ウィンドウの画面である（環境変数の読み取りは
-    // [`initial_screen_script`] の中にしか無く、そこは `verification-triggers` の下にある）。
-    // 指定が無ければ何もしない（**無条件に初期化スクリプトを足さない**）。
+    // 検証専用: 初期画面の選択（要件 10.4 / タスク 9.7）と一括転送の駆動（要件 4.5 / タスク
+    // 10.8）。**既定のビルドではこの分岐ごと消える**ので、配布物の初期画面は常に 9.6 の
+    // 空ウィンドウの画面であり、一括転送も起きない（環境変数の読み取りは
+    // [`initial_screen_script`] / [`bulk_rows_script`] の中にしか無く、どちらも
+    // `verification-triggers` の下にある）。指定が無ければ何もしない
+    // （**無条件に初期化スクリプトを足さない**）。
     #[cfg(feature = "verification-triggers")]
-    if let Some(script) = initial_screen_script() {
+    if let Some(script) = verification_init_script() {
         builder = builder.initialization_script(script);
     }
     // 位置は復元できたときだけ指定する（指定しなければウィンドウマネージャの既定の配置に
@@ -417,6 +419,135 @@ fn initial_screen_script() -> Option<String> {
         "window.{} = \"{}\";",
         VERIFY_INITIAL_SCREEN_GLOBAL, requested
     ))
+}
+
+// ---------------------------------------------------------------------------
+// 検証専用: 大きなペイロードの一括転送の駆動（要件 4.5 / タスク 10.8）
+// ---------------------------------------------------------------------------
+
+/// 検証専用: 転送する行数の一覧を指定する環境変数（例 `100,100000`）。
+///
+/// **`verification-triggers` feature の下にのみ存在する**（既定のビルドには環境変数の読み取り
+/// 自体が入らない）。10.8 は「10 万行規模のデータが **1 回の呼び出し**で受け渡せること」と
+/// 「**呼び出し回数が行数に比例しないこと**」を実アプリで観測する。後者を示すには少なくとも
+/// 2 つの大きさが要るので、値は**正の整数の一覧**（2〜4 件）とする。
+#[cfg(feature = "verification-triggers")]
+const VERIFY_BULK_ROWS_ENV: &str = "JXCEL_VERIFICATION_BULK_ROWS";
+
+/// 初期化スクリプトが書く行数の一覧のグローバルの名前。**`src/shell/verificationBulk.ts` の
+/// `VERIFICATION_BULK_ROWS_GLOBAL` と同じ綴りでなければならない**（既定のビルドにはどちらか
+/// 一方しか存在しない検証専用の対の契約）。
+#[cfg(feature = "verification-triggers")]
+const VERIFY_BULK_ROWS_GLOBAL: &str = "__JXCEL_VERIFICATION_BULK_ROWS__";
+
+/// 検証専用: 受け付ける行数の下限の件数。**1 件では「行数に比例しない」ことを示せない**ので、
+/// 1 件だけの指定は受け付けない（フロントエンド側も同じ規則で弾く）。
+#[cfg(feature = "verification-triggers")]
+const MIN_VERIFY_BULK_SIZES: usize = 2;
+
+/// 検証専用: 受け付ける行数の上限の件数（初期化スクリプトと記録を小さく保つ）。
+#[cfg(feature = "verification-triggers")]
+const MAX_VERIFY_BULK_SIZES: usize = 4;
+
+/// 検証専用: 1 件あたりの行数の上限。1 行あたり [`VERIFY_BULK_LINE_BYTES`] バイトなので
+/// 1,000,000 行 = 47,000,000 B であり、**7.2 の上限（64 MiB = 67,108,864 B）の内側に収まる**
+/// （上限を超える入力は 7.2 の契約で空の応答になるため、検証が経路の上限に当たらない値にする）。
+#[cfg(feature = "verification-triggers")]
+const MAX_VERIFY_BULK_ROWS: u64 = 1_000_000;
+
+/// 検証専用: 1 行あたりのバイト数。**`src/shell/verificationBulk.ts` の `BULK_LINE_BYTES` と
+/// `scripts/check-bulk-transfer.sh` の `bulk_line_bytes` と同じ値でなければならない**
+/// （検査器が期待バイト数を `行数 × これ` で計算する）。7.2 の実測（10 万行 = 4,700,000 B）と
+/// 同じ 47 B である。
+#[cfg(feature = "verification-triggers")]
+const VERIFY_BULK_LINE_BYTES: u64 = 47;
+
+/// 検証専用: 環境変数の値を行数の一覧に解釈する。**純粋関数**であり、受け付ける形をテストで
+/// 固定する。**初期化スクリプトのソースへそのまま埋め込む**ため、数字と区切り以外は受け付けない
+/// （引用符・括弧・式を混ぜられない）。
+///
+/// 受け付ける形: 空でない正の整数を `,` で 2〜4 件。前後の空白は許す。0・負・非数・範囲外・
+/// 件数外はすべて `None`。
+#[cfg(feature = "verification-triggers")]
+fn parse_bulk_rows(value: &str) -> Option<Vec<u64>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let mut rows = Vec::new();
+    for part in value.split(',') {
+        let part = part.trim();
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let count: u64 = part.parse().ok()?;
+        if count == 0 || count > MAX_VERIFY_BULK_ROWS {
+            return None;
+        }
+        rows.push(count);
+    }
+    if !(MIN_VERIFY_BULK_SIZES..=MAX_VERIFY_BULK_SIZES).contains(&rows.len()) {
+        return None;
+    }
+    Some(rows)
+}
+
+/// 検証専用: フロントエンドへ行数の一覧を渡す初期化スクリプト（タスク 10.8）。
+///
+/// 指定が無い・解釈できない・範囲外のときは `None` を返し、**転送は 1 件も起きない**
+/// （検査器は結果の行が現れないので非 0 で落ちる — 黙って小さい転送へ縮退しない）。
+/// **どの一覧を要求したかを記録に 1 行残す**（検査器が起動の識別として読む。期待バイト数も
+/// ここに出すので、記録だけで要求と期待が突き合わせられる）。
+#[cfg(feature = "verification-triggers")]
+fn bulk_rows_script() -> Option<String> {
+    let requested = std::env::var(VERIFY_BULK_ROWS_ENV).ok()?;
+    let rows = match parse_bulk_rows(&requested) {
+        Some(rows) => rows,
+        None => {
+            log::warn!(
+                "{} の値を行数の一覧に使えない（無視する）: {requested:?}",
+                VERIFY_BULK_ROWS_ENV,
+            );
+            return None;
+        }
+    };
+    // 区切りの作り方はフロントエンド（`src/shell/verificationBulk.ts` の `join(",")`）と
+    // 検査器（`scripts/check-bulk-transfer.sh` の `IFS=,` による分割）の両方で同じ形になる
+    // ように固定する。
+    let list = rows
+        .iter()
+        .map(|count| count.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let expected = rows
+        .iter()
+        .map(|count| (count * VERIFY_BULK_LINE_BYTES).to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    log::info!(
+        "検証用の一括転送を要求した: 行数={list} / 1 行あたり={} B / 期待バイト数={expected}",
+        VERIFY_BULK_LINE_BYTES,
+    );
+    Some(format!("window.{} = [{list}];", VERIFY_BULK_ROWS_GLOBAL))
+}
+
+/// 検証専用: 初期化スクリプトを 1 本にまとめる。
+///
+/// `WebviewWindowBuilder::initialization_script` は複数回呼べるが、**呼び出しを 1 箇所に保つ**
+/// ためここで連結する（初期画面の指定と一括転送の指定は独立であり、どちらか片方だけでも
+/// 有効でなければならない）。どちらも指定が無ければ `None`（**無条件に初期化スクリプトを
+/// 足さない**）。
+#[cfg(feature = "verification-triggers")]
+fn verification_init_script() -> Option<String> {
+    let parts: Vec<String> = [initial_screen_script(), bulk_rows_script()]
+        .into_iter()
+        .flatten()
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.concat())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -867,5 +998,50 @@ mod tests {
         assert!(!is_embeddable_screen_id("smoke;table"));
         assert!(!is_embeddable_screen_id("(smoke)"));
         assert!(!is_embeddable_screen_id("表"));
+    }
+
+    /// 検証専用の行数の一覧（要件 4.5 / タスク 10.8）は**初期化スクリプトのソースへそのまま
+    /// 埋め込まれる**ので、数字と区切り以外を受け付けない。**1 件だけの指定は受け付けない** —
+    /// 1 件では「呼び出し回数が行数に比例しない」ことを示せないためである（null を返すと転送が
+    /// 1 件も起きず、検査器が非 0 で落ちる）。
+    #[cfg(feature = "verification-triggers")]
+    #[test]
+    fn only_a_plain_row_list_can_be_embedded_in_the_initialization_script() {
+        use super::{parse_bulk_rows, MAX_VERIFY_BULK_ROWS};
+
+        // 実際に使う値（10 万行規模と、比較用の小さい値）と、周囲の空白・上限の値。
+        assert_eq!(parse_bulk_rows("100,100000"), Some(vec![100, 100_000]));
+        assert_eq!(parse_bulk_rows(" 100 , 100000 "), Some(vec![100, 100_000]));
+        assert_eq!(
+            parse_bulk_rows("1,2,3,4"),
+            Some(vec![1, 2, 3, 4]),
+            "件数の上限までは受け付ける"
+        );
+        assert_eq!(
+            parse_bulk_rows(&format!("{MAX_VERIFY_BULK_ROWS},{MAX_VERIFY_BULK_ROWS}")),
+            Some(vec![MAX_VERIFY_BULK_ROWS, MAX_VERIFY_BULK_ROWS]),
+            "行数の上限そのものは受け付ける"
+        );
+        assert_eq!(
+            parse_bulk_rows(&format!("{},100", MAX_VERIFY_BULK_ROWS + 1)),
+            None,
+            "行数の上限を超える値は受け付けない"
+        );
+
+        // 1 件・0 件・空・空要素・非数・0・負・上限超え・件数超え・式を混ぜた値は**すべて拒否する**。
+        assert_eq!(parse_bulk_rows("100"), None);
+        assert_eq!(parse_bulk_rows(""), None);
+        assert_eq!(parse_bulk_rows("   "), None);
+        assert_eq!(parse_bulk_rows("100,"), None);
+        assert_eq!(parse_bulk_rows(",100000"), None);
+        assert_eq!(parse_bulk_rows("100,100000,"), None);
+        assert_eq!(parse_bulk_rows("100,abc"), None);
+        assert_eq!(parse_bulk_rows("100,1_000"), None);
+        assert_eq!(parse_bulk_rows("100,0"), None);
+        assert_eq!(parse_bulk_rows("100,-1"), None);
+        assert_eq!(parse_bulk_rows("100,100000,1,2,3"), None);
+        assert_eq!(parse_bulk_rows("100,1000001"), None);
+        assert_eq!(parse_bulk_rows("100,100000];alert(1);//"), None);
+        assert_eq!(parse_bulk_rows("100,1e5"), None);
     }
 }

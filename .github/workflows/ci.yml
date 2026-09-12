@@ -2654,6 +2654,333 @@ jobs:
           Write-Host "検証（後始末）: 残存プロセス数=0（アプリ・補助プロセスとも）"
           Write-Host "OK: Windows: 通常終了・強制終了・孫ありの 3 条件すべてで残存補助プロセスが 0 であることを検証した"
       # ---------------------------------------------------------------------
+      # 一括転送の検証（tasks.md 10.8 / 要件 4.5）
+      #
+      # **10 万行規模のデータが 1 回の呼び出しで受け渡せること**と、**呼び出し回数が行数に
+      # 比例しないこと**を、実アプリの生バイト経路（7.2 の `bulk_echo`）で実測する。
+      #
+      # ## 駆動の仕組み（配布物に検証用の入口を残さない）
+      #
+      # 検証用の形（`target/release/jxcel[.exe]`）を環境変数
+      # `JXCEL_VERIFICATION_BULK_ROWS=<行数の一覧>`（例 `100,100000`）付きで起動する。Rust
+      # （`src-tauri/src/window/mod.rs` の `bulk_rows_script`。`verification-triggers` の下にだけ
+      # 存在する）がその値を**ウィンドウの初期化スクリプト**としてグローバルへ載せ、フロント
+      # エンド（`src/shell/verificationBulk.ts`）が初回描画の後に**行数ごとに 1 回ずつ**
+      # `invokeRaw("bulk_echo", …)` を呼ぶ。**コマンドも権限も増やしていない**（`emit` は
+      # `core:default` に含まれる既存の許可の範囲）。**配布物（既定のビルド）は環境変数も
+      # 初期化スクリプトも持たない**ので、一括転送は 1 件も起きない（5.4 / 7.4 の片付けと同じ規約。
+      # 10.5 の段が `strings` で不在を確かめている）。
+      #
+      # ## 証拠の形（2 つの独立した事実を突き合わせる）
+      #
+      #   - **呼び出し回数**は `bulk_echo` 自身が呼び出しごとに記録する `受信バイト数 = <N>` の
+      #     行数から数える（7.2 の実装。アプリの記録であって、フロントエンドの自己申告ではない）。
+      #   - **送信バイト数・受信バイト数・往復のバイト一致・呼び出し回数**はフロントエンドが
+      #     イベントで報告し、Rust のリスナ（`verification-triggers` の下にだけ存在する）が
+      #     記録へ 1 行で写す（`一括転送の結果: {"rows":…,"sentBytes":…,"byteIdentical":true,…}`）。
+      #   検査器は両者を突き合わせるので、**どちらか一方の自己申告だけでは通らない**。
+      #
+      # ## 主張（tasks.md 10.8 の完了状態）
+      #
+      #   (i) **10 万行が 1 回の呼び出しで**: 100,000 行（4,700,000 B）の転送について、
+      #       `bulk_echo` の記録行がちょうど 1 行であり、送信・受信のバイト数が一致し、
+      #       往復が`byteIdentical=true` であること。
+      #  (ii) **呼び出し回数が行数に比例しない**: 2 つの大きさ（100 行 = 4,700 B と 100,000 行 =
+      #       4,700,000 B）で**同じ定数 1** であること、かつ一覧の件数を超える余分な呼び出しが
+      #       1 件も無いこと。**2 つの大きさは必須である** — 1 件では定数であることを示せない
+      #       （検査器が 1 件の一覧を入力として拒否する）。
+      #
+      # ## 「本当に実行されたか」の錠前（空振りで緑にしない）
+      #
+      # 判定の前に、**要求の行**（検証用の形の Rust だけが出す）と**行数ごとの `bulk_echo` の行**と
+      # **行数ごとの結果の行**の 3 つすべてを要求する。期待バイト数は `行数 × 1 行あたり 47 B` と
+      # して**検査器が計算し直す**（フロントエンドの申告を信用しない）ので、期待値が 0 以下に
+      # なることはない。転送が 1 件も起きなければ（引き金を読まない・起動しない・失敗した）、
+      # どの段も必ず非 0 で落ちる。**この錠前そのものを各段の 2 番目の検証で実測する** —
+      # 配布物（既定のビルド）に対して同じ検査を走らせ、**非 0 で落ちることを要求する**。
+      #
+      # ## ペイロードの大きさと 7.2 の上限（64 MiB）の関係
+      #
+      #   1 行 47 B であり、100,000 行 = 4,700,000 B（約 4.48 MiB）、100 行 = 4,700 B。検証用の
+      #   環境変数の上限は 1,000,000 行 = 47,000,000 B（約 44.8 MiB）で、**7.2 の 64 MiB
+      #   （67,108,864 B）の内側**に収まる（上限を超える入力は空の応答になるため、検証が経路の
+      #   上限に当たる値を使わない）。
+      #
+      # ## この環境（Linux）で確認できないこと
+      #
+      # macOS / Windows の段は**このホストでは実行できず、CI が唯一の実行の場**である。検査器は
+      # Linux / macOS で同じ POSIX sh が走り（`scripts/check-bulk-transfer.sh`。X11 に依存しない
+      # ため macOS でもそのまま使える）、Windows の段は同じ主張を PowerShell で組む。
+      # **macOS のプロセス起動と Windows の `Start-Process` による起動・記録の読み取りは CI だけが
+      # 実測する。**
+      # ---------------------------------------------------------------------
+
+      # Linux の一括転送の検証（tasks.md 10.8）。1 回目の検証は検証用の形で 2 つの大きさ
+      # （100 行と 100,000 行）を 1 回ずつ転送させ、2 回目は**配布物を渡して非 0 で落ちることを
+      # 要求する**（「本当に実行されたか」の錠前の実測。FUSE に依存しないよう展開実行で起動する）。
+      - name: Verify bulk transfer of a 100k-row payload (Linux / Xvfb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -eu
+          # 4.4 の解決（Linux はアプリケーションデータ領域の下の logs。空の XDG_DATA_HOME は
+          # 未設定として $HOME へ落ちる — アプリ側の解決と同じ）。
+          record="${XDG_DATA_HOME:-$HOME/.local/share}/com.jxcel.app/logs/jxcel.log"
+          echo "診断記録: $record"
+          # 記録は**追記式**であり、検査器は失敗時に記録の末尾 40 行を出力へダンプする。したがって
+          # **出力全体を grep してはいけない** — 直前の実行（陽性）が書いた行がダンプに混ざり、
+          # 前の実行の要求行で「引き金を読んでいない」判定が壊れ、前の実行の掃除行で「起動した」
+          # 判定が偽に成立する（いずれも実際に起きた）。以下の判定は**各実行の直前に取った行数より
+          # 後ろの行だけ**を見る（Windows の段の `$beforeNeg` と同じ規律）。
+          record_lines() {
+            if [ -f "$record" ]; then wc -l < "$record" | tr -d ' '; else echo 0; fi
+          }
+          # `<開始行数>` より後の行だけから `grep -E` の一致数を出す（記録が無ければ 0）。
+          count_after() {
+            if [ ! -f "$record" ]; then echo 0; return 0; fi
+            tail -n "+$(( $1 + 1 ))" "$record" 2>/dev/null | grep -c -E "$2" || true
+          }
+
+          set -- target/release/bundle/appimage/*.AppImage
+          appimage=$1
+          echo "検証 1/2: 検証用の形で 100 行と 100,000 行を 1 回ずつ転送し、呼び出し回数が一定であることを検証する"
+          before_pos=$(record_lines)
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            sh scripts/check-bulk-transfer.sh target/release/jxcel 60 "$record" 100,100000
+          # 陽性の主張も**この実行が書いた行だけ**で確かめる（検査器の内部判定は起動直前の行数から
+          # 始まるが、段の側でも同じ範囲を要求し、「前の段の行で満たされた」経路を塞ぐ）。
+          if [ "$(count_after "$before_pos" '検証用の一括転送を要求した:')" -ne 1 ]; then
+            echo "NG: 検証 1/2 で検証用の形が引き金を読んだ記録が 1 行ではありません（前の段の行では満たせない）" >&2
+            exit 1
+          fi
+          if [ "$(count_after "$before_pos" '残留プロセスの掃除で')" -lt 1 ]; then
+            echo "NG: 検証 1/2 で検証用の形が起動した形跡がありません（起動しなかった実行を成功と取り違えない）" >&2
+            exit 1
+          fi
+          echo "検証 2/2: 反証 — 配布物（既定のビルド）は検証用の引き金を読まないので転送は起きない。検査は非 0 で落ちなければならない"
+          before_neg=$(record_lines)
+          rc=0
+          output=$(APPIMAGE_EXTRACT_AND_RUN=1 \
+            xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            sh scripts/check-bulk-transfer.sh "$appimage" 20 "$record" 100,100000 2>&1) || rc=$?
+          printf '%s\n' "$output"
+          if [ "$rc" -eq 0 ]; then
+            echo "NG: 配布物に対して検査が成功してしまった（転送が 1 件も起きていないのに通っている）" >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$output" | grep -q '一括転送の結果が'; then
+            echo "NG: 反証が「結果の行が現れない」以外の理由で落ちた（検査器が動いていない可能性がある）" >&2
+            exit 1
+          fi
+          # **配布物が起動していたこと**まで要求する — 起動しなかった場合も「結果が現れない」に
+          # なるので、それだけでは錠前の実測にならない。**直前の行数より後**の掃除行だけを数える
+          # （出力のダンプに残る前の実行の行では満たせない）。
+          if [ "$(count_after "$before_neg" '残留プロセスの掃除で')" -lt 1 ]; then
+            echo "NG: 反証で配布物が起動した形跡がありません（起動しなかった実行を錠前の実測と取り違えない）" >&2
+            exit 1
+          fi
+          # **この実行が書いた行**に要求行が 1 行も無いこと（前の実行の要求行では判定しない）。
+          if [ "$(count_after "$before_neg" '検証用の一括転送を要求した:')" -ne 0 ]; then
+            echo "NG: 配布物が検証用の引き金を読んでいます（既定のビルドに検証用の経路が入っている）" >&2
+            exit 1
+          fi
+          echo "反証: 期待どおり非 0 で落ちました（配布物は起動したが、検証用の引き金を読まないため転送が起きない）"
+          # 展開実行（`APPIMAGE_EXTRACT_AND_RUN=1`）は AppImage のランタイムが一時ディレクトリへ
+          # 展開する。検査器はプロセスを子孫ごと終了するが、ランタイムの後始末は走らないので、
+          # この段が作った展開先をここで片付ける（後続の段へ持ち越さない）。
+          rm -rf /tmp/appimage_extracted_* 2>/dev/null || true
+
+      # macOS の一括転送の検証（tasks.md 10.8）。同じ POSIX sh の検査器をそのまま使う（この検査は
+      # X11 に依存しない — アプリを起動し、記録の行を読むだけである）。反証は配布物（`.app` の
+      # 実行ファイル）に対して行い、非 0 で落ちることを要求する。
+      - name: Verify bulk transfer of a 100k-row payload (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 4.4 の解決（macOS は $HOME/Library/Logs/{識別子}。`logs` 接尾辞は付かない）。
+          record="$HOME/Library/Logs/com.jxcel.app/jxcel.log"
+          echo "診断記録: $record"
+          # 記録は**追記式**であり、検査器は失敗時に記録の末尾 40 行を出力へダンプする。したがって
+          # **出力全体を grep してはいけない** — 直前の実行（陽性）が書いた行がダンプに混ざり、
+          # 前の実行の要求行で「引き金を読んでいない」判定が壊れ、前の実行の掃除行で「起動した」
+          # 判定が偽に成立する（いずれも実際に起きた）。以下の判定は**各実行の直前に取った行数より
+          # 後ろの行だけ**を見る（Windows の段の `$beforeNeg` と同じ規律）。
+          record_lines() {
+            if [ -f "$record" ]; then wc -l < "$record" | tr -d ' '; else echo 0; fi
+          }
+          # `<開始行数>` より後の行だけから `grep -E` の一致数を出す（記録が無ければ 0）。
+          count_after() {
+            if [ ! -f "$record" ]; then echo 0; return 0; fi
+            tail -n "+$(( $1 + 1 ))" "$record" 2>/dev/null | grep -c -E "$2" || true
+          }
+
+          echo "検証 1/2: 検証用の形で 100 行と 100,000 行を 1 回ずつ転送し、呼び出し回数が一定であることを検証する"
+          before_pos=$(record_lines)
+          sh scripts/check-bulk-transfer.sh target/release/jxcel 60 "$record" 100,100000
+          # 陽性の主張も**この実行が書いた行だけ**で確かめる（検査器の内部判定は起動直前の行数から
+          # 始まるが、段の側でも同じ範囲を要求し、「前の段の行で満たされた」経路を塞ぐ）。
+          if [ "$(count_after "$before_pos" '検証用の一括転送を要求した:')" -ne 1 ]; then
+            echo "NG: 検証 1/2 で検証用の形が引き金を読んだ記録が 1 行ではありません（前の段の行では満たせない）" >&2
+            exit 1
+          fi
+          if [ "$(count_after "$before_pos" '残留プロセスの掃除で')" -lt 1 ]; then
+            echo "NG: 検証 1/2 で検証用の形が起動した形跡がありません（起動しなかった実行を成功と取り違えない）" >&2
+            exit 1
+          fi
+          echo "検証 2/2: 反証 — 配布物（.app）は検証用の引き金を読まないので転送は起きない。検査は非 0 で落ちなければならない"
+          before_neg=$(record_lines)
+          rc=0
+          output=$(sh scripts/check-bulk-transfer.sh \
+            target/release/bundle/macos/jxcel.app/Contents/MacOS/jxcel 20 "$record" 100,100000 2>&1) || rc=$?
+          printf '%s\n' "$output"
+          if [ "$rc" -eq 0 ]; then
+            echo "NG: 配布物に対して検査が成功してしまった（転送が 1 件も起きていないのに通っている）" >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$output" | grep -q '一括転送の結果が'; then
+            echo "NG: 反証が「結果の行が現れない」以外の理由で落ちた（検査器が動いていない可能性がある）" >&2
+            exit 1
+          fi
+          # **配布物が起動していたこと**まで要求する — 起動しなかった場合も「結果が現れない」に
+          # なるので、それだけでは錠前の実測にならない。**直前の行数より後**の掃除行だけを数える
+          # （出力のダンプに残る前の実行の行では満たせない）。
+          if [ "$(count_after "$before_neg" '残留プロセスの掃除で')" -lt 1 ]; then
+            echo "NG: 反証で配布物が起動した形跡がありません（起動しなかった実行を錠前の実測と取り違えない）" >&2
+            exit 1
+          fi
+          # **この実行が書いた行**に要求行が 1 行も無いこと（前の実行の要求行では判定しない）。
+          if [ "$(count_after "$before_neg" '検証用の一括転送を要求した:')" -ne 0 ]; then
+            echo "NG: 配布物が検証用の引き金を読んでいます（既定のビルドに検証用の経路が入っている）" >&2
+            exit 1
+          fi
+          echo "反証: 期待どおり非 0 で落ちました（配布物は起動したが、検証用の引き金を読まないため転送が起きない）"
+
+      # Windows の一括転送の検証（tasks.md 10.8）。同じ 2 つの主張を PowerShell で組む
+      # （起動と記録の読み取りは 10.4 / 10.5 / 10.7 と同じ手段）。配布物は **1.5 の段**（Windows の
+      # ウィンドウ検証）が `/S` で導入した `%LOCALAPPDATA%\jxcel\jxcel.exe` である（10.5 以降の
+      # 段は導入済みのものを消費するだけである）。
+      - name: Verify bulk transfer of a 100k-row payload (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $verify = "target\release\jxcel.exe"
+          $dist = Join-Path $env:LOCALAPPDATA "jxcel\jxcel.exe"
+          $recordPath = Join-Path $env:LOCALAPPDATA "com.jxcel.app\logs\jxcel.log"
+          if (-not (Test-Path $verify)) { throw "検証用の形が見つかりません: $verify（--features verification-triggers のビルドではない）" }
+          if (-not (Test-Path $dist)) { throw "配布物が見つかりません: $dist（1.5 の段の /S 導入が先に必要）" }
+          Write-Host "診断記録: $recordPath"
+
+          # 1 行あたりのバイト数と行数の一覧（`scripts/check-bulk-transfer.sh` と同じ値。検査器は
+          # フロントエンドの申告を信用せず、期待バイト数をここで計算し直す）。
+          $lineBytes = 47
+          $sizes = @(100, 100000)
+
+          function Get-Lines {
+            param([int]$Skip)
+            if (-not (Test-Path $recordPath)) { return @() }
+            $all = @(Get-Content -Path $recordPath -Encoding UTF8 -ErrorAction SilentlyContinue)
+            if ($all.Count -le $Skip) { return @() }
+            return $all[$Skip..($all.Count - 1)]
+          }
+          function Get-Count {
+            param([int]$Skip, [string]$Pattern)
+            return @(Get-Lines -Skip $Skip | Where-Object { $_ -match $Pattern }).Count
+          }
+          function Stop-App {
+            param($Process)
+            if ($null -eq $Process) { return }
+            if (-not $Process.HasExited) { Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue }
+            $deadline = (Get-Date).AddSeconds(10)
+            while (-not $Process.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
+          }
+
+          # 1 回の起動で、行数ごとに 1 回ずつ転送させ、記録から 2 つの主張を判定する。
+          function Test-Transfer {
+            param([string]$Exe, [string]$Phase, [int]$TimeoutSeconds)
+            $skip = 0
+            if (Test-Path $recordPath) { $skip = @(Get-Content -Path $recordPath -Encoding UTF8).Count }
+            $env:JXCEL_VERIFICATION_BULK_ROWS = ($sizes -join ",")
+            $p = $null
+            try {
+              $p = Start-Process -FilePath $Exe -PassThru
+            } finally {
+              Remove-Item Env:\JXCEL_VERIFICATION_BULK_ROWS -ErrorAction SilentlyContinue
+            }
+            try {
+              $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+              while ((Get-Date) -lt $deadline) {
+                if ((Get-Count -Skip $skip -Pattern '一括転送の結果:.*"invocations":') -ge $sizes.Count) { break }
+                if ($p.HasExited) { break }
+                Start-Sleep -Milliseconds 200
+              }
+              $observed = Get-Count -Skip $skip -Pattern '一括転送の結果:.*"invocations":'
+              if ($observed -lt $sizes.Count) {
+                throw "($Phase) 行数ごとの一括転送の結果が $TimeoutSeconds 秒以内に現れませんでした（観測 $observed 行。期待 $($sizes.Count) 行。転送が 1 件も起きていないか、失敗しています）"
+              }
+              $request = Get-Count -Skip $skip -Pattern '検証用の一括転送を要求した:'
+              if ($request -ne 1) {
+                throw "($Phase) 要求の行（'検証用の一括転送を要求した:'）が 1 行ではありません（観測 $request 行。検証用の形で起動していないか、環境変数が解釈されていません）"
+              }
+              $requestLine = @(Get-Lines -Skip $skip | Where-Object { $_ -match '検証用の一括転送を要求した:' })[0]
+              Write-Host "($Phase) 要求の記録: $requestLine"
+              $total = Get-Count -Skip $skip -Pattern 'jxcel::commands::bulk.*受信バイト数 = '
+              if ($total -ne $sizes.Count) {
+                throw "($Phase) 一括転送の呼び出しの合計が行数の件数と一致しません（観測 $total 回。期待 $($sizes.Count) 回 = 行数ごとにちょうど 1 回）"
+              }
+              foreach ($rows in $sizes) {
+                $bytes = $rows * $lineBytes
+                if ($bytes -le 0) { throw "($Phase) 行数 $rows の期待バイト数が 0 以下です（ペイロードが空である）" }
+                $calls = Get-Count -Skip $skip -Pattern ("jxcel::commands::bulk.*受信バイト数 = " + $bytes + "$")
+                if ($calls -ne 1) {
+                  throw "($Phase) 行数 $rows（期待 $bytes B）の bulk_echo の記録行が 1 行ではありません（観測 $calls 行。1 回の呼び出しで受け渡せていないか、重複しています）"
+                }
+                $results = @(Get-Lines -Skip $skip | Where-Object {
+                  $_ -match ('"rows":' + $rows + '[,}]') -and
+                  $_ -match ('"sentBytes":' + $bytes + '[,}]') -and
+                  $_ -match ('"receivedBytes":' + $bytes + '[,}]') -and
+                  $_ -match '"byteIdentical":true' -and
+                  $_ -match '"invocations":1[,}]'
+                })
+                if ($results.Count -ne 1) {
+                  throw "($Phase) 行数 $rows（期待 $bytes B）の一括転送の結果が 1 行ではありません（観測 $($results.Count) 行。送信・受信のバイト数・バイト一致・呼び出し回数 1 のいずれかが期待と一致しません）"
+                }
+                Write-Host "($Phase) 行数=$rows 呼び出し回数=1 期待バイト数=$bytes / $($results[0])"
+              }
+              Write-Host "($Phase) OK: 行数の一覧（$($sizes -join ',')）のすべてで、1 回の呼び出しがちょうど 1 行であり、往復のバイト数が一致した"
+              Write-Host "($Phase) OK: 呼び出し回数は行数によらず定数 1 である（合計 $total 回 = 行数の件数 $($sizes.Count) 件。行数に比例しない）"
+            } finally {
+              Stop-App $p
+            }
+          }
+
+          Write-Host "検証 1/2: 検証用の形で 100 行と 100,000 行を 1 回ずつ転送し、呼び出し回数が一定であることを検証する"
+          Test-Transfer -Exe $verify -Phase "検証 1/2" -TimeoutSeconds 60
+          Write-Host "検証 2/2: 反証 — 配布物（既定のビルド）は検証用の引き金を読まないので転送は起きない。検査は失敗しなければならない"
+          $beforeNeg = 0
+          if (Test-Path $recordPath) { $beforeNeg = @(Get-Content -Path $recordPath -Encoding UTF8).Count }
+          $failed = $false
+          try {
+            Test-Transfer -Exe $dist -Phase "検証 2/2" -TimeoutSeconds 20
+          } catch {
+            $failed = $true
+            Write-Host "反証: 期待どおり失敗しました: $($_.Exception.Message)"
+          }
+          if (-not $failed) {
+            throw "NG: 配布物に対して検査が成功してしまった（転送が 1 件も起きていないのに通っている）"
+          }
+          # **配布物が起動していたこと**まで要求する — 起動しなかった場合も「結果が現れない」に
+          # なるので、それだけでは錠前の実測にならない（起動行が記録にあることを確かめる）。
+          if ((Get-Count -Skip $beforeNeg -Pattern '残留プロセスの掃除で') -lt 1) {
+            throw "NG: 反証で配布物が起動した形跡がありません（起動しなかった実行を錠前の実測と取り違えない）"
+          }
+          if ((Get-Count -Skip $beforeNeg -Pattern '検証用の一括転送を要求した:') -ne 0) {
+            throw "NG: 配布物が検証用の引き金を読んでいます（既定のビルドに検証用の経路が入っている）"
+          }
+          Write-Host "反証: 配布物（既定のビルド）は起動したが、検証用の引き金を読まないため転送が 1 件も起きず検査が失敗することを確認した"
+
+      # ---------------------------------------------------------------------
       # 配布物の検証（tasks.md 10.2 / 要件 6.4, 6.5, 6.6）
       #
       # 生成した配布物から補助プロセスの実行ファイルを取り出し、起動できることを確かめ、
