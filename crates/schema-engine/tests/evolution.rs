@@ -1,16 +1,21 @@
-//! スキーマ変更の影響集計の統合テスト（design.md「Testing Strategy / Integration Tests」の
-//! `evolution.rs`。tasks.md 7.2）。要件 8.2, 8.3, 8.4。
+//! スキーマ変更の影響集計と適用の統合テスト（design.md「Testing Strategy / Integration
+//! Tests」の `evolution.rs`。tasks.md 7.2 / 7.3）。要件 8.2, 8.3, 8.4, 8.5, 8.6, 8.8。
 //!
 //! 上流のドキュメントモデルに載せた宣言から計画を組み立て、**適用した場合に何が起きるか**を
-//! 集計する経路を確かめる。適用そのもの（タスク 7.3）はここでは行わず、集計が示した数と
-//! 位置、および計画が計算しきった値だけを見る。集計がドキュメントを変更しないことは、
-//! 部品集合のバイト列の前後比較で示す（要件 8.4）。
+//! 集計する経路（7.2）と、その計画を**適用する**経路（7.3）を確かめる。集計がドキュメントを
+//! 変更しないことは部品集合のバイト列の前後比較で示す（要件 8.4）。
+//!
+//! 適用では、適用が返した結果だけでなく**適用後のドキュメントを観測して**数え直す。集計が
+//! 示した変換行数・違反行数・失われる行と、適用結果（書き戻された値・適用後の全件検証・
+//! 消えた列）が一致することを示す（要件 8.5）。集計と適用の間でドキュメントが変わった
+//! 場合は陳腐化として返り、**何も変わっていない**ことを示す（要件 8.6）。
 
 use document_format::parts::to_parts;
 use document_format::{CellValue, Document, RowId, SchemaPart, SheetId};
 use schema_engine::compile::compile;
-use schema_engine::declaration::codec::parse_schema;
+use schema_engine::declaration::codec::{parse_schema, schema_to_text};
 use schema_engine::error::SchemaError;
+use schema_engine::evolution::apply::apply_change;
 use schema_engine::evolution::impact::{plan_change, PlanDigest, ValueLoss};
 use schema_engine::registry::TypeRegistry;
 use schema_engine::validate::report::{ValidationOptions, ViolationReason};
@@ -101,6 +106,29 @@ fn snapshot(doc: &Document) -> Vec<(String, Vec<u8>)> {
         .iter()
         .map(|part| (part.name.to_string(), part.bytes.clone()))
         .collect()
+}
+
+/// シートの観測可能な状態（列名と、行の識別子・値の並び）。
+///
+/// `Document` は複製できない（比較は部品集合のバイト列かアクセサで行う規約）ため、適用の
+/// 前後を突き合わせるにはこの形で読み出しておく。読み出すのは**ドキュメントそのもの**で
+/// あり、計画の内部ではない — 適用結果の観測を計画の主張に依らせないためである。
+struct ObservedSheet {
+    columns: Vec<String>,
+    rows: Vec<(RowId, Vec<CellValue>)>,
+}
+
+/// シートの現在の状態を読み出す。
+fn observe(doc: &Document, sheet: SheetId) -> ObservedSheet {
+    let target = doc.sheet_by_id(sheet).expect("標本のシートがある");
+    ObservedSheet {
+        columns: target.columns().to_vec(),
+        rows: target
+            .rows()
+            .iter()
+            .map(|row| (row.id(), row.values().to_vec()))
+            .collect(),
+    }
 }
 
 /// 列の追加では既定値が入り、既定値が宣言されていなければ値なしが入る（要件 8.2, 8.3）。
@@ -240,7 +268,7 @@ fn cross_row_violations_are_counted_and_match_the_applied_state() {
     let to = parse_schema(TO_TEXT).expect("新しい宣言は解析できる");
     let plan = plan_change(&doc, sheet, &to, &TypeRegistry::new()).expect("計画は組み立てられる");
 
-    let impact = plan.impact();
+    let impact = plan.impact().clone();
     assert_eq!(0, impact.converted_rows, "変換される値は無い");
     assert_eq!(
         1, impact.violating_rows,
@@ -249,18 +277,14 @@ fn cross_row_violations_are_counted_and_match_the_applied_state() {
     assert_eq!(0, impact.losing_rows, "削除される列は無い");
     assert!(impact.losses.is_empty(), "失われる値は無い");
 
-    // 計画が計算したとおりに書き戻し（タスク 7.3 の適用に相当）、全件検証と突き合わせる。
-    let columns = plan.columns().to_vec();
-    let computed: Vec<(RowId, Vec<CellValue>)> = plan
-        .rows()
-        .map(|(row, values)| (row, values.to_vec()))
-        .collect();
-    doc.set_sheet_columns(sheet, columns)
-        .expect("標本のシートがある");
-    for (row, values) in computed {
-        doc.set_row_values(sheet, row, values)
-            .expect("標本の行がある");
-    }
+    // 計画を適用し（タスク 7.3）、全件検証と突き合わせる。ルートスキーマの設置は適用の
+    // 分担ではない（タスク 7.2 の裁定）ため、呼び出し元が行う。
+    let applied = apply_change(&mut doc, plan).expect("計画は適用できる");
+    assert_eq!(
+        &impact,
+        applied.impact(),
+        "適用が実現した集計は提示した集計そのものである"
+    );
     doc.set_root_schema(
         sheet,
         SchemaPart::parse(&envelope(TO_TEXT)).expect("エンベロープは妥当"),
@@ -352,4 +376,209 @@ fn a_declaration_that_cannot_be_resolved_is_rejected() {
         matches!(error, SchemaError::DanglingTypeRef { .. }),
         "宣言の誤りとして拒否される"
     );
+}
+
+/// 適用は集計どおりの結果を残す（要件 8.5, 8.8）。
+///
+/// 適用が返す結果を照合するだけでなく、**適用後のドキュメントを観測して**、集計が示した
+/// 変換行数・違反行数・失われる行を数え直す。数え直しに計画の内部は使わない — 使うのは
+/// 適用の前後にドキュメントから読み出した値と、宣言の差から決まる列の対応（要件 8.7）だけ
+/// である。
+#[test]
+fn the_applied_sheet_matches_the_planned_impact() {
+    /// 旧宣言（`FROM`）の列の並び。
+    const FROM_COLUMNS: [&str; 3] = ["旧名", "消える", "数量"];
+    /// 新宣言（`TO`）の列の並び。
+    const TO_COLUMNS: [&str; 4] = ["新名", "増えた", "空欄", "数量"];
+    /// 値を運ぶ列の（旧宣言の添字, 新宣言の添字）。`旧名` は改名、`数量` は型の変更である。
+    const CARRIED: [(usize, usize); 2] = [(0, 0), (2, 3)];
+    /// 削除される列の旧宣言での添字。
+    const REMOVED: usize = 1;
+
+    let (mut doc, sheet, _) = sample();
+    let to = parse_schema(TO).expect("新しい宣言は解析できる");
+    let plan = plan_change(&doc, sheet, &to, &TypeRegistry::new()).expect("計画は組み立てられる");
+    let impact = plan.impact().clone();
+    let planned_columns = plan.columns().to_vec();
+    assert!(
+        impact.converted_rows > 0 && impact.violating_rows > 0 && impact.losing_rows > 0,
+        "標本は 3 つの影響を持つ"
+    );
+
+    let before = observe(&doc, sheet);
+    assert_eq!(FROM_COLUMNS.to_vec(), before.columns);
+
+    let applied = apply_change(&mut doc, plan).expect("計画は適用できる");
+    assert_eq!(sheet, applied.sheet());
+    assert_eq!(planned_columns, applied.columns(), "適用は計画の列名を返す");
+    assert_eq!(
+        before.rows.len(),
+        applied.rows(),
+        "適用は計画の全行を書き戻す"
+    );
+    assert_eq!(
+        &impact,
+        applied.impact(),
+        "適用が実現した集計は提示した集計そのものである（要件 8.5）"
+    );
+
+    let after = observe(&doc, sheet);
+    assert_eq!(
+        TO_COLUMNS.to_vec(),
+        after.columns,
+        "列名は新しい宣言の並びになる"
+    );
+    assert!(
+        !after.columns.iter().any(|name| name == "消える"),
+        "削除された列はキー列から消える（値が失われる）"
+    );
+    assert!(
+        after
+            .rows
+            .iter()
+            .all(|(_, values)| values.len() == after.columns.len()),
+        "1 シート内の全行が同一のキー列である（上流の不変条件）"
+    );
+    assert_eq!(
+        vec![
+            text("A"),
+            text("なし"),
+            CellValue::Null,
+            CellValue::float(5.0)
+        ],
+        after.rows[0].1,
+        "適用は計画が計算した値をそのまま書き戻す"
+    );
+    for (_, values) in &after.rows {
+        assert_eq!(
+            text("なし"),
+            values[1],
+            "追加された列には既定値がすべての行に入る（要件 8.8）"
+        );
+        assert_eq!(
+            CellValue::Null,
+            values[2],
+            "既定値のない列には値なしがすべての行に入る（要件 8.8）"
+        );
+    }
+    assert_eq!(
+        FROM,
+        doc.sheet_by_id(sheet)
+            .expect("標本のシートがある")
+            .root_schema()
+            .root()
+            .as_str(),
+        "適用はルートスキーマを設置しない（呼び出し元が `Document::set_root_schema` で行う）"
+    );
+
+    // 変換される行数: 運搬される列の値が適用の前後で変わった行を数える。値が変わるのは
+    // 型強制が起きたときだけである（改名も同名の列も同じ値を運ぶ。タスク 6.1 の
+    // 「`Converted` ⇔ 値が変わった」の不変条件）。
+    let mut converted = 0usize;
+    for ((old_row, old), (new_row, new)) in before.rows.iter().zip(&after.rows) {
+        assert_eq!(old_row, new_row, "適用は行の識別子と並びを変えない");
+        if CARRIED.iter().any(|&(from, to)| old[from] != new[to]) {
+            converted += 1;
+        }
+    }
+    assert_eq!(
+        impact.converted_rows, converted,
+        "変換される行数が適用結果と一致する"
+    );
+
+    // 値が失われる行と位置: 削除される列に値を持つ行を、適用**前**のドキュメントから数える。
+    let losses: Vec<ValueLoss> = before
+        .rows
+        .iter()
+        .filter(|(_, values)| values[REMOVED] != CellValue::Null)
+        .map(|(row, _)| ValueLoss {
+            row: *row,
+            column: "消える".into(),
+        })
+        .collect();
+    assert_eq!(
+        impact.losses, losses,
+        "値が失われる位置が適用結果と一致する"
+    );
+    assert_eq!(
+        impact.losing_rows,
+        losses.len(),
+        "値が失われる行数が適用結果と一致する"
+    );
+
+    // 違反になる行数: 適用後の状態を全件検証して数える（要件 5.4 と同じ数え方）。
+    doc.set_root_schema(
+        sheet,
+        SchemaPart::parse(&envelope(
+            &schema_to_text(&to).expect("宣言は正準のテキストへ出力できる"),
+        ))
+        .expect("エンベロープは妥当"),
+    )
+    .expect("標本のシートがある");
+    let compiled = compile(
+        doc.sheet_by_id(sheet).expect("標本のシートがある"),
+        &TypeRegistry::new(),
+    )
+    .expect("新しい宣言はコンパイルできる");
+    let report = validate_sheet(&doc, sheet, &compiled, &ValidationOptions::default());
+    assert_eq!(
+        impact.violating_rows,
+        report.invalid_rows().len(),
+        "違反になる行数が適用結果と一致する"
+    );
+}
+
+/// 集計の後にドキュメントが変わったら、陳腐化として返り**何も変わらない**（要件 8.5, 8.6）。
+///
+/// 適用の前に計画のダイジェストと現在のシートを照合する。食い違えば適用は計画の値を
+/// 書き戻さず、列名も行の値も 1 つも変えない。
+#[test]
+fn a_stale_plan_leaves_the_document_untouched() {
+    let (mut doc, sheet, _) = sample();
+    let to = parse_schema(TO).expect("新しい宣言は解析できる");
+    let plan = plan_change(&doc, sheet, &to, &TypeRegistry::new()).expect("計画は組み立てられる");
+
+    // 集計の後に列名が変わる（上流の列編集の経路を模す。行の並びはそのまま）。
+    doc.set_sheet_columns(
+        sheet,
+        vec![
+            "旧名".to_owned(),
+            "消える".to_owned(),
+            "数量".to_owned(),
+            "増えた".to_owned(),
+        ],
+    )
+    .expect("標本のシートがある");
+
+    let before = observe(&doc, sheet);
+    let error = apply_change(&mut doc, plan).expect_err("陳腐化した計画は適用されない");
+    assert_eq!(sheet, error.sheet(), "どのシートの計画だったかを運ぶ");
+    assert_ne!(
+        error.expected(),
+        error.observed().expect("シートはまだ在る"),
+        "期待したダイジェストと観測したダイジェストが食い違っている"
+    );
+
+    let after = observe(&doc, sheet);
+    assert_eq!(before.columns, after.columns, "列名は 1 つも変わっていない");
+    assert_eq!(before.rows, after.rows, "行の値は 1 つも変わっていない");
+}
+
+/// 対象のシートが消えた計画も陳腐化として扱い、何もしない（要件 8.6）。
+#[test]
+fn a_plan_for_a_removed_sheet_is_stale() {
+    let (mut doc, sheet, _) = sample();
+    let to = parse_schema(TO).expect("新しい宣言は解析できる");
+    let plan = plan_change(&doc, sheet, &to, &TypeRegistry::new()).expect("計画は組み立てられる");
+
+    doc.remove_sheet(sheet).expect("標本のシートがある");
+
+    let error = apply_change(&mut doc, plan).expect_err("シートが消えた計画は適用されない");
+    assert_eq!(sheet, error.sheet());
+    assert_eq!(
+        None,
+        error.observed(),
+        "シートが無いので観測できるダイジェストは無い"
+    );
+    assert!(doc.sheets().is_empty(), "文書は適用によって変わっていない");
 }

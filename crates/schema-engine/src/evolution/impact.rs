@@ -205,6 +205,32 @@ impl ChangePlan {
             None => true,
         }
     }
+
+    /// 適用（タスク 7.3）のために、計算済みの値を**所有権ごと**取り出す。
+    ///
+    /// 計画の唯一の消費者は適用である（設計の分類）。借用で渡すと全行分のセル値の複製が
+    /// 要るため、分解して渡す。シート識別子とダイジェストは [`Copy`] であり、適用の前に
+    /// アクセサで読めるのでここには含めない。
+    pub(crate) fn into_parts(self) -> PlanParts {
+        PlanParts {
+            columns: self.columns,
+            rows: self.rows,
+            impact: self.impact,
+        }
+    }
+}
+
+/// [`ChangePlan::into_parts`] が渡す、適用に必要な計算済みの値（タスク 7.3）。
+///
+/// クレート内だけの型である。適用は [`ChangePlan`] の唯一の消費者であり、書き戻しの段に
+/// 可謬な処理も複製も残さないために、計画の保持する値をそのまま受け取る。
+pub(crate) struct PlanParts {
+    /// 新しい列名の配列（新しい宣言の並び順）。
+    pub(crate) columns: Box<[String]>,
+    /// 全行分の新しい値（行の並び順）。
+    pub(crate) rows: Box<[(RowId, Vec<CellValue>)]>,
+    /// 集計した影響。
+    pub(crate) impact: ChangeImpact,
 }
 
 /// 新しい宣言を適用した場合の影響を集計する（design.md「Evolution Layer /

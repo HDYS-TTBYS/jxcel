@@ -17,10 +17,10 @@
 //! |------------|------|------|----------|
 //! | [`diff`] | 旧宣言と新宣言から変更を抽出する | 8.1, 8.7 | 7.1 |
 //! | [`impact`] | 適用した場合の影響を集計する。ドキュメントを変更しない | 8.2, 8.3, 8.4 | 7.2 |
+//! | [`apply`] | 計画を適用する。可謬な処理をここに残さない | 8.5, 8.6, 8.8 | 7.3 |
 //!
-//! 計画の適用（`apply`）はタスク 7.3 が同じ層に足す。本ファイルは層の入口（design.md
-//! 「`evolution/mod.rs` # スキーマ変更の入口（計画 → 適用）」）であり、適用が揃った時点で
-//! `apply_change` を再輸出する。
+//! 層の入口は [`apply_change`]（計画 → 適用）である。集計（[`plan_change`]）は可謬な処理を
+//! すべて済ませ、適用は計算済みの値を書き戻すだけにする。
 //!
 //! # 改名は削除と追加の組ではない（design.md「Evolution Layer / SchemaEvolution」。要件 8.1, 8.7）
 //!
@@ -31,7 +31,12 @@
 //! # 原子性の作り方（design.md「Evolution Layer / SchemaEvolution」。要件 8.6）
 //!
 //! 可謬な処理を**すべて計画側に寄せる**。計画が新しい列名の配列と全行分の新しい値を
-//! 計算しきり、適用は計算済みの値を書き戻すだけにする。この分担はタスク 7.2 / 7.3 が実装する。
+//! 計算しきり、適用は計算済みの値を書き戻すだけにする。この分担が「途中で失敗して半端に
+//! 適用された状態」を構造上作れなくする（タスク 7.2 / 7.3）。
 
+pub mod apply;
 pub mod diff;
 pub mod impact;
+
+pub use apply::{apply_change, AppliedChange, StalePlan};
+pub use impact::{plan_change, ChangeImpact, ChangePlan, PlanDigest, ValueLoss};
