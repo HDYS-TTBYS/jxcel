@@ -685,9 +685,17 @@ mod tests {
     fn only_an_absolute_appdir_value_is_used_as_the_root() {
         use std::ffi::OsStr;
 
+        // 絶対パスの例は**ホストの規則**に合わせる（`/tmp/.mount_jxcel` は Windows では
+        // ドライブ前置が無いため絶対パスではない）。これを合わせないと、規則そのものではなく
+        // `Path` のプラットフォーム差を試験してしまい、Windows で必ず落ちる。
+        let absolute_root = if cfg!(windows) {
+            PathBuf::from(r"C:\mount\jxcel")
+        } else {
+            PathBuf::from("/tmp/.mount_jxcel")
+        };
         assert_eq!(
-            appdir_from_env(Some(OsStr::new("/tmp/.mount_jxcel"))),
-            Some(PathBuf::from("/tmp/.mount_jxcel")),
+            appdir_from_env(Some(absolute_root.as_os_str())),
+            Some(absolute_root),
         );
         assert_eq!(appdir_from_env(Some(OsStr::new(""))), None);
         assert_eq!(appdir_from_env(Some(OsStr::new("mount_jxcel"))), None);
@@ -879,12 +887,16 @@ mod tests {
             first_pid, second_pid,
             "2 つの要求元が同じ 1 つのプロセスを共有する"
         );
-        assert_eq!(
-            running,
-            1,
-            "OS 上に存在する補助プロセスは 1 つだけである（配置: {}）",
-            layout.display()
-        );
+        // OS 上の数を照合できるホスト（Linux）でのみ数える（[`running_processes`] の doc）。
+        // **pid の一致はこの計測に依らない**ので、`None` のホストでも共有の主張は残る。
+        if let Some(running) = running {
+            assert_eq!(
+                running,
+                1,
+                "OS 上に存在する補助プロセスは 1 つだけである（配置: {}）",
+                layout.display()
+            );
+        }
         assert!(shutdown.is_ok(), "終了は成功する: {shutdown:?}");
     }
 
@@ -918,7 +930,10 @@ mod tests {
         }
 
         // 起動そのものは試みられていない（拒否のあとに OS 上のプロセスは 0 のまま）。
-        assert_eq!(running_processes(&layout), 0);
+        // **OS 上の数を照合できるホスト（Linux）に限る**（[`running_processes`] の doc）。
+        if let Some(running) = running_processes(&layout) {
+            assert_eq!(running, 0);
+        }
 
         // 正しいダイジェスト（本番の検査）なら起動する — 拒否がファイルの不在や実行権限では
         // ないことを同じ前提で裏付ける。
@@ -985,35 +1000,44 @@ mod tests {
     }
 
     /// 解決が実際に指すパスから起動されたプロセスの数を数える（Linux のみ。`/proc` を直接読む）。
+    ///
+    /// **数を観測できないホストでは `None` を返す。** macOS の `ps comm` は 16 文字に切詰められ、
+    /// Windows の Toolhelp32 はイメージ名しか与えないため、起動時の絶対パスとの照合が成立しない。
+    /// 呼び出し側は `None` を「このホストでは OS 上の数を観測できない」として扱い、**数を根拠に
+    /// する判定を省く**（黙って 0 や 1 を返してはならない — 以前は Linux 以外で常に 1 を返して
+    /// おり、「拒否のあとにプロセスが 0」という判定が macOS / Windows で必ず落ちていた）。
+    /// **この計測は Linux の補助に過ぎない** — 共有の主張は pid の一致が担う（3 OS の実行時確認は
+    /// 10.x）。
     #[cfg(target_os = "linux")]
-    fn running_processes(layout: &Path) -> usize {
+    fn running_processes(layout: &Path) -> Option<usize> {
         let Ok(entries) = std::fs::read_dir("/proc") else {
-            return 0;
+            return Some(0);
         };
-        entries
-            .flatten()
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name.parse::<u32>().is_ok())
-            })
-            .filter(|entry| {
-                let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
-                    return false;
-                };
-                let first = cmdline.split(|byte| *byte == 0).next().unwrap_or_default();
-                first == layout.as_os_str().as_encoded_bytes()
-            })
-            .count()
+        Some(
+            entries
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.parse::<u32>().is_ok())
+                })
+                .filter(|entry| {
+                    let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+                        return false;
+                    };
+                    let first = cmdline.split(|byte| *byte == 0).next().unwrap_or_default();
+                    first == layout.as_os_str().as_encoded_bytes()
+                })
+                .count(),
+        )
     }
 
-    /// Linux 以外では `/proc` が無い（macOS の `ps comm` は 16 文字に切詰められ、Windows の
-    /// Toolhelp32 はイメージ名しか与えない）。**この計測は Linux の補助に過ぎない** — 共有の
-    /// 主張は pid の一致が担う（3 OS の実行時確認は 10.x）。
+    /// Linux 以外では `/proc` が無く、絶対パスとの照合が成立しない（上の doc を参照）。
+    /// **数を返さない**（`None`）。
     #[cfg(not(target_os = "linux"))]
-    fn running_processes(_layout: &Path) -> usize {
-        1
+    fn running_processes(_layout: &Path) -> Option<usize> {
+        None
     }
 
     // -----------------------------------------------------------------------
