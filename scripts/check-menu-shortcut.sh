@@ -135,7 +135,7 @@ if [ -z "$record" ]; then
   exit 2
 fi
 if [ ! -f "$document" ]; then
-  echo "NG: ドキュメント位置が実在しません: $document（7.7 は読まないが、渡す位置は実在させる）" >&2
+  echo "NG: ドキュメント位置が実在しません: ${document}（7.7 は読まないが、渡す位置は実在させる）" >&2
   exit 2
 fi
 if ! command -v python3 >/dev/null 2>&1; then
@@ -214,7 +214,7 @@ report_failure() {
     echo "--- 診断記録（末尾）: $record ---" >&2
     tail -n 40 "$record" >&2
   else
-    echo "--- 診断記録: $record（存在しません） ---" >&2
+    echo "--- 診断記録: ${record}（存在しません） ---" >&2
   fi
   exit 1
 }
@@ -768,7 +768,7 @@ PY
 # いたことは、この wrapper（とその wrapper が呼ぶ `report_failure`）を足すまで見えなかった
 # （ファイル冒頭の「キーバインドは AT-SPI から読まない」を参照）。
 atspi() {
-  atspi_run "$@" || report_failure "AT-SPI の呼び出しが失敗した（$*）"
+  atspi_run "$@" || report_failure "AT-SPI の呼び出しが失敗した（${*}）"
 }
 
 echo "診断記録: $record"
@@ -939,7 +939,7 @@ for _id in $x11_window_ids; do
   fi
 done
 if [ -z "$second_id" ]; then
-  report_failure "2 枚目のウィンドウの識別子が増えていません（1 枚目と同じ: $first_id）"
+  report_failure "2 枚目のウィンドウの識別子が増えていません（1 枚目と同じ: ${first_id}）"
 fi
 echo "検証 2/3: 2 枚目: ラベル=${doc_label} 識別子=0x$(printf '%s' "$second_id" | sed 's/^0x//')（1 枚目とは別の識別子）"
 

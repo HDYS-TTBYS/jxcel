@@ -117,7 +117,7 @@ if [ -z "$record" ]; then
   exit 2
 fi
 if [ ! -f "$document" ]; then
-  echo "NG: ドキュメント位置が実在しません: $document（7.7 は読まないが、渡す位置は実在させる）" >&2
+  echo "NG: ドキュメント位置が実在しません: ${document}（7.7 は読まないが、渡す位置は実在させる）" >&2
   exit 2
 fi
 
@@ -305,7 +305,7 @@ while [ "$(date +%s)" -lt "$presentation_deadline" ]; do
   sleep "$x11_poll_sleep"
 done
 if [ ! -f "$window_error_record" ]; then
-  report_failure "提示の記録（$window_error_record）がありません（失敗が提示されていない）"
+  report_failure "提示の記録（${window_error_record}）がありません（失敗が提示されていない）"
 fi
 if ! grep -qF 'ウィンドウを生成できませんでした。' "$window_error_record"; then
   report_failure "提示の記録に失敗の宣言（'ウィンドウを生成できませんでした。'）がありません"
@@ -319,7 +319,7 @@ fi
 if ! grep -qF '既に開いている他のウィンドウの動作は中断していません。' "$window_error_record"; then
   report_failure "提示の記録に「他のウィンドウの動作は中断していません」がありません"
 fi
-echo "OK: 失敗が提示されました（$window_error_record）:"
+echo "OK: 失敗が提示されました（${window_error_record}）:"
 sed 's/^/    /' "$window_error_record"
 
 # --- 5. 失敗のあとも他のウィンドウが生き続けることを数秒観測する -------------------------

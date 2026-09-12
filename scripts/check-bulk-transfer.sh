@@ -245,15 +245,15 @@ report_failure() {
     echo "--- 診断記録（末尾）: $record ---" >&2
     tail -n 40 "$record" >&2
   else
-    echo "--- 診断記録: $record（存在しません） ---" >&2
+    echo "--- 診断記録: ${record}（存在しません） ---" >&2
   fi
   exit 1
 }
 
 # --- 起動 -------------------------------------------------------------------
 baseline=$(record_lines)
-echo "起動前の記録の行数: $baseline（これ以降の行だけを調べる）"
-echo "起動: $app（JXCEL_VERIFICATION_BULK_ROWS=${rows_values}）"
+echo "起動前の記録の行数: ${baseline}（これ以降の行だけを調べる）"
+echo "起動: ${app}（JXCEL_VERIFICATION_BULK_ROWS=${rows_values}）"
 if [ "$os_mode" = linux ]; then
   nohup env GDK_BACKEND=x11 JXCEL_VERIFICATION_BULK_ROWS="$rows_values" "$app" \
     >"$app_log" 2>&1 &

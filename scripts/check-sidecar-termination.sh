@@ -295,11 +295,11 @@ require_clean_exit() {
     exit 1
   fi
   if [ "$app_exit_rc" -ne 0 ]; then
-    echo "NG: ${phase} アプリの終了コードが $app_exit_rc（通常終了は 0 であるべき）" >&2
+    echo "NG: ${phase} アプリの終了コードが ${app_exit_rc}（通常終了は 0 であるべき）" >&2
     tail -n 30 "$app_log" >&2 || true
     exit 1
   fi
-  echo "${phase} アプリの終了コード: $app_exit_rc（通常終了）"
+  echo "${phase} アプリの終了コード: ${app_exit_rc}（通常終了）"
 }
 
 # 補助プロセスが現れることを要求する（**「起動していない」を残存 0 と取り違えない**）。

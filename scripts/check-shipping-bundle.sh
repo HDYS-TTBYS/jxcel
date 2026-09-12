@@ -68,7 +68,7 @@ if [ -n "$BINARY" ] && [ -f "${BINARY}.exe" ]; then
   BINARY="${BINARY}.exe"
 fi
 if [ -n "$BINARY" ] && [ ! -f "$BINARY" ]; then
-  echo "check-shipping-bundle: 実行ファイルがありません: $BINARY（または ${BINARY}.exe）" >&2
+  echo "check-shipping-bundle: 実行ファイルがありません: ${BINARY}（または ${BINARY}.exe）" >&2
   exit 2
 fi
 

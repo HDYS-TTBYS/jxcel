@@ -146,7 +146,7 @@ case "$log_dir" in
     settings_file=$(dirname -- "$log_dir")/settings.json
     ;;
   *)
-    echo "NG: 診断の保存先（$log_dir）が Linux の規約（…/{識別子}/logs）ではありません。この検査器は Linux 専用です" >&2
+    echo "NG: 診断の保存先（${log_dir}）が Linux の規約（…/{識別子}/logs）ではありません。この検査器は Linux 専用です" >&2
     exit 2
     ;;
 esac
@@ -581,7 +581,7 @@ while [ "$(date +%s)" -lt "$observation_end" ]; do
   probe_id=$(printf '%s\n' "$x11_window_ids" | head -n 1)
   sleep "$x11_poll_sleep"
 done
-echo "OK: 配布物の題名は変わっていません（$probe_id）"
+echo "OK: 配布物の題名は変わっていません（${probe_id}）"
 
 pixel_line=$(x11_notice_pixels "$probe_id" 64) ||
   report_failure "ウィンドウ ${probe_id} の画素を読めませんでした"

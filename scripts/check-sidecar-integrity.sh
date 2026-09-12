@@ -147,7 +147,7 @@ if [ -n "$original_arg" ]; then
   if [ "${original##*/}" != "$expected_name" ]; then
     echo "NG: 同梱前の原本の名前がホストのターゲットトリプルと一致しません" >&2
     echo "  指定: $original" >&2
-    echo "  期待: $expected_original（ホスト: ${host_triple}）" >&2
+    echo "  期待: ${expected_original}（ホスト: ${host_triple}）" >&2
     echo "  ネイティブの成果物はクロス指定の成果物とバイトが異なる（1.7）。配置し直すこと:" >&2
     echo "    bash scripts/stage-sidecars.sh" >&2
     exit 2
@@ -158,7 +158,7 @@ fi
 
 if [ ! -f "$original" ]; then
   echo "NG: 同梱前の原本がありません: $original" >&2
-  echo "  期待する名前: $expected_name（ホスト: ${host_triple}）" >&2
+  echo "  期待する名前: ${expected_name}（ホスト: ${host_triple}）" >&2
   echo "  配置するには: bash scripts/stage-sidecars.sh" >&2
   exit 2
 fi

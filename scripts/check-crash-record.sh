@@ -183,7 +183,7 @@ x11_install_cleanup_trap
 # **前回の記録で成功しないよう、起動の前に消す。**（消したことを出力にも残す — 記録が
 # 「前回の実行のもの」である可能性を検査の出力から排除する。）
 rm -f "$record" "$crash_record"
-echo "検査の前提: 診断記録（$record）と異常終了の記録（$crash_record）を起動の前に消しました"
+echo "検査の前提: 診断記録（${record}）と異常終了の記録（${crash_record}）を起動の前に消しました"
 
 # ウィンドウの出現を待つ（<整数> は待つ上限、結果は終了コード）。
 wait_for_window() {
@@ -256,7 +256,7 @@ if [ "$mode" = panic ]; then
 
   # **異常終了の記録（要件 8.2 の主張そのもの）。**
   if [ ! -f "$crash_record" ]; then
-    report_failure "異常終了の記録（$crash_record）がありません（8.2 の記録が残っていない）"
+    report_failure "異常終了の記録（${crash_record}）がありません（8.2 の記録が残っていない）"
   fi
   if ! grep -qF '===== 異常終了（パニック） =====' "$crash_record"; then
     report_failure "異常終了の記録に見出し（'===== 異常終了（パニック） ====='）がありません"
@@ -273,7 +273,7 @@ if [ "$mode" = panic ]; then
   if ! grep -qF '位置: ' "$crash_record"; then
     report_failure "異常終了の記録に発生位置（'位置: '）がありません"
   fi
-  echo "OK: 異常終了の記録が残りました（$crash_record）:"
+  echo "OK: 異常終了の記録が残りました（${crash_record}）:"
   sed 's/^/    /' "$crash_record"
 
   # **何も壊れていないこと**: もう一度起動して、描画まで成立し、通常終了（0）する。
@@ -373,7 +373,7 @@ while [ "$(date +%s)" -lt "$observation_end" ]; do
     report_failure "配布物の本体（pid=${app_pid}）が引き金（panic:${panic_ms}）で終了しました（既定のビルドが環境変数を読んでいる。5.4 の片付けが壊れている）"
   fi
   if [ -f "$crash_record" ]; then
-    report_failure "配布物が異常終了の記録（$crash_record）を書きました（既定のビルドに検証用の経路が入っている）"
+    report_failure "配布物が異常終了の記録（${crash_record}）を書きました（既定のビルドに検証用の経路が入っている）"
   fi
   x11_observe_window "$title" "$min_w" "$min_h"
   if [ "$x11_window_count" -eq 0 ]; then

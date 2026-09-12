@@ -105,7 +105,7 @@ if [ -z "$record" ]; then
   exit 2
 fi
 if [ ! -f "$document" ]; then
-  echo "NG: ドキュメント位置が実在しません: $document（7.7 は読まないが、渡す位置は実在させる）" >&2
+  echo "NG: ドキュメント位置が実在しません: ${document}（7.7 は読まないが、渡す位置は実在させる）" >&2
   exit 2
 fi
 if [ -z "$deny_label" ]; then
@@ -168,7 +168,7 @@ report_failure() {
     echo "--- 診断記録（末尾）: $record ---" >&2
     tail -n 40 "$record" >&2
   else
-    echo "--- 診断記録: $record（存在しません） ---" >&2
+    echo "--- 診断記録: ${record}（存在しません） ---" >&2
   fi
   exit 1
 }

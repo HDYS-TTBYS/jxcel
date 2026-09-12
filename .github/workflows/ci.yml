@@ -2279,7 +2279,7 @@ jobs:
             fi
           done
           if [ -n "$at_spi_launcher" ]; then
-            echo "AT-SPI: at-spi-bus-launcher あり（$at_spi_launcher。at-spi2-core が導入されている）"
+            echo "AT-SPI: at-spi-bus-launcher あり（${at_spi_launcher}。at-spi2-core が導入されている）"
           else
             echo "AT-SPI: at-spi-bus-launcher が無い（at-spi2-core が無い。メニューの AT-SPI 読みは成立しない）" >&2
           fi
@@ -2590,7 +2590,7 @@ jobs:
               Get-Content -Path $record -Encoding UTF8 -ErrorAction SilentlyContinue |
                 Select-Object -Last 40 | ForEach-Object { Write-Host $_ }
             } else {
-              Write-Host "--- 診断記録: $record（存在しません） ---"
+              Write-Host "--- 診断記録: ${record}（存在しません） ---"
             }
           }
           # メニューバーを「部分メニュー名 → (項目の文字列 → コマンド識別子)」として読む。
