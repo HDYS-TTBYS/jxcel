@@ -318,7 +318,8 @@ impl CompiledSchema {
     /// その列の既定値（要件 4.2, 4.3）。未宣言と計画の外の添字は `None`。
     ///
     /// 行の初期値の組み立て（タスク 6.3）はこの経路で値を引き、既定値の無い列へ値なしを
-    /// 与える。既定値の適合はコンパイル時に検査済みである（要件 4.8）。
+    /// 与える。既定値の適合は**使用可能な列では**コンパイル時に検査済みである（要件 4.8。
+    /// 使用不能な列の扱いは [`CompiledSchema::default_row`] を参照）。
     pub fn default_value(&self, column: ColumnIndex) -> Option<&CellValue> {
         self.defaults.get(column.index())?.as_ref()
     }
@@ -335,8 +336,12 @@ impl CompiledSchema {
     /// 発行し、`Document::set_row_values` がこの値を書く（design.md「Public API Layer /
     /// SchemaEngineApi」の `default_row`）。本クレートは値だけを供給する。
     ///
-    /// 既定値の適合はコンパイル時に検査済みであるため（要件 4.8）、ここでは
-    /// [`CompiledSchema::default_value`] が返す検査済みの値をそのまま複製する。
+    /// 既定値の適合は**使用可能な列では**コンパイル時に検査済みであるため（要件 4.8）、
+    /// ここでは [`CompiledSchema::default_value`] が返す検査済みの値をそのまま複製する。
+    /// **使用不能な列（未知の種別・未登録の拡張型・展開できない再帰型。要件 11.7）では
+    /// 適合検査が走らない**（検証器が無いため）ので、宣言された既定値をそのまま供給する。
+    /// その列の値は既定値を含めてすべて `ViolationReason::UnusableColumn` の違反になるため、
+    /// 実害は無い（タスク 6.3 の裁定）。
     pub fn default_row(&self) -> Vec<CellValue> {
         self.defaults
             .iter()
