@@ -1508,7 +1508,13 @@ jobs:
           guard let secondWindows = waitForWindowCount(of: first.processIdentifier, atLeast: firstWindows + 1, seconds: timeoutSeconds) else {
               fail("2 つ目の起動の後、ウィンドウ数が \(firstWindows + 1) 以上になりませんでした（引き継いだ側がウィンドウを提示していない）")
           }
-          guard let handover = findLine("二重起動を引き継ぎました.*ドキュメント要求 ", from: phaseAB, seconds: 10) else {
+          // **引き継ぎの行は待ち時間を長く取る（30 秒）。** 実測（2026-09-12 の macOS の
+          // ランナー）: 3 つ目の起動（引数なし）が終了してから**最初のインスタンスが
+          // `二重起動を引き継ぎました … ドキュメント要求なし` を記録するまで 10.4 秒**かかり、
+          // 10 秒では足りなかった（最初のインスタンスはその間も生きており、他の行は書いている）。
+          // 引き継ぎの**利用者から見える効果**（2 つ目が常駐せず、ウィンドウが増える）は別の
+          // 主張として短い期限で見ているので、記録の行そのものは長めに待つ。
+          guard let handover = findLine("二重起動を引き継ぎました.*ドキュメント要求 ", from: phaseAB, seconds: 30) else {
               fail("引き継ぎの行（二重起動を引き継ぎました … ドキュメント要求 …）が記録に現れません")
           }
           guard let docLabelLine = findLine("ウィンドウを開いた: label=doc-", from: phaseAB, seconds: 10) else {
@@ -1529,7 +1535,7 @@ jobs:
           if third.terminationStatus != 0 {
               fail("引数なしの 2 つ目の起動が終了コード \(third.terminationStatus) で終わった（0 であるべき）")
           }
-          guard let argless = findLine("二重起動を引き継ぎました.*ドキュメント要求なし", from: phaseArgless, seconds: 10) else {
+          guard let argless = findLine("二重起動を引き継ぎました.*ドキュメント要求なし", from: phaseArgless, seconds: 30) else {
               fail("引数なしの引き継ぎの行（… ドキュメント要求なし）が記録に現れません")
           }
           let settleEnd = Date().addingTimeInterval(3)
@@ -2537,8 +2543,24 @@ jobs:
             Write-Host "検証 1/2: 配布物のメニューに検証専用の項目は現れない（アクセラレータは項目の文字列に埋め込まれている）"
 
             Write-Host "検証 1/2: 診断 > 記録の保存場所を表示 を WM_COMMAND で活性化する（選択が登録元へ通知されること）"
+            # **活性化の前にウィンドウを前面へ出す。** ウィンドウ単位のメニューでも、基盤の
+            # メニューイベントは発生元のウィンドウを運ばない（tauri 2.11.5 の `MenuEvent` は
+            # 項目の識別子だけ）ので、アプリは**活性化の時点のフォーカス**から対象ウィンドウを
+            # 解決する（7.5 の `activation_target`）。前面化していないと対象が決まらず、
+            # 通知は `対象ウィンドウ=(対象なし)` になり、登録元は要求を送らない
+            # （実測: 2026-09-12 の Windows のランナー。Linux の段は `XSetInputFocus` で同じことを
+            # している）。
+            if (-not (Set-ForegroundChecked -Handle $shippingHandles[0])) {
+              Show-RecordTail
+              throw "配布物のウィンドウを前面へ出せませんでした（活性化の対象が決まらず、通知が (対象なし) になります）"
+            }
+            # **フォーカスの通知がアプリへ届いてから活性化する**（届く前に送ると対象が (対象なし)
+            # のままになる。上の待ちは `GetForegroundWindow` の一致までしか見ていない）。
+            Start-Sleep -Milliseconds 500
+            # 送り先は**メニューを読んだのと同じウィンドウ**（`MainWindowHandle` は単一
+            # インスタンスの隠しウィンドウを指しうる）。
             $itemId = $tree["診断"]["記録の保存場所を表示`tCtrl+Shift+L"]
-            if (-not [JxcelMenuApi]::PostMessage($shipping.MainWindowHandle, [JxcelMenuApi]::WM_COMMAND, [IntPtr]$itemId, [IntPtr]::Zero)) {
+            if (-not [JxcelMenuApi]::PostMessage($shippingHandles[0], [JxcelMenuApi]::WM_COMMAND, [IntPtr]$itemId, [IntPtr]::Zero)) {
               throw "WM_COMMAND を送れませんでした（コマンド識別子=${itemId}）"
             }
             $notified = Find-RecordLine -Skip $phaseShipping -Pattern "メニュー項目が選択された: 登録元=app-shell 項目=app-shell.diagnostics-log-location " -Seconds 10
@@ -3426,7 +3448,12 @@ jobs:
           appimage=$1
           echo "反証: 配布物を渡すと検査器が引き金の不在で exit 2 になることを確かめる"
           rc=0
-          output=$(sh scripts/check-window-failure.sh \
+          # **反証も仮想ディスプレイの下で走らせる。** 検査器は実行ファイルの引き金を読む前に
+          # 環境（`xwininfo` と `DISPLAY`）を確かめて exit 2 で落ちるので、ディスプレイ無しで
+          # 呼ぶと「引き金の不在」ではなく「DISPLAY 不在」で落ち、対照が成立しない
+          # （実測: 2026-09-12 の Linux のランナー）。
+          output=$(xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            sh scripts/check-window-failure.sh \
             "$appimage" jxcel "$record" "$document" 60 100 100 2>&1) || rc=$?
           printf '%s\n' "$output" | tail -n 3
           if [ "$rc" -eq 0 ]; then
