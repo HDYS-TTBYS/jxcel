@@ -38,7 +38,7 @@
   - _Requirements: 10.6_
 
 - [ ] 2. Core: 型カタログ
-- [ ] 2.1 組込型の集合とセル値への写像を定義する
+- [x] 2.1 組込型の集合とセル値への写像を定義する
   - 整数・小数・10 進数・文字列・真偽・日時・列挙・シート間参照・添付参照・オブジェクト・配列・ANY・拡張型を型の集合として定義する
   - 各型が受け入れるセル値の変種を一意に定める
   - 値なしはどの型でも「値なし」を表し、受理されるかは列の必須指定が決める（型の側では決めない）
@@ -314,3 +314,6 @@
 - 1.4 の申し送り（9.1 / 9.2 が読むこと）: `tests/common/mod.rs` の `Sample::column_count` / `row_values` は `document.sheets()[0]` を直接引く（標本は 1 シート前提）。群 9 がシートを前置する形に変えるなら `self.sheet` 経由に直すこと。
 - 1.4 の申し送り: 標本の生成は `add_row` + `set_row_values` を 10 万回呼ぶと O(n²) になるため、骨格文書 → `to_parts` → 行エントリの差し替え → `with_rebuilt_manifest` → `from_parts`（`Sheet::extend_rows` の一括経路）で行っている。**これは `document-format` の `tests/common/mod.rs` / `benches/large_document.rs` / `tests/row_granular_diff.rs` と同じ既存の迂回路**であり、独自の発明ではない。
 - 1.4 の申し送り: `tests/sample.rs` は design の tests 一覧に無いが、共有モジュール自身を検証する唯一の実行可能ターゲットとして置いた（`common/mod.rs` に `#[cfg(test)]` を書くと全テストバイナリで再実行されるため分離した）。
+- 2.1 の申し送り（4.1 / 4.2 / 5.1 が読むこと）: `TypeKind::accepts` は `AcceptedVariants::Delegated`（`custom`）に対して**適合を返す**。これは変種段階の判断であり、実際の 2 値判定は `CustomType::validate`（4.1）が持つ。`Delegated` を適合の確定と解釈してはならない。また `CellValue::Null` は変種段階で常に適合（受理の可否は列の `required` が決める）。
+- 2.1 で `src/types/{mod,decimal,datetime,text}.rs` が宣言済み（`decimal` / `datetime` / `text` は骨格のみ。中身は 2.2 / 2.3 / 2.4）。
+- 2.1 の申し送り: qlty の rustfmt は `pub mod` をアルファベット順に並べる。宣言順を固定したい場合はコメントで意図を残すこと。
