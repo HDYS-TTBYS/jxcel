@@ -39,8 +39,11 @@
 //! 記録の対象名は `jxcel::render` である（8.1 の `jxcel::sidecar` と同じ規約）。記録先は 5.2 が
 //! 登録した記録機構であり、本モジュールは行を出すだけである。不成立は **`error`** で、
 //! ラベル・期限・経過ミリ秒・診断情報の保存先を含む（要件 10.2 の「識別できる情報」）。
-//! ラスタライザの文字列は環境の情報であってドキュメントの内容ではないので、4.4 の秘匿の対象
-//! ではない（中核のモジュール doc）。
+//! ラスタライザの文字列と**実際に描画されていた画面の識別子**は環境の情報であってドキュメントの
+//! 内容ではないので、4.4 の秘匿の対象ではない（中核のモジュール doc）。**成立の 2 行と不成立の
+//! 行は `画面=<識別子>` を必ず出し**、tasks.md 10.4 の 3 OS の描画確認が「初回描画が成立した
+//! こと」と「**どの画面が**描画されたか」を同じ 1 つの記録から判定できるようにする
+//! （[`DiagnosticsRecorder`] の doc を参照）。
 //!
 //! # 8.3 が読む印（要件 10.3）
 //!
@@ -230,7 +233,11 @@ pub fn render_heartbeat(
         };
     }
 
-    let outcome = watch.notify(&label, request.renderer.as_deref());
+    let outcome = watch.notify(
+        &label,
+        request.renderer.as_deref(),
+        request.screen.as_deref(),
+    );
     let (verdict, withdraw) = match heartbeat_action(outcome) {
         HeartbeatAction::Reply { verdict, withdraw } => (verdict, withdraw),
         HeartbeatAction::Unwatched => {
@@ -320,6 +327,13 @@ fn heartbeat_action(outcome: NotifyOutcome) -> HeartbeatAction {
 /// - [`RenderVerdict::Painted`] → `info`（正常）
 /// - [`RenderVerdict::SoftwareRaster`] → `warn`（描画は成立したが低速な経路である）
 /// - [`RenderVerdict::NoPaint`] → `error`（**描画が成立しなかった**。要件 10.2 の失敗）
+///
+/// **成立の 2 行は `画面=<識別子>` を必ず出す。**これが「初回描画が成立したこと」と
+/// 「**どの画面が**描画されたか」を同じ 1 つの記録で判定できるようにする（tasks.md 10.4 の
+/// 3 OS の描画確認）。値は通知が報告した**実際に描画されていた画面**であり、起動時に要求した
+/// 識別子ではない（要求が未登録ならシェルは既定の画面へ落ちるので、両者は一致しない。9.7）。
+/// 報告が無い通知では `(報告なし)` と出す — **空にしない**ので、10.4 の段は「画面が分からない
+/// ままの成功」を成立として扱えない。
 pub struct DiagnosticsRecorder;
 
 impl RenderRecorder for DiagnosticsRecorder {
@@ -327,24 +341,27 @@ impl RenderRecorder for DiagnosticsRecorder {
         match record.verdict {
             RenderVerdict::Painted => log::info!(
                 target: LOG_TARGET,
-                "初回描画が成立した: label={} 経過={} ms ラスタライザ={}",
+                "初回描画が成立した: label={} 画面={} 経過={} ms ラスタライザ={}",
                 record.label.as_str(),
+                screen_text(record.screen.as_deref()),
                 record.elapsed_millis,
                 renderer_text(record.renderer.as_deref()),
             ),
             RenderVerdict::SoftwareRaster => log::warn!(
                 target: LOG_TARGET,
-                "初回描画は成立したがソフトウェアラスタライザ経由である: label={} 経過={} ms ラスタライザ={}",
+                "初回描画は成立したがソフトウェアラスタライザ経由である: label={} 画面={} 経過={} ms ラスタライザ={}",
                 record.label.as_str(),
+                screen_text(record.screen.as_deref()),
                 record.elapsed_millis,
                 renderer_text(record.renderer.as_deref()),
             ),
             RenderVerdict::NoPaint => log::error!(
                 target: LOG_TARGET,
-                "初回描画が成立しなかった: label={} 期限={} ms 経過={} ms 診断情報の保存先={}",
+                "初回描画が成立しなかった: label={} 期限={} ms 経過={} ms 画面={} 診断情報の保存先={}",
                 record.label.as_str(),
                 FIRST_PAINT_DEADLINE.as_millis(),
                 record.elapsed_millis,
+                screen_text(record.screen.as_deref()),
                 log_location(),
             ),
         }
@@ -364,6 +381,14 @@ impl RenderRecorder for DiagnosticsRecorder {
 /// 記録に出すラスタライザの表現（未取得を空文字で表さない）。
 fn renderer_text(renderer: Option<&str>) -> &str {
     renderer.unwrap_or("(取得できなかった)")
+}
+
+/// 記録に出す「描画されていた画面」の表現（未報告を空文字で表さない）。
+///
+/// 空文字にすると、10.4 の段が要求する `画面=<識別子>` を**部分一致で満たしかねない**。
+/// 空でない目印を出し、報告が無いことを記録そのものから読めるようにする。
+fn screen_text(screen: Option<&str>) -> &str {
+    screen.unwrap_or("(報告なし)")
 }
 
 /// 診断情報の保存先（4.4 の方針が解決する場所）。解決できなければその事実を返す。
@@ -633,6 +658,7 @@ mod tests {
             label: WindowLabel::new("empty-1"),
             verdict: RenderVerdict::NoPaint,
             renderer: renderer.map(str::to_owned),
+            screen: None,
             elapsed_millis: 3_000,
         }
     }
@@ -803,5 +829,13 @@ mod tests {
     fn the_renderer_text_marks_a_missing_value() {
         assert_eq!(renderer_text(None), "(取得できなかった)");
         assert_eq!(renderer_text(Some("llvmpipe")), "llvmpipe");
+    }
+
+    /// 画面の表現（報告が無いことを空文字で表さない）。**空文字だと 10.4 の段が要求する
+    /// `画面=<識別子>` を部分一致で満たしかねない**ので、空でない目印を出す。
+    #[test]
+    fn the_screen_text_marks_a_missing_report() {
+        assert_eq!(screen_text(None), "(報告なし)");
+        assert_eq!(screen_text(Some("empty-window")), "empty-window");
     }
 }

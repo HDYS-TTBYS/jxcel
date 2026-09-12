@@ -102,10 +102,14 @@
 //!
 //! # 記録の内容（要件 8.1、8.4、10.2）
 //!
-//! [`RenderRecorder`] が受け取るのはウィンドウのラベル・判定・ラスタライザの文字列・経過
-//! ミリ秒だけである。**ラスタライザの文字列は環境の情報であって利用者の内容ではない**ので、
-//! 4.4 の秘匿（[`crate::diagnostics::Redacted`]）の対象ではない。ドキュメントの内容がこの
-//! 経路に載ることはない（セル値もスキーマもここへ入ってくる経路が無い）。
+//! [`RenderRecorder`] が受け取るのはウィンドウのラベル・判定・ラスタライザの文字列・
+//! **実際に描画されていた画面の識別子**・経過ミリ秒である。**ラスタライザの文字列も画面の
+//! 識別子も環境の情報であって利用者の内容ではない**ので、4.4 の秘匿
+//! （[`crate::diagnostics::Redacted`]）の対象ではない。ドキュメントの内容がこの経路に載る
+//! ことはない（セル値もスキーマもここへ入ってくる経路が無い）。**画面の識別子を載せるのは、
+//! 3 OS の描画確認（tasks.md 10.4）が「初回描画が成立したこと」と「どの画面が描画されたか」を
+//! 同じ 1 つの記録から判定できるようにするためである**（要求した識別子ではなく、通知の時点で
+//! 領域が表示していた識別子である）。
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -299,6 +303,13 @@ pub struct VerdictRecord {
     pub verdict: RenderVerdict,
     /// 通知が運んだラスタライザの文字列（期限超過では `None`）。
     pub renderer: Option<String>,
+    /// 通知が運んだ**実際に描画されていた画面の識別子**（期限超過と未報告では `None`）。
+    ///
+    /// 3 OS の描画確認（tasks.md 10.4）が「どの画面が描画されたか」を記録から読むために
+    /// 載せる。**要求した識別子ではない** — アダプタが記録する行に出し、CI の段は
+    /// 「描画は成立したが画面が違う」を成立として扱わない（8.2 の完了状態と 10.4 の
+    /// 完了状態を同じ 1 つの記録で判定できるようにする）。
+    pub screen: Option<String>,
     /// 監視の開始から判定までの経過ミリ秒。
     pub elapsed_millis: u64,
 }
@@ -428,7 +439,16 @@ impl RenderWatchdog {
     /// **2 で [`RenderVerdict::NoPaint`] が返ったことは「画面が遅れて使える状態になった」を
     /// 意味する**ので、呼び出し側（アダプタの `watchdog::render_heartbeat`）は不成立の提示を
     /// 取り下げる。判定・記録・印を決めるのはこの中核であり、呼び出し側はその意味に従う。
-    pub fn notify(&self, label: &WindowLabel, renderer: Option<&str>) -> NotifyOutcome {
+    ///
+    /// `screen` は通知を送ったフロントエンドが**実際に描画していた画面の識別子**である
+    /// （[`VerdictRecord::screen`]）。判定には影響しないが、記録に載せて 3 OS の描画確認
+    /// （tasks.md 10.4）が「どの画面が描画されたか」を読めるようにする。
+    pub fn notify(
+        &self,
+        label: &WindowLabel,
+        renderer: Option<&str>,
+        screen: Option<&str>,
+    ) -> NotifyOutcome {
         let now = self.clock.now_millis();
         let decided = {
             let mut watches = self.lock();
@@ -444,6 +464,7 @@ impl RenderWatchdog {
                 label: label.clone(),
                 verdict,
                 renderer: renderer.map(str::to_owned),
+                screen: screen.map(str::to_owned),
                 elapsed_millis: now.saturating_sub(watch.started_millis),
             }
         };
@@ -475,6 +496,8 @@ impl RenderWatchdog {
                     label: WindowLabel::new(label.clone()),
                     verdict: RenderVerdict::NoPaint,
                     renderer: None,
+                    // 通知が届いていないので、描画された画面の報告も無い。
+                    screen: None,
                     elapsed_millis: now.saturating_sub(watch.started_millis),
                 });
             }
@@ -678,7 +701,7 @@ mod tests {
         watchdog.start(&label("empty-1"));
         assert_eq!(watchdog.pending_count(), 1);
 
-        let outcome = watchdog.notify(&label("empty-1"), Some("ANGLE (NVIDIA GeForce RTX)"));
+        let outcome = watchdog.notify(&label("empty-1"), Some("ANGLE (NVIDIA GeForce RTX)"), None);
         assert_eq!(outcome, NotifyOutcome::Decided(RenderVerdict::Painted));
         assert_eq!(recorder.verdicts(), vec![RenderVerdict::Painted]);
         assert_eq!(watchdog.pending_count(), 0);
@@ -687,14 +710,19 @@ mod tests {
         assert_eq!(mark.writes.load(Ordering::SeqCst), 0);
     }
 
-    /// 記録には判定を識別できる材料（ラベル・ラスタライザ・経過）が載る（要件 10.2）。
+    /// 記録には判定を識別できる材料（ラベル・ラスタライザ・**描画された画面**・経過）が載る
+    /// （要件 10.2、tasks.md 10.4）。
     #[test]
     fn the_record_carries_what_identifies_the_verdict() {
         let (clock, recorder, _mark, watchdog) = watch(3_000);
         watchdog.start(&label("doc-7"));
         clock.advance(120);
 
-        watchdog.notify(&label("doc-7"), Some("Mesa Intel(R) UHD Graphics 620"));
+        watchdog.notify(
+            &label("doc-7"),
+            Some("Mesa Intel(R) UHD Graphics 620"),
+            Some("smoke-table"),
+        );
 
         let records = recorder.records();
         assert_eq!(records.len(), 1);
@@ -703,6 +731,31 @@ mod tests {
         assert_eq!(
             records[0].renderer.as_deref(),
             Some("Mesa Intel(R) UHD Graphics 620")
+        );
+        // **要求した識別子ではなく、通知が報告した識別子がそのまま載る。**
+        assert_eq!(records[0].screen.as_deref(), Some("smoke-table"));
+    }
+
+    /// 画面の報告が無い通知（領域を読めなかった・古いフロントエンド）と、通知そのものが
+    /// 無い期限超過は、どちらも `screen` が `None` になる。**どちらも「どの画面が描画されたか」
+    /// の証明にはならない**（10.4 の段はその場合に落ちる）。
+    #[test]
+    fn a_report_without_a_screen_leaves_the_screen_unknown() {
+        let (clock, recorder, _mark, watchdog) = watch(10);
+        watchdog.start(&label("empty-1"));
+        watchdog.notify(&label("empty-1"), Some("Apple GPU"), None);
+        // 期限超過の記録（通知が届いていない）。
+        watchdog.start(&label("empty-2"));
+        clock.advance(20);
+        watchdog.expire_due();
+
+        assert_eq!(
+            recorder
+                .records()
+                .iter()
+                .map(|record| record.screen.clone())
+                .collect::<Vec<_>>(),
+            vec![None, None]
         );
     }
 
@@ -713,7 +766,7 @@ mod tests {
         watchdog.start(&label("empty-2"));
 
         assert_eq!(
-            watchdog.notify(&label("empty-2"), None),
+            watchdog.notify(&label("empty-2"), None, None),
             NotifyOutcome::Decided(RenderVerdict::Painted)
         );
         assert_eq!(recorder.verdicts(), vec![RenderVerdict::Painted]);
@@ -768,7 +821,7 @@ mod tests {
     fn a_notified_window_is_not_overwritten_by_later_expiry() {
         let (clock, _recorder, _mark, watchdog) = watch(100);
         watchdog.start(&label("empty-4"));
-        watchdog.notify(&label("empty-4"), None);
+        watchdog.notify(&label("empty-4"), None, None);
 
         clock.advance(1_000);
         assert!(watchdog.expire_due().is_empty());
@@ -783,7 +836,11 @@ mod tests {
         let (_clock, recorder, mark, watchdog) = watch(3_000);
         watchdog.start(&label("empty-5"));
 
-        let outcome = watchdog.notify(&label("empty-5"), Some("llvmpipe (LLVM 17.0.6, 256 bits)"));
+        let outcome = watchdog.notify(
+            &label("empty-5"),
+            Some("llvmpipe (LLVM 17.0.6, 256 bits)"),
+            None,
+        );
 
         assert_eq!(
             outcome,
@@ -848,9 +905,9 @@ mod tests {
     fn a_second_notification_keeps_the_first_verdict_and_records_nothing() {
         let (_clock, recorder, _mark, watchdog) = watch(3_000);
         watchdog.start(&label("empty-6"));
-        watchdog.notify(&label("empty-6"), Some("llvmpipe"));
+        watchdog.notify(&label("empty-6"), Some("llvmpipe"), None);
 
-        let outcome = watchdog.notify(&label("empty-6"), None);
+        let outcome = watchdog.notify(&label("empty-6"), None, None);
 
         assert_eq!(
             outcome,
@@ -864,7 +921,7 @@ mod tests {
         let (_clock, recorder, _mark, watchdog) = watch(3_000);
 
         assert_eq!(
-            watchdog.notify(&label("empty-9"), None),
+            watchdog.notify(&label("empty-9"), None, None),
             NotifyOutcome::Unwatched
         );
         assert!(recorder.verdicts().is_empty());
@@ -883,7 +940,7 @@ mod tests {
         clock.advance(20);
         watchdog.expire_due();
 
-        let outcome = watchdog.notify(&label("empty-7"), Some("ANGLE (NVIDIA GeForce RTX)"));
+        let outcome = watchdog.notify(&label("empty-7"), Some("ANGLE (NVIDIA GeForce RTX)"), None);
 
         assert_eq!(
             outcome,
@@ -937,13 +994,13 @@ mod tests {
 
         // 次のウィンドウで描画が成立すれば印は下りる。
         watchdog.start(&label("empty-2"));
-        watchdog.notify(&label("empty-2"), None);
+        watchdog.notify(&label("empty-2"), None, None);
         assert_eq!(mark.current(), Some(false));
         assert_eq!(mark.writes.load(Ordering::SeqCst), 2);
 
         // もう一枚描画が成立しても、同じ値なので書かない。
         watchdog.start(&label("empty-3"));
-        watchdog.notify(&label("empty-3"), None);
+        watchdog.notify(&label("empty-3"), None, None);
         assert_eq!(mark.writes.load(Ordering::SeqCst), 2);
     }
 
@@ -962,7 +1019,7 @@ mod tests {
 
         // 代替経路を適用した起動で描画が成立しても、ソフトウェア経路なら印は下ろさない。
         watchdog.start(&label("empty-2"));
-        watchdog.notify(&label("empty-2"), Some("llvmpipe"));
+        watchdog.notify(&label("empty-2"), Some("llvmpipe"), None);
         assert_eq!(mark.current(), Some(true));
         assert_eq!(
             mark.writes.load(Ordering::SeqCst),
@@ -972,7 +1029,7 @@ mod tests {
 
         // 通常の描画経路が成立したときにだけ印が下りる。
         watchdog.start(&label("empty-3"));
-        watchdog.notify(&label("empty-3"), Some("Apple GPU"));
+        watchdog.notify(&label("empty-3"), Some("Apple GPU"), None);
         assert_eq!(mark.current(), Some(false));
         assert_eq!(mark.writes.load(Ordering::SeqCst), 2);
     }
@@ -1031,7 +1088,7 @@ mod tests {
 
         // 描画が成立すれば下りる。
         watchdog.start(&label("empty-2"));
-        watchdog.notify(&label("empty-2"), None);
+        watchdog.notify(&label("empty-2"), None, None);
         assert!(!render_fallback_pending(&store));
 
         let _ = std::fs::remove_dir_all(&directory);

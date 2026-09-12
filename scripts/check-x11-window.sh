@@ -28,6 +28,12 @@
 # （xwininfo -root -tree）を 0.1 秒ごとに走査し、タイトルが一致して最小寸法を満たす
 # ウィンドウが現れるまで待つ。現れなければ非 0 で終了し、アプリの出力を残す。
 #
+# **観測と片付けの実装は `scripts/lib/x11-window.sh` が持つ。** tasks.md 10.4 の
+# `scripts/check-x11-render.sh` も同じ置き場を source する（どちらも「タイトル一致かつ
+# 最小寸法」の判定と、AppImage の展開実行でラッパーの子として残る本体の片付けという
+# **同じ前提**に立つ。2 箇所に写すと片方だけ直したときに検査の意味がずれる）。この
+# スクリプトに残るのは 10.3 の計測（ミリ秒時計・区間・platform 名）だけである。
+#
 # 前提:
 #   - DISPLAY が設定されていること。CI（Linux ランナー）では xvfb-run が設定する。
 #     ローカルでは `DISPLAY=:0` など、実画面の X サーバを指す。
@@ -40,7 +46,17 @@
 # 本体より先に終了して本体が孤児になることがある。その場合の後始末は仮想ディスプレイの
 # 終了に委ねる（X との接続が切れると GTK アプリは終了する）。通常の FUSE 実行では
 # ラッパーが本体を exec するため、この検査が起動した pid の終了で後始末が完結する。
+#
+# SC1091 / SC2154: 置き場は**同じリポジトリのファイル**であり、`x11_log` / `x11_poll_sleep` /
+# `x11_died` はそこで代入される。qlty は検査対象を一時ディレクトリへ写してから shellcheck に
+# かけるため、shellcheck は置き場をたどれず「たどれない・未代入」と報告する（実際の実行では
+# `$0` からの相対で解決する）。契約は置き場の doc に 1 つだけ書いてある。
+# shellcheck disable=SC1091,SC2154
 set -eu
+
+_x11_lib_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# 置き場は `$0` からの相対で解決する（上の SC1091 / SC2154 の注記を参照）。
+. "$_x11_lib_dir/lib/x11-window.sh"
 
 # ミリ秒単位の単調でない壁時計（エポックからのミリ秒）。GNU coreutils / uutils の date は
 # `%N` をナノ秒に展開するので 1000000 で割る。BSD（macOS）の date は `%N` を解釈せず
@@ -67,20 +83,8 @@ min_w=${4:-100}
 min_h=${5:-100}
 measure_file=${6:-}
 
-if [ ! -x "$app" ]; then
-  echo "NG: 実行ファイルが無いか実行権限がありません: $app" >&2
-  exit 2
-fi
-
-if ! command -v xwininfo >/dev/null 2>&1; then
-  echo "NG: xwininfo が見つかりません（x11-utils を導入してください）" >&2
-  exit 2
-fi
-
-if [ -z "${DISPLAY:-}" ]; then
-  echo "NG: DISPLAY が設定されていません（仮想ディスプレイ上で実行してください）" >&2
-  exit 2
-fi
+x11_require_app "$app"
+x11_require_environment
 
 # ミリ秒の時計が無ければ計測できない。ウィンドウの存在検査は成立するが、計測値を
 # 書けないまま通すより、前提の不成立として落とす（tasks.md 10.3 の予算判定が
@@ -99,118 +103,64 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
   *) platform=x11 ;;
 esac
 
-log=$(mktemp)
-pid=""
-
-# 起動したアプリは必ず片付ける。同じジョブの後続の段に残したままにしない。
-# 子孫を先に終了する: AppImage を展開実行（APPIMAGE_EXTRACT_AND_RUN=1）した場合、
-# ラッパーの子として本体が動くため、ラッパーだけを終了すると本体が残る。
-# shellcheck disable=SC2329 # trap 経由の cleanup から呼ばれる（shellcheck は trap を追えない）
-kill_tree() {
-  _tree_pid=$1
-  if command -v pgrep >/dev/null 2>&1; then
-    for _tree_child in $(pgrep -P "$_tree_pid" 2>/dev/null || true); do
-      kill_tree "$_tree_child"
-    done
-  fi
-  kill "$_tree_pid" 2>/dev/null || true
-}
-
-# shellcheck disable=SC2329 # 下の trap から呼ばれる
-cleanup() {
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    kill_tree "$pid"
-    n=0
-    while [ "$n" -lt 10 ] && kill -0 "$pid" 2>/dev/null; do
-      sleep 0.5
-      n=$((n + 1))
-    done
-    kill -9 "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-  fi
-  if [ -n "${log:-}" ] && [ -f "$log" ]; then
-    rm -f "$log"
-  fi
-}
-trap cleanup EXIT INT TERM
+x11_install_cleanup_trap
 
 report_failure() {
   echo "NG: タイトルに '$title' を含む $min_w x $min_h 以上のウィンドウが $timeout_secs 秒以内に現れませんでした" >&2
   echo "--- xwininfo: タイトル一致行 ---" >&2
   xwininfo -root -tree 2>/dev/null | grep -F "\"$title\"" >&2 || echo "(一致なし)" >&2
-  echo "--- アプリの出力（末尾）---" >&2
-  if [ -f "$log" ]; then
-    tail -n 40 "$log" >&2
-  else
-    echo "(出力なし)" >&2
-  fi
+  x11_dump_tail "アプリの出力（末尾）" "$x11_log"
   exit 1
 }
 
 # 計測区間の始点。ここから起動してウィンドウを観測するまでが要件 1.3 の時間である。
 start_ms=$(now_ms)
-GDK_BACKEND=x11 nohup "$app" >"$log" 2>&1 &
-pid=$!
+GDK_BACKEND=x11 nohup "$app" >"$x11_log" 2>&1 &
+x11_pid=$!
 
 # 起動したプロセスの終了を観測しても、即座に失敗とはしない。AppImage の展開実行
 # （APPIMAGE_EXTRACT_AND_RUN=1）では起動ラッパーが本体より先に終了することがあり、
 # ラッパーの終了はアプリの失敗を意味しないためである。ウィンドウの出現を期限まで
 # 待ち続け、現れなかった場合にだけ、終了を観測した事実を添えて失敗する。
-died=0
 deadline_ms=$((start_ms + timeout_secs * 1000))
 
 # 検出粒度を 0.1 秒にする（起動時間をミリ秒で報告するため）。分数秒を受け付けない
 # sleep では 1 秒へ退避する（計測値はその粒度だけ大きく出る＝保守側）。
-if sleep 0.1 2>/dev/null; then
-  poll_sleep=0.1
-else
-  poll_sleep=1
-fi
+x11_pick_poll_sleep
+
+x11_window_match=""
+x11_window_lines=""
 
 while :; do
-  lines=$(xwininfo -root -tree 2>/dev/null | grep -F "\"$title\"" || true)
-  if [ -n "$lines" ]; then
-    # 各行から "幅x高さ" を取り出し、最小寸法を満たすものが 1 つでもあれば成立とする。
-    match=$(printf '%s\n' "$lines" |
-      sed -n 's/.*[^0-9]\([0-9][0-9]*\)x\([0-9][0-9]*\)[+-].*/\1 \2/p' |
-      awk -v mw="$min_w" -v mh="$min_h" '$1 >= mw && $2 >= mh { print $1 "x" $2; exit }')
-    if [ -n "$match" ]; then
-      # 計測区間の終点は「観測した瞬間」。0.1 秒ごとの観測なので実際の表示より
-      # 最大その粒度だけ大きく出る（保守側）。
-      elapsed_ms=$(( $(now_ms) - start_ms ))
-      echo "OK: ウィンドウ '$title' $match が現れました（pid=${pid}, 起動から ${elapsed_ms} ms）"
-      echo "起動時間: ${elapsed_ms} ms（起動から ウィンドウ表示まで）"
-      # 計測値の書き出しは**成功した試行だけ**が行う（この分岐に入った時点で成功）。
-      # したがって APPIMAGE_EXTRACT_AND_RUN=1 の再試行がある場合、権威があるのは
-      # exit 0 になった試行の値であり、失敗した試行はファイルに触れない。
-      if [ -n "$measure_file" ]; then
-        printf '%s=%s\n' "$platform" "$elapsed_ms" > "$measure_file"
-        echo "計測値: ${platform}=${elapsed_ms}（書き出し先 ${measure_file}）"
-      fi
-      printf '%s\n' "$lines"
-      exit 0
+  x11_observe_window "$title" "$min_w" "$min_h"
+  if [ -n "$x11_window_match" ]; then
+    # 計測区間の終点は「観測した瞬間」。0.1 秒ごとの観測なので実際の表示より
+    # 最大その粒度だけ大きく出る（保守側）。
+    elapsed_ms=$(( $(now_ms) - start_ms ))
+    echo "OK: ウィンドウ '$title' $x11_window_match が現れました（pid=${x11_pid}, 起動から ${elapsed_ms} ms）"
+    echo "起動時間: ${elapsed_ms} ms（起動から ウィンドウ表示まで）"
+    # 計測値の書き出しは**成功した試行だけ**が行う（この分岐に入った時点で成功）。
+    # したがって APPIMAGE_EXTRACT_AND_RUN=1 の再試行がある場合、権威があるのは
+    # exit 0 になった試行の値であり、失敗した試行はファイルに触れない。
+    if [ -n "$measure_file" ]; then
+      printf '%s=%s\n' "$platform" "$elapsed_ms" > "$measure_file"
+      echo "計測値: ${platform}=${elapsed_ms}（書き出し先 ${measure_file}）"
     fi
+    printf '%s\n' "$x11_window_lines"
+    exit 0
   fi
 
-  if [ "$died" = 0 ] && ! kill -0 "$pid" 2>/dev/null; then
-    echo "注意: 起動したプロセス（pid=${pid}）が先に終了しました。ウィンドウの出現を待ち続けます" >&2
-    died=1
-  fi
+  x11_note_if_process_died
 
   if [ "$(now_ms)" -ge "$deadline_ms" ]; then
     break
   fi
-  sleep "$poll_sleep"
+  sleep "$x11_poll_sleep"
 done
 
-if [ "$died" = 1 ]; then
-  echo "NG: 起動したプロセスがウィンドウを出す前に終了しました（pid=${pid}）" >&2
-  echo "--- アプリの出力（末尾）---" >&2
-  if [ -f "$log" ]; then
-    tail -n 40 "$log" >&2
-  else
-    echo "(出力なし)" >&2
-  fi
+if [ "$x11_died" = 1 ]; then
+  echo "NG: 起動したプロセスがウィンドウを出す前に終了しました（pid=${x11_pid}）" >&2
+  x11_dump_tail "アプリの出力（末尾）" "$x11_log"
   exit 1
 fi
 

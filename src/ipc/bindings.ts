@@ -244,10 +244,18 @@ export type PickDocumentFileResult = IpcResult<PickDocumentFileResponse, IpcErro
 /**
  * 初回描画の通知の要求（タスク 8.2。要件 10.1、10.2）。
  *
- * 運ぶのは**ラスタライザの文字列だけ**である（フロントエンドが
- * `WEBGL_debug_renderer_info` の `UNMASKED_RENDERER_WEBGL` から得た値。research.md 決定 7）。
- * 取得できない環境では `null` であり、その場合も通知が届いたこと自体は描画成立の証拠に
- * なる（中核の写像を参照）。
+ * 運ぶのは**ラスタライザの文字列**と**実際に描画されていた画面の識別子**である。
+ *
+ * - `renderer` はフロントエンドが `WEBGL_debug_renderer_info` の
+ *   `UNMASKED_RENDERER_WEBGL` から得た値である（research.md 決定 7）。取得できない環境では
+ *   `null` であり、その場合も通知が届いたこと自体は描画成立の証拠になる（中核の写像を参照）。
+ * - `screen` は通知を送る時点で**シェルの領域が実際に表示していた画面**の識別子である
+ *   （`src/shell/Layout.tsx` が領域の要素に書く `data-shell-screen`。tasks.md 9.1 の契約）。
+ *   3 OS の描画確認（tasks.md 10.4）が「**どの画面が描画されたか**」をこの 1 つの記録から
+ *   読めるようにするために載せる（`src/shell/renderHeartbeat.ts` のモジュール doc を参照）。
+ *   **要求した識別子ではなく、描画された識別子であること**が要点である — 起動時に要求した
+ *   画面が未登録なら、シェルは既定の初期画面へ落ちるため、両者は一致しない（9.7 の契約）。
+ *   領域を読めなかったときは `null`（「報告なし」として扱われ、描画の証明にはならない）。
  *
  * **ウィンドウは運ばない。** 呼び出し元は Tauri が注入する `WebviewWindow` から取るため、
  * フロントエンドがウィンドウを偽装する経路は存在しない（要件 4.6、tasks.md 7.1）。
@@ -256,7 +264,11 @@ export type RenderHeartbeatRequest = {
 /**
  * ラスタライザの文字列。取得できなければ `null`。
  */
-renderer: string | null, };
+renderer: string | null, 
+/**
+ * 通知の時点で**実際に描画されていた画面の識別子**。読めなければ `null`。
+ */
+screen: string | null, };
 /**
  * 初回描画の通知の応答（タスク 8.2。要件 10.1、10.2、4.6）。
  *

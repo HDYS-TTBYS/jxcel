@@ -423,7 +423,41 @@ jobs:
         run: |
           $setup = Get-ChildItem "target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
           if (-not $setup) { throw "NSIS インストーラが見つかりません" }
+
+          # 「追加のインストールを要求せずに起動する」ことの前提を記録する（要件 1.2、tasks.md 10.4）。
+          # WebView2 ランタイムが無い環境では、インストーラが bootstrapper を取得して
+          # `/silent /install` で導入する（既定の downloadBootstrapper。上のコメント）。**ランナー
+          # には通常プリインストール済み**なので、この経路は実際には走らないことが多い — その事実も
+          # 出力に残し、「証明できていないこと」を隠さない。導入済みの判定は EdgeUpdate の
+          # クライアント登録（`pv` に版）で行う。
+          $wv2Keys = @(
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+            "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+            "HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+          )
+          function Get-WebView2Version {
+            foreach ($key in $wv2Keys) {
+              if (Test-Path $key) {
+                $version = (Get-ItemProperty -Path $key -ErrorAction SilentlyContinue).pv
+                if ($version) { return $version }
+              }
+            }
+            return $null
+          }
+          $wv2Before = Get-WebView2Version
+          if ($wv2Before) {
+            Write-Host "WebView2 ランタイム: 導入済み (pv=$wv2Before) — bootstrapper の経路はこの実行では走らない"
+          } else {
+            Write-Host "WebView2 ランタイム: 未導入 — bootstrapper が /silent /install で導入する経路を実測する"
+          }
+
           Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait
+
+          if (-not $wv2Before) {
+            $wv2After = Get-WebView2Version
+            if (-not $wv2After) { throw "WebView2 ランタイムが導入されていない（bootstrapper が動いていない）" }
+            Write-Host "WebView2 ランタイム: 無人導入で導入された (pv=$wv2After) — 利用者の操作は無い"
+          }
 
           $exe = Join-Path $env:LOCALAPPDATA "jxcel\jxcel.exe"
           if (-not (Test-Path $exe)) {
@@ -478,6 +512,470 @@ jobs:
       - name: Startup time budget (2s from launch to operable window)
         shell: bash
         run: bash scripts/check-startup-budget.sh
+
+      # ---------------------------------------------------------------------
+      # 起動と描画の検証（tasks.md 10.4 / 要件 1.1, 1.2, 10.1, 10.4）
+      #
+      # 目的は 2 つである:
+      #
+      #   (1) 3 OS それぞれの**配布物**が起動し、ウィンドウが現れ、**初回描画が成立する**こと
+      #       （要件 1.1, 1.2, 10.1）。ウィンドウの出現は直前の 1.5 の 3 段が既に確かめている
+      #       （`check-x11-window.sh` / Swift スパイク / `MainWindowHandle`）が、**空の
+      #       ウィンドウでも出現はする**。描画が成立したことの客観的な信号は 8.2 の
+      #       `初回描画が成立した: label=… 画面=… 経過=… ms ラスタライザ=…` の記録行だけなので、
+      #       ここで診断記録（4.4 の保存先）を読む。**この段は 10.3 の計測から分けてある** —
+      #       計測の段（直前の 3 つの起動検証と予算判定）には一切触れず、別の起動として行う
+      #       （計測値の意味を変えないため。10.3 の定義は「配布物を起動した瞬間 → ウィンドウを
+      #       観測した瞬間」であり、この段の余分な待ちを計測区間へ混ぜてはならない）。
+      #
+      #   (2) **両方の最小画面**（`smoke-table` / `smoke-editor`）が 3 OS で描画されること
+      #       （要件 10.4）。
+      #
+      # ## 検証用の形（`verification-triggers`）で起動する理由（重要）
+      #
+      # 要件 10.4 の完了状態は「配布物が起動し、表形式と文字編集の両方の画面が描画されたこと」
+      # を求めるが、9.7 が 2 つの最小画面へ至る経路（`JXCEL_VERIFICATION_INITIAL_SCREEN`）は
+      # **非既定の cargo feature `verification-triggers` の下にだけ存在する**。配布物（既定
+      # ビルド）は環境変数を読まず、初期画面は 9.6 の空ウィンドウの画面のままである
+      # （`src-tauri/src/window/mod.rs` の `initial_screen_script`。`strings` による不在確認が
+      # 5.4 / 7.4 の片付けの規約）。したがって次の 2 択になる:
+      #
+      #   A. **配布物の検査はそのままにし**（起動＋ウィンドウ＋初回描画）、両画面は
+      #      `--features verification-triggers` の**検証用の形**を起動して確かめる。
+      #   B. 配布物にも両画面へ至る導線を与え（7.4 の登録口＋メニュー→フロントエンドの
+      #      イベント）、3 OS でそれを駆動する。
+      #
+      # **A を採る。**理由:
+      #   - B は「実用画面ではない・ユーザー向けの導線を持たない」という 9.7 の決定と
+      #     `SmokeScreens` の契約（design.md「Frontend Layer」）に反する。ユーザーに見える
+      #     メニュー項目を検証専用のために足すことは、配布物の挙動そのものを検証のために
+      #     変えることになる。
+      #   - B の駆動は OS ごとに別機構になる。macOS / Windows には AT-SPI が無く、メニューの
+      #     キー注入は画面収録・アクセシビリティの許可に依存する（macOS の画面収録の許可は
+      #     ランナーで安定して与えられない）。Linux では `XSendEvent` が使えるが、**3 OS 分の
+      #     メニュー駆動を CI で安定させる保証が無い**。
+      #   - A は配布物に検証専用のコードを一切足さない（上記の不在確認を破らない）。
+      #   - **両画面のコードは 2 つの形で同一である**（同じ `src/features/smoke/` と
+      #     `src/shell/Layout.tsx` の登録簿が `dist/` に埋め込まれる。違うのは環境変数を読んで
+      #     初期化スクリプトを足す Rust 側の 1 箇所だけ）。配布物の描画は (1) の初回描画の
+      #     記録が担保する。
+      #
+      # **トレードオフ（正直に記す）**: 検証用の形は**バンドルしない**リリース実行ファイル
+      # （`npx tauri build --no-bundle --features verification-triggers` が作る
+      # `target/release/jxcel[.exe]`）を起動する。したがって CI が実測するのは「配布物そのものが
+      # 両画面を描く」ことではなく、「**配布物が起動して初回描画が成立し**、**同じフロントエンド
+      # 資産を持つ検証用の形が両画面を描く**」ことである。配布物の中に両画面へ至る入口が無い
+      # という 9.7 の決定と、要件 10.4 の文言の間の差はここに残る。
+      #
+      # ## 各 OS の証拠が何を証明するか（要件 1.1, 1.2）
+      #
+      #   - **Linux**: AppImage を**そのまま実行する**（実行権限は配布物が持つ。deb の導入も
+      #     `apt` も使わない）。FUSE が使えないランナー向けの `APPIMAGE_EXTRACT_AND_RUN=1` は
+      #     自分自身を一時領域へ展開する実行であり、インストールではない（1.5 と同じ退避）。
+      #   - **macOS**: `.app` の中の実行ファイルを直接起動する（インストーラを使わない）。
+      #     WebView は OS 提供の WKWebView。配布物は ad-hoc 署名であり、Gatekeeper / 公証は
+      #     本スペックの非目標である（1.5）。
+      #   - **Windows**: 配布物は NSIS インストーラである。**`/S` の無人導入**（直前の 1.5 の段）
+      #     の後に、導入された実行ファイルを起動する（利用者の操作は無い）。WebView2 は導入済み
+      #     ならそれを使い、無ければインストーラの bootstrapper が `/silent /install` で導入する
+      #     （既定の downloadBootstrapper）。**導入前後のランタイムの有無は 1.5 の段が出力する**
+      #     ので、どちらの経路を通ったかが CI のログに現れる。
+      #   - **限界**: ランナーは素の利用者機ではない。Linux はビルド用の開発パッケージが入って
+      #     おり（同梱ライブラリが壊れていても気付けない）、macOS / Windows は WebView が OS に
+      #     同梱されている。したがって CI が証明するのは「配布物が追加のインストール手順を
+      #     要求せず、そのまま起動して描画すること」であり、「依存が 1 つも欠けた最も素の環境で
+      #     動くこと」ではない。
+      #
+      # ## 画面の識別（証拠の形。**要求ではなく、実際に描画された画面を証明する**）
+      #
+      # 証明に使うのは、8.2 の成立行が運ぶ `画面=<識別子>` である。フロントエンド
+      # （`src/shell/renderHeartbeat.ts`）が通知の時点でシェルの領域
+      # （`[data-testid="jxcel-shell-region"]` の `data-shell-screen`。9.1 の契約）を読み、
+      # 境界の型 `RenderHeartbeatRequest.screen`（`crates/app-shell/src/ipc/mod.rs`）に載せ、
+      # アダプタ（`src-tauri/src/watchdog.rs`）が
+      # `初回描画が成立した: label=… 画面=… 経過=… ms ラスタライザ=…` の行に出し、診断記録
+      # （4.4 の保存先）へ落ちる。**3 OS はいずれも同じ綴りの記録を出す**ので、段は
+      # プラットフォームごとの別機構（macOS の画面収録の許可、Windows の UI Automation、
+      # Linux の AT-SPI）を足さずに画面を判定できる。
+      #
+      # **報告されるのは「実際に描画されていた画面」である（要求した識別子ではない）。**
+      # 起動時の指定が登録簿に無ければ、フロントエンドは警告 1 行を残して既定の初期画面へ
+      # 落ちる（9.7 の契約。`src/shell/verificationScreen.ts`）ので、`画面=empty-window` が
+      # 報告される。したがって**未登録の識別子を渡すと段は非 0 で落ちる**。旧い形は要求の行
+      # `検証用の初期画面を指定した: screen=<識別子>`（`window/mod.rs` が**要求**を記録する
+      # だけの行）を証明にしていたため、存在しない画面でも緑になった（レビューで再現された
+      # 反証）。**要求の行は起動の識別として残すが、証明からは外す。**
+      #
+      # 識別子の綴りは画面ファイルの単一定義（`TABLE_SMOKE_SCREEN_ID` /
+      # `EDITOR_SMOKE_SCREEN_ID`）と一致していなければならない。**配布物にも期待を渡す** —
+      # 配布物は環境変数を読まないので要求は無視されるが、初期画面は 9.6 の空ウィンドウの画面
+      # であり、`画面=empty-window` が報告されることを要求できる（配布物でも画面の報告経路が
+      # 働いていることの証明になる）。
+      #
+      # 段が要求するものは 3 つである（**どれか 1 つでも欠けたらその段は非 0 で終わる**）:
+      #   1. ウィンドウが現れたこと（1.5 と同じ観測）
+      #   2. 8.2 の成立行（`初回描画が成立した: label=…`。ソフトウェアラスタライザ経由の
+      #      `初回描画は成立したがソフトウェアラスタライザ経由である: label=…` も描画の成立
+      #      である — 遅いだけで描かれている）
+      #   3. **その成立行が `画面=<期待する識別子>` を報告していること**（実際に描画された画面）
+      # 要求の行 `検証用の初期画面を指定した: screen=<識別子>` は、あれば起動の識別として出し、
+      # **存在は要求しない**（配布物はこの行を出さない）。
+      #
+      # 診断記録の保存先（4.4 の解決）と、5.2 が書く記録中のファイル名 `jxcel.log`:
+      #   Linux   : $XDG_DATA_HOME/{識別子}/logs（無ければ $HOME/.local/share/{識別子}/logs）
+      #   macOS   : $HOME/Library/Logs/{識別子}（`logs` 接尾辞は付かない）
+      #   Windows : %LOCALAPPDATA%\{識別子}\logs
+      # 識別子は bundle identifier `com.jxcel.app`（4.4 / 5.1）。
+      # ---------------------------------------------------------------------
+
+      # 検証用の形（バンドルしない）。**配布物を上書きしない** — `--no-bundle` なので直前までに
+      # 生成した配布物（AppImage / deb / .app / dmg / NSIS インストーラ）はそのまま残り、
+      # `target/release/jxcel[.exe]` だけが差し替わる。`beforeBuildCommand`（`npm run build`）が
+      # フロントエンドを生成してから release ビルドを行うので、埋め込み資産は配布物と同一である。
+      - name: Build verification form (no bundle, --features verification-triggers)
+        run: npx tauri build --no-bundle --features verification-triggers
+
+      # Linux の描画検証（tasks.md 10.4）。4 回起動する（配布物・smoke-table・smoke-editor・
+      # 反証）。検査本体は POSIX sh の `scripts/check-x11-render.sh`（ローカルでも同じものを
+      # 実行できる）。第 7 引数は**期待する「描画された画面」**である（要求した識別子ではない）。
+      - name: Verify first paint and both smoke screens render (Linux / Xvfb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -eu
+          # 4.4 の解決（Linux はアプリケーションデータ領域の下の logs。空の XDG_DATA_HOME は
+          # 未設定として $HOME へ落ちる — アプリ側の解決と同じ）。
+          record="${XDG_DATA_HOME:-$HOME/.local/share}/com.jxcel.app/logs/jxcel.log"
+          echo "診断記録: $record"
+          set -- target/release/bundle/appimage/*.AppImage
+          appimage=$1
+          # 配布物は環境変数を読まない（9.7）ので初期画面は 9.6 の空ウィンドウの画面である。
+          # それでも `画面=empty-window` を要求する — **配布物でも画面の報告経路が働いている
+          # こと**の証明になる（要求は無視されるが、期待は成立する）。
+          echo "検証 1/4: 配布物（AppImage）を直接起動する。追加のインストール手順は無い（deb の導入も apt も使わない）"
+          if ! xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+               sh scripts/check-x11-render.sh "$appimage" jxcel 60 100 100 "$record" empty-window; then
+            echo "FUSE 経由で起動できなかったため、APPIMAGE_EXTRACT_AND_RUN=1 で再試行します" >&2
+            export APPIMAGE_EXTRACT_AND_RUN=1
+            xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+              sh scripts/check-x11-render.sh "$appimage" jxcel 60 100 100 "$record" empty-window
+          fi
+          echo "検証 2/4: 表形式の最小画面 smoke-table（検証用の形。埋め込み資産は配布物と同一）"
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            sh scripts/check-x11-render.sh target/release/jxcel jxcel 60 100 100 "$record" smoke-table
+          echo "検証 3/4: 文字編集の最小画面 smoke-editor（検証用の形。埋め込み資産は配布物と同一）"
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            sh scripts/check-x11-render.sh target/release/jxcel jxcel 60 100 100 "$record" smoke-editor
+          # 反証: 埋め込み可能だが**登録簿に無い**識別子を期待として渡す。実際に描画されるのは
+          # 既定の空ウィンドウの画面（9.7 の契約で既定へ落ちる）なので、検査は
+          # 「描画された画面が期待と一致しない」で非 0 で落ちなければならない。**落ちなかった
+          # らこの段を失敗させる** — 検査が描画された画面を見ていないことになる。
+          echo "検証 4/4: 反証 — 登録簿に無い識別子 no-such-screen で検査が非 0 で落ちること"
+          rc=0
+          output=$(xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            sh scripts/check-x11-render.sh target/release/jxcel jxcel 60 100 100 "$record" no-such-screen 2>&1) || rc=$?
+          printf '%s\n' "$output"
+          if [ "$rc" -eq 0 ]; then
+            echo "NG: 未登録の画面の識別子で検査が成功してしまった（描画された画面を証明していない）" >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$output" |
+            grep -q "描画された画面が期待と一致しません: 期待 screen=no-such-screen / 実際 screen=empty-window"; then
+            echo "NG: 反証が「描画された画面の不一致」以外の理由で落ちた（検査器が動いていない可能性がある）" >&2
+            exit 1
+          fi
+          echo "反証: 期待どおり非 0 で落ちました（実際に描画された画面は empty-window）"
+
+      # macOS の描画検証（tasks.md 10.4）。3 回起動する（配布物・smoke-table・smoke-editor）。
+      # ウィンドウの観測は 1.5 のスパイクと同じ CoreGraphics の列挙（所有者 pid・レイヤー・寸法のみ。
+      # 画面収録の許可を要するウィンドウ名は使わない）。描画と**描画された画面**は診断記録を読む。
+      #
+      # **アプリの標準出力・標準誤差は診断記録とは別のファイルへ書く。**同じファイルへ書くと、
+      # アプリ（`TargetKind::Stdout`）と診断記録（5.2 の `TargetKind::Folder`）が**独立した 2 つの
+      # 書き手**として同じファイルを offset 0 と EOF から触り、アプリ側が先頭から上書きして
+      # `初回描画が成立した` の行を壊しうる（偽の失敗）。Linux / Windows の段は最初から別ファイル
+      # である（`>"$log"` / `Start-Process` の既定）。
+      - name: Verify first paint and both smoke screens render (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 4.4 の解決（macOS は $HOME/Library/Logs/{識別子}。`logs` 接尾辞は付かない）。
+          record="$HOME/Library/Logs/com.jxcel.app/jxcel.log"
+          appout="$RUNNER_TEMP/jxcel-app-output.log"
+          mkdir -p "$(dirname "$record")"
+          echo "診断記録: $record"
+          echo "アプリの出力: $appout（記録とは別ファイル）"
+          spike="$RUNNER_TEMP/check-render.swift"
+          cat > "$spike" <<'SWIFT'
+          import CoreGraphics
+          import Darwin
+          import Foundation
+
+          // アプリを起動してウィンドウを観測し、診断記録から初回描画（8.2）と**描画された画面**
+          // （10.4）の行を読む。
+          // 引数: <実行ファイル> <期待する画面の識別子|空> <記録ファイル> <アプリ出力ファイル> <タイムアウト秒>
+          //
+          // **記録とアプリの出力は別のファイルである。**アプリの標準出力・標準誤差を記録へ
+          // つなぐと、アプリと診断記録（`TargetKind::Folder`）が同じファイルへ独立に書く
+          // ことになり、アプリ側が先頭から上書きして記録の行を壊しうる。計測（10.3）は
+          // 1.5 の段が別に行うので、ここでは計時しない。
+          let appPath = CommandLine.arguments[1]
+          let expectedScreen = CommandLine.arguments[2]
+          let recordPath = CommandLine.arguments[3]
+          let appOutputPath = CommandLine.arguments[4]
+          let timeoutSeconds = Double(CommandLine.arguments[5]) ?? 60.0
+
+          // 8.2 の成立行は 2 つある（`Painted` とソフトウェアラスタライザ経由）。**どちらも
+          // 描画の成立である**（後者は遅いだけ）。
+          let heartbeatPatterns = [
+              "初回描画が成立した: label=",
+              "初回描画は成立したがソフトウェアラスタライザ経由である: label=",
+          ]
+          let requestedPattern = "検証用の初期画面を指定した: screen=\(expectedScreen)"
+
+          func recordText() -> String {
+              return (try? String(contentsOfFile: recordPath, encoding: .utf8)) ?? ""
+          }
+
+          /// 成立行が報告する**実際に描画されていた画面**を取る（`画面=<識別子>`）。
+          func renderedScreen(in line: String) -> String? {
+              guard let range = line.range(of: "画面=") else { return nil }
+              let rest = line[range.upperBound...]
+              return rest.split(separator: " ", maxSplits: 1).first.map { String($0) }
+          }
+
+          func tail(_ path: String, _ count: Int) -> [String] {
+              return ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "")
+                  .split(separator: "\n").suffix(count).map { String($0) }
+          }
+
+          func fail(_ message: String) -> Never {
+              FileHandle.standardError.write("NG: \(message)\n".data(using: .utf8)!)
+              FileHandle.standardError.write("--- 診断記録（末尾）: \(recordPath) ---\n".data(using: .utf8)!)
+              for line in tail(recordPath, 20) {
+                  FileHandle.standardError.write("\(line)\n".data(using: .utf8)!)
+              }
+              FileHandle.standardError.write("--- アプリの出力（末尾）: \(appOutputPath) ---\n".data(using: .utf8)!)
+              for line in tail(appOutputPath, 40) {
+                  FileHandle.standardError.write("\(line)\n".data(using: .utf8)!)
+              }
+              exit(1)
+          }
+
+          // 記録とアプリの出力を空にしてから起動する（前回の起動の行で偽の成功をしない）。
+          _ = FileManager.default.createFile(atPath: recordPath, contents: nil)
+          _ = FileManager.default.createFile(atPath: appOutputPath, contents: nil)
+
+          let process = Process()
+          process.executableURL = URL(fileURLWithPath: appPath)
+          var environment = ProcessInfo.processInfo.environment
+          if expectedScreen.isEmpty {
+              environment.removeValue(forKey: "JXCEL_VERIFICATION_INITIAL_SCREEN")
+          } else {
+              environment["JXCEL_VERIFICATION_INITIAL_SCREEN"] = expectedScreen
+          }
+          process.environment = environment
+          // **アプリの出力は記録とは別のファイルへ。**配布物は環境変数を読まないので要求は
+          // 無視されるが、期待（初期画面は 9.6 の空ウィンドウの画面）は成立する。
+          if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: appOutputPath)) {
+              process.standardOutput = handle
+              process.standardError = handle
+          }
+
+          let start = Date()
+          do {
+              try process.run()
+          } catch {
+              fail("アプリを起動できません: \(error)")
+          }
+          let pid = process.processIdentifier
+
+          func stop() {
+              process.terminate()
+              Thread.sleep(forTimeInterval: 0.5)
+              if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+          }
+
+          // 1. ウィンドウの出現（1.5 と同じ観測: 通常レイヤーの 100x100 以上）。
+          let windowDeadline = start.addingTimeInterval(timeoutSeconds)
+          var windowLine: String? = nil
+          while Date() < windowDeadline {
+              if !process.isRunning {
+                  stop()
+                  fail("アプリがウィンドウを出す前に終了しました")
+              }
+              if let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] {
+                  for window in list {
+                      guard let owner = window[kCGWindowOwnerPID as String] as? Int, owner == Int(pid) else { continue }
+                      guard let layer = window[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
+                      guard let bounds = window[kCGWindowBounds as String] as? [String: Any],
+                            let width = bounds["Width"] as? Double, let height = bounds["Height"] as? Double,
+                            width >= 100, height >= 100 else { continue }
+                      let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
+                      windowLine = "OK: ウィンドウ \(Int(width))x\(Int(height)) が現れました (pid=\(pid), 起動から \(elapsedMs) ms)"
+                      break
+                  }
+              }
+              if windowLine != nil { break }
+              Thread.sleep(forTimeInterval: 0.1)
+          }
+          guard let observed = windowLine else {
+              stop()
+              fail("\(Int(timeoutSeconds)) 秒以内にウィンドウが現れませんでした")
+          }
+          print(observed)
+
+          // 2. 初回描画（8.2）の成立行と、そこに載る**描画された画面**（10.4）を待つ。8.2 の
+          //    期限はウィンドウ生成から 3 秒なので、これを大きく超える猶予で足りる。
+          let renderDeadline = Date().addingTimeInterval(20.0)
+          var heartbeat: String? = nil
+          var actual: String? = nil
+          while Date() < renderDeadline {
+              for line in recordText().split(separator: "\n") {
+                  let text = String(line)
+                  if heartbeatPatterns.contains(where: { text.contains($0) }) {
+                      heartbeat = text
+                      actual = renderedScreen(in: text)
+                  }
+              }
+              if heartbeat != nil {
+                  // 期待が空なら成立だけでよい。期待があるなら**描画された画面**が一致する
+                  // ことを要求する（通知はウィンドウごとに 1 回なので、待っても変わらない）。
+                  if expectedScreen.isEmpty { break }
+                  if actual == expectedScreen { break }
+                  stop()
+                  let actualText = actual ?? "（報告なし）"
+                  fail("描画は成立しましたが、描画された画面が期待と一致しません: 期待 screen=\(expectedScreen) / 実際 screen=\(actualText)（起動時の指定が登録簿に無いか、描画が既定の画面へ落ちています）")
+              }
+              if !process.isRunning { break }
+              Thread.sleep(forTimeInterval: 0.2)
+          }
+          guard let painted = heartbeat else {
+              stop()
+              fail("初回描画の成立行（'\(heartbeatPatterns[0])'）が 20 秒以内に現れませんでした（初回描画が成立していない）")
+          }
+          print("初回描画: \(painted)")
+          if !expectedScreen.isEmpty {
+              let actualText = actual ?? "（報告なし）"
+              print("描画された画面: \(actualText)（期待 \(expectedScreen)）")
+              // 要求の行は**証明ではなく起動の識別**として出す（あれば。配布物は出さない）。
+              for line in recordText().split(separator: "\n") where String(line).contains(requestedPattern) {
+                  print("初期画面の指定: \(line)")
+              }
+          }
+          stop()
+          exit(0)
+          SWIFT
+          # 3 回とも**期待する「描画された画面」**を渡す（配布物は要求を無視するが、初期画面は
+          # 9.6 の空ウィンドウの画面なので `画面=empty-window` が成立する）。
+          echo "検証 1/3: 配布物（.app）をそのまま起動する。追加のインストール手順は無い（インストーラを使わない）"
+          swift "$spike" "target/release/bundle/macos/jxcel.app/Contents/MacOS/jxcel" "empty-window" "$record" "$appout" 60
+          echo "検証 2/3: 表形式の最小画面 smoke-table（検証用の形。埋め込み資産は配布物と同一）"
+          swift "$spike" target/release/jxcel smoke-table "$record" "$appout" 60
+          echo "検証 3/3: 文字編集の最小画面 smoke-editor（検証用の形。埋め込み資産は配布物と同一）"
+          swift "$spike" target/release/jxcel smoke-editor "$record" "$appout" 60
+
+      # Windows の描画検証（tasks.md 10.4）。3 回起動する（配布物・smoke-table・smoke-editor）。
+      # ウィンドウの観測は 1.5 の段と同じ `MainWindowHandle`。描画と**描画された画面**は診断記録を
+      # 読む（第 2 引数は**期待する「描画された画面」**であり、要求した識別子ではない）。
+      - name: Verify first paint and both smoke screens render (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # 4.4 の解決（Windows は %LOCALAPPDATA%\{識別子}\logs）。
+          $record = Join-Path $env:LOCALAPPDATA "com.jxcel.app\logs\jxcel.log"
+          New-Item -ItemType Directory -Force -Path (Split-Path $record) | Out-Null
+          Write-Host "診断記録: $record"
+
+          # 8.2 の成立行は 2 つある（`Painted` とソフトウェアラスタライザ経由）。**どちらも
+          # 描画の成立である**（後者は遅いだけ）。
+          $heartbeatPatterns = @(
+            "初回描画が成立した: label=",
+            "初回描画は成立したがソフトウェアラスタライザ経由である: label="
+          )
+
+          function Test-Render {
+            param(
+              [string]$Exe,
+              [string]$Expected,
+              [string]$What
+            )
+            if (-not (Test-Path $Exe)) { throw "${What}: 実行ファイルがありません: $Exe" }
+            # **記録は起動の前に空にする**（前回の起動の行で偽の成功をしない）。
+            if (Test-Path $record) { Remove-Item $record -Force }
+            if ($Expected) { $env:JXCEL_VERIFICATION_INITIAL_SCREEN = $Expected }
+            else { Remove-Item Env:\JXCEL_VERIFICATION_INITIAL_SCREEN -ErrorAction SilentlyContinue }
+            $p = Start-Process -FilePath $Exe -PassThru
+            try {
+              $deadline = (Get-Date).AddSeconds(60)
+              $title = $null
+              while ((Get-Date) -lt $deadline) {
+                Start-Sleep -Milliseconds 100
+                if ($p.HasExited) { throw "${What}: アプリがウィンドウを出す前に終了しました (exit=$($p.ExitCode))" }
+                $p.Refresh()
+                if ($p.MainWindowHandle -ne 0) { $title = $p.MainWindowTitle; break }
+              }
+              if (-not $title) { throw "${What}: 60 秒以内にウィンドウが現れませんでした" }
+              if ($title -notmatch "jxcel") { throw "${What}: 予期しないウィンドウタイトル: $title" }
+              Write-Host "OK: ウィンドウ '$title' が現れました (pid=$($p.Id))"
+
+              $heartbeat = $null
+              $actual = $null
+              $renderDeadline = (Get-Date).AddSeconds(20)
+              while ((Get-Date) -lt $renderDeadline) {
+                Start-Sleep -Milliseconds 200
+                if (Test-Path $record) {
+                  foreach ($line in (Get-Content -Path $record -Encoding UTF8)) {
+                    foreach ($pattern in $heartbeatPatterns) {
+                      if ($line -like "*$pattern*") { $heartbeat = $line }
+                    }
+                  }
+                }
+                if ($heartbeat) {
+                  # 成立行が報告するのは**実際に描画されていた画面**である。通知はウィンドウごとに
+                  # 1 回なので、待っても変わらない（8.2 の契約）。
+                  $match = [regex]::Match($heartbeat, "画面=(\S+)")
+                  $actual = if ($match.Success) { $match.Groups[1].Value } else { "（報告なし）" }
+                  if (-not $Expected) { break }
+                  if ($actual -eq $Expected) { break }
+                  throw "${What}: 描画は成立しましたが、描画された画面が期待と一致しません: 期待 screen=$Expected / 実際 screen=$actual（起動時の指定が登録簿に無いか、描画が既定の画面へ落ちています）"
+                }
+              }
+              if (-not $heartbeat) { throw "${What}: 初回描画の成立行が 20 秒以内に現れませんでした（初回描画が成立していない）" }
+              Write-Host "初回描画: $heartbeat"
+              if ($Expected) {
+                Write-Host "描画された画面: $actual（期待 $Expected）"
+                # 要求の行は**証明ではなく起動の識別**として出す（あれば。配布物は出さない）。
+                foreach ($line in (Get-Content -Path $record -Encoding UTF8)) {
+                  if ($line -like "*検証用の初期画面を指定した: screen=$Expected*") { Write-Host "初期画面の指定: $line" }
+                }
+              }
+            } finally {
+              if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+              # プロセスの終了を待ってから戻る。次回の起動は診断記録を削除するので、直前の
+              # プロセスが記録のハンドルを握ったままだと削除が失敗しうる（無言の取りこぼしを作らない）。
+              if ($p) { $p.WaitForExit(5000) | Out-Null }
+            }
+          }
+
+          # 導入先は 1.5 の段と同じ前提（既定の installMode は currentUser）。見つからない場合は
+          # 1.5 の段と同じ探索に退避する（導入先が変わっても偽の失敗をしない）。
+          $installed = Join-Path $env:LOCALAPPDATA "jxcel\jxcel.exe"
+          if (-not (Test-Path $installed)) {
+            $found = Get-ChildItem -Path $env:LOCALAPPDATA -Filter "jxcel.exe" -Recurse -Depth 3 -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($found) { $installed = $found.FullName }
+          }
+          if (-not (Test-Path $installed)) { throw "導入された実行ファイルが見つかりません: $installed" }
+          # 配布物は環境変数を読まない（9.7）ので初期画面は 9.6 の空ウィンドウの画面である。
+          # それでも `画面=empty-window` を要求する（配布物でも画面の報告経路が働くことの証明）。
+          Write-Host "検証 1/3: 配布物（NSIS インストーラで /S 導入済みの実行ファイル）を起動する。追加の操作は無い"
+          Test-Render -Exe $installed -Expected "empty-window" -What "配布物"
+          Write-Host "検証 2/3: 表形式の最小画面 smoke-table（検証用の形。埋め込み資産は配布物と同一）"
+          Test-Render -Exe "target/release/jxcel.exe" -Expected "smoke-table" -What "画面 smoke-table"
+          Write-Host "検証 3/3: 文字編集の最小画面 smoke-editor（検証用の形。埋め込み資産は配布物と同一）"
+          Test-Render -Exe "target/release/jxcel.exe" -Expected "smoke-editor" -What "画面 smoke-editor"
 
       # ---------------------------------------------------------------------
       # 配布物の検証（tasks.md 10.2 / 要件 6.4, 6.5, 6.6）

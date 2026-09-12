@@ -31,6 +31,40 @@
  * 読むためだけに作った WebGL 文脈は、読み終えたら `WEBGL_lose_context` で手放す（使わない
  * 文脈を保持すると、GPU 資源とコンテキスト数の上限を無駄に消費する）。
  *
+ * # 画面の申告（tasks.md 10.4 の 3 OS の描画確認）
+ *
+ * 通知には**その時点で領域が実際に表示していた画面の識別子**を載せる。領域
+ * （`[data-testid="jxcel-shell-region"]`）から読む目印は **2 つ**である:
+ *
+ * - 9.1 が「現在の画面の識別」として定めた `data-shell-screen`（外から 1 式で読める）。
+ * - 9.3 のエラー提示 `[data-testid="jxcel-screen-error"]`。**これが要る理由**: `data-shell-screen`
+ *   は画面を包む境界の**外側**に付く（`./Layout.tsx`）。したがって画面が描画中に例外を投げても、
+ *   境界が提示へ差し替えた後で同じ識別子が残る。1 だけを読むと**描画に失敗した画面を
+ *   「描画された」と報告してしまい**、10.4 の段が描画の証明に使えなくなる（レビューで再現された
+ *   反証: 登録済みの画面が投げても段が緑になった）。
+ *
+ * **提示が出ているときは `null` を送る**（Rust 側は「報告なし」＝ `(報告なし)` として記録する。
+ * 空文字は送らない — `画面=<識別子>` の部分一致で要求を満たさせないため）。これにより 10.4 の
+ * 段は、登録済みの画面が描画中に失敗した場合も `実際 screen=（報告なし）` で落ちる。
+ *
+ * **この 2 つの目印が覆う範囲**: 「領域が 9.3 のエラー提示を表示していないこと」までである。
+ * **画面が中身を持たずに描かれた場合は区別できない**（提示が出ないので識別子を報告する）。
+ * 画面ごとの内容の目印を領域の中に置けば区別できるが、9.1 の 1 式を画面の実装すべてへ広げる
+ * 変更になり、10.4 の境界を超える。**描画フレームから通知が届くこと自体**（冒頭）が「1 フレームが
+ * 描かれた」ことの証拠であり、この属性は「**どの画面か**」だけを担う。
+ *
+ * **要求した識別子ではなく、描画された識別子を送ることが要点である。** 起動時の指定
+ * （`src/shell/verificationScreen.ts`）が未登録の識別子なら、シェルは**警告 1 行を残して既定の
+ * 初期画面へ落ちる**（9.7 の契約）。両者を別々に記録すれば、10.4 の段は「要求どおりの画面が
+ * 描画されたこと」を証明できる — 要求した識別子だけを記録していた旧い形では、登録簿から画面を
+ * 消しても段が緑になった（レビューで再現された反証）。判定は Rust 側の記録（8.2 の
+ * `初回描画が成立した` 行に付けられる `画面=`）で行う。
+ *
+ * **この不一致をフロントエンドで失敗にしない**理由: 未知の識別子で既定の画面へ落ちるのは
+ * 9.6 / 9.7 が定めた起動の契約であり（`resolveVerificationInitialScreen` の doc）、ここで
+ * 例外を投げると**配布物の起動そのものを検証専用の入力で壊す**ことになる。警告は既に
+ * 1 行出ており、照合は 10.4 の段が実測で行う。
+ *
  * # 失敗しても何も壊さない
  *
  * 通知が届かなければ監視側は期限超過として不成立を記録し、利用者に提示する（要件 10.2）。
@@ -57,6 +91,9 @@
 
 import type { RenderHeartbeatResponse } from "../ipc/bindings";
 import { invokeCommand, type CommandName } from "../ipc/client";
+// 9.3 のエラー提示の目印。**文字列をここへ写さない** — 境界とこの読み取りが同じ 1 つの源
+// （`./ScreenBoundary` の定数。外部の検査に約束している目印である）を指すようにする。
+import { SCREEN_ERROR_TESTID } from "./ScreenBoundary";
 
 /**
  * 初回描画の通知コマンドの名前。
@@ -86,13 +123,34 @@ export function installRenderHeartbeat(): void {
     requestAnimationFrame(() => {
       void (async () => {
         try {
+          // 領域は **1 回だけ**引き、そこから 2 つの目印を読む（領域の要素は同一である）:
+          //
+          // 1. `data-shell-screen` — 9.1 が定めた「領域が選択している画面の識別子」。
+          // 2. `[data-testid="jxcel-screen-error"]` — 9.3 の境界が例外を捕まえてエラー提示を
+          //    描いたかどうか。**提示が出ているなら、その画面は描画されていない。**
+          //
+          // 目印 2 が要る理由は**モジュール doc「画面の申告」**にある（`data-shell-screen` は
+          // 境界の外側に付くので、境界が提示へ差し替えても残る）。提示が出ているときは `null`
+          // を送り、Rust 側に「報告なし」を記録させる。**空文字は送らない**（`画面=` の部分
+          // 一致で要求を満たさせないため）。
+          const region = document.querySelector(
+            '[data-testid="jxcel-shell-region"]',
+          );
+          const showsErrorPanel =
+            region !== null &&
+            region.querySelector(`[data-testid="${SCREEN_ERROR_TESTID}"]`) !==
+              null;
+          const value = region?.getAttribute("data-shell-screen");
+          const screen =
+            showsErrorPanel || value === undefined || value === "" ? null : value;
+
           // **引数の鍵は Rust 側の仮引数名である**（Tauri は仮引数名で引数を対応付ける。
           // コマンドの署名は `render_heartbeat(watch, window, request: RenderHeartbeatRequest)`
           // なので、鍵は `request` になる）。生バイト経路（`bulk_echo`）だけが例外であり、
           // こちらは封筒を返す通常の経路である。
           const result = await invokeCommand<RenderHeartbeatResponse>(
             RENDER_HEARTBEAT_COMMAND,
-            { request: { renderer: detectRenderer() } },
+            { request: { renderer: detectRenderer(), screen } },
           );
           if (result.status === "error") {
             console.warn(
