@@ -17,6 +17,9 @@
 //! - **一括**: 参照先シートの行識別子の集合を、そのシートを指す列の数に依らず 1 回だけ
 //!   作る（要件 9.6）。行の走査は 1 回であり、参照先への問い合わせは集合の所属判定だけ
 //!   である。
+//! - **対象の列に閉じる**: `selected` があるときはその列の形だけを組み立てる（要件 10.5。
+//!   費用が指定した列数に比例する）。参照を持たない列だけを指定したときは形が空になり、
+//!   行を舐める前に戻る。
 //! - **参照の値は行識別子のテキスト**: `ref` 列（design.md「組込型カタログと `CellValue`
 //!   への写像」の `ref`）が受け入れるのは `Text` である（`compile::plan` の
 //!   [`ColumnValidator::Ref`]）。実在の判定は**識別子として**行い、綴りでは行わない —
@@ -81,7 +84,16 @@ use super::report::{Expected, ValuePath, ValuePathSegment, Violation, ViolationR
 ///
 /// 違反は行の並び順 → 列の添字 → 入れ子の位置の順に返す（要件 5.5 の安定併合の基準）。
 /// 参照を 1 つも持たない計画では空を返す。
-pub fn scan<'a, I>(doc: &Document, schema: &CompiledSchema, rows: I) -> Vec<Violation>
+///
+/// `selected` は走査の対象の列である（`None` は全列）。指定があるときは**その列だけ**の
+/// 形を組み立て、行ごとの費用を対象の列数に閉じる（要件 10.5）。並びは**昇順・重複除去
+/// 済み**であること（[`super::validate_columns`] が正規化する）。
+pub fn scan<'a, I>(
+    doc: &Document,
+    schema: &CompiledSchema,
+    rows: I,
+    selected: Option<&[ColumnIndex]>,
+) -> Vec<Violation>
 where
     I: IntoIterator<Item = (RowId, &'a [CellValue])>,
 {
@@ -90,6 +102,13 @@ where
     let mut plan: Vec<(ColumnIndex, RefShape<'_>)> = Vec::new();
     for index in 0..schema.column_count() {
         let column = ColumnIndex::new(index);
+        // 指定があるときはその列だけを組み立てる（要件 10.5。行ごとの費用を対象の列数に
+        // 閉じる）。`selected` は昇順・重複除去済みである（`validate_columns` が正規化する）。
+        if let Some(selected) = selected {
+            if selected.binary_search(&column).is_err() {
+                continue;
+            }
+        }
         let Some(validator) = schema.validator(column) else {
             // 使用不能な列（未知の `kind`・未登録の拡張型・有限に展開できない再帰型）は
             // 値の種類を問わず `validate::cell` が報告する（要件 11.7）。参照の判定は無い。
@@ -254,6 +273,8 @@ mod tests {
     use crate::types::TypeKind;
     use crate::validate::report::{Expected, ValuePath, ValuePathSegment, ViolationReason};
     use document_format::{CellValue, Document, IdFactory, NestedValue, RowId, SheetId};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     /// 文字列のセル値。
@@ -358,6 +379,81 @@ mod tests {
             .expect("標本の宣言はコンパイルできる")
     }
 
+    /// 行の走査を数えるイテレータ（第 2 段の費用を行数で観測する）。
+    struct CountedRows<'a> {
+        rows: std::vec::IntoIter<(RowId, &'a [CellValue])>,
+        consumed: Arc<AtomicUsize>,
+    }
+
+    impl<'a> Iterator for CountedRows<'a> {
+        type Item = (RowId, &'a [CellValue]);
+
+        fn next(&mut self) -> Option<Self::Item> {
+            let item = self.rows.next();
+            if item.is_some() {
+                self.consumed.fetch_add(1, Ordering::Relaxed);
+            }
+            item
+        }
+    }
+
+    /// 対象の列を指定した走査は、指定した列に閉じる（tasks.md 5.4。要件 10.5）。
+    ///
+    /// 参照を持たない列だけを指定したときは参照の形を 1 つも組み立てないため、**行の走査
+    /// そのものを行わない**（[`scan`] は形が空なら行を舐める前に戻る）。全列を走査して
+    /// から結果を絞る実装は行を舐めてしまうので、行の消費数がこの違いを直接に観測する。
+    #[test]
+    fn a_selected_reference_scan_is_closed_to_the_columns_it_did_not_select() {
+        let mut doc = Document::new();
+        let target = add_sheet(&mut doc, "仕入先", &["名称"]);
+        let source = add_sheet(&mut doc, "発注", &["仕入先", "備考"]);
+        let missing = IdFactory::new().new_row_id();
+        let schema = compiled(vec![
+            ref_column("仕入先", target),
+            column("備考", TypeKind::Text, Constraints::default()),
+        ]);
+        for _ in 0..6 {
+            add_row(
+                &mut doc,
+                source,
+                vec![CellValue::Text(missing.to_string()), text("至急")],
+            );
+        }
+        let rows = rows_of(&doc, source);
+
+        // 全列の走査は参照の列を見て、6 行すべてを違反として報告する。
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let violations = scan(
+            &doc,
+            &schema,
+            CountedRows {
+                rows: rows.clone().into_iter(),
+                consumed: Arc::clone(&consumed),
+            },
+            None,
+        );
+        assert_eq!(6, violations.len(), "参照の違反が出ていない");
+        assert_eq!(6, consumed.load(Ordering::Relaxed));
+
+        // 参照を持たない列だけを指定すると、参照の走査は行を舐めない。
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let violations = scan(
+            &doc,
+            &schema,
+            CountedRows {
+                rows: rows.clone().into_iter(),
+                consumed: Arc::clone(&consumed),
+            },
+            Some(&[ColumnIndex::new(1)]),
+        );
+        assert!(violations.is_empty(), "指定していない列の違反が混ざった");
+        assert_eq!(
+            0,
+            consumed.load(Ordering::Relaxed),
+            "指定していない参照の列を走査するために行を舐めている"
+        );
+    }
+
     /// 実在する行への参照は違反にならない（要件 9.2）。
     #[test]
     fn a_reference_to_an_existing_row_is_conforming() {
@@ -372,7 +468,7 @@ mod tests {
         );
         let schema = compiled(vec![ref_column("仕入先", target)]);
 
-        let violations = scan(&doc, &schema, rows_of(&doc, source));
+        let violations = scan(&doc, &schema, rows_of(&doc, source), None);
 
         assert!(
             violations.is_empty(),
@@ -394,7 +490,7 @@ mod tests {
         let second = add_row(&mut doc, source, vec![CellValue::Text(missing.to_string())]);
         let schema = compiled(vec![ref_column("仕入先", target)]);
 
-        let violations = scan(&doc, &schema, rows_of(&doc, source));
+        let violations = scan(&doc, &schema, rows_of(&doc, source), None);
 
         assert_eq!(
             2,
@@ -440,7 +536,7 @@ mod tests {
         );
         let schema = compiled(vec![ref_column("仕入先", target)]);
 
-        let violations = scan(&doc, &schema, rows_of(&doc, source));
+        let violations = scan(&doc, &schema, rows_of(&doc, source), None);
 
         assert!(
             violations.is_empty(),
@@ -463,7 +559,7 @@ mod tests {
             vec![CellValue::Text(supplier.to_string()), text("至急")],
         );
         assert!(
-            scan(&doc, &schema, rows_of(&doc, source)).is_empty(),
+            scan(&doc, &schema, rows_of(&doc, source), None).is_empty(),
             "削除の前から参照が違反になっている"
         );
 
@@ -480,7 +576,7 @@ mod tests {
         // 値なしは参照ではない（必須の判定は 5.1 が持つ）。
         let without = add_row(&mut doc, source, vec![CellValue::Null, text("至急")]);
 
-        let violations = scan(&doc, &schema, rows_of(&doc, source));
+        let violations = scan(&doc, &schema, rows_of(&doc, source), None);
 
         assert_eq!(
             vec![Some(first), Some(second)],
@@ -524,7 +620,7 @@ mod tests {
         let row = add_row(&mut doc, source, vec![CellValue::Text(deleted.to_string())]);
         let schema = compiled(vec![ref_column("仕入先", target)]);
 
-        let violations = scan(&doc, &schema, rows_of(&doc, source));
+        let violations = scan(&doc, &schema, rows_of(&doc, source), None);
 
         assert_eq!(1, violations.len());
         assert_eq!(Some(row), violations[0].row());
@@ -595,7 +691,7 @@ mod tests {
             ])],
         );
 
-        let violations = scan(&doc, &schema, rows_of(&doc, source));
+        let violations = scan(&doc, &schema, rows_of(&doc, source), None);
 
         assert_eq!(2, violations.len(), "入れ子の内側の参照が判定されていない");
         assert_eq!(Some(row), violations[0].row());
@@ -632,7 +728,7 @@ mod tests {
         add_row(&mut doc, source, vec![CellValue::Int(7)]);
         let schema = compiled(vec![ref_column("仕入先", target)]);
 
-        let violations = scan(&doc, &schema, rows_of(&doc, source));
+        let violations = scan(&doc, &schema, rows_of(&doc, source), None);
 
         assert!(
             violations.is_empty(),
@@ -663,7 +759,7 @@ mod tests {
             ],
         );
 
-        let violations = scan(&doc, &schema, rows_of(&doc, source));
+        let violations = scan(&doc, &schema, rows_of(&doc, source), None);
 
         assert_eq!(
             vec![(first, 0), (second, 0), (second, 1)],
@@ -708,7 +804,7 @@ mod tests {
         let schema = compiled(vec![ref_column("仕入先", target)]);
 
         let started = Instant::now();
-        let violations = scan(&doc, &schema, rows);
+        let violations = scan(&doc, &schema, rows, None);
         let elapsed = started.elapsed();
 
         assert!(violations.is_empty(), "実在する行への参照が違反になった");

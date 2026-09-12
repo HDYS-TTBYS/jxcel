@@ -64,9 +64,10 @@ path = "src/lib.rs"
 # ファンアウトしても壊れないようにする（crates/document-format/Cargo.toml と同じ形）。
 bench = false
 
-# criterion ベンチターゲット（harness 直結）。実測（10 万行 × 30 列の全件検証と、
-# 一意制約を持つ列 1 本だけの再検証）は tasks.md 9.1 の標本と 9.2 の計測が
-# benches/large_sheet.rs に入れる。ここはハーネスの動作確認用の最小スケフォールドである。
+# criterion ベンチターゲット（harness 直結）。tasks.md 9.1 の標本（10 万行 × 30 列）と
+# 9.2 の計測（全件検証の予算判定と、一意制約を持つ列 1 本だけの再検証）を
+# benches/large_sheet.rs に入れてある。9.2 で実測済みであり、ハーネスの動作確認用の
+# スケフォールドではない。
 [[bench]]
 name = "large_sheet"
 harness = false

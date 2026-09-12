@@ -40,6 +40,13 @@
 //! 上限（[`ValidationOptions`]）が守るはずの記憶域が上限の外で膨らむ（design.md「検証結果の
 //! 表現」の上限の存在理由）。1 行分だけを確保し、最終の報告は上限までしか保持しない。
 //!
+//! # 列を指定した再検証（要件 10.5）
+//!
+//! [`validate_columns`] は対象の列の集合を**両方の段へ渡す**。第 1 段は指定した列だけを
+//! 判定し、第 2 段（[`unique::scan`] と [`refs::scan`]）も指定した列の形だけを組み立てる。
+//! したがって費用は指定した列数に比例し、指定していない列を 10 万行に対して舐め直さない。
+//! 指定は列添字の昇順へ正規化してから渡す（両走査は二分探索で所属を判定する）。
+//!
 //! # 入れ子の位置の順序（[`compare_paths`]）
 //!
 //! 位置の段を先頭から比べ、フィールド名は文字列として、添字は数値として比べる。**宣言順
@@ -394,22 +401,24 @@ fn validate(
 
     // 第 2 段: 行を跨ぐ性質（一意性と参照の実在）。全行を走査し終えてから違反が返るため、
     // 行ごとに併合できるよう行の識別子でまとめておく。参照を 1 つも含まない計画では
-    // どちらの走査も空を返す（呼び出し元は判定の要否を確かめずに呼んでよい）。
+    // どちらの走査も空を返す（呼び出し元は判定の要否を確かめずに呼んでよい）。対象の列の
+    // 指定は**両方の走査へ渡す** — 走査そのものが指定した列に閉じるので、ここで絞り直さない
+    // （費用が指定した列に比例する根拠。要件 10.5。写しを作らない）。
     let mut cross_by_row: HashMap<RowId, Vec<Violation>> = HashMap::new();
     let mut orphans: Vec<Violation> = Vec::new();
-    let found = unique::scan(schema, rows.iter().map(|row| (row.id(), row.values())))
-        .into_iter()
-        .chain(refs::scan(
-            doc,
-            schema,
-            rows.iter().map(|row| (row.id(), row.values())),
-        ));
+    let found = unique::scan(
+        schema,
+        rows.iter().map(|row| (row.id(), row.values())),
+        selected,
+    )
+    .into_iter()
+    .chain(refs::scan(
+        doc,
+        schema,
+        rows.iter().map(|row| (row.id(), row.values())),
+        selected,
+    ));
     for violation in found {
-        if let Some(selected) = selected {
-            if selected.binary_search(&violation.column()).is_err() {
-                continue;
-            }
-        }
         match violation.row() {
             Some(row) => cross_by_row.entry(row).or_default().push(violation),
             // 行に属さない違反（列そのものの問題）は行の並びに置けない。末尾へ回す。
@@ -868,6 +877,40 @@ mod tests {
             by_column(&[ColumnIndex::new(99)]).is_empty(),
             "計画の外の列が判定された"
         );
+    }
+
+    /// 列指定の再検証は、全件検証を指定した列に絞ったものと違反の集合・順序が一致する
+    /// （tasks.md 5.4。要件 10.5）。
+    ///
+    /// 第 2 段（一意性と参照の実在）を指定した列に閉じても、報告は変わらない — 変わるのは
+    /// 費用だけである。全件検証の結果から指定した列を抜き出したものと突き合わせて固定する。
+    #[test]
+    fn revalidating_selected_columns_matches_the_full_scan_restricted_to_them() {
+        let (doc, sheet, schema, _, _) = two_stage_sample();
+        let options = ValidationOptions::default();
+        let full = validate_sheet(&doc, sheet, &schema, &options);
+
+        for columns in [
+            vec![ColumnIndex::new(0)],
+            // 一意でも参照でもない列だけを選んでも壊れない（要件 10.5 は列を限定しない）。
+            vec![ColumnIndex::new(1)],
+            vec![ColumnIndex::new(2)],
+            vec![ColumnIndex::new(3)],
+            vec![ColumnIndex::new(0), ColumnIndex::new(3)],
+        ] {
+            let expected: Vec<Violation> = full
+                .violations()
+                .iter()
+                .filter(|violation| columns.contains(&violation.column()))
+                .cloned()
+                .collect();
+            let restricted = validate_columns(&doc, sheet, &schema, &columns, &options);
+            assert_eq!(
+                expected,
+                restricted.violations().to_vec(),
+                "列指定の再検証が全件検証を絞ったものと一致しない: {columns:?}"
+            );
+        }
     }
 
     /// 検証する行を持たないシートは、違反の無い結果になる（要件 5.4, 5.7）。

@@ -15,6 +15,8 @@
 //!
 //! - **1 パス**: 行を 1 回だけ走査し、その内側で一意制約を持つ列をすべて見る。列ごとに
 //!   全行を舐め直さない。
+//! - **対象の列に閉じる**: `selected` があるときはその列だけを走査する（要件 10.5。費用が
+//!   指定した列数に比例する）。全列のときは計画の一覧を借りたままで、確保を増やさない。
 //! - **値なしは対象外**: [`CellValue::Null`] と、列数に満たない行の欠けた値は比較しない
 //!   （値なしの扱いは列の `required` が決める。要件 4.4）。一意制約が値なしの重複を報告
 //!   すると、任意の一意列を空のまま残しただけで違反になる。
@@ -43,7 +45,7 @@ use document_format::{AttachmentId, CellValue, NestedValue, RowId};
 use jiff::civil;
 use jiff::Timestamp;
 
-use crate::compile::plan::ColumnValidator;
+use crate::compile::plan::{ColumnIndex, ColumnValidator};
 use crate::compile::CompiledSchema;
 use crate::types::datetime::{TemporalForm, TemporalValue};
 use crate::types::decimal::{self, DecimalCanonical};
@@ -59,11 +61,31 @@ use super::report::{Expected, Violation, ViolationReason};
 /// 一意制約を持つ列（[`CompiledSchema::unique_columns`]）を 1 回の走査で見て、重複した値
 /// ごとに 1 件の [`ViolationReason::Duplicate`] を組にする。違反は「最初に現れた行の位置
 /// → 列の添字」の昇順で返す（要件 5.5 の安定併合の基準）。
-pub fn scan<'a, I>(schema: &CompiledSchema, rows: I) -> Vec<Violation>
+///
+/// `selected` は走査の対象の列である（`None` は全列）。指定があるときは**その列だけ**を
+/// 見て、行ごとの費用を対象の列数に閉じる（要件 10.5）。並びは**昇順・重複除去済み**で
+/// あること（[`super::validate_columns`] が正規化する）。
+pub fn scan<'a, I>(
+    schema: &CompiledSchema,
+    rows: I,
+    selected: Option<&[ColumnIndex]>,
+) -> Vec<Violation>
 where
     I: IntoIterator<Item = (RowId, &'a [CellValue])>,
 {
-    let unique = schema.unique_columns();
+    // 走査する列を先に閉じる（要件 10.5）。全列のときは計画の一覧を借りたままにして確保を
+    // 増やさない（`validate_sheet` が通る経路）。
+    let unique: Cow<'_, [ColumnIndex]> = match selected {
+        Some(selected) => Cow::Owned(
+            schema
+                .unique_columns()
+                .iter()
+                .copied()
+                .filter(|column| selected.binary_search(column).is_ok())
+                .collect(),
+        ),
+        None => Cow::Borrowed(schema.unique_columns()),
+    };
     if unique.is_empty() {
         return Vec::new();
     }
@@ -306,6 +328,7 @@ mod tests {
     use crate::types::decimal::DecimalDigits;
     use crate::types::TypeKind;
     use document_format::IdFactory;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     /// 種別と制約による列を組み立てる。
@@ -349,11 +372,21 @@ mod tests {
     /// 行識別子は ULID を発行する（`document-format` の正典の経路）。標本は小さいため
     /// これで足りる。
     fn scanned(schema: &CompiledSchema, values: &[Vec<CellValue>]) -> (Vec<RowId>, Vec<Violation>) {
+        scanned_selected(schema, values, None)
+    }
+
+    /// 対象の列を指定して値の並びを走査する（要件 10.5。`None` は全列）。
+    fn scanned_selected(
+        schema: &CompiledSchema,
+        values: &[Vec<CellValue>],
+        selected: Option<&[ColumnIndex]>,
+    ) -> (Vec<RowId>, Vec<Violation>) {
         let mut factory = IdFactory::new();
         let ids: Vec<RowId> = (0..values.len()).map(|_| factory.new_row_id()).collect();
         let violations = scan(
             schema,
             ids.iter().copied().zip(values.iter().map(Vec::as_slice)),
+            selected,
         );
         (ids, violations)
     }
@@ -410,6 +443,87 @@ mod tests {
             .register(Arc::new(implementation))
             .expect("標本の拡張型は登録できる");
         registry
+    }
+
+    /// 正準化の呼び出し回数を数える拡張型（列ごとの走査の費用を観測する）。
+    struct Counting {
+        id: CustomTypeId,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CustomType for Counting {
+        fn id(&self) -> &CustomTypeId {
+            &self.id
+        }
+
+        fn validate(&self, _value: &CellValue) -> Result<CustomVerdict, CustomTypeFailure> {
+            Ok(CustomVerdict::Accepted)
+        }
+
+        fn canonicalize(&self, value: &CellValue) -> Result<CellValue, CustomTypeFailure> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(value.clone())
+        }
+    }
+
+    /// 一意制約を持つ列を指定したとき、その列**だけ**を走査する（tasks.md 5.4。要件 10.5）。
+    ///
+    /// 費用は対象の列数に比例しなければならない — 全列を走査してから結果を絞る実装では、
+    /// 指定していない列の正準化も走ってしまう。正準化は 1 行 1 列につき 1 回だけ呼ばれる
+    /// ため、その回数が「走査した列 × 行数」を直接に観測する。
+    #[test]
+    fn only_the_selected_unique_columns_are_examined() {
+        let left_calls = Arc::new(AtomicUsize::new(0));
+        let right_calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = TypeRegistry::new();
+        for (id, calls) in [
+            ("left", Arc::clone(&left_calls)),
+            ("right", Arc::clone(&right_calls)),
+        ] {
+            registry
+                .register(Arc::new(Counting {
+                    id: CustomTypeId::new(id),
+                    calls,
+                }))
+                .expect("標本の拡張型は登録できる");
+        }
+        let custom = |name: &str, id: &str| {
+            column(
+                name,
+                TypeKind::Custom,
+                Constraints {
+                    custom_type: Some(id.into()),
+                    ..Constraints::default()
+                },
+                true,
+            )
+        };
+        let schema = compiled_with(vec![custom("左", "left"), custom("右", "right")], &registry);
+        let values: Vec<Vec<CellValue>> = (0..8)
+            .map(|index| vec![text(&format!("L{index}")), text(&format!("R{index}"))])
+            .collect();
+
+        // 全列の走査は両方の列を見る。
+        let (_, all) = scanned_selected(&schema, &values, None);
+        assert!(all.is_empty(), "重複が無いのに違反が出た");
+        assert_eq!(8, left_calls.load(Ordering::Relaxed));
+        assert_eq!(8, right_calls.load(Ordering::Relaxed));
+
+        // 1 列だけの走査はその列だけを見る（指定していない列の値に触れない）。
+        left_calls.store(0, Ordering::Relaxed);
+        right_calls.store(0, Ordering::Relaxed);
+        let (_, one) = scanned_selected(&schema, &values, Some(&[ColumnIndex::new(0)]));
+        assert!(one.is_empty(), "重複が無いのに違反が出た");
+        assert_eq!(
+            8,
+            left_calls.load(Ordering::Relaxed),
+            "指定した列が走査されていない"
+        );
+        assert_eq!(
+            0,
+            right_calls.load(Ordering::Relaxed),
+            "指定していない列が走査された"
+        );
     }
 
     /// 重複する値を持つ列は、重複するすべての行の識別子を 1 件の違反に載せる（要件 4.7）。

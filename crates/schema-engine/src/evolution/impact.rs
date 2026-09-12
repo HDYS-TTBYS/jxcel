@@ -322,6 +322,7 @@ pub fn plan_change(
         computed
             .iter()
             .map(|(row, values)| (*row, values.as_slice())),
+        None,
     )
     .into_iter()
     .chain(refs::scan(
@@ -330,6 +331,7 @@ pub fn plan_change(
         computed
             .iter()
             .map(|(row, values)| (*row, values.as_slice())),
+        None,
     ))
     .filter_map(|violation| violation.row())
     .collect();
