@@ -321,7 +321,7 @@ x11_install_cleanup_trap
 # **前回の実行の行で成功しないよう、起動の前に消す。**
 rm -f "$record"
 
-heartbeat_re='初回描画が成立した: label=|初回描画は成立したがソフトウェアラスタライザ経由である: label='
+heartbeat_re='初回描画が成立した: label=|初回描画は成立したがソフトウェアラスタライザ経由である: label=|期限超過のあとに描画の通知が届いた（不成立の提示を取り下げる）: label='
 no_paint_re='初回描画が成立しなかった: label='
 
 if [ "$mode" = suppressed ]; then

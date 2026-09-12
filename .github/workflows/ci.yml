@@ -763,7 +763,11 @@ jobs:
       #   1. ウィンドウが現れたこと（1.5 と同じ観測）
       #   2. 8.2 の成立行（`初回描画が成立した: label=…`。ソフトウェアラスタライザ経由の
       #      `初回描画は成立したがソフトウェアラスタライザ経由である: label=…` も描画の成立
-      #      である — 遅いだけで描かれている）
+      #      である — 遅いだけで描かれている。**期限を超えてから成立した
+      #      `期限超過のあとに描画の通知が届いた（不成立の提示を取り下げる）: label=…` も
+      #      `画面=` を運ぶので同じ証拠として扱う** — 遅いランナーでは期限（3 秒）をわずかに
+      #      超えることがある（実測: 期限=3000 ms に対し経過=3142 ms）。判定は `NoPaint` の
+      #      ままであり、不成立の提示だけが取り下げられる）
       #   3. **その成立行が `画面=<期待する識別子>` を報告していること**（実際に描画された画面）
       # 要求の行 `検証用の初期画面を指定した: screen=<識別子>` は、あれば起動の識別として出し、
       # **存在は要求しない**（配布物はこの行を出さない）。
@@ -895,11 +899,16 @@ jobs:
           let appOutputPath = CommandLine.arguments[4]
           let timeoutSeconds = Double(CommandLine.arguments[5]) ?? 60.0
 
-          // 8.2 の成立行は 2 つある（`Painted` とソフトウェアラスタライザ経由）。**どちらも
-          // 描画の成立である**（後者は遅いだけ）。
+          // 描画が成立したことを示す行は 3 つある: `Painted` / ソフトウェアラスタライザ経由 /
+          // **期限を超えてから成立した行**（下の 3 つ目。判定は `NoPaint` のままだが `画面=` を
+          // 運ぶので、どの画面が描画されたかの証拠としては同等である）。
           let heartbeatPatterns = [
               "初回描画が成立した: label=",
               "初回描画は成立したがソフトウェアラスタライザ経由である: label=",
+              // **期限を超えてから描画が成立した場合**（遅いランナー。実測: 期限=3000 ms に対し
+              // 経過=3142 ms）。この行も `画面=` を運ぶので、どの画面が描画されたかの証拠と
+              // しては同等である（判定は `NoPaint` のままで、不成立の提示だけが取り下げられる）。
+              "期限超過のあとに描画の通知が届いた（不成立の提示を取り下げる）: label=",
           ]
           let requestedPattern = "検証用の初期画面を指定した: screen=\(expectedScreen)"
 
@@ -1057,11 +1066,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Split-Path $record) | Out-Null
           Write-Host "診断記録: $record"
 
-          # 8.2 の成立行は 2 つある（`Painted` とソフトウェアラスタライザ経由）。**どちらも
-          # 描画の成立である**（後者は遅いだけ）。
+          # 描画が成立したことを示す行は 3 つある: `Painted` / ソフトウェアラスタライザ経由 /
+          # **期限を超えてから成立した行**（下の 3 つ目。判定は `NoPaint` のままだが `画面=` を
+          # 運ぶので、どの画面が描画されたかの証拠としては同等である）。
           $heartbeatPatterns = @(
             "初回描画が成立した: label=",
-            "初回描画は成立したがソフトウェアラスタライザ経由である: label="
+            "初回描画は成立したがソフトウェアラスタライザ経由である: label=",
+            # **期限を超えてから描画が成立した場合**（遅いランナー）。この行も `画面=` を運ぶので、
+            # どの画面が描画されたかの証拠としては同等である。
+            "期限超過のあとに描画の通知が届いた（不成立の提示を取り下げる）: label="
           )
 
           function Test-Render {
@@ -1661,7 +1674,8 @@ jobs:
               fail("検証用の形が doc-1 というラベルのウィンドウを開いていません（拒否の対象が存在しない）")
           }
           guard findLine("初回描画が成立した: label=doc-1 ", from: phaseDeny, seconds: 20) != nil
-                || findLine("初回描画は成立したがソフトウェアラスタライザ経由である: label=doc-1 ", from: phaseDeny, seconds: 1) != nil else {
+                || findLine("初回描画は成立したがソフトウェアラスタライザ経由である: label=doc-1 ", from: phaseDeny, seconds: 1) != nil
+                || findLine("期限超過のあとに描画の通知が届いた（不成立の提示を取り下げる）: label=doc-1 ", from: phaseDeny, seconds: 1) != nil else {
               fail("初回描画の成立行が現れません（購読が張られたことを確認できない）")
           }
           note("検証 (c): ウィンドウ数=\(deniedWindows)")
@@ -1698,7 +1712,8 @@ jobs:
                       fail("対照のウィンドウが \(Int(timeoutSeconds)) 秒以内に現れませんでした")
                   }
                   guard findLine("初回描画が成立した: label=doc-1 ", from: phaseAllow, seconds: 20) != nil
-                        || findLine("初回描画は成立したがソフトウェアラスタライザ経由である: label=doc-1 ", from: phaseAllow, seconds: 1) != nil else {
+                        || findLine("初回描画は成立したがソフトウェアラスタライザ経由である: label=doc-1 ", from: phaseAllow, seconds: 1) != nil
+                        || findLine("期限超過のあとに描画の通知が届いた（不成立の提示を取り下げる）: label=doc-1 ", from: phaseAllow, seconds: 1) != nil else {
                       fail("対照の初回描画の成立行が現れません")
                   }
                   if pressCloseButton(of: allowed.processIdentifier) {
@@ -2010,7 +2025,8 @@ jobs:
             throw "検証用の形が doc-1 というラベルのウィンドウを開いていません（拒否の対象が存在しない）"
           }
           if (-not (Find-RecordLine -Skip $phaseDeny -Pattern "初回描画が成立した: label=doc-1 " -Seconds 20) -and
-              -not (Find-RecordLine -Skip $phaseDeny -Pattern "初回描画は成立したがソフトウェアラスタライザ経由である: label=doc-1 " -Seconds 1)) {
+              -not (Find-RecordLine -Skip $phaseDeny -Pattern "初回描画は成立したがソフトウェアラスタライザ経由である: label=doc-1 " -Seconds 1) -and
+              -not (Find-RecordLine -Skip $phaseDeny -Pattern "期限超過のあとに描画の通知が届いた（不成立の提示を取り下げる）: label=doc-1 " -Seconds 1)) {
             Stop-Instance $denied
             throw "初回描画の成立行が現れません（購読が張られたことを確認できない）"
           }
@@ -2058,7 +2074,8 @@ jobs:
             throw "対照のウィンドウが現れませんでした"
           }
           if (-not (Find-RecordLine -Skip $phaseAllow -Pattern "初回描画が成立した: label=doc-1 " -Seconds 20) -and
-              -not (Find-RecordLine -Skip $phaseAllow -Pattern "初回描画は成立したがソフトウェアラスタライザ経由である: label=doc-1 " -Seconds 1)) {
+              -not (Find-RecordLine -Skip $phaseAllow -Pattern "初回描画は成立したがソフトウェアラスタライザ経由である: label=doc-1 " -Seconds 1) -and
+              -not (Find-RecordLine -Skip $phaseAllow -Pattern "期限超過のあとに描画の通知が届いた（不成立の提示を取り下げる）: label=doc-1 " -Seconds 1)) {
             Stop-Instance $allowed
             throw "対照の初回描画の成立行が現れません"
           }

@@ -524,7 +524,7 @@ if [ -z "$(wait_record "$phase_deny" "ウィンドウを開いた: label=${deny_
 fi
 # フロントエンドの購読（7.6）が載っていることを待つ。初回描画の成立行は通知が描画フレームの
 # 中から出るので、これが現れていれば購読も張られている（`src/main.tsx` の順序）。
-if [ -z "$(wait_record "$phase_deny" "初回描画が成立した: label=${deny_label} |初回描画は成立したがソフトウェアラスタライザ経由である: label=${deny_label} " 20 || true)" ]; then
+if [ -z "$(wait_record "$phase_deny" "初回描画が成立した: label=${deny_label} |初回描画は成立したがソフトウェアラスタライザ経由である: label=${deny_label} |期限超過のあとに描画の通知が届いた（不成立の提示を取り下げる）: label=${deny_label} " 20 || true)" ]; then
   report_failure "初回描画の成立行が現れません（購読が張られたことを確認できない）"
 fi
 
@@ -586,7 +586,7 @@ launched_pids="$launched_pids $x11_pid"
 if ! wait_for_windows 1 "$timeout_secs"; then
   report_failure "対照のウィンドウが ${timeout_secs} 秒以内に現れませんでした"
 fi
-if [ -z "$(wait_record "$phase_allow" "初回描画が成立した: label=${deny_label} |初回描画は成立したがソフトウェアラスタライザ経由である: label=${deny_label} " 20 || true)" ]; then
+if [ -z "$(wait_record "$phase_allow" "初回描画が成立した: label=${deny_label} |初回描画は成立したがソフトウェアラスタライザ経由である: label=${deny_label} |期限超過のあとに描画の通知が届いた（不成立の提示を取り下げる）: label=${deny_label} " 20 || true)" ]; then
   report_failure "対照の初回描画の成立行が現れません（購読が張られたことを確認できない）"
 fi
 observe_windows
