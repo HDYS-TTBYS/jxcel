@@ -59,13 +59,17 @@ if [ ! -d "$DIST" ]; then
 fi
 
 # Windows の release 実行ファイルは接尾辞付きである（呼び出し側は接尾辞なしで渡せる）。
+#
+# **`.exe` を先に見る。** Git Bash（MSYS2 / Cygwin）の `-f` は `jxcel` を `jxcel.exe` へ
+# 解決して真を返すため、「`-f $BINARY` が真なら接尾辞なしのまま使う」順序では、**Windows の
+# node へ接尾辞なしのパスを渡してしまい** `ENOENT` で落ちる（実測: CI の Windows）。
+# `jxcel.exe` が実在すればそれを優先する（Linux / macOS には `.exe` は無いので影響しない）。
+if [ -n "$BINARY" ] && [ -f "${BINARY}.exe" ]; then
+  BINARY="${BINARY}.exe"
+fi
 if [ -n "$BINARY" ] && [ ! -f "$BINARY" ]; then
-  if [ -f "${BINARY}.exe" ]; then
-    BINARY="${BINARY}.exe"
-  else
-    echo "check-shipping-bundle: 実行ファイルがありません: $BINARY（または ${BINARY}.exe）" >&2
-    exit 2
-  fi
+  echo "check-shipping-bundle: 実行ファイルがありません: $BINARY（または ${BINARY}.exe）" >&2
+  exit 2
 fi
 
 if ! command -v node >/dev/null 2>&1; then
