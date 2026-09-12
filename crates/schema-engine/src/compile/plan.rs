@@ -10,6 +10,11 @@
 //! `validate` 層の型を参照しない** — 検証器を組み立てる側（`DeclarationCodec` と
 //! `SchemaCompiler`）が `SchemaError` を返す。本モジュールは `SchemaError` を生成しない。
 //!
+//! 列の添字の型（[`ColumnIndex`]）の**定義は本モジュールにある**。列添字を所有するのは、
+//! その添字で引ける配列（[`crate::compile::CompiledSchema`] の `columns` と `validators`）を
+//! 持つ `compile` 層だからであり、`validate` 層はこの型を参照する側である（層の鎖の向きと
+//! 一致する）。
+//!
 //! # `TextPattern::compile` をここで呼ばない
 //!
 //! パターンのコンパイルは `SchemaCompiler`（タスク 4.4）が列ごとに一度だけ行う
@@ -63,7 +68,7 @@
 //! - **入れ子の再帰**: [`ColumnValidator::Object`] の `fields` と [`ColumnValidator::Array`]
 //!   の `items` を降りるのは `validate` 層（タスク 5.1）である。本モジュールは値の**形**と
 //!   配列の**要素数**だけを判定する（違反の位置をフィールド名と添字の並びで運ぶには、降りる
-//!   側が [`ValuePath`](crate::validate::report::ValuePath) を組み立てる必要がある）。
+//!   側が `ValuePath`（`validate` 層の型）を組み立てる必要がある）。
 //! - **参照先の実在**: [`ColumnValidator::Ref`] は参照先シートを持つだけで、行が実在するかを
 //!   判定しない（要件 9.2 の一括判定はタスク 5.3）。
 //! - **一意性**: 行を跨ぐため `validate` 層（タスク 5.2）が判定する。
@@ -80,6 +85,34 @@ use crate::types::datetime::{TemporalForm, TemporalValue};
 use crate::types::decimal::{self, DecimalCanonical, DecimalDigits};
 use crate::types::text::TextConstraints;
 use crate::types::{Acceptance, TypeKind};
+
+/// 列の添字（`CompiledSchema` の列名の配列と `Row::values()` の同じ添字。design.md
+/// 「Data Models / Domain Model」の不変条件）。
+///
+/// 行の添字・行数・列数と取り違えないよう、`document-format` の識別子と同じく新型で
+/// 持つ（design.md「Architecture Integration」が保つ既存規約「識別子の newtype」）。
+///
+/// **本モジュール（`compile` 層）が定義を持つ。** 列添字を所有するのは、その添字で引ける
+/// 配列（[`crate::compile::CompiledSchema`] の `columns` と `validators`）を持つ層だからで
+/// ある（design.md「CompiledSchema の columns と validators は常に同じ長さで同じ添字」）。
+/// `validate` 層はこの型を**参照する側**であり、層の鎖
+/// （`… → compile → { coerce, validate } → …`）と向きが一致する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ColumnIndex(usize);
+
+impl ColumnIndex {
+    /// 0 起点の列の位置を包む。
+    #[inline]
+    pub const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    /// 0 起点の列の位置。
+    #[inline]
+    pub const fn index(self) -> usize {
+        self.0
+    }
+}
 
 /// 範囲制約（design.md「Compile Layer / ColumnValidator」の「範囲をインラインに持つ」）。
 ///
@@ -215,9 +248,13 @@ pub enum ColumnValidator {
     ///
     /// 桁は**書かれた形**で判定する（[`DecimalDigits`] の docs と tasks.md 2.2 の裁定）。
     /// したがって `decimal(2,1)` は `"1.5"` を適合とし `"1.50"` を違反とする。
+    ///
+    /// 桁数（`precision` / `scale`）は**宣言できる**ものであり必須ではない（要件 2.3 の
+    /// 文面）。宣言が無ければ桁の判定を行わず（[`None`]）、範囲の判定だけを行う。
     Decimal {
-        /// 宣言された有効桁数と小数点以下の桁数（`precision` / `scale`）。
-        digits: DecimalDigits,
+        /// 宣言された有効桁数と小数点以下の桁数（`precision` / `scale`）。未宣言は `None`
+        /// （桁の制約なし）。
+        digits: Option<DecimalDigits>,
         /// 範囲（`min` / `max`）。比較用の端点は正準形である。
         bounds: Bounds<DecimalCanonical>,
     },
@@ -323,12 +360,24 @@ impl ColumnValidator {
             },
             ColumnValidator::Decimal { digits, bounds } => match value {
                 CellValue::Decimal(found) => {
-                    // 桁は書かれた形で判定する（tasks.md 2.2 の裁定）。
-                    if !matches!(digits.accepts(found), Acceptance::Conforming) {
-                        ColumnVerdict::Violating(ColumnViolation::PrecisionExceeded {
-                            precision: digits.precision(),
-                            scale: digits.scale(),
-                        })
+                    // 桁は書かれた形で判定し、そのうえで範囲を見る（tasks.md 2.2 の裁定）。
+                    // 桁の宣言が無いときは桁を見ないが、**文法は要求する** —
+                    // `CellValue::Decimal` は逐語で往復する契約のため文法外の中身（上流の
+                    // 脱出口）も持ちうるが、それは 10 進数の値として解釈できない。
+                    let fits = match digits {
+                        Some(digits) => matches!(digits.accepts(found), Acceptance::Conforming),
+                        None => decimal::scan(found).is_some(),
+                    };
+                    if !fits {
+                        match digits {
+                            Some(digits) => {
+                                ColumnVerdict::Violating(ColumnViolation::PrecisionExceeded {
+                                    precision: digits.precision(),
+                                    scale: digits.scale(),
+                                })
+                            }
+                            None => ColumnVerdict::type_mismatch(TypeKind::Decimal),
+                        }
                     } else if decimal::canonicalize(found)
                         .is_some_and(|canonical| bounds.excludes(&canonical))
                     {
@@ -705,7 +754,7 @@ mod tests {
                 ),
             },
             TypeKind::Decimal => ColumnValidator::Decimal {
-                digits: DecimalDigits::new(4, 1).expect("4 >= 1 かつ 1 <= 4"),
+                digits: Some(DecimalDigits::new(4, 1).expect("4 >= 1 かつ 1 <= 4")),
                 bounds: Bounds::new(
                     Some(decimal("0.0")),
                     Some(decimal("9.9")),
@@ -962,6 +1011,7 @@ mod tests {
         }
         match validator_for(TypeKind::Decimal) {
             ColumnValidator::Decimal { digits, bounds } => {
+                let digits = digits.expect("標本は桁数を宣言している");
                 assert_eq!(digits.precision(), 4);
                 assert_eq!(digits.scale(), 1);
                 assert_eq!(bounds.declared_max(), Some(&decimal("9.9")));
@@ -1167,7 +1217,7 @@ mod tests {
     #[test]
     fn decimal_checks_the_written_digits_before_the_range() {
         let validator = ColumnValidator::Decimal {
-            digits: DecimalDigits::new(4, 1).expect("4 >= 1 かつ 1 <= 4"),
+            digits: Some(DecimalDigits::new(4, 1).expect("4 >= 1 かつ 1 <= 4")),
             bounds: Bounds::new(
                 Some(decimal("0.0")),
                 Some(decimal("9.9")),
@@ -1193,6 +1243,41 @@ mod tests {
         );
         assert_eq!(
             validator.check(&CellValue::Int(1)),
+            ColumnVerdict::Violating(ColumnViolation::TypeMismatch {
+                kind: TypeKind::Decimal,
+            })
+        );
+    }
+
+    /// 桁数の宣言が無い 10 進数は桁を見ず、範囲だけを見る（要件 2.3 は桁を宣言**できる**
+    /// ことを求めるのみである）。文法外の値は 10 進数の値として解釈できないため型の不一致に
+    /// 落ち、`PrecisionExceeded` は発生しない。
+    #[test]
+    fn decimal_without_declared_digits_checks_the_grammar_and_the_range() {
+        let validator = ColumnValidator::Decimal {
+            digits: None,
+            bounds: Bounds::new(
+                Some(decimal("0.0")),
+                Some(decimal("9.9")),
+                Some(canonical("0.0")),
+                Some(canonical("9.9")),
+            ),
+        };
+        // 桁の宣言が無いため、長い小数部も有効桁の多い値も適合する。
+        assert_eq!(validator.check(&decimal("1.50")), ColumnVerdict::Conforming);
+        assert_eq!(
+            validator.check(&decimal("9.80000000000000000001")),
+            ColumnVerdict::Conforming
+        );
+        assert_eq!(
+            validator.check(&decimal("12.0")),
+            ColumnVerdict::Violating(ColumnViolation::OutOfRange {
+                min: Some(decimal("0.0")),
+                max: Some(decimal("9.9")),
+            })
+        );
+        assert_eq!(
+            validator.check(&decimal("abc")),
             ColumnVerdict::Violating(ColumnViolation::TypeMismatch {
                 kind: TypeKind::Decimal,
             })

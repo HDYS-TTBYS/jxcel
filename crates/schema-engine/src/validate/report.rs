@@ -43,27 +43,10 @@
 
 use document_format::{CellValue, RowId, SheetId};
 
-/// 列の添字（`CompiledSchema` の列名の配列と `Row::values()` の同じ添字。design.md
-/// 「Data Models / Domain Model」の不変条件）。
-///
-/// 行の添字・行数・列数と取り違えないよう、`document-format` の識別子と同じく新型で
-/// 持つ（design.md「Architecture Integration」が保つ既存規約「識別子の newtype」）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ColumnIndex(usize);
-
-impl ColumnIndex {
-    /// 0 起点の列の位置を包む。
-    #[inline]
-    pub const fn new(index: usize) -> Self {
-        Self(index)
-    }
-
-    /// 0 起点の列の位置。
-    #[inline]
-    pub const fn index(self) -> usize {
-        self.0
-    }
-}
+// 列の添字の定義は `compile` 層にある（列添字を所有するのは、その添字で引ける配列
+// `columns` と `validators` を持つ側である）。本層はその型を参照する側であり、層の鎖
+// （`… → compile → { coerce, validate } → …`）と向きが一致する。
+use crate::compile::plan::ColumnIndex;
 
 /// 入れ子の内側の位置の 1 段（design.md「検証結果の表現」の `ValuePath` の要素）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,7 +250,8 @@ pub enum ViolationReason {
         expected: Expected,
         /// 実際の値。
         actual: CellValue,
-        /// 解釈できなかった宣言の種別（未知の `kind` または未登録の拡張型の識別子）。
+        /// 解釈できなかった宣言の種別（未知の `kind`・未登録の拡張型の識別子・展開できない
+        /// 再帰型の識別子）。
         kind: Box<str>,
     },
     /// 拡張型が値を拒否した（要件 11.3）。

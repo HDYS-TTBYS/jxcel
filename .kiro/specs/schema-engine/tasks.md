@@ -133,7 +133,7 @@
   - _Requirements: 3.5, 3.6_
   - _Depends: 3.2_
 
-- [ ] 4.4 計画を組み立て、列の並び順を供給する
+- [x] 4.4 計画を組み立て、列の並び順を供給する
   - ルートスキーマから列名の集合と並び順を決定する。並び順は宣言の列の並びそのものとする
   - 決定した並び順を、行データを永続化する呼び出し元へ供給する経路を用意する
   - 解決済みの型を列添字で引ける検証器の配列へ落とす
@@ -308,7 +308,7 @@
 - `scripts/check-core-deps.sh` は引数なしだと `app-shell` を検査する。負の対照（`check-core-deps.sh jxcel` が tauri 一族を検出して exit 1）で検査器が生きていることを確認できる。
 - 1.1 の裁定: `crates/schema-engine` はまだ誰からも呼ばれない新規クレートであり、実行時に切り替える消費者経路が無い。Feature Flag Protocol のフラグは dead code になるだけなので導入せず、標準の RED → GREEN を使う（RED の証拠は各タスクで必須のまま）。
 - 1.3 の申し送り（5.4 が読むこと）: `ViolationReport` は `invalid_rows` を **直前要素との比較だけで重複排除**している（`push` の順序 = 行の並び順という前提に依存）。5.4 の安定併合では、第 1 段と第 2 段の両方に現れる行が二重に載らないよう、**併合結果を並べ替えてから** `invalid_rows` を確定すること。
-- 1.3 の申し送り: `ColumnIndex` は design が所属モジュールを定めていないため `src/validate/report.rs` に置いた（`Violation` が使う型であり、層の鎖 `compile → validate` の逆参照を作らない位置）。4.4 / 8.1 はここから import する。
+- 1.3 の申し送り: `ColumnIndex` は design が所属モジュールを定めていないため、1.3 では `src/validate/report.rs` に置いた。**4.4 で `compile::plan` へ移設済み**（層の鎖は `compile → validate` の向きであり、`validate` から参照するのが正しい。下の 4.4 の裁定を参照）。
 - 1.3 の申し送り: `ValidationOptions::default()` は**無制限**（上限なし）である。design/tasks が既定値を定めていないため。要件 5.6 は「呼び出し元が上限を指定できること」だけを要求する。
 - 1.3 で `crates/schema-engine/src/validate/` の 5 ファイル（mod / report / cell / unique / refs）が宣言済み。`cell.rs` / `unique.rs` / `refs.rs` の中身は 5.1 / 5.2 / 5.3 が埋める。
 - 1.4 の申し送り（9.1 / 9.2 が読むこと）: `tests/common/mod.rs` の `Sample::column_count` / `row_values` は `document.sheets()[0]` を直接引く（標本は 1 シート前提）。群 9 がシートを前置する形に変えるなら `self.sheet` 経由に直すこと。
@@ -364,3 +364,15 @@
 - 4.3 の申し送り: 循環の辺は**必須かつ非配列**の参照だけである。`required: false` を経由する再帰と配列を経由する再帰は正当な宣言として通す（design「Compile Layer / SchemaCompiler」の明示）。`minItems >= 1` の配列経由も通す（設計の規則を独自に強めていない。要件 3.6 の字義とは緊張するが、design が配列を明示的に除外している）。
 - 4.3 の申し送り: 重複した型定義識別子は**最初の出現だけ**を保持する（一意性の検証は上流 `document-format` の担当。design「Out of Boundary」）。
 - 4.3 の申し送り: 循環検出の DFS は明示的なフレーム積みで実装されている（長い定義連鎖でもスタックを食わない）。辺は重複排除してから辿る（偽の循環を避けるため）。
+- **4.4 の裁定（5.1〜5.4 / 8.1 が読むこと）— 展開できない型定義**: 検証器は値を内包する（`Object { fields }` / `Array { items }`）ため、**参照辺が循環する型定義は有限に展開できない**。design の「解決できない型の扱い」表はこの 3 例目を書き落としている。裁定は「**その列だけ使用不能**・スキーマは破棄しない」（未知の `kind`・未登録の拡張型と同じ枠。要件 11.7）。
+  - 判定に使うグラフは **4.3 の循環検出とは別物**である。4.3 が見るのは「必須かつ非配列」の辺だけで、これは**値が有限の大きさで存在しえない**循環を探す（要件 3.6。コンパイルエラーにする）。展開可能性を決めるのは**すべての参照辺**（`required: false` の辺も配列の `items` の辺も含む）の循環である。
+  - **循環に含まれる定義だけでなく、それを推移的に参照する定義も展開不能**である（`{ "a": Tree }` で `Tree` が再帰する場合、`a` の検証器も作れない）。実装は「すべての参照辺で出次数 0 の頂点を繰り返し取り除き、残った定義」として前計算している（`compile::unexpandable_definitions`）。
+  - `ViolationReason::UnusableColumn` の `kind` には**展開を断った型定義の識別子**を入れる（未知の `kind`・未登録の拡張型の識別子と同じ枠）。
+  - `required: false` や配列を経由する再帰は**宣言としては正当**であり、コンパイルエラーにしてはならない（4.3 の裁定）。
+- **4.4 の裁定（4.2 / 5.1 が読むこと）— 10 進数の桁未宣言**: `{"kind":"decimal"}`（`precision` も `scale` も無い）は**正当な宣言**である。codec は `(None, None)` を受理し、`Constraints::digits` は `Option<DecimalDigits>` である（3.1）。要件 2.3 も桁数の**宣言を可能にすること**を求めるだけで必須にしていない。したがって `ColumnValidator::Decimal` の `digits` は `Option` であり、`None` のときは**桁の判定をせず範囲だけを判定する**（`PrecisionExceeded` は発生しない）。宣言に無い制約を `u32::MAX` などで捏造してはならない。
+  - 文法（`CellValue::Decimal` の中身が 10 進文法に一致すること）は桁の有無に依らず要求する。`None` のときの文法外の値は `PrecisionExceeded` ではなく `TypeMismatch { kind: decimal }` に落ちる（桁が無いので精度の期待値を運べない）。
+- **4.4 の裁定（5.1〜5.4 / 8.1 が読むこと）— `ColumnIndex` の所属**: 層の鎖は `error / types → declaration → registry → compile → { coerce, validate } → write → evolution → api` であり、**`validate` が `compile` に依存する向き**である。1.3 の申し送りとそのレビューの記述は向きを取り違えていた。`ColumnIndex` の定義は **`compile::plan::ColumnIndex`**（`compile/mod.rs` が再輸出）にあり、`validate` 側は `use crate::compile::plan::ColumnIndex;` で参照する。**5.1〜5.4 / 8.1 は `crate::compile::ColumnIndex` から import すること。**
+- 4.4 の申し送り: `CompiledSchema` は design の状態一覧に加えて**列ごとの `default`**（`default_row` が計画だけを引数に取るため。要件 4.3）、**`unusable_kind`**（要件 11.7 の報告に型定義の識別子が要るため）、**`required`**（5.1 の必須判定のため）を保持する。design の State 一覧の記載漏れであり、消費者のいる保持である。
+- **4.4 の申し送り（5.3 が読むこと。未決の論点）**: `CompiledSchema::references()` は**最上位の `Ref` 列だけ**を組にする。`Object` のフィールドや `Array` の `items` の内側にある `Ref` は載っていない。design「Compile Layer / SchemaCompiler」の State Management の記述どおりだが、要件 9.2「参照を持つ値が検証されたとき、参照先の行が実在するかを判定する」を**入れ子の内側まで**満たすかは 5.3 の設計時に決めること。必要なら `references()` を入れ子まで拡張する。
+- 4.4 の申し送り（5.1 が読むこと）: 既定値のオブジェクト構造の合否判定が `declaration/codec.rs`（その場で判定できる分）と `compile/mod.rs`（型解決後にしか判定できない分）に**構造の歩きとして二重化**している。葉の適合判定は 4.2 の検証器を再利用しているが、片方だけ直すと既定値の合否が食い違う。5.1 以降で共有述語へ寄せる余地がある。
+- 4.4 のプロセスの申し送り: 実装者が仕様の穴 2 件（再帰型・桁未宣言）について裁定を求めてきた。**裁定を返したうえで実装させる**のが正しい処理であり、実装者の暫定案をそのまま通してはならない（暫定案 2 は正当な宣言を拒否する誤りだった）。
