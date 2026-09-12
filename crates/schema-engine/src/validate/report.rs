@@ -530,6 +530,18 @@ impl ViolationReport {
         }
     }
 
+    /// 蓄積した違反を取り出し、総件数と違反を持つ行の一覧を空に戻す（タスク 5.4）。
+    ///
+    /// 一括検証（`validate` 層の入口）が**行ごとに**第 1 段の違反を取り出し、第 2 段の違反と
+    /// 併合してから最終の報告へ押し込み直すために使う。行を跨いで第 1 段の違反をためると、
+    /// 上限が守るはずの記憶域が上限の外で膨らむ（モジュール docs「上限を持つ理由」）。
+    /// 取り出した [`Vec`] は空のとき確保を行っていないため、違反の無い行では確保が起きない。
+    pub(crate) fn take_violations(&mut self) -> Vec<Violation> {
+        self.total = 0;
+        self.invalid_rows.clear();
+        std::mem::take(&mut self.violations)
+    }
+
     /// ここまでに加えた違反の総件数。
     #[inline]
     pub fn total(&self) -> usize {

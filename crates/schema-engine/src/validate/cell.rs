@@ -43,6 +43,10 @@
 //! 続ける**（要件 11.5）。違反の理由は組込型と同じ [`ViolationReason`] の変種として
 //! 報告される（要件 11.3）。
 //!
+//! 行の内側の入口は 2 つある。[`validate_row`] は計画の全列を宣言順に判定し、
+//! [`validate_row_columns`] は**指定した列だけ**を判定する（要件 10.5 の再検証）。
+//! 判定の本体は [`validate_column`] の 1 つだけであり、列を絞るかどうかで規則は変わらない。
+//!
 //! [`CustomType::validate_batch`]: crate::registry::CustomType::validate_batch
 
 use document_format::{CellValue, NestedValue, RowId};
@@ -71,38 +75,70 @@ pub fn validate_row(
     values: &[CellValue],
     report: &mut ViolationReport,
 ) {
-    for (index, name) in schema.columns().iter().enumerate() {
-        let column = ColumnIndex::new(index);
-        let mut cursor = Cursor {
-            row,
-            column,
-            column_name: name.as_str(),
-            path: ValuePath::root(),
-        };
-        let Some(validator) = schema.validator(column) else {
-            // 使用不能な列（未知の `kind`・未登録の拡張型・有限に展開できない再帰型）。
-            // 値の種類を問わず、その列の**すべての**値をこの理由に落とす（要件 11.7）。
-            // 適合の判定そのものが存在しないため、値なしも例外ではない。
-            let actual = values.get(index).cloned().unwrap_or(CellValue::Null);
-            let kind = schema.unusable_kind(column).unwrap_or_default();
-            report.push(cursor.violation(ViolationReason::UnusableColumn {
-                expected: Expected::Usable,
-                actual,
-                kind: kind.into(),
-            }));
-            continue;
-        };
-
-        let null = CellValue::Null;
-        let value = values.get(index).unwrap_or(&null);
-        inspect(
-            &mut cursor,
-            value,
-            validator,
-            schema.required(column),
-            report,
-        );
+    for index in 0..schema.column_count() {
+        validate_column(schema, row, values, ColumnIndex::new(index), report);
     }
+}
+
+/// 指定した列だけを 1 行分検証する（tasks.md 5.4 の列指定の再検証。要件 10.5）。
+///
+/// [`validate_row`] と同じ判定を、`columns` に挙げた列についてだけ行う。スキーマの一部が
+/// 変わったときに全列を舐め直さないための経路であり、一括検証（[`super::validate_columns`]）
+/// が使う。計画の外の添字は判定しない（列名が無く、違反の位置を組み立てられない）。
+pub fn validate_row_columns(
+    schema: &CompiledSchema,
+    row: Option<RowId>,
+    values: &[CellValue],
+    columns: &[ColumnIndex],
+    report: &mut ViolationReport,
+) {
+    for column in columns {
+        validate_column(schema, row, values, *column, report);
+    }
+}
+
+/// 1 列分の判定（[`validate_row`] と [`validate_row_columns`] が共有する本体）。
+///
+/// 使用不能な列（未知の `kind`・未登録の拡張型・有限に展開できない再帰型）は、値の種類を
+/// 問わず**その列のすべての値**を [`ViolationReason::UnusableColumn`] に落とす（要件 11.7。
+/// 適合の判定そのものが存在しないため、値なしも例外ではない）。
+fn validate_column(
+    schema: &CompiledSchema,
+    row: Option<RowId>,
+    values: &[CellValue],
+    column: ColumnIndex,
+    report: &mut ViolationReport,
+) {
+    let index = column.index();
+    let Some(name) = schema.columns().get(index) else {
+        return;
+    };
+    let mut cursor = Cursor {
+        row,
+        column,
+        column_name: name.as_str(),
+        path: ValuePath::root(),
+    };
+    let Some(validator) = schema.validator(column) else {
+        let actual = values.get(index).cloned().unwrap_or(CellValue::Null);
+        let kind = schema.unusable_kind(column).unwrap_or_default();
+        report.push(cursor.violation(ViolationReason::UnusableColumn {
+            expected: Expected::Usable,
+            actual,
+            kind: kind.into(),
+        }));
+        return;
+    };
+
+    let null = CellValue::Null;
+    let value = values.get(index).unwrap_or(&null);
+    inspect(
+        &mut cursor,
+        value,
+        validator,
+        schema.required(column),
+        report,
+    );
 }
 
 /// 1 つのセルの中を再帰する間ずっと変わらない位置（行・列の添字・列名）と、降りるたびに
