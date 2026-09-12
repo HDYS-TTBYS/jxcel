@@ -91,9 +91,12 @@ tauri-build = { version = "2.6.3", features = [] }
 # 有効にすると環境変数 `JXCEL_VERIFICATION_EXIT_AFTER_MS` が働き、指定した時間後に
 # 「明示的な終了」「意図的なパニック」「補助プロセスの起動」「ウィンドウ生成の失敗」の
 # いずれかを起こす（`lifecycle.rs` の `arm_verification_exit_trigger`、`window/mod.rs` の
-# `force_creation_failure`）。**配布物（release）に検証専用の環境変数の読み取りを入れない**
-# ため、既定では無効にしてある（tasks.md 5.4 の申し送り。7.4 が「終了」メニュー項目を
-# 配線したことに伴う片付け）。
+# `force_creation_failure`）。あわせて `JXCEL_VERIFICATION_INITIAL_SCREEN` が働き、
+# **ウィンドウが最初に表示する画面**をフロントエンドの識別子で選べる（3 OS の描画確認 10.4 が
+# 実用画面ではない最小画面 `smoke-table` / `smoke-editor` を直接開くための経路。
+# `window/mod.rs` の `initial_screen_script`）。**配布物（release）に検証専用の環境変数の
+# 読み取りを入れない**ため、既定では無効にしてある（tasks.md 5.4 の申し送り。7.4 が
+# 「終了」メニュー項目を配線したことに伴う片付け）。
 #
 # 検証時は明示的に有効にする:
 #   cargo test  -p jxcel --features verification-triggers

@@ -189,6 +189,14 @@ fn build_window<R: Runtime>(app: &AppHandle<R>, label: &str) -> tauri::Result<We
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::default())
         .title(WINDOW_TITLE)
         .inner_size(width, height);
+    // 検証専用: 初期画面の選択（要件 10.4 / タスク 9.7）。**既定のビルドではこの分岐ごと
+    // 消える**ので、配布物の初期画面は常に 9.6 の空ウィンドウの画面である（環境変数の読み取りは
+    // [`initial_screen_script`] の中にしか無く、そこは `verification-triggers` の下にある）。
+    // 指定が無ければ何もしない（**無条件に初期化スクリプトを足さない**）。
+    #[cfg(feature = "verification-triggers")]
+    if let Some(script) = initial_screen_script() {
+        builder = builder.initialization_script(script);
+    }
     // 位置は復元できたときだけ指定する（指定しなければウィンドウマネージャの既定の配置に
     // 任せる）。
     if let Some((x, y)) = initial.position() {
@@ -338,6 +346,67 @@ fn creation_target(label: &str) -> String {
     #[cfg(not(feature = "verification-triggers"))]
     let target = label.to_owned();
     target
+}
+
+// ---------------------------------------------------------------------------
+// 検証専用: 初期画面の選択（要件 10.4 / タスク 9.7）
+// ---------------------------------------------------------------------------
+
+/// 検証専用: ウィンドウが最初に表示する画面（フロントエンドの画面識別子）を指定する環境変数。
+///
+/// **`verification-triggers` feature の下にのみ存在する**（既定のビルドには環境変数の読み取り
+/// 自体が入らない。`src-tauri/Cargo.toml` の feature の説明を参照）。
+///
+/// 3 OS の描画確認（10.4）が、実用画面ではない 2 つの最小画面（`smoke-table` / `smoke-editor`。
+/// `src/features/smoke/`）を直接開くための経路である。**Webview はプロセスの環境変数を読めない**
+/// ので、値は [`initial_screen_script`] がウィンドウの初期化スクリプトとしてグローバルへ書き、
+/// フロントエンド（`src/shell/verificationScreen.ts`）が起動時に読む。**コマンドは増やさない**
+/// （通信境界の集合は閉じており、検証のために開けない）。既定のビルドにはこの経路が 1 つも
+/// 入らないので、配布物の初期画面は常に 9.6 の空ウィンドウの画面である。
+#[cfg(feature = "verification-triggers")]
+const VERIFY_INITIAL_SCREEN_ENV: &str = "JXCEL_VERIFICATION_INITIAL_SCREEN";
+
+/// 初期化スクリプトが書くグローバルの名前。**`src/shell/verificationScreen.ts` の
+/// `VERIFICATION_INITIAL_SCREEN_GLOBAL` と同じ綴りでなければならない** — 既定のビルドには
+/// どちらか一方しか存在しないため、共有できる定数を持てない検証専用の対の契約である。
+#[cfg(feature = "verification-triggers")]
+const VERIFY_INITIAL_SCREEN_GLOBAL: &str = "__JXCEL_VERIFICATION_INITIAL_SCREEN__";
+
+/// 検証専用: 環境変数の値が初期化スクリプトへ埋め込んでよい形か。
+///
+/// **値は JavaScript のソースへ文字列として埋め込まれる**ため、任意の文字を許すと式を混ぜられる。
+/// 画面の識別子に現れる文字（ASCII の英数字と `-` `_` `.`）だけを許す。フロントエンドも登録済みの
+/// 識別子と一致しなければ既定の初期画面へ落ちるので、**外からの入力は二重に止まる**。
+#[cfg(feature = "verification-triggers")]
+fn is_embeddable_screen_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// 検証専用: フロントエンドの初期画面を選ぶ初期化スクリプト。
+///
+/// 指定が無い・空・使えない形の値のときは `None` を返し、**ウィンドウは通常どおり既定の初期画面
+/// で開く**。初期化スクリプトは「グローバルが作られた後・文書が解析される前・文書の他の
+/// スクリプトより前」に走るので、フロントエンドのバンドルが読む時点で値は必ず載っている
+/// （`WebviewWindowBuilder::initialization_script` の doc）。
+#[cfg(feature = "verification-triggers")]
+fn initial_screen_script() -> Option<String> {
+    let requested = std::env::var(VERIFY_INITIAL_SCREEN_ENV).ok()?;
+    let requested = requested.trim();
+    if !is_embeddable_screen_id(requested) {
+        log::warn!(
+            "{} の値を初期画面の指定に使えない（無視する）: {requested:?}",
+            VERIFY_INITIAL_SCREEN_ENV,
+        );
+        return None;
+    }
+    Some(format!(
+        "window.{} = \"{}\";",
+        VERIFY_INITIAL_SCREEN_GLOBAL, requested
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -760,5 +829,33 @@ mod tests {
                 .map(|label| label.as_str().to_owned()),
             Some("doc-1".to_owned()),
         );
+    }
+
+    /// 検証専用の初期画面の指定（要件 10.4 / タスク 9.7）は**初期化スクリプトのソースへ
+    /// 埋め込まれる**ので、埋め込んでよい形だけを受け付ける。**引用符や改行を通すと任意の式を
+    /// 混ぜられる**ため、受け付ける文字を「画面の識別子に現れるもの」に固定する。
+    #[cfg(feature = "verification-triggers")]
+    #[test]
+    fn only_a_plain_screen_id_can_be_embedded_in_the_initialization_script() {
+        use super::is_embeddable_screen_id;
+
+        // 実際に使う識別子と、その形（ASCII の英数字と `-` `_` `.`）。
+        assert!(is_embeddable_screen_id("smoke-table"));
+        assert!(is_embeddable_screen_id("smoke-editor"));
+        assert!(is_embeddable_screen_id("shell.initial"));
+        assert!(is_embeddable_screen_id("empty-window"));
+        assert!(is_embeddable_screen_id("a_b-1.2"));
+
+        // 空・長すぎる・空白・引用符・バックスラッシュ・改行・文の終わり・括弧・非 ASCII は
+        // **すべて拒否する**（ソースへ埋め込む位置に置ける文字ではない）。
+        assert!(!is_embeddable_screen_id(""));
+        assert!(!is_embeddable_screen_id(" smoke-table"));
+        assert!(!is_embeddable_screen_id(&"a".repeat(65)));
+        assert!(!is_embeddable_screen_id("smoke\";alert(1);//"));
+        assert!(!is_embeddable_screen_id("smoke\\table"));
+        assert!(!is_embeddable_screen_id("smoke\ntable"));
+        assert!(!is_embeddable_screen_id("smoke;table"));
+        assert!(!is_embeddable_screen_id("(smoke)"));
+        assert!(!is_embeddable_screen_id("表"));
     }
 }

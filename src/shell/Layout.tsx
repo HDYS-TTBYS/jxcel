@@ -61,9 +61,14 @@
  *   `screenId` に与える）。シェルのクロームと領域そのものは包まない。エラー時は同じ領域に
  *   提示（`[data-testid="jxcel-screen-error"]`）が出て、境界は `key` の変化で作り直される
  *   （詳細は `./ScreenBoundary` のモジュール doc）。
- * - **9.7（3 OS 描画確認の最小画面）**: `src/features/smoke/` の 2 画面を `ScreenDefinition`
- *   として `SHELL_SCREEN_REGISTRY` に足す。**遷移機構には触れない**（足すだけで表示できる）。
- *   描画の通知（`./renderHeartbeat`）も再利用し、2 つ目の発信側を足さないこと。
+ * - **9.7（3 OS 描画確認の最小画面）— 実装済み**: `src/features/smoke/` の 2 画面
+ *   （`smoke-table` / `smoke-editor`）を `ScreenDefinition` として `SHELL_SCREEN_REGISTRY` に
+ *   足した。**遷移機構には触れていない**（足すだけで表示できる）。描画の通知
+ *   （`./renderHeartbeat`）も 8.2 の 1 本をそのまま再利用し、**2 つ目の発信側を足していない**
+ *   （通知はウィンドウごと・起動ごとに 1 回であり、そのウィンドウが最初に表示した画面の描画を
+ *   証拠にする）。**ユーザー向けの導線は持たない**（9.6 の空ウィンドウの画面にスモークの項目を
+ *   足していない）。10.4 は検証専用の経路（`./verificationScreen` の
+ *   `JXCEL_VERIFICATION_INITIAL_SCREEN`）で初期画面として選び、**1 画面につき 1 回起動する**。
  * - **9.5（診断の導線）— 実装済み**: `src/features/diagnostics/` の画面を `ScreenDefinition`
  *   として `SHELL_SCREEN_REGISTRY` に足し（`initial` は変えない）、メニューの選択を画面へ
  *   引き渡す購読を `installDiagnosticsRequests` で 1 回だけ張る（購読が持つのは**区画の
@@ -123,6 +128,15 @@ import {
   EmptyWindowScreen,
   EMPTY_WINDOW_SCREEN_ID,
 } from "../features/empty/EmptyWindowScreen";
+import {
+  EDITOR_SMOKE_SCREEN_ID,
+  EditorSmoke,
+} from "../features/smoke/EditorSmoke";
+import {
+  TABLE_SMOKE_SCREEN_ID,
+  TableSmoke,
+} from "../features/smoke/TableSmoke";
+import { resolveVerificationInitialScreen } from "./verificationScreen";
 
 /**
  * 1.4 が置いた初期画面（`InitialScreen`）の識別子。**9.6 以降は既定で表示される画面ではない**
@@ -168,12 +182,17 @@ function InitialScreen(): ReactElement {
  * シェルが差し込める画面の一覧。**画面を足すとは、この配列に 1 つ足すことに他ならない。**
  *
  * タスク 9.5 が診断の導線（`src/features/diagnostics/`）の画面を足し、9.6 が空ウィンドウの
- * 操作導線（`src/features/empty/`）の画面を足して `initial` をそこへ移し、タスク 9.7 が
- * `src/features/smoke/` の 2 画面をここへ足す。
+ * 操作導線（`src/features/empty/`）の画面を足して `initial` をそこへ移した。**タスク 9.7 は
+ * 3 OS 描画確認用の 2 画面（`src/features/smoke/`）をここへ足した** — 実用画面ではなく、
+ * 育てるのは `data-grid` と `macro-editor-lsp` である。
  *
  * **`initial` が 1 つの識別子であることは 9.1 の契約である**（ウィンドウごとに初期画面を
  * 選ぶ仕組みは無い）。関連付けに応じて提示を変えるのは 9.6 の画面自身の責務であり、
  * この配列は「最初にどの画面を領域へ差し込むか」だけを決める。
+ *
+ * **既定の初期画面は 9.6 の空ウィンドウの画面である。**9.7 の 2 画面はユーザー向けの導線を
+ * 持たず、検証専用の経路（`verification-triggers` ビルドの
+ * `JXCEL_VERIFICATION_INITIAL_SCREEN`。`./verificationScreen`）だけが初期画面として選ぶ。
  */
 export const SHELL_SCREEN_REGISTRY: ShellScreenRegistry = {
   initial: EMPTY_WINDOW_SCREEN_ID,
@@ -192,6 +211,16 @@ export const SHELL_SCREEN_REGISTRY: ShellScreenRegistry = {
       id: DIAGNOSTICS_SCREEN_ID,
       title: "診断",
       component: DiagnosticsScreen,
+    },
+    {
+      id: TABLE_SMOKE_SCREEN_ID,
+      title: "描画確認: 表",
+      component: TableSmoke,
+    },
+    {
+      id: EDITOR_SMOKE_SCREEN_ID,
+      title: "描画確認: 文字編集",
+      component: EditorSmoke,
     },
   ],
 };
@@ -361,7 +390,17 @@ export function ShellRegion({
  * 持つのは選択の表示と入口（[`AppearanceControl`]）だけである。
  */
 export function Layout(): ReactElement {
-  const router = useShellRouter(SHELL_SCREEN_REGISTRY);
+  // 検証専用の初期画面の選択（要件 10.4。`./verificationScreen`）。**既定のビルドでは常に
+  // `null`** なので、この解決は登録簿の内容を変えない — 既定の初期画面は 9.6 の空ウィンドウの
+  // 画面のままである。マウント時に 1 回だけ読む（値は文書の他のスクリプトより前に走る初期化
+  // スクリプトが載せるので、この時点で確定している）。
+  const registry = useMemo<ShellScreenRegistry>(() => {
+    const verification = resolveVerificationInitialScreen(SHELL_SCREEN_REGISTRY);
+    return verification === null
+      ? SHELL_SCREEN_REGISTRY
+      : { ...SHELL_SCREEN_REGISTRY, initial: verification };
+  }, []);
+  const router = useShellRouter(registry);
   const appearance = useAppearance();
 
   // メニューからの診断の導線（要件 8.1、8.6、8.7。タスク 9.5）。**登録するのは購読だけで
@@ -376,11 +415,8 @@ export function Layout(): ReactElement {
   // エラー提示の回復導線に出す「他の画面」。**表示中の画面自身は除く**（同じ画面へは
   // 「再試行」で戻る）。画面の集合はモジュール定数なので、現在の識別子だけが入力である。
   const alternatives = useMemo(
-    () =>
-      SHELL_SCREEN_REGISTRY.screens.filter(
-        (screen) => screen.id !== router.current.id,
-      ),
-    [router.current.id],
+    () => registry.screens.filter((screen) => screen.id !== router.current.id),
+    [registry, router.current.id],
   );
 
   return (
