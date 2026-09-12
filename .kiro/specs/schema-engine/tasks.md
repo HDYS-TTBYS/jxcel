@@ -20,7 +20,7 @@
   - すべての変種が生成・照合できることをテストで示す
   - _Requirements: 1.5, 1.6, 1.7, 3.5, 3.6, 4.8, 11.4_
 
-- [ ] 1.3 違反の表現を定義し、検証層のモジュールを宣言する
+- [x] 1.3 違反の表現を定義し、検証層のモジュールを宣言する
   - 違反 1 件が、行の識別子・列の添字と名前・入れ子の内側の位置・理由を持つ形を定義する
   - 理由は期待した内容と実際の値の双方を持ち、表示用の文言を持たない
   - シート全体の結果が、上限までの違反・違反の総件数・違反を持つ行の一覧を持つ形を定義する
@@ -307,3 +307,7 @@
 - **ワークスペース全体の `cargo build`/`cargo test` は走らせない**。`src-tauri` が Tauri 依存をコンパイルするため。対象は常に `-p schema-engine` に限定する。
 - `scripts/check-core-deps.sh` は引数なしだと `app-shell` を検査する。負の対照（`check-core-deps.sh jxcel` が tauri 一族を検出して exit 1）で検査器が生きていることを確認できる。
 - 1.1 の裁定: `crates/schema-engine` はまだ誰からも呼ばれない新規クレートであり、実行時に切り替える消費者経路が無い。Feature Flag Protocol のフラグは dead code になるだけなので導入せず、標準の RED → GREEN を使う（RED の証拠は各タスクで必須のまま）。
+- 1.3 の申し送り（5.4 が読むこと）: `ViolationReport` は `invalid_rows` を **直前要素との比較だけで重複排除**している（`push` の順序 = 行の並び順という前提に依存）。5.4 の安定併合では、第 1 段と第 2 段の両方に現れる行が二重に載らないよう、**併合結果を並べ替えてから** `invalid_rows` を確定すること。
+- 1.3 の申し送り: `ColumnIndex` は design が所属モジュールを定めていないため `src/validate/report.rs` に置いた（`Violation` が使う型であり、層の鎖 `compile → validate` の逆参照を作らない位置）。4.4 / 8.1 はここから import する。
+- 1.3 の申し送り: `ValidationOptions::default()` は**無制限**（上限なし）である。design/tasks が既定値を定めていないため。要件 5.6 は「呼び出し元が上限を指定できること」だけを要求する。
+- 1.3 で `crates/schema-engine/src/validate/` の 5 ファイル（mod / report / cell / unique / refs）が宣言済み。`cell.rs` / `unique.rs` / `refs.rs` の中身は 5.1 / 5.2 / 5.3 が埋める。
