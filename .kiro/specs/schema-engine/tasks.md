@@ -29,7 +29,7 @@
   - 入れ子の内側の位置がフィールド名と添字の並びで表現でき、空ならセル直下を指すことをテストで示す
   - _Requirements: 5.1, 5.2, 5.6_
 
-- [ ] 1.4 テストとベンチが共有する標本の生成器を用意する
+- [x] 1.4 テストとベンチが共有する標本の生成器を用意する
   - 指定した行数・列数のシートと行の値を組み立てる生成器を、テスト用の共有モジュールとして置く
   - **上流のドキュメントモデルとセル値だけに依存する**。スキーマの宣言を必要とする標本はこの時点では作れないため扱わない（群 9 が組み立てる）
   - ベンチからは相対パス指定でこの共有モジュールを取り込む（`tests/` のモジュールはそのままではベンチから参照できない）
@@ -311,3 +311,6 @@
 - 1.3 の申し送り: `ColumnIndex` は design が所属モジュールを定めていないため `src/validate/report.rs` に置いた（`Violation` が使う型であり、層の鎖 `compile → validate` の逆参照を作らない位置）。4.4 / 8.1 はここから import する。
 - 1.3 の申し送り: `ValidationOptions::default()` は**無制限**（上限なし）である。design/tasks が既定値を定めていないため。要件 5.6 は「呼び出し元が上限を指定できること」だけを要求する。
 - 1.3 で `crates/schema-engine/src/validate/` の 5 ファイル（mod / report / cell / unique / refs）が宣言済み。`cell.rs` / `unique.rs` / `refs.rs` の中身は 5.1 / 5.2 / 5.3 が埋める。
+- 1.4 の申し送り（9.1 / 9.2 が読むこと）: `tests/common/mod.rs` の `Sample::column_count` / `row_values` は `document.sheets()[0]` を直接引く（標本は 1 シート前提）。群 9 がシートを前置する形に変えるなら `self.sheet` 経由に直すこと。
+- 1.4 の申し送り: 標本の生成は `add_row` + `set_row_values` を 10 万回呼ぶと O(n²) になるため、骨格文書 → `to_parts` → 行エントリの差し替え → `with_rebuilt_manifest` → `from_parts`（`Sheet::extend_rows` の一括経路）で行っている。**これは `document-format` の `tests/common/mod.rs` / `benches/large_document.rs` / `tests/row_granular_diff.rs` と同じ既存の迂回路**であり、独自の発明ではない。
+- 1.4 の申し送り: `tests/sample.rs` は design の tests 一覧に無いが、共有モジュール自身を検証する唯一の実行可能ターゲットとして置いた（`common/mod.rs` に `#[cfg(test)]` を書くと全テストバイナリで再実行されるため分離した）。
