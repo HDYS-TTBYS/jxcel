@@ -1801,6 +1801,10 @@ fn present_existing_or_create(app: &AppHandle) {
 ///   （`SidecarHost`）を通して補助プロセスを 1 つ起動し、その ms 後に通常終了する**。配布物と
 ///   同じ解決・整合性検査・共有の経路で起動し、終了時に補助プロセスが残らないこと（要件 5.6）を
 ///   実測するために使う
+/// - `sidecar-grandchild:<ミリ秒>`（10.7 が足した形）: `VerificationAction::SidecarGrandchild` —
+///   上の `sidecar` と同じ経路で、**孫プロセスを持つ**補助プロセスを起動する（補助プロセスへ
+///   `--spawn-grandchild` を渡す。`crates/sidecar-smoke` の検証専用の口）。3.3 のプロセス
+///   グループ / Job Object が**孫まで**届くこと（要件 5.6）を実測するために使う
 /// - `fail-window:<ミリ秒>`（6.1 が足した形）: `VerificationAction::FailWindow` — **ウィンドウの
 ///   生成を意図的に失敗させ、その ms 後に通常終了する**。失敗が報告され、既に開いている他の
 ///   ウィンドウが動作し続けること（要件 2.10）を実測するために使う
@@ -1832,6 +1836,15 @@ enum VerificationAction {
     /// **10.x の 3 OS 検証もこの動作を使う**（配布物から起動して補助プロセスが現れることを
     /// 確かめる経路がほかに無い）。
     Sidecar,
+    /// **孫プロセスを持つ補助プロセスを起動した状態を作る**（タスク 10.7 が足した動作）。5.6 が
+    /// 足した `Sidecar` とまったく同じ経路（[`SidecarHost`] → 監督 → 解決 → 整合性検査 →
+    /// `spawn`）を通り、**`crates/sidecar-smoke` の `--spawn-grandchild` だけを余分に渡す**。
+    /// 3.3 のプロセスグループ / Job Object が**孫まで**届くこと（要件 5.6）を実機で実測する
+    /// ために使う。`<ミリ秒>` は他の動作と同じく終了までの待ちである。
+    ///
+    /// **補助プロセス側に新しい口は要らない** — 孫を作る口（`--spawn-grandchild`）は 3.3 が
+    /// すでに置いており、欠けていたのは「アプリの引き金からその引数を渡す経路」だけである。
+    SidecarGrandchild,
     /// **ウィンドウの生成を意図的に失敗させ、既存のウィンドウが動作し続けることを実測する**
     /// （タスク 6.1 が足した動作。要件 2.10）。失敗は直ちに起こし、`<ミリ秒>` は他の動作と
     /// 同じく終了までの待ちである。失敗の起こし方は [`window::force_creation_failure`] にある。
@@ -1846,6 +1859,7 @@ impl VerificationAction {
             "exit" => Some(Self::Exit),
             "panic" => Some(Self::Panic),
             "sidecar" => Some(Self::Sidecar),
+            "sidecar-grandchild" => Some(Self::SidecarGrandchild),
             "fail-window" => Some(Self::FailWindow),
             _ => None,
         }
@@ -1857,6 +1871,7 @@ impl VerificationAction {
             Self::Exit => "exit",
             Self::Panic => "panic",
             Self::Sidecar => "sidecar",
+            Self::SidecarGrandchild => "sidecar-grandchild",
             Self::FailWindow => "fail-window",
         }
     }
@@ -2102,14 +2117,16 @@ fn handle_reopen(app: &AppHandle, has_visible_windows: bool) {
 /// その ms 後に通常終了する（5.6 が足した形。終了時に残らないことを実測する）。
 /// `fail-window:<ミリ秒>` のときは**直ちにウィンドウの生成を失敗させ**
 /// （[`window::force_creation_failure`]）、その ms 後に通常終了する（6.1 が足した形。失敗が
-/// 隔離されることを実測する）。**環境変数が無い通常の起動では関数の先頭で即座に戻るので何も
+/// 隔離されることを実測する）。`sidecar-grandchild:<ミリ秒>` のときは `sidecar:<ミリ秒>` と
+/// 同じ経路で**孫プロセスを持つ**補助プロセスを起動する（10.7 が足した形。3.3 の終了保証が
+/// 孫まで届くことを実測する）。**環境変数が無い通常の起動では関数の先頭で即座に戻るので何も
 /// しない**（解釈できない値のときも何もしない）。したがって配布物の既定の振る舞いを変えない。
 ///
 /// 7.4 / 7.5 がメニュー項目を結線したら、この引き金は不要になる。残す場合もメニューの経路を
 /// 置き換えてはならない（引き金は環境変数が設定された検証のときだけ働く）。
 ///
 /// **名前は 5.4 のままにしてある**（tasks.md の 5.4 の申し送りが片付け対象としてこの名前を
-/// 指しているため）。動作は 4 つを選べるが、仕組みは 1 つのままである。
+/// 指しているため）。動作は 5 つを選べるが、仕組みは 1 つのままである。
 /// **この関数は既定のビルドには存在しない**（`verification-triggers` feature。`VERIFY_EXIT_ENV`
 /// の doc「片付け」を参照）。
 #[cfg(feature = "verification-triggers")]
@@ -2130,7 +2147,8 @@ fn arm_verification_exit_trigger(app: &AppHandle) {
     // ある。アプリが生きている間に、補助プロセスが動いていること・他のウィンドウが生きている
     // ことを外部から観測できるようにする）。
     match action {
-        VerificationAction::Sidecar => start_verification_sidecar(&app),
+        VerificationAction::Sidecar => start_verification_sidecar(&app, false),
+        VerificationAction::SidecarGrandchild => start_verification_sidecar(&app, true),
         VerificationAction::FailWindow => window::force_creation_failure(&app),
         _ => {}
     }
@@ -2139,6 +2157,7 @@ fn arm_verification_exit_trigger(app: &AppHandle) {
         match action {
             VerificationAction::Exit
             | VerificationAction::Sidecar
+            | VerificationAction::SidecarGrandchild
             | VerificationAction::FailWindow => request_exit(&app),
             // **パニックはメインスレッドで起こす。**ほかのスレッドで起こしたパニックはその
             // スレッドを終わらせるだけでプロセスは生き続けるため、「意図的に異常終了させる」を
@@ -2156,7 +2175,7 @@ fn arm_verification_exit_trigger(app: &AppHandle) {
 }
 
 /// 検証専用: ホストを通して補助プロセスを 1 つ起動する（タスク 5.6 が置き、8.1 が本物の経路へ
-/// 置き換えた）。
+/// 置き換え、10.7 が孫プロセスの有無を足した）。
 ///
 /// **通常の起動とまったく同じ経路を通る。**1.7 の同梱原本の置き場を直接指していた代用の解決
 /// （旧 `verification_sidecar_path`）は 8.1 で消えた — 検証だけが別の解決を使うと、配布物で
@@ -2170,17 +2189,25 @@ fn arm_verification_exit_trigger(app: &AppHandle) {
 /// - 種類ごとに 1 つのプロセスという不変条件（終了時の終了が同じ登録簿を見る）
 /// - 補助プロセスの出力が診断の記録先へ現れること（手順 4.4 の購読）
 ///
+/// `spawn_grandchild` が真のときだけ、補助プロセスへ `--spawn-grandchild` を余分に渡す
+/// （`crates/sidecar-smoke` の検証専用の口）。**孫を作るのは補助プロセス自身**であり、
+/// 孫は補助プロセスのプロセスグループ / Job Object を継承する。したがって 3.3 の終了保証が
+/// 孫まで届くかどうかを、起動から終了までの実経路で観測できる（タスク 10.7 が使う）。
+/// 親監視のフラグ（`--parent-pid`）は監督が `child_args` で注入するので、ここでは渡さない。
+///
 /// **この関数は検証ビルドにしか存在しない**（`verification-triggers` feature）。既定の
 /// ビルドには環境変数の読み取りもこの経路も入らない。
 ///
 /// 起動の失敗は記録に残す（**検証の失敗を無言にしない**）。失敗してもアプリは通常終了の経路へ
 /// 進むので、終了時の終了処理そのものは実測できる。
 #[cfg(feature = "verification-triggers")]
-fn start_verification_sidecar(app: &AppHandle) {
-    match app
-        .state::<SidecarHost>()
-        .ensure(SidecarKind::Smoke, Vec::new())
-    {
+fn start_verification_sidecar(app: &AppHandle, spawn_grandchild: bool) {
+    let args: Vec<String> = if spawn_grandchild {
+        vec!["--spawn-grandchild".to_string()]
+    } else {
+        Vec::new()
+    };
+    match app.state::<SidecarHost>().ensure(SidecarKind::Smoke, args) {
         Ok(handle) => log::info!(
             "検証用の補助プロセスを起動した: kind={} pid={}",
             handle.kind().as_str(),
@@ -2518,6 +2545,22 @@ mod tests {
         assert_eq!(
             parse_verification_trigger(" sidecar : 0 "),
             Some((VerificationAction::Sidecar, 0))
+        );
+    }
+
+    #[cfg(feature = "verification-triggers")]
+    #[test]
+    fn the_verification_trigger_can_start_a_sidecar_with_a_grandchild() {
+        // 10.7 が足した形。5.6 の `sidecar` と同じ経路のまま、補助プロセスへ
+        // `--spawn-grandchild` を余分に渡した状態を作る（3.3 の終了保証が孫まで届くことを
+        // 実機で実測するために使う）。
+        assert_eq!(
+            parse_verification_trigger("sidecar-grandchild:1500"),
+            Some((VerificationAction::SidecarGrandchild, 1500))
+        );
+        assert_eq!(
+            parse_verification_trigger(" sidecar-grandchild : 0 "),
+            Some((VerificationAction::SidecarGrandchild, 0))
         );
     }
 

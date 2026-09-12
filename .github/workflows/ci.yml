@@ -2367,6 +2367,293 @@ jobs:
           Write-Host "検証（後始末）: 常駐インスタンス数=0（残存プロセスなし）"
           Write-Host "OK: Windows: 配布物のメニューバー（項目とアクセラレータの文字列）・WM_COMMAND による活性化の通知・2 枚のウィンドウのフォーカス先への作用を検証した"
       # ---------------------------------------------------------------------
+      # 補助プロセスの終了保証の検証（tasks.md 10.7 / 要件 5.6）
+      #
+      # 3 条件を 3 OS それぞれで実測する。**残存プロセス数が 0 であることがこの段の出力に現れる**:
+      #
+      #   (a) 通常終了        — `sidecar:<ms>` で補助プロセスを起動し、通常終了した後に残存 0
+      #   (b) 強制終了        — `sidecar:<ms>` で起動し、アプリを強制終了した後に残存 0。
+      #                         **こちらが本番の経路である**（異常終了では終了処理が走らない）
+      #   (c) 孫あり・通常終了 — `sidecar-grandchild:<ms>` で補助プロセスに孫を作らせ、通常終了の
+      #                         後に残存 0（**3.3 のプロセスグループ / Job Object が孫まで届く**）
+      #   (d) 補助: 孫あり・強制終了 → 親監視の届かない孫を次回起動の掃除（3.5）が除去する
+      #
+      # ## どの機構が何を保証するか（3.3 / 3.5 / 5.6 の実装に基づく）
+      #
+      #   - **通常終了**: 5.6 の `RunEvent::Exit` → `shutdown_all` が、3.3 の機構（Unix は
+      #     `setpgid` したプロセスグループへの `killpg`、Windows は Job Object の
+      #     `TerminateJobObject`）で**孫まで**終了させる。(c) がこれを直接確かめる。
+      #   - **強制終了（Unix / macOS）**: `RunEvent::Exit` が届かず `killpg` も走らない。実効的な
+      #     機構は**補助プロセス自身の親監視**（1.6 / 3.5 が注入する `--parent-pid`）だけである。
+      #     検出間隔は `crates/sidecar-smoke` の `POLL_INTERVAL` = 100 ms。**(b) がこれを確かめる。**
+      #     孫は親監視を持たない（`--idle`。3.3 の注記）ため強制終了の後に残り得る。それを
+      #     終わらせるのは**3.5 の起動時の掃除だけ**であり、**(d) がそれを確かめる**。
+      #   - **強制終了（Windows）**: Job Object の `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` を
+      #     **カーネルが強制する**（アプリの異常終了後も有効な唯一の機構。3.3）。孫もジョブに入る
+      #     ので、(b) と (d) の双方で残存 0 になる。
+      #   - **macOS の掃除**: `ps -axo pid=,comm=` の**名前照合**だけに頼る。`comm` はカーネルの
+      #     `p_comm` で 16 文字に切詰められ、起動時の絶対パスを返さないため、8.1 は macOS に期待
+      #     パスを与えない（与えると掃除が無音の no-op になる）。(d) が macOS における名前照合の
+      #     掃除を実測する — **3.5 / 8.1 の申し送りが求めていた確認はこれである**。
+      #
+      # ## 検証用の形（`verification-triggers`）で起動する理由
+      #
+      # `sidecar:<ms>` / `sidecar-grandchild:<ms>` の引き金は 5.4 / 10.7 が**非既定の feature の
+      # 下にだけ**置いている（配布物に検証専用の環境変数の読み取りを入れない決定。5.4 / 7.4 の
+      # 片付け）。したがってこの段は、直前の 10.4 の段が作る**バンドルしない検証用の形**
+      # （`target/release/jxcel[.exe]`）を起動する。**配布物は書き換えない** — AppImage / deb /
+      # `.app` / dmg / NSIS はそのまま残り、後続の 10.2 の検証と成果物の保存がそのまま働く。
+      # 配布物に検証専用の識別子が無いことは 10.5 の段が `strings` で確かめている。
+      #
+      # ## 「本当に起動したか」の事前条件（**残存 0 が空振りで通らないようにする**）
+      #
+      # 残存 0 を判定する前に、**補助プロセスが実際に動いていること**を要求し、さらにその
+      # コマンドラインが**この段が起動したアプリの識別子**を `--parent-pid` に持つことまで要求する
+      # （監督が `child_args` で注入する。3.2 / 3.5）。補助プロセスが現れなければ、その時点で非 0
+      # になる（補助プロセスを 1 つも起動しない実行が「残存 0」で緑になる経路は無い）。
+      #
+      # ## 残存の数え方（**照合の限界を明記する**）
+      #
+      #   - **Linux**: 8.1 の解決先の絶対パス（`<実行ファイルのディレクトリ>/../share/jxcel/
+      #     sidecar-smoke`。deb / システムインストールと同じ形）と `/proc/<pid>/exe` が一致する
+      #     ものだけを数える（3.5 と同じく、名前だけでなく実行ファイルで照合する）。検査本体は
+      #     POSIX sh の `scripts/check-sidecar-termination.sh`（ローカルでも同じものを実行できる）。
+      #   - **macOS**: 同じ検査器を使う。`/proc` が無いため `ps -axo pid=,comm=` を使い、
+      #     **`comm` の名前（`sidecar-smoke`。13 文字で 16 文字の切詰めに収まる）だけで照合する**。
+      #     絶対パス照合は効かない（8.1 が macOS に期待パスを与えない理由と同じ）。
+      #   - **Windows**: PowerShell の `Get-Process` を `Path`（期待する実行ファイルの絶対パス
+      #     `target\release\sidecar-smoke.exe`）で絞って数える。**Job Object の経路を実測するのは
+      #     この段だけである。**
+      #
+      # ## 後始末
+      #
+      # どの段も、起動したアプリと残存する補助プロセスを終了させてから抜ける（後続の段へ持ち越さ
+      # ない）。片付けは判定より後に走るので、検証の失敗（残存ありで非 0）を覆い隠さない。
+      #
+      # ## この環境（Linux）で確認できないこと
+      #
+      # macOS / Windows の段は**このホストでは実行できず、CI が唯一の実行の場**である。Linux の
+      # 検査器は `uname` を差し替えて macOS の分岐（`ps` による名前照合）を実行して確かめてあるが、
+      # **実際の macOS の `ps` の出力形式・`comm` の切詰め・Job Object の強制は CI だけが実測する。**
+      # ---------------------------------------------------------------------
+
+      # Linux の終了保証の検証（tasks.md 10.7）。検査器は 4 つの条件（通常終了・強制終了・
+      # 孫あり・孫あり強制終了 → 次回起動の掃除）を 1 回の実行で検証する。非 0 はそのまま
+      # パイプラインの失敗になる。
+      - name: Verify sidecar termination (Linux / Xvfb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -eu
+          # 8.1 の解決規則（Linux は `usr/share/jxcel/sidecar-smoke`。AppImage は $APPDIR、
+          # それ以外は実行ファイルの 1 つ上の `share/jxcel`）に合わせ、**検証用の形から見た
+          # 解決先**へ staging した原本を複製する（deb / システムインストールと同じ形）。
+          # `tauri-build` は Linux では externalBin を複製しないため、この段が要る。
+          set -- sidecars/sidecar-smoke-*
+          staged=$1
+          if [ ! -f "$staged" ]; then
+            echo "NG: 原本がありません（先に bash scripts/stage-sidecars.sh）: $staged" >&2
+            exit 1
+          fi
+          mkdir -p target/share/jxcel
+          cp "$staged" target/share/jxcel/sidecar-smoke
+          chmod 755 target/share/jxcel/sidecar-smoke
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            sh scripts/check-sidecar-termination.sh target/release/jxcel 60
+
+      # macOS の終了保証の検証（tasks.md 10.7）。同じ検査器を macOS の分岐で走らせる
+      # （`/proc` が無いので `ps -axo pid=,comm=` の名前照合になる）。`externalBin` の原本は
+      # `tauri-build` が実行ファイルの隣（`target/release/sidecar-smoke`）へ複製している。
+      - name: Verify sidecar termination (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -eu
+          if [ ! -x target/release/sidecar-smoke ]; then
+            echo "NG: 8.1 の解決先の補助プロセスがありません（--features verification-triggers のビルドか確認）: target/release/sidecar-smoke" >&2
+            exit 1
+          fi
+          sh scripts/check-sidecar-termination.sh target/release/jxcel 60
+
+      # Windows の終了保証の検証（tasks.md 10.7）。**Job Object の経路を実測する唯一の段**である。
+      # 3 条件に加えて、孫ありで強制終了した後に次回起動の掃除が走ることも確かめる（Job Object が
+      # カーネルとして孫まで終了させるので、掃除が見る残存は 0 件になる。それでも掃除の記録行は出る）。
+      #
+      # **既知の窓（`job_windows.rs` の doc）**: `CreateProcess` と `AssignProcessToJobObject` の
+      # 間に子が孫を起動すると、その孫はジョブの外に残りうる。この段は `--spawn-grandchild` で
+      # 孫を起動直後に作らせるため、**その窓を実際に踏む唯一の検証である**。この段が赤くなった
+      # ときに最初に疑うべきはこの窓であり、マージン（数十 µs 対 数 ms）を実測できるのは CI だけである。
+      - name: Verify sidecar termination (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $verify = "target\release\jxcel.exe"
+          $sidecarPath = "target\release\sidecar-smoke.exe"
+          if (-not (Test-Path $verify)) { throw "検証用の形が見つかりません: $verify（--features verification-triggers のビルドではない）" }
+          if (-not (Test-Path $sidecarPath)) { throw "8.1 の解決先の補助プロセスが見つかりません: $sidecarPath" }
+          $expected = (Resolve-Path $sidecarPath).Path
+          $record = Join-Path $env:LOCALAPPDATA "com.jxcel.app\logs\jxcel.log"
+
+          # 期待する実行ファイルに属する補助プロセスだけを数える（名前だけでなくパスで照合する）。
+          function Get-Sidecars {
+            @(Get-Process -Name "sidecar-smoke" -ErrorAction SilentlyContinue |
+              Where-Object { $_.Path -and ($_.Path -eq $expected) })
+          }
+
+          function Show-Sidecars {
+            param([string]$Phase)
+            $procs = Get-Sidecars
+            foreach ($p in $procs) {
+              $cmd = ""
+              try { $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$($p.Id)").CommandLine } catch { $cmd = "(取得できない)" }
+              Write-Host "    pid=$($p.Id) path=$($p.Path) args=$cmd"
+            }
+            Write-Host "  ${Phase}: 補助プロセスの数: $($procs.Count)"
+          }
+
+          # 補助プロセス（と孫）が現れるまで待ち、**そのコマンドラインがこのアプリの識別子を
+          # --parent-pid に持つこと**まで確かめる（起動していないのに残存 0 で通る経路を作らない）。
+          function Wait-Started {
+            param([int]$Want, [int]$AppPid, [int]$Seconds)
+            $deadline = (Get-Date).AddSeconds($Seconds)
+            do {
+              $procs = Get-Sidecars
+              if ($procs.Count -ge $Want) {
+                foreach ($p in $procs) {
+                  $cmd = ""
+                  try { $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$($p.Id)").CommandLine } catch { $cmd = "" }
+                  if ($cmd -match "--parent-pid\s+$AppPid(\s|$)") { return $procs }
+                }
+              }
+              Start-Sleep -Milliseconds 200
+            } while ((Get-Date) -lt $deadline)
+            return @()
+          }
+
+          function Wait-Zero {
+            param([int]$Seconds)
+            $deadline = (Get-Date).AddSeconds($Seconds)
+            do {
+              if (@(Get-Sidecars).Count -eq 0) { return $true }
+              Start-Sleep -Milliseconds 100
+            } while ((Get-Date) -lt $deadline)
+            return (@(Get-Sidecars).Count -eq 0)
+          }
+
+          function Confirm-Exit {
+            param($Process, [string]$Phase, [int]$Seconds)
+            if (-not $Process.WaitForExit($Seconds * 1000)) {
+              throw "NG: ${Phase} アプリが $Seconds 秒以内に終了しませんでした"
+            }
+            if ($Process.ExitCode -ne 0) {
+              throw "NG: ${Phase} アプリの終了コードが $($Process.ExitCode)（通常終了は 0 であるべき）"
+            }
+          }
+
+          try {
+            # ---- (a) 通常終了 ----
+            Write-Host "== (a) 通常終了（sidecar:8000） =="
+            $env:JXCEL_VERIFICATION_EXIT_AFTER_MS = "sidecar:8000"
+            $p = Start-Process -FilePath $verify -PassThru
+            $procs = @(Wait-Started -Want 1 -AppPid $p.Id -Seconds 60)
+            if ($procs.Count -lt 1) { throw "NG: (a) 補助プロセス（--parent-pid=$($p.Id)）が 60 秒以内に現れませんでした" }
+            Write-Host "(a) 補助プロセスが動作していることを観測した:"
+            Show-Sidecars "(a) 起動を観測"
+            Confirm-Exit -Process $p -Phase "(a)" -Seconds 60
+            if (-not (Wait-Zero 15)) { Show-Sidecars "(a) 残存"; throw "NG: (a) 通常終了の後に補助プロセスが残っています" }
+            Write-Host "(a) 通常終了の後の一覧（残存 0）:"
+            Show-Sidecars "(a) 通常終了の後"
+            Write-Host "OK: (a) 通常終了の後に補助プロセスは残らない（5.6 の shutdown_all → 3.3 の Job Object）"
+
+            # ---- (b) 強制終了（本番の経路） ----
+            Write-Host "== (b) 強制終了（Stop-Process -Force。本番の経路） =="
+            $env:JXCEL_VERIFICATION_EXIT_AFTER_MS = "sidecar:600000"
+            $p = Start-Process -FilePath $verify -PassThru
+            $procs = @(Wait-Started -Want 1 -AppPid $p.Id -Seconds 60)
+            if ($procs.Count -lt 1) { throw "NG: (b) 補助プロセス（--parent-pid=$($p.Id)）が 60 秒以内に現れませんでした" }
+            Write-Host "(b) 強制終了の前の一覧:"
+            Show-Sidecars "(b) 強制終了の前"
+            $killed = $p.Id
+            Write-Host "(b) アプリ（pid=$killed）へ Stop-Process -Force を送る（終了処理は走らない）"
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            Stop-Process -Id $p.Id -Force
+            $p.WaitForExit(10000) | Out-Null
+            if (-not (Wait-Zero 15)) { Show-Sidecars "(b) 残存"; throw "NG: (b) 強制終了の後に補助プロセスが残っています" }
+            $sw.Stop()
+            Write-Host "(b) 強制終了から約 $([int]$sw.ElapsedMilliseconds) ms で残存 0 になった"
+            Write-Host "(b) 強制終了の後の一覧（残存 0）:"
+            Show-Sidecars "(b) 強制終了の後"
+            Write-Host "OK: (b) 強制終了の後に補助プロセスは残らない（Windows の機構は 3.3 の Job Object。"
+            Write-Host "        カーネルが強制するため終了処理が走らない異常終了の後も有効）"
+
+            # ---- (c) 孫あり・通常終了 ----
+            Write-Host "== (c) 孫プロセスあり・通常終了（sidecar-grandchild:8000） =="
+            $env:JXCEL_VERIFICATION_EXIT_AFTER_MS = "sidecar-grandchild:8000"
+            $p = Start-Process -FilePath $verify -PassThru
+            $procs = @(Wait-Started -Want 2 -AppPid $p.Id -Seconds 60)
+            if ($procs.Count -lt 2) { throw "NG: (c) 補助プロセスと孫の 2 つ（--parent-pid=$($p.Id)）が 60 秒以内に現れませんでした（観測: $($procs.Count) 件）" }
+            Write-Host "(c) 補助プロセスと孫が動作していることを観測した:"
+            Show-Sidecars "(c) 起動を観測"
+            Confirm-Exit -Process $p -Phase "(c)" -Seconds 60
+            if (-not (Wait-Zero 15)) { Show-Sidecars "(c) 残存"; throw "NG: (c) 通常終了の後に補助プロセスが残っています（孫を含む）" }
+            Write-Host "(c) 通常終了の後の一覧（残存 0）:"
+            Show-Sidecars "(c) 通常終了の後"
+            Write-Host "OK: (c) 孫を持つ補助プロセスも通常終了で残らない（3.3 の Job Object が孫まで届く）"
+
+            # ---- (d) 補助: 孫あり・強制終了 → 次回起動の掃除 ----
+            Write-Host "== (d) 補助: 孫あり・強制終了 → 次回起動の掃除（3.5） =="
+            $env:JXCEL_VERIFICATION_EXIT_AFTER_MS = "sidecar-grandchild:600000"
+            $p = Start-Process -FilePath $verify -PassThru
+            $procs = @(Wait-Started -Want 2 -AppPid $p.Id -Seconds 60)
+            if ($procs.Count -lt 2) { throw "NG: (d) 補助プロセスと孫の 2 つ（--parent-pid=$($p.Id)）が 60 秒以内に現れませんでした（観測: $($procs.Count) 件）" }
+            Write-Host "(d) 強制終了の前の一覧（補助プロセスと孫）:"
+            Show-Sidecars "(d) 強制終了の前"
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            Stop-Process -Id $p.Id -Force
+            $p.WaitForExit(10000) | Out-Null
+            if (-not (Wait-Zero 15)) {
+              Show-Sidecars "(d) 残存"
+              throw "NG: (d) 強制終了の後に孫が残っています（Job Object の KILL_ON_JOB_CLOSE が孫まで届いていない）"
+            }
+            $sw.Stop()
+            Write-Host "(d) 強制終了から約 $([int]$sw.ElapsedMilliseconds) ms で孫を含めて残存 0 になった（Job Object はカーネルが強制する）"
+            Write-Host "(d) 強制終了の後の一覧（残存 0）:"
+            Show-Sidecars "(d) 強制終了の後"
+            # 次回起動で起動時の残留掃除（3.5）を走らせ、その記録行を出す（Job Object が既に 0 に
+            # した場合でも掃除そのものは走る。掃除の経路が生きていることを記録でも確かめる）。
+            $before = 0
+            if (Test-Path $record) { $before = @(Get-Content -LiteralPath $record).Count }
+            $env:JXCEL_VERIFICATION_EXIT_AFTER_MS = "exit:2500"
+            $q = Start-Process -FilePath $verify -PassThru
+            Confirm-Exit -Process $q -Phase "(d) 次回起動" -Seconds 60
+            $sweepLine = $null
+            if (Test-Path $record) {
+              $sweepLine = @(Get-Content -LiteralPath $record | Select-Object -Skip $before) |
+                Where-Object { $_ -match "残留プロセスの掃除で" } | Select-Object -Last 1
+            }
+            if (-not $sweepLine) { throw "NG: (d) 次回起動の掃除の記録（残留プロセスの掃除で N 件を終了した）が現れませんでした: $record" }
+            Write-Host "(d) 記録（5.1 の起動時の掃除）: $sweepLine"
+            if (-not (Wait-Zero 15)) { Show-Sidecars "(d) 残存"; throw "NG: (d) 次回起動の掃除の後も補助プロセスが残っています" }
+            Write-Host "(d) 掃除の後の一覧（残存 0）:"
+            Show-Sidecars "(d) 掃除の後"
+            Write-Host "OK: (d) 孫ありで強制終了しても残存 0（Job Object）であり、次回起動の掃除も走る（3.5）"
+          } finally {
+            Remove-Item Env:\JXCEL_VERIFICATION_EXIT_AFTER_MS -ErrorAction SilentlyContinue
+            Get-Process -Name "jxcel" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Get-Sidecars | Stop-Process -Force -ErrorAction SilentlyContinue
+            Write-Host "検証（後始末）: 残存するアプリと補助プロセスを終了した"
+          }
+          # 後始末の完了を待ってから主張する（`Stop-Process` は非同期であり、直後の列挙が
+          # 間に合わないことがある。偽の失敗を作らない）。
+          $cleanDeadline = (Get-Date).AddSeconds(10)
+          while ((Get-Date) -lt $cleanDeadline -and @(Get-Process -Name "jxcel" -ErrorAction SilentlyContinue).Count -ne 0) {
+            Start-Sleep -Milliseconds 100
+          }
+          if (@(Get-Process -Name "jxcel" -ErrorAction SilentlyContinue).Count -ne 0) { throw "後始末の後に常駐しているインスタンスが残っています" }
+          if (-not (Wait-Zero 10)) { Show-Sidecars "後始末"; throw "後始末の後に補助プロセスが残っています" }
+          Write-Host "検証（後始末）: 残存プロセス数=0（アプリ・補助プロセスとも）"
+          Write-Host "OK: Windows: 通常終了・強制終了・孫ありの 3 条件すべてで残存補助プロセスが 0 であることを検証した"
+      # ---------------------------------------------------------------------
       # 配布物の検証（tasks.md 10.2 / 要件 6.4, 6.5, 6.6）
       #
       # 生成した配布物から補助プロセスの実行ファイルを取り出し、起動できることを確かめ、
