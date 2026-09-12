@@ -1393,6 +1393,50 @@ jobs:
               return windowIds(of: pid).count
           }
 
+          /// 集合を読みやすい形にする（失敗の診断に使う）。
+          func describe(_ ids: Set<Int>) -> String {
+              return "[" + ids.sorted().map(String.init).joined(separator: ", ") + "]"
+          }
+
+          /// 集合を `samples` 回サンプリングする（`interval` 秒ごと）。**過渡的な増減を人の目で
+          /// 追えるようにする**ためであり、判定には使わない。
+          func sampleWindowSet(of pid: pid_t, samples: Int, interval: Double) -> [Set<Int>] {
+              var result: [Set<Int>] = []
+              for _ in 0..<samples {
+                  result.append(windowIds(of: pid))
+                  Thread.sleep(forTimeInterval: interval)
+              }
+              return result
+          }
+
+          /// その pid のすべてのウィンドウを「id / レイヤー / 大きさ / 画面内か」で並べる。
+          ///
+          /// **目的は増えた 1 枚の正体を残すこと。** ウィンドウサーバの一覧には、アプリが作った
+          /// トップレベルでないもの（フレームワークが持つ隠しウィンドウなど）が混ざりうるので、
+          /// 「増えた」と言うだけでは原因が分からない（実測: 2026-09-12 の macOS のランナーで
+          /// 集合が [63, 68] → [63, 68, 69] になった）。
+          func describeWindows(of pid: pid_t) -> String {
+              guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
+                  return "(ウィンドウの一覧を取得できません)"
+              }
+              var parts: [String] = []
+              for window in list {
+                  guard let owner = window[kCGWindowOwnerPID as String] as? Int, owner == Int(pid) else { continue }
+                  let number = window[kCGWindowNumber as String] as? Int ?? -1
+                  let layer = window[kCGWindowLayer as String] as? Int ?? -1
+                  let onscreen = window[kCGWindowIsOnscreen as String] as? Bool ?? false
+                  let bounds = window[kCGWindowBounds as String] as? [String: Any]
+                  let width = bounds?["Width"] as? Double ?? -1
+                  let height = bounds?["Height"] as? Double ?? -1
+                  // `kCGWindowOwnerName` はアプリ名、`kCGWindowName` は**画面収録の許可が無いと
+                  // `nil`** になりうる（どちらも診断のためだけに読む）。
+                  let ownerName = window[kCGWindowOwnerName as String] as? String ?? "(名前なし)"
+                  let windowName = window[kCGWindowName as String] as? String ?? "(名前なし)"
+                  parts.append("#\(number) layer=\(layer) \(Int(width))x\(Int(height)) onscreen=\(onscreen) owner=\(ownerName) name=\(windowName)")
+              }
+              return parts.isEmpty ? "(0 枚)" : parts.joined(separator: " / ")
+          }
+
           /// ウィンドウの集合を `seconds` の間観測し、**最後の 2 標本が一致し、かつ `expected` と
           /// 一致する**かどうかを返す（一致しなければ最後の標本を返す）。
           ///
@@ -1562,7 +1606,10 @@ jobs:
           note("検証 (a): 引数なしで再度実行する（既にあるウィンドウを前面に出すだけで、新しいウィンドウを作らない）")
           let phaseArgless = recordLines().count
           // **起動の直前の集合**を取る（この段の直前の観測は揺れうるので、ここで取り直す）。
-          let setBeforeArgless = windowIds(of: first.processIdentifier)
+          // 0.5 秒ごとに 5 標本を取り、**揺れていないこと**と**増えた 1 枚の正体**を残す。
+          let beforeSamples = sampleWindowSet(of: first.processIdentifier, samples: 5, interval: 0.5)
+          let setBeforeArgless = beforeSamples.last ?? []
+          note("検証 (a): 引数なしの起動の前の集合（0.5 秒ごと 5 標本）: \(beforeSamples.map(describe).joined(separator: " → "))")
           let third = launch(distApp, arguments: [], denyClose: nil)
           if !waitForExit(third, seconds: timeoutSeconds) {
               stop(third)
@@ -1575,11 +1622,12 @@ jobs:
               fail("引数なしの引き継ぎの行（… ドキュメント要求なし）が記録に現れません")
           }
           // **過渡的な増減を許し、持続する差だけを失敗にする**（集合で見るので入れ替わりも解る）。
+          let afterSamples = sampleWindowSet(of: first.processIdentifier, samples: 5, interval: 0.5)
           let (setAfterArgless, settled) = settleWindowSet(of: first.processIdentifier, expected: setBeforeArgless, seconds: 5)
           if !settled {
-              fail("引数なしの 2 つ目の起動の後、ウィンドウの集合が \(setBeforeArgless.sorted()) に落ち着きませんでした（観測 \(setAfterArgless.sorted())）— 新しいウィンドウを作ってはならない")
+              fail("引数なしの 2 つ目の起動の後、ウィンドウの集合が \(describe(setBeforeArgless)) に落ち着きませんでした（起動後 0.5 秒ごとの 5 標本: \(afterSamples.map(describe).joined(separator: " → ")) / 落ち着き待ちの最後の観測 \(describe(setAfterArgless)) / その時点の全ウィンドウ: \(describeWindows(of: first.processIdentifier))）— 新しいウィンドウを作ってはならない")
           }
-          note("検証 (a): 引数なしの 2 つ目の起動も終了コード 0 で終わり、ウィンドウの集合=\(setAfterArgless.sorted())（起動前と同じ \(secondWindows) 枚）のまま変わらない")
+          note("検証 (a): 引数なしの 2 つ目の起動も終了コード 0 で終わり、ウィンドウの集合=\(describe(setAfterArgless))（起動前と同じ \(secondWindows) 枚）のまま変わらない")
           note("検証 (a): 記録（引数なしの引き継ぎ）: \(argless)")
 
           note("検証: 配布物のインスタンスを片付ける")
