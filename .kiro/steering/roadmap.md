@@ -42,7 +42,8 @@ JSON をファイル実体とする、データベースとして運用可能な
 
 - `document-format` — 実装完了（38 サブタスク）
 - `app-shell` — 実装完了（56 サブタスク）。4 次元の feature 検証（全スイート＋起動の実測 / 要件被覆 / 設計整合と境界 / 横断統合）で一度 **NO-GO** となり、欠けていた検証成果物・出荷物に混入した検証コード・強制検査の欠落・設計の記述のずれを是正して **GO**（2026-09-12）。**ローカルで閉じられない残り（macOS / Windows の実行時、コード署名、3 OS の配布物）は CI の実行で確認する**
-- 他 12 本 — `brief.md` のみ
+- `schema-engine` — 仕様完了（requirements / design / tasks、31 サブタスク、2026-09-12）。実装未着手。設計で外部依存を `jiff` と `regex` の 2 本に絞り、10 進数クレートは**採らない**と決めた（tech.md 参照）
+- 他 11 本 — `brief.md` のみ
 
 ## Specs (dependency order)
 - [x] document-format -- zip + JSON のドキュメント形式と File/Sheet/Schema/Row のドキュメントモデル。Dependencies: none
