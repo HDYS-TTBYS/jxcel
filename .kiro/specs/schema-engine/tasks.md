@@ -373,9 +373,16 @@
   - 文法（`CellValue::Decimal` の中身が 10 進文法に一致すること）は桁の有無に依らず要求する。`None` のときの文法外の値は `PrecisionExceeded` ではなく `TypeMismatch { kind: decimal }` に落ちる（桁が無いので精度の期待値を運べない）。
 - **4.4 の裁定（5.1〜5.4 / 8.1 が読むこと）— `ColumnIndex` の所属**: 層の鎖は `error / types → declaration → registry → compile → { coerce, validate } → write → evolution → api` であり、**`validate` が `compile` に依存する向き**である。1.3 の申し送りとそのレビューの記述は向きを取り違えていた。`ColumnIndex` の定義は **`compile::plan::ColumnIndex`**（`compile/mod.rs` が再輸出）にあり、`validate` 側は `use crate::compile::plan::ColumnIndex;` で参照する。**5.1〜5.4 / 8.1 は `crate::compile::ColumnIndex` から import すること。**
 - 4.4 の申し送り: `CompiledSchema` は design の状態一覧に加えて**列ごとの `default`**（`default_row` が計画だけを引数に取るため。要件 4.3）、**`unusable_kind`**（要件 11.7 の報告に型定義の識別子が要るため）、**`required`**（5.1 の必須判定のため）を保持する。design の State 一覧の記載漏れであり、消費者のいる保持である。
-- **4.4 の申し送り（5.3 が読むこと。未決の論点）**: `CompiledSchema::references()` は**最上位の `Ref` 列だけ**を組にする。`Object` のフィールドや `Array` の `items` の内側にある `Ref` は載っていない。design「Compile Layer / SchemaCompiler」の State Management の記述どおりだが、要件 9.2「参照を持つ値が検証されたとき、参照先の行が実在するかを判定する」を**入れ子の内側まで**満たすかは 5.3 の設計時に決めること。必要なら `references()` を入れ子まで拡張する。
+- **4.4 の申し送り（5.3 が読むこと。未決の論点）→ 5.3 が裁定済み**: `CompiledSchema::references()` は**最上位の `Ref` 列だけ**を組にしていた。5.3 はこれを**引かず**、`ColumnValidator` の木から参照の位置を 1 回だけ前計算する方式を採った（**入れ子の `Ref` も判定対象**にするため。要件 9.2 は「参照を持つ値」一般を対象にしており、入れ子の内側を外す理由が無い）。その結果 `references()` に消費者が無くなったため、**5.3 で削除した**（`compile/mod.rs` の field・初期化・アクセサ・テストの assert）。design.md の State 一覧と Testing Strategy も実態に合わせて是正済み。**5.4 は `schema.references()` を呼ばず、`refs::scan` を無条件に呼ぶこと**（参照が無ければ空を返す）。
 - 4.4 の申し送り（5.1 が読むこと）: 既定値のオブジェクト構造の合否判定が `declaration/codec.rs`（その場で判定できる分）と `compile/mod.rs`（型解決後にしか判定できない分）に**構造の歩きとして二重化**している。葉の適合判定は 4.2 の検証器を再利用しているが、片方だけ直すと既定値の合否が食い違う。5.1 以降で共有述語へ寄せる余地がある。
 - 4.4 のプロセスの申し送り: 実装者が仕様の穴 2 件（再帰型・桁未宣言）について裁定を求めてきた。**裁定を返したうえで実装させる**のが正しい処理であり、実装者の暫定案をそのまま通してはならない（暫定案 2 は正当な宣言を拒否する誤りだった）。
+
+- **5.3 の申し送り（5.4 が読むこと）**: `validate::refs::scan(doc: &Document, schema: &CompiledSchema, rows: I) -> Vec<Violation>` を**無条件に呼ぶ**こと。`schema.references()` で判定を省かない（その API は削除済み）。参照が無ければ空を返す。
+- 5.3 の申し送り: 参照の実在判定は**入れ子の `Ref` も対象**である。違反の列は**入れ子を含む最上位の列**、位置は `ValuePath`（`cell` の入れ子報告と同じ規約）。
+- 5.3 の申し送り: 参照先シートの行識別子の集合は**参照先シートごとに 1 回だけ**作る（`HashSet` の `contains` のみ。行ごとの問い合わせをしない。要件 9.6）。参照先シートが削除されている場合は空集合になり、そのシートを指す**すべての参照**が違反になる（要件 9.5）。
+- 5.3 の申し送り: `scan` は `&Document` を不変で借りるだけで、変更経路を持たない（参照されている行の削除に介入しない。要件 9.4）。行削除の公開経路が上流に無いため、「削除後の状態」を組み立てて検証している。
+- 5.3 の申し送り: 順序は行 → 列添字 → `ValuePath` の DFS で決まり、`HashSet` は所属判定にしか使わない（反復順が結果に漏れない）。
+- 5.3 の申し送り: 5.3 は 4.4 の `CompiledSchema::references()` を削除した（入れ子の参照を扱うため引かずに済ませた結果、消費者が無くなった）。design.md の State 一覧と Testing Strategy を実態に合わせて是正した。
 
 - **5.1 の申し送り（5.4 が読むこと）**: `validate::cell::reason()` は非公開であり、`ColumnViolation` → `ViolationReason` の写像は `validate_row` の中だけで共有される。5.4 が列ごとの `validate_batch` を直接使う経路を選ぶなら、この写像を再利用できない（写しを作らないこと）。
 - 5.1 の申し送り: `validate_row` の `row` は `Option<RowId>`（`None` は 6.2 の書き込み値の判定用。走査は常に `Some`）。計画の列数を超える値は判定しない。

@@ -88,7 +88,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
-use document_format::{CellValue, NestedValue, RowId, Sheet, SheetId, TypeDefId};
+use document_format::{CellValue, NestedValue, RowId, Sheet, TypeDefId};
 
 use crate::declaration::codec::{parse_schema, parse_type_definition};
 use crate::declaration::{Constraints, DeclaredKind, Schema, TypeDecl, TypeDefinition};
@@ -177,7 +177,6 @@ pub fn compile_declaration(
     let mut required = Vec::with_capacity(count);
     let mut defaults = Vec::with_capacity(count);
     let mut unique = Vec::new();
-    let mut references = Vec::new();
     let mut unusable = Vec::new();
     let mut unusable_kinds = Vec::new();
 
@@ -194,9 +193,6 @@ pub fn compile_declaration(
                 }
                 if column.unique {
                     unique.push(ColumnIndex::new(index));
-                }
-                if let ColumnValidator::Ref { sheet } = &built {
-                    references.push((ColumnIndex::new(index), *sheet));
                 }
                 Some(built)
             }
@@ -221,7 +217,6 @@ pub fn compile_declaration(
         required: required.into_boxed_slice(),
         defaults: defaults.into_boxed_slice(),
         unique: unique.into_boxed_slice(),
-        references: references.into_boxed_slice(),
         unusable: unusable.into_boxed_slice(),
         unusable_kinds: unusable_kinds.into_boxed_slice(),
     })
@@ -239,7 +234,7 @@ pub fn compile_declaration(
 ///
 /// # 列ごとの既定値を計画が持つ理由（design.md の記載漏れを補う）
 ///
-/// design.md の状態一覧（列名・検証器・一意制約の列・参照の組・使用不能な列）には既定値が
+/// design.md の状態一覧（列名・検証器・一意制約の列・使用不能な列）には既定値が
 /// 無いが、`default_row(&self, schema: &CompiledSchema) -> Vec<CellValue>` は**計画だけ**を
 /// 引数に取る。行の初期値（要件 4.3）を供給するには、既定値が計画から引けねばならない
 /// （宣言を引き直す経路を残すと、コンパイル層を置いた意味が消える）。適合の検査は
@@ -257,8 +252,6 @@ pub struct CompiledSchema {
     defaults: Box<[Option<CellValue>]>,
     /// 一意制約を持つ列の添字（要件 4.6, 4.7）。使用不能な列は含まない。
     unique: Box<[ColumnIndex]>,
-    /// 参照列と参照先シートの組（要件 9.1, 9.2）。
-    references: Box<[(ColumnIndex, SheetId)]>,
     /// 使用不能な列の添字（昇順）。
     unusable: Box<[ColumnIndex]>,
     /// `unusable` と同じ並びの、解釈できなかった宣言の識別子
@@ -336,14 +329,6 @@ impl CompiledSchema {
     /// 無いためである（[`plan::ColumnValidator::Custom`] の実装が正準化を持つ）。
     pub fn unique_columns(&self) -> &[ColumnIndex] {
         &self.unique
-    }
-
-    /// 参照列と参照先シートの組（要件 9.1）。
-    ///
-    /// 行の実在の一括判定（タスク 5.3）はこの組だけを見て、参照先シートの行識別子の集合を
-    /// シートごとに 1 回作る（要件 9.6）。
-    pub fn references(&self) -> &[(ColumnIndex, SheetId)] {
-        &self.references
     }
 }
 
@@ -1378,10 +1363,10 @@ mod tests {
         );
     }
 
-    /// 計画が、行を跨ぐ性質（一意制約と参照先シート）を列添字で供給する
-    /// （5.2 と 5.3 の入力。design.md「Compile Layer / SchemaCompiler」の State Management）。
+    /// 計画が一意制約を列添字で供給する（5.2 の入力。design.md「Compile Layer /
+    /// SchemaCompiler」の State Management）。
     #[test]
-    fn unique_columns_and_reference_targets_are_supplied_by_column_index() {
+    fn unique_columns_are_supplied_by_column_index() {
         let mut supplier = column(
             "仕入先",
             declared(
@@ -1401,7 +1386,6 @@ mod tests {
             compile_declaration(&root, &[], &TypeRegistry::new()).expect("標本は計画へ落ちる");
 
         assert_eq!(&[ColumnIndex::new(1)], compiled.unique_columns());
-        assert_eq!(&[(ColumnIndex::new(1), sheet_id())], compiled.references());
     }
 
     /// シートのルートスキーマと型定義から計画を組み立てる（要件 1.1。列の並び順の決定は
