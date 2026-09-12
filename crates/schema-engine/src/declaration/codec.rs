@@ -531,8 +531,13 @@ fn kind_from_token(token: &str) -> Option<TypeKind> {
     })
 }
 
-/// [`TypeKind`] の種別トークン（診断メッセージに使う）。
-fn kind_token(kind: TypeKind) -> &'static str {
+/// [`TypeKind`] の種別トークン（本層が表記を所有する。`kind_from_token` の逆写像）。
+///
+/// 宣言テキストの読み書き（本層）と、値の違反の理由
+/// （[`Expected::Kind`](crate::validate::report::Expected::Kind) が運ぶトークン。
+/// `validate` 層のタスク 5.1）が共有する**単一の源**である。`types` 層は本層より左に
+/// あり（design.md「内部の依存の向き」）、`TypeKind` 自身はトークンを持たない。
+pub(crate) fn kind_token(kind: TypeKind) -> &'static str {
     match kind {
         TypeKind::Int => "int",
         TypeKind::Float => "float",
