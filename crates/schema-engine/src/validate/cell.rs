@@ -35,10 +35,25 @@
 //!
 //! # 一括経路との関係（tasks.md 4.2 / 5.4）
 //!
-//! 本モジュールが判定するのは**1 行の内側**である。拡張型の一括判定
-//! （[`CustomType::validate_batch`](crate::registry::CustomType::validate_batch)）を列ごとに
-//! 1 回呼ぶのは一括検証（タスク 5.4）の仕事であり、ここでは [`ColumnValidator::check`] が
-//! 1 件ずつ実装へ委ねる。判定の失敗（`Err`）は
+//! 本モジュールが判定するのは**1 行の内側**である。列の検証器が
+//! [`ColumnValidator::Custom`] である列は、シート全体の一括検証（[`super::validate_sheet`] /
+//! [`super::validate_columns`]）が第 1 段から**取り除き**、列ごとに 1 回の一括判定
+//! （[`CustomType::validate_batch`](crate::registry::CustomType::validate_batch)）へ載せる
+//! （要件 11.6。`super` のモジュール docs「拡張型の列は列ごとに 1 回の一括判定で判定する」）。
+//! したがって一括検証の内側で、拡張型の列のセルごとに実装の境界を越えることはない。
+//!
+//! **一括の継ぎ目は最上位の列を対象とする。** 入れ子のフィールドの型として指定された拡張型
+//! （`object` の内側など）は本モジュールが値ごとに実装へ委ねる。入れ子の内側の値は行ごとに
+//! 形が異なりうるため、**同じ位置の値を行を跨いで集める**収集と位置の写像が要る — これは
+//! `CustomType` のシグネチャの制約ではなく、その収集が未実装であることによる。入れ子の
+//! 内側は組込型のフィールドも拡張型のフィールドも**同じく値ごとに判定する**ので、
+//! 「組込型のみの場合と同一の経路」という要件 11.6 の読みは最上位の列について満たされて
+//! いる。入れ子の拡張型でも境界を越える回数が問題になったら、`custom-types` 側の要求として
+//! 収集経路を足す（design.md の Revalidation Triggers 相当）。
+//!
+//! [`validate_row`] / [`validate_row_columns`] は 1 行分の入口であり（書き込み経路の判定と、
+//! 一括検証の第 1 段の残りの列）、ここへ拡張型の列が渡された場合は
+//! [`ColumnValidator::check`] が 1 件ずつ実装へ委ねる。判定の失敗（`Err`）は
 //! [`ColumnViolation::CustomFailed`] としてその値の違反に閉じ込め、**次の値の走査を
 //! 続ける**（要件 11.5）。違反の理由は組込型と同じ [`ViolationReason`] の変種として
 //! 報告される（要件 11.3）。
@@ -172,6 +187,10 @@ impl Cursor<'_> {
 /// フィールドでは [`FieldValidator::required`] が決める。配列の要素には存在の制約が無い
 /// ため常に `false` である（存在の制約は列とフィールドだけが持つ。tasks.md 3.1）。
 ///
+/// 入れ子の内側は**値ごとに判定する**。組込型のフィールドも拡張型のフィールドも同じ経路で
+/// あり、拡張型だけは [`ColumnValidator::check`] が実装へ委ねる（一括の継ぎ目が最上位の
+/// 列を対象とする理由はモジュール docs「一括経路との関係」）。
+///
 /// [`FieldValidator::required`]: crate::compile::plan::FieldValidator::required
 fn inspect(
     cursor: &mut Cursor<'_>,
@@ -184,10 +203,7 @@ fn inspect(
     // `required` が決める（design.md「組込型カタログと `CellValue` への写像」）。
     if matches!(value, CellValue::Null) {
         if required {
-            report.push(cursor.violation(ViolationReason::MissingValue {
-                expected: Expected::Present,
-                actual: CellValue::Null,
-            }));
+            report.push(cursor.violation(missing_value_reason()));
         }
         return;
     }
@@ -195,11 +211,13 @@ fn inspect(
     // セル自身の判定。組込型は列挙体の直接マッチであり、拡張型だけが実装へ委ねる。
     // 拡張型の拒否も失敗もこの 1 箇所で組込型と同じ違反の形へ落ちる（要件 11.3, 11.5）。
     if let ColumnVerdict::Violating(violation) = validator.check(value) {
-        report.push(cursor.violation(reason(violation, value)));
+        report.push(cursor.violation(reason(violation, value.clone())));
     }
 
     // 入れ子の内側へ降りる。**セル自身の違反があっても続ける** — 配列の要素数の逸脱と
     // 要素の中身の逸脱は別の違反であり、一方を報告しただけで他方を落とさない（要件 5.3）。
+    // 内側は値ごとに判定する（組込型のフィールドも拡張型のフィールドも同じ経路。モジュール
+    // docs「一括経路との関係」 — 一括の継ぎ目は最上位の列を対象とする）。
     match (validator, value) {
         (ColumnValidator::Object { fields }, CellValue::Nested(NestedValue::Object(entries))) => {
             for field in fields {
@@ -226,14 +244,27 @@ fn inspect(
     }
 }
 
+/// 値なしを許さない位置（列または入れ子のフィールド）の違反理由（要件 4.4）。
+///
+/// 値なしの報告はセルごとの判定（[`inspect`]）と、拡張型の列の一括判定（`super::CustomScan`）
+/// の 2 経路にある。**この 1 箇所を共有する** — 同じ形の違反が経路ごとに食い違わないためで
+/// ある。
+pub(crate) fn missing_value_reason() -> ViolationReason {
+    ViolationReason::MissingValue {
+        expected: Expected::Present,
+        actual: CellValue::Null,
+    }
+}
+
 /// 検証器の違反（`compile` 層の語彙）を違反の理由（`validate` 層の語彙）へ写す
 /// （要件 5.2, 11.3）。
 ///
 /// 層の鎖は `compile → validate` の一方向であるため、`compile` 層は本層の型を参照できず、
 /// 同じ文脈を自層の語彙（`plan::ColumnViolation`）で運ぶ。**写すのはこの 1 箇所だけ**で
-/// あり、組込型も拡張型も同じ [`ViolationReason`] の変種へ落ちる（要件 11.3）。
-fn reason(violation: ColumnViolation, actual: &CellValue) -> ViolationReason {
-    let actual = actual.clone();
+/// あり、組込型も拡張型も同じ [`ViolationReason`] の変種へ落ちる（要件 11.3）。セルごとの
+/// 判定（[`inspect`]）と、拡張型の列の一括判定（`super::CustomScan`）の双方がここを通る。
+/// `actual` は違反の理由が所有する（適合の経路は本関数を呼ばない）。
+pub(crate) fn reason(violation: ColumnViolation, actual: CellValue) -> ViolationReason {
     match violation {
         ColumnViolation::TypeMismatch { kind } => ViolationReason::TypeMismatch {
             expected: Expected::Kind(kind_token(kind).into()),

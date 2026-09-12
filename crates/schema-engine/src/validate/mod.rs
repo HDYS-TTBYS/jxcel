@@ -46,6 +46,43 @@
 //! ではない** — 併合は計画の木を引かずに違反だけで順序を決める必要があり、値の形から
 //! 復元できるのは名前と添字だけである。同じ位置の 2 件は第 1 段を先に置く（`sort_by` が
 //! 安定であるため）。この順序は同じ入力に対して常に同じ結果を与える（要件 5.5）。
+//!
+//! # 拡張型の列は列ごとに 1 回の一括判定で判定する（要件 11.6）
+//!
+//! 第 1 段の行ごとの判定のうち、**列の検証器が [`ColumnValidator::Custom`] である列**は
+//! セルごとに実装（`CustomType::validate`）を呼ばず、[`CustomScan`] が列ごとに 1 回だけ
+//! 一括判定（`CustomType::validate_batch`）を呼ぶ。拡張型の実体は `custom-types`（JS）に
+//! あり、10 万行でセルごとに境界を越えると予算に収まらないためである（design.md「Registry
+//! Layer / TypeRegistry」の「一括の継ぎ目」。要件 10.4, 11.6）。
+//!
+//! 実装の契約により、`Err` を返しても**失敗より前の判定は `out` へ出現順に渡されている**
+//! （タスク 4.1 の裁定）。したがって失敗位置は「`out` が受け取った件数 `k`」であり、その
+//! 1 件を `CustomFailed` として報告してから `k + 1` 番目以降でやり直す。各回は必ず 1 件
+//! 以上を消費するため有限で止まり、健全な実装では呼び出しは列ごとに 1 回のままである
+//! （design.md の Postconditions「`Err` はその値の違反になり、走査は次の値へ進む」を、
+//! バッチ経路でも**値ごとの隔離**として保つ）。
+//!
+//! 値は行優先（`Row::values()`）で保持されるのに対し `validate_batch` は列の連続した
+//! スライスを要求するため、**拡張型の列の値だけを複製して集める**。掛かるのは拡張型の列
+//! だけであり、`CustomType` のシグネチャを変える（design.md の Revalidation Triggers）より
+//! 小さい。集めた値のうち保持し続けるのは**違反になる値だけ**であり（適合した値は捨てる）、
+//! 記憶域は第 2 段が行ごとに作る違反と同じ桁に収まる。値なし（[`CellValue::Null`]）は実装へ
+//! 渡さない — 値なしはどの変種でも適合であり、受理の可否は列の `required` が決める
+//! （タスク 4.2 の裁定）。必須の列の値なしは本経路が
+//! [`ViolationReason::MissingValue`](report::ViolationReason) として報告する。
+//!
+//! 併合の並びは拡張型の列でも変わらない（行の並び順 → 列の添字 → 入れ子の位置）。
+//! `CustomScan` の結果は行の添字つきで保持し、行ごとに第 1 段の直後へ差し込む
+//! （[`CustomScan::append`]）。
+//!
+//! **入れ子のフィールドの型として指定された拡張型**（`object` の内側など）は本経路の
+//! 対象外であり、[`cell`] が値ごとに 1 件ずつ実装へ委ねる。**一括の継ぎ目は最上位の列を
+//! 対象とする**ためである — 入れ子の内側の値は行ごとに形が異なりうるので、**同じ位置の
+//! 値**を行を跨いで集める収集と位置の写像が要る（`CustomType` のシグネチャの制約ではなく、
+//! その収集が未実装である）。入れ子の内側は組込型のフィールドも拡張型のフィールドも
+//! **同じく値ごとに判定する**ので、「組込型のみの場合と同一の経路」という要件 11.6 の読みは
+//! 最上位の列について満たされている。入れ子の拡張型でも境界を越える回数が問題になったら、
+//! `custom-types` 側の要求として収集経路を足す（design.md の Revalidation Triggers 相当）。
 
 pub mod cell;
 pub mod refs;
@@ -53,12 +90,13 @@ pub mod report;
 pub mod unique;
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
-use document_format::{Document, Row, RowId, SheetId};
+use document_format::{CellValue, Document, Row, RowId, SheetId};
 
-use crate::compile::plan::ColumnIndex;
+use crate::compile::plan::{ColumnIndex, ColumnValidator, ColumnViolation};
 use crate::compile::CompiledSchema;
+use crate::registry::CustomVerdict;
 
 use report::{
     SheetReport, ValidationOptions, ValuePath, ValuePathSegment, Violation, ViolationReport,
@@ -100,6 +138,233 @@ pub fn validate_columns(
     validate(doc, sheet, schema, Some(&selected), options)
 }
 
+/// 拡張型の列の一括判定（要件 11.6。design.md「Registry Layer / TypeRegistry」の
+/// 「一括の継ぎ目」）。
+///
+/// 検証の対象の列から**列の検証器が [`ColumnValidator::Custom`] である列**を取り出し、
+/// 列ごとに 1 回だけ `CustomType::validate_batch` を呼ぶ。結果は行の添字つきで保持し、
+/// 行ごとの併合（[`CustomScan::append`]）で第 1 段と同じ位置へ置く。理由はモジュール docs
+/// 「拡張型の列は列ごとに 1 回の一括判定で判定する」にある。
+///
+/// 拡張型の列が 1 つも無ければ空であり、[`CustomScan::remaining`] が `None`（全列）を返す
+/// ため、呼び出し元は従来の経路をそのまま通る（確保も増えない）。
+struct CustomScan<'a> {
+    /// 拡張型の列ごとの結果。対象の列の並びのうち拡張型であるものを順に持つ。
+    columns: Vec<CustomColumn<'a>>,
+}
+
+/// 拡張型の 1 列分の一括判定の結果（[`CustomScan`]）。
+struct CustomColumn<'a> {
+    /// 列の添字。
+    column: ColumnIndex,
+    /// 列名（違反が運ぶ。計画から借りる）。
+    name: &'a str,
+    /// 宣言された拡張型の識別子（違反の期待内容が運ぶ）。
+    id: Box<str>,
+    /// 報告すべき判定だけを**行の添字の昇順**に保持する（適合は保持しない）。
+    findings: VecDeque<(usize, CustomFinding)>,
+}
+
+/// 一括判定が返した、報告すべき 1 件（[`CustomColumn`]）。
+enum CustomFinding {
+    /// 必須の列に値なしがある（実装へは渡していない）。
+    Missing,
+    /// 実装が値を拒否した（要件 11.3）。
+    Rejected {
+        /// 実装が返した文脈（表示用の文言ではない）。
+        reason: Box<str>,
+        /// 拒否された値。
+        actual: CellValue,
+    },
+    /// 実装の判定が失敗した（要件 11.5）。
+    Failed {
+        /// 実装が返した文脈（表示用の文言ではない）。
+        reason: Box<str>,
+        /// 判定できなかった値。
+        actual: CellValue,
+    },
+}
+
+impl<'a> CustomScan<'a> {
+    /// 対象の列から拡張型の列を集め、列ごとに 1 回の一括判定を走らせる。
+    ///
+    /// `selected` は検証の対象の列（`None` は全列）である。列指定の再検証でも同じ一括経路を
+    /// 通る（要件 10.5）。対象の外の列は走査しない。
+    fn prepare(schema: &'a CompiledSchema, rows: &[Row], selected: Option<&[ColumnIndex]>) -> Self {
+        let mut columns = Vec::new();
+        match selected {
+            Some(selected) => {
+                for column in selected {
+                    if let Some(found) = CustomColumn::scan(schema, *column, rows) {
+                        columns.push(found);
+                    }
+                }
+            }
+            None => {
+                for index in 0..schema.column_count() {
+                    if let Some(found) = CustomColumn::scan(schema, ColumnIndex::new(index), rows) {
+                        columns.push(found);
+                    }
+                }
+            }
+        }
+        Self { columns }
+    }
+
+    /// 第 1 段（行ごとの値の判定）が担う列。拡張型の列を除いたものであり、拡張型の列が
+    /// 1 つも無ければ `None`（呼び出し元は現在の経路をそのまま通す）。
+    ///
+    /// 列の並びは `selected`（または全列）の昇順のままである — 第 1 段の違反の並びは列の
+    /// 添字で決まるため、並びを変えても結果は変わらない。
+    fn remaining(
+        &self,
+        schema: &CompiledSchema,
+        selected: Option<&[ColumnIndex]>,
+    ) -> Option<Vec<ColumnIndex>> {
+        if self.columns.is_empty() {
+            return None;
+        }
+        let unbatched =
+            |column: &ColumnIndex| !self.columns.iter().any(|found| found.column == *column);
+        Some(match selected {
+            Some(selected) => selected.iter().copied().filter(unbatched).collect(),
+            None => (0..schema.column_count())
+                .map(ColumnIndex::new)
+                .filter(unbatched)
+                .collect(),
+        })
+    }
+
+    /// その行の一括判定の結果を違反として足す（**行の並び順に**呼ばれる）。
+    ///
+    /// 結果は行の添字の昇順に保持されているため、列ごとに先頭の 1 件だけを見ればよい
+    /// （1 つの行は 1 つの列に 1 つの値しか持たない）。
+    fn append(&mut self, row: Option<RowId>, row_index: usize, out: &mut Vec<Violation>) {
+        for column in &mut self.columns {
+            let Some((index, _)) = column.findings.front() else {
+                continue;
+            };
+            if *index != row_index {
+                continue;
+            }
+            let (_, finding) = column.findings.pop_front().expect("先頭を確認済み");
+            out.push(column.violation(row, finding));
+        }
+    }
+}
+
+impl<'a> CustomColumn<'a> {
+    /// 1 列分の値を集めて一括判定を走らせる（列ごとに 1 回。要件 11.6）。
+    ///
+    /// 拡張型の列でなければ `None`。
+    fn scan(schema: &'a CompiledSchema, column: ColumnIndex, rows: &[Row]) -> Option<Self> {
+        let ColumnValidator::Custom { id, imp } = schema.validator(column)? else {
+            return None;
+        };
+        let name = schema.columns().get(column.index())?;
+        let required = schema.required(column);
+
+        // 行優先の保持（`Row::values()`）から、この列の値だけを複製して集める
+        // （`validate_batch` は連続したスライスを要求する。モジュール docs 参照）。
+        // 値なしは実装へ渡さず、必須の列では値なしの違反をここで作る。
+        let mut findings = Vec::new();
+        let mut values = Vec::new();
+        let mut row_indices = Vec::new();
+        for (row_index, row) in rows.iter().enumerate() {
+            match row.values().get(column.index()) {
+                Some(value) if !matches!(value, CellValue::Null) => {
+                    row_indices.push(row_index);
+                    values.push(value.clone());
+                }
+                _ if required => findings.push((row_index, CustomFinding::Missing)),
+                _ => {}
+            }
+        }
+
+        // 一括判定。`Err` のときの失敗位置は「`out` が受け取った件数」である（タスク 4.1 の
+        // 契約）。その 1 件だけを失敗として報告し、次の値からやり直す。
+        let mut offset = 0;
+        while offset < values.len() {
+            let slice = &values[offset..];
+            let mut verdicts: Vec<(usize, CustomVerdict)> = Vec::new();
+            let outcome =
+                imp.validate_batch(slice, &mut |index, verdict| verdicts.push((index, verdict)));
+            let held = verdicts.len();
+            for (index, verdict) in verdicts {
+                let CustomVerdict::Rejected { reason } = verdict else {
+                    continue;
+                };
+                let Some((row_index, value)) =
+                    row_indices.get(offset + index).zip(slice.get(index))
+                else {
+                    continue;
+                };
+                findings.push((
+                    *row_index,
+                    CustomFinding::Rejected {
+                        reason,
+                        actual: value.clone(),
+                    },
+                ));
+            }
+            match outcome {
+                Ok(()) => offset += slice.len(),
+                Err(failure) => {
+                    let failed = offset + held;
+                    // 契約に反して失敗位置が値の外を指す実装では帰属先が無いため、そこで止める。
+                    let Some(row_index) = row_indices.get(failed).copied() else {
+                        break;
+                    };
+                    findings.push((
+                        row_index,
+                        CustomFinding::Failed {
+                            reason: failure.reason().into(),
+                            actual: values[failed].clone(),
+                        },
+                    ));
+                    offset = failed + 1;
+                }
+            }
+        }
+
+        // 値なしの違反と一括判定の結果を行の添字の昇順に揃える（1 つの行は 1 つの列に
+        // 1 つの値しか持たないため、同じ添字の 2 件は無い）。
+        findings.sort_unstable_by_key(|(row_index, _)| *row_index);
+        Some(Self {
+            column,
+            name,
+            id: id.as_str().into(),
+            findings: findings.into(),
+        })
+    }
+
+    /// 1 件の違反を組み立てる。拡張型の値は列の直下にあるため、位置はセル直下である。
+    ///
+    /// 理由の組み立ては [`cell`] の写像をそのまま使う — 組込型のセルと同じ
+    /// [`ViolationReason`](report::ViolationReason) へ落とす規則を 2 箇所に置かない
+    /// （タスク 5.1 の申し送り）。
+    fn violation(&self, row: Option<RowId>, finding: CustomFinding) -> Violation {
+        let reason = match finding {
+            CustomFinding::Missing => cell::missing_value_reason(),
+            CustomFinding::Rejected { reason, actual } => cell::reason(
+                ColumnViolation::CustomRejected {
+                    id: self.id.clone(),
+                    reason,
+                },
+                actual,
+            ),
+            CustomFinding::Failed { reason, actual } => cell::reason(
+                ColumnViolation::CustomFailed {
+                    id: self.id.clone(),
+                    reason,
+                },
+                actual,
+            ),
+        };
+        Violation::at_cell(row, self.column, self.name, reason)
+    }
+}
+
 /// 2 段の走査と安定併合（[`validate_sheet`] と [`validate_columns`] が共有する本体）。
 ///
 /// `selected` が `Some` のときはその列の違反だけを結果に載せる（列添字の昇順に正規化済みで
@@ -117,6 +382,15 @@ fn validate(
         return report.finish(sheet);
     };
     let rows = target.rows();
+
+    // 拡張型の列は列ごとに 1 回の一括判定へ載せる（要件 11.6）。拡張型の列が 1 つも無ければ
+    // 何も確保せず、第 1 段は従来どおり全列（または指定列）を判定する。
+    let mut custom = CustomScan::prepare(schema, rows, selected);
+    let remaining: Option<Vec<ColumnIndex>> = custom.remaining(schema, selected);
+    let first_stage = match &remaining {
+        Some(columns) => Some(columns.as_slice()),
+        None => selected,
+    };
 
     // 第 2 段: 行を跨ぐ性質（一意性と参照の実在）。全行を走査し終えてから違反が返るため、
     // 行ごとに併合できるよう行の識別子でまとめておく。参照を 1 つも含まない計画では
@@ -146,8 +420,11 @@ fn validate(
     // 第 1 段: 行ごとの値の判定。行の並び順に流し、その行の第 2 段の違反を併合する。
     // 確保するのは 1 行分だけである（モジュール docs「2 段の併合」）。
     let mut scratch = ViolationReport::new(&ValidationOptions::unlimited());
-    for row in rows {
-        let mut violations = value_violations(schema, row, selected, &mut scratch);
+    for (row_index, row) in rows.iter().enumerate() {
+        let mut violations = value_violations(schema, row, first_stage, &mut scratch);
+        // 拡張型の列の一括判定の結果（第 1 段の直後へ差し込み、同じ位置の 2 件では第 1 段を
+        // 先に置く — セルごとに判定していたときと同じ並びになる）。
+        custom.append(Some(row.id()), row_index, &mut violations);
         if let Some(mut extra) = cross_by_row.remove(&row.id()) {
             violations.append(&mut extra);
         }
@@ -175,15 +452,19 @@ fn validate(
 
 /// 1 行分の第 1 段の違反を取り出す（`scratch` は行ごとに使い回す）。
 ///
+/// `columns` は判定する列（`None` は全列）であり、拡張型の列は [`CustomScan`] が担うため
+/// **呼び出し元が取り除いた**ものを渡す（モジュール docs「拡張型の列は列ごとに 1 回の
+/// 一括判定で判定する」）。
+///
 /// 確保するのは 1 行分だけであり、`scratch` は行を跨いで空に戻る
 /// （[`ViolationReport::take_violations`]）。
 fn value_violations(
     schema: &CompiledSchema,
     row: &Row,
-    selected: Option<&[ColumnIndex]>,
+    columns: Option<&[ColumnIndex]>,
     scratch: &mut ViolationReport,
 ) -> Vec<Violation> {
-    match selected {
+    match columns {
         Some(columns) => {
             cell::validate_row_columns(schema, Some(row.id()), row.values(), columns, scratch)
         }
@@ -239,10 +520,14 @@ mod tests {
 
     use crate::compile::compile_declaration;
     use crate::declaration::{ColumnDecl, Constraints, DeclaredKind, FieldDecl, Schema, TypeDecl};
-    use crate::registry::TypeRegistry;
+    use crate::registry::{
+        CustomType, CustomTypeFailure, CustomTypeId, CustomVerdict, TypeRegistry,
+    };
     use crate::types::TypeKind;
     use crate::validate::report::ViolationReason;
     use document_format::{CellValue, Document, IdFactory, NestedValue, RowId, SheetId};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     /// 整数のセル値。
     fn int(value: i64) -> CellValue {
@@ -616,6 +901,474 @@ mod tests {
         assert!(
             report.invalid_rows().is_empty(),
             "文書に無いシートで違反行が出ている"
+        );
+    }
+
+    /// 標本の拡張型の識別子（`〒` で始まるテキストだけを受理する）。
+    const POSTAL: &str = "postal-code";
+
+    /// 失敗を返す標本の拡張型の識別子。
+    const FLAKY: &str = "flaky";
+
+    /// 拡張型の列の宣言。
+    fn custom_column(name: &str, id: &str, required: bool) -> ColumnDecl {
+        ColumnDecl {
+            required,
+            ..column(
+                name,
+                TypeKind::Custom,
+                Constraints {
+                    custom_type: Some(id.into()),
+                    ..Constraints::default()
+                },
+            )
+        }
+    }
+
+    /// 拡張型を 1 つ登録した計画を組み立てる。
+    fn compiled_with_custom(
+        columns: Vec<ColumnDecl>,
+        implementation: Arc<dyn CustomType>,
+    ) -> CompiledSchema {
+        let mut registry = TypeRegistry::new();
+        registry
+            .register(implementation)
+            .expect("標本の拡張型は登録できる");
+        compile_declaration(&Schema { columns }, &[], &registry)
+            .expect("標本の宣言はコンパイルできる")
+    }
+
+    /// `〒` で始まるときだけ受理する規則。
+    fn postal_verdict(value: &CellValue) -> Result<CustomVerdict, CustomTypeFailure> {
+        match value {
+            CellValue::Text(text) if text.starts_with('〒') => Ok(CustomVerdict::Accepted),
+            _ => Ok(CustomVerdict::rejected("〒 で始まらない")),
+        }
+    }
+
+    /// 一括判定の呼び出し回数と、渡された値の並びを記録する標本の拡張型（要件 11.6）。
+    ///
+    /// 一括判定は `validate` を経由せずに判定する。**セルごとの判定が起きていないこと**を
+    /// `validate` の呼び出し回数で観測できるようにするためである。
+    struct BatchSpy {
+        id: CustomTypeId,
+        calls: Arc<AtomicUsize>,
+        cells: Arc<AtomicUsize>,
+        seen: Arc<Mutex<Vec<Vec<CellValue>>>>,
+    }
+
+    /// [`BatchSpy`] の観測点（呼び出し回数・セルごとの判定の回数・渡された値）。
+    type BatchCounters = (
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<Mutex<Vec<Vec<CellValue>>>>,
+    );
+
+    impl BatchSpy {
+        /// 標本の実体と、その観測点を組み立てる。
+        fn new(id: &str) -> (Self, BatchCounters) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let cells = Arc::new(AtomicUsize::new(0));
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    id: CustomTypeId::new(id),
+                    calls: calls.clone(),
+                    cells: cells.clone(),
+                    seen: seen.clone(),
+                },
+                (calls, cells, seen),
+            )
+        }
+    }
+
+    impl CustomType for BatchSpy {
+        fn id(&self) -> &CustomTypeId {
+            &self.id
+        }
+
+        fn validate(&self, value: &CellValue) -> Result<CustomVerdict, CustomTypeFailure> {
+            self.cells.fetch_add(1, Ordering::SeqCst);
+            postal_verdict(value)
+        }
+
+        fn validate_batch(
+            &self,
+            values: &[CellValue],
+            out: &mut dyn FnMut(usize, CustomVerdict),
+        ) -> Result<(), CustomTypeFailure> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.seen
+                .lock()
+                .expect("標本の記録が壊れていない")
+                .push(values.to_vec());
+            for (index, value) in values.iter().enumerate() {
+                out(index, postal_verdict(value)?);
+            }
+            Ok(())
+        }
+    }
+
+    /// 一括判定を上書きしない（既定実装のままの）標本の拡張型。
+    struct DefaultBatch {
+        id: CustomTypeId,
+    }
+
+    impl CustomType for DefaultBatch {
+        fn id(&self) -> &CustomTypeId {
+            &self.id
+        }
+
+        fn validate(&self, value: &CellValue) -> Result<CustomVerdict, CustomTypeFailure> {
+            postal_verdict(value)
+        }
+    }
+
+    /// `fail` の値で一括判定を失敗させる標本の拡張型（要件 11.5）。
+    struct FailingBatch {
+        id: CustomTypeId,
+        calls: Arc<AtomicUsize>,
+        seen: Arc<Mutex<Vec<Vec<CellValue>>>>,
+    }
+
+    impl CustomType for FailingBatch {
+        fn id(&self) -> &CustomTypeId {
+            &self.id
+        }
+
+        fn validate(&self, value: &CellValue) -> Result<CustomVerdict, CustomTypeFailure> {
+            if matches!(value, CellValue::Text(text) if text.as_str() == "fail") {
+                return Err(CustomTypeFailure::new("応答がない"));
+            }
+            postal_verdict(value)
+        }
+
+        fn validate_batch(
+            &self,
+            values: &[CellValue],
+            out: &mut dyn FnMut(usize, CustomVerdict),
+        ) -> Result<(), CustomTypeFailure> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.seen
+                .lock()
+                .expect("標本の記録が壊れていない")
+                .push(values.to_vec());
+            // 4.1 の契約: 失敗より前の判定はすべて `out` へ渡してから `Err` を返す。
+            for (index, value) in values.iter().enumerate() {
+                out(index, self.validate(value)?);
+            }
+            Ok(())
+        }
+    }
+
+    /// 拡張型の列は、列ごとに 1 回の一括判定で判定する（tasks.md 5.4。要件 11.6, 10.4）。
+    #[test]
+    fn a_custom_column_is_evaluated_in_one_batch_per_column() {
+        let (implementation, (calls, cells, seen)) = BatchSpy::new(POSTAL);
+        let schema = compiled_with_custom(
+            vec![custom_column("郵便番号", POSTAL, false)],
+            Arc::new(implementation),
+        );
+
+        let mut doc = Document::new();
+        let sheet = add_sheet(&mut doc, "宛先", &["郵便番号"]);
+        for value in ["〒100-0001", "100-0002", "〒100-0003"] {
+            add_row(&mut doc, sheet, vec![text(value)]);
+        }
+
+        let report = validate_sheet(&doc, sheet, &schema, &ValidationOptions::default());
+        assert_eq!(
+            1,
+            calls.load(Ordering::SeqCst),
+            "一括判定が列ごとに 1 回呼ばれていない"
+        );
+        assert_eq!(
+            0,
+            cells.load(Ordering::SeqCst),
+            "セルごとの判定が一括判定と別に走っている"
+        );
+        assert_eq!(
+            vec![vec![
+                text("〒100-0001"),
+                text("100-0002"),
+                text("〒100-0003"),
+            ]],
+            *seen.lock().expect("標本の記録が壊れていない"),
+            "列の値が 1 回にまとめて渡されていない"
+        );
+        assert_eq!(
+            1,
+            report.total_violations(),
+            "拒否した値だけが違反になっていない"
+        );
+
+        // 列指定の再検証も同じ一括経路を通る（要件 10.5）。
+        let again = validate_columns(
+            &doc,
+            sheet,
+            &schema,
+            &[ColumnIndex::new(0)],
+            &ValidationOptions::default(),
+        );
+        assert_eq!(
+            2,
+            calls.load(Ordering::SeqCst),
+            "列指定で一括判定が呼ばれていない"
+        );
+        assert_eq!(1, again.total_violations());
+    }
+
+    /// 列指定の再検証は、指定した列の拡張型だけを一括判定する（要件 10.5, 11.6）。
+    #[test]
+    fn revalidating_selected_columns_batches_only_the_selected_custom_columns() {
+        let (postal, (postal_calls, _, _)) = BatchSpy::new(POSTAL);
+        let (codes, (code_calls, _, _)) = BatchSpy::new(FLAKY);
+        let mut registry = TypeRegistry::new();
+        registry
+            .register(Arc::new(postal))
+            .expect("標本の拡張型は登録できる");
+        registry
+            .register(Arc::new(codes))
+            .expect("標本の拡張型は登録できる");
+        let schema = compile_declaration(
+            &Schema {
+                columns: vec![
+                    custom_column("郵便番号", POSTAL, false),
+                    custom_column("商品コード", FLAKY, false),
+                ],
+            },
+            &[],
+            &registry,
+        )
+        .expect("標本の宣言はコンパイルできる");
+
+        let mut doc = Document::new();
+        let sheet = add_sheet(&mut doc, "宛先", &["郵便番号", "商品コード"]);
+        add_row(&mut doc, sheet, vec![text("bad"), text("bad")]);
+        add_row(&mut doc, sheet, vec![text("bad"), text("bad")]);
+
+        let report = validate_columns(
+            &doc,
+            sheet,
+            &schema,
+            &[ColumnIndex::new(1)],
+            &ValidationOptions::default(),
+        );
+        assert_eq!(
+            0,
+            postal_calls.load(Ordering::SeqCst),
+            "指定していない拡張型の列が走査された"
+        );
+        assert_eq!(
+            1,
+            code_calls.load(Ordering::SeqCst),
+            "指定した拡張型の列が一括判定されていない"
+        );
+        assert_eq!(2, report.total_violations(), "指定した列の違反が出ていない");
+        assert!(
+            report
+                .violations()
+                .iter()
+                .all(|violation| violation.column().index() == 1),
+            "指定していない列の違反が混ざっている"
+        );
+    }
+
+    /// 値なしは一括判定へ渡さないが、必須の列では違反として報告する（4.2 の裁定。要件 11.6）。
+    #[test]
+    fn null_values_are_not_passed_to_the_batch_but_missing_is_reported() {
+        let (implementation, (_, _, seen)) = BatchSpy::new(POSTAL);
+        let schema = compiled_with_custom(
+            vec![custom_column("郵便番号", POSTAL, true)],
+            Arc::new(implementation),
+        );
+
+        let mut doc = Document::new();
+        let sheet = add_sheet(&mut doc, "宛先", &["郵便番号"]);
+        add_row(&mut doc, sheet, vec![text("〒100-0001")]);
+        add_row(&mut doc, sheet, vec![CellValue::Null]);
+        add_row(&mut doc, sheet, vec![text("〒100-0003")]);
+
+        let report = validate_sheet(&doc, sheet, &schema, &ValidationOptions::default());
+        assert_eq!(
+            vec![vec![text("〒100-0001"), text("〒100-0003")]],
+            *seen.lock().expect("標本の記録が壊れていない"),
+            "値なしが実装へ渡されている"
+        );
+        assert_eq!(
+            1,
+            report.total_violations(),
+            "必須の列の値なしが違反になっていない"
+        );
+        assert!(
+            matches!(
+                report.violations()[0].reason(),
+                ViolationReason::MissingValue { .. }
+            ),
+            "値なしの違反が必須の列の違反と違う形で報告されている"
+        );
+    }
+
+    /// 一括判定を上書きした実装と既定実装は同じ結果を返す（design.md の不変条件）。
+    #[test]
+    fn an_overridden_batch_yields_the_same_report_as_the_default_batch() {
+        let (implementation, (calls, _, _)) = BatchSpy::new(POSTAL);
+        let overridden = compiled_with_custom(
+            vec![custom_column("郵便番号", POSTAL, false)],
+            Arc::new(implementation),
+        );
+        let default = compiled_with_custom(
+            vec![custom_column("郵便番号", POSTAL, false)],
+            Arc::new(DefaultBatch {
+                id: CustomTypeId::new(POSTAL),
+            }),
+        );
+
+        let mut doc = Document::new();
+        let sheet = add_sheet(&mut doc, "宛先", &["郵便番号"]);
+        for value in ["〒100-0001", "100-0002", "〒100-0003"] {
+            add_row(&mut doc, sheet, vec![text(value)]);
+        }
+
+        let options = ValidationOptions::default();
+        let batched = validate_sheet(&doc, sheet, &overridden, &options);
+        let cell_by_cell = validate_sheet(&doc, sheet, &default, &options);
+        assert_eq!(
+            cell_by_cell, batched,
+            "上書きした一括判定と既定実装の結果が違う"
+        );
+        assert_eq!(
+            1,
+            calls.load(Ordering::SeqCst),
+            "上書きした一括判定が使われていない"
+        );
+    }
+
+    /// 一括判定の失敗はその値だけの違反に閉じ込め、シート全体の検証を完走する
+    /// （要件 11.5。4.1 の契約）。
+    #[test]
+    fn a_batch_failure_is_confined_to_the_failing_value_and_the_scan_completes() {
+        let (implementation, calls, seen) = {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            (
+                FailingBatch {
+                    id: CustomTypeId::new(FLAKY),
+                    calls: calls.clone(),
+                    seen: seen.clone(),
+                },
+                calls,
+                seen,
+            )
+        };
+        let schema = compiled_with_custom(
+            vec![
+                custom_column("郵便番号", FLAKY, false),
+                required_column("数量", TypeKind::Int),
+            ],
+            Arc::new(implementation),
+        );
+
+        let mut doc = Document::new();
+        let sheet = add_sheet(&mut doc, "宛先", &["郵便番号", "数量"]);
+        let values = [
+            ("〒100-0001", int(1)),
+            ("100-0002", int(2)),
+            ("fail", int(3)),
+            ("〒100-0004", CellValue::Null),
+            ("100-0005", int(5)),
+        ];
+        let mut ids = Vec::new();
+        for (postal, count) in values {
+            ids.push(add_row(&mut doc, sheet, vec![text(postal), count]));
+        }
+
+        let report = validate_sheet(&doc, sheet, &schema, &ValidationOptions::default());
+
+        // 失敗位置は「`out` が受け取った件数」（0 始まりで 2）である。失敗より前は通常の判定が
+        // そのまま残り、失敗した値だけが `CustomFailed` になり、次の値からやり直す。
+        assert_eq!(
+            vec![
+                vec![
+                    text("〒100-0001"),
+                    text("100-0002"),
+                    text("fail"),
+                    text("〒100-0004"),
+                    text("100-0005"),
+                ],
+                vec![text("〒100-0004"), text("100-0005")],
+            ],
+            *seen.lock().expect("標本の記録が壊れていない"),
+            "失敗の前後で一括判定へ渡す値が違う"
+        );
+        assert_eq!(
+            2,
+            calls.load(Ordering::SeqCst),
+            "失敗した値の次からやり直していない"
+        );
+
+        // 失敗した値の前後（`k-1` は拒否、`k` は失敗、`k+1` は適合）と、失敗より後の行の
+        // 判定が続いていることを固定する。
+        assert_eq!(
+            vec![(ids[1], 0), (ids[2], 0), (ids[3], 1), (ids[4], 0),],
+            report
+                .violations()
+                .iter()
+                .map(|violation| (
+                    violation.row().expect("行に属する違反である"),
+                    violation.column().index(),
+                ))
+                .collect::<Vec<_>>(),
+            "失敗の前後の違反の並びが違う"
+        );
+        assert!(matches!(
+            report.violations()[1].reason(),
+            ViolationReason::CustomFailed { .. }
+        ));
+        assert!(matches!(
+            report.violations()[2].reason(),
+            ViolationReason::MissingValue { .. }
+        ));
+        assert_eq!(4, report.total_violations());
+    }
+
+    /// 拡張型の列が混ざっても、違反の並びは行 → 列添字のままである（要件 5.4, 5.5）。
+    #[test]
+    fn custom_columns_keep_the_row_then_column_order() {
+        let (implementation, _) = BatchSpy::new(POSTAL);
+        let schema = compiled_with_custom(
+            vec![
+                bounded_int_column("数量", 10),
+                custom_column("郵便番号", POSTAL, false),
+                column(
+                    "名称",
+                    TypeKind::Text,
+                    Constraints {
+                        max_length: Some(1),
+                        ..Constraints::default()
+                    },
+                ),
+            ],
+            Arc::new(implementation),
+        );
+
+        let mut doc = Document::new();
+        let sheet = add_sheet(&mut doc, "宛先", &["数量", "郵便番号", "名称"]);
+        let first = add_row(&mut doc, sheet, vec![int(99), text("bad-a"), text("長い")]);
+        let second = add_row(&mut doc, sheet, vec![int(99), text("bad-b"), text("長い")]);
+
+        let report = validate_sheet(&doc, sheet, &schema, &ValidationOptions::default());
+        assert_eq!(
+            vec![
+                (Some(first), 0, vec![]),
+                (Some(first), 1, vec![]),
+                (Some(first), 2, vec![]),
+                (Some(second), 0, vec![]),
+                (Some(second), 1, vec![]),
+                (Some(second), 2, vec![]),
+            ],
+            positions(&report),
+            "拡張型の列が混ざると違反の並びが崩れている"
         );
     }
 }
