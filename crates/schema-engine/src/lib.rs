@@ -32,9 +32,11 @@
 //! `FieldDecl` / `TypeDecl` / `Constraints`）を置いた。タスク 3.2 が不透明ペイロードの
 //! 文法の解析（`declaration::codec` の `parse_schema` / `parse_type_definition`）を置いた。
 //! タスク 3.3 が同じモジュールに正準出力（`schema_to_text` / `type_definition_to_text`）
-//! を足した。
+//! を足した。タスク 4.1 が登録層 [`registry`] の拡張インターフェース（`CustomType` /
+//! `TypeRegistry`）を置いた。
 
 pub mod declaration;
 pub mod error;
+pub mod registry;
 pub mod types;
 pub mod validate;
