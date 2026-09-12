@@ -1331,8 +1331,19 @@ jobs:
           }
 
           func recordLines() -> [String] {
+              // **末尾の空要素を数に入れない。** `omittingEmptySubsequences: false` は末尾の改行の
+              // 後ろにも空の要素を作るので、その `count` を**位置**として使うと（下の
+              // `phase… = recordLines().count`）**次の 1 行を飛ばす**。実測（2026-09-12 の macOS の
+              // ランナー）: 3 つ目の起動（引数なし）の後に書かれた最初の行がまさに
+              // `二重起動を引き継ぎました … ドキュメント要求なし` だったため、10 秒待っても
+              // （30 秒に伸ばしても）見つからず、失敗時のダンプ（`.suffix(30)`）には現れていた
+              // — 走査の窓だけが 1 行ずれていた。**行の位置は「改行で区切られた行の数」で数える。**
               let text = (try? String(contentsOfFile: recordPath, encoding: .utf8)) ?? ""
-              return text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+              var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+              while lines.last == "" {
+                  lines.removeLast()
+              }
+              return lines
           }
 
           // 記録の `<offset>` 行目より後から正規表現に一致する最初の行を待つ。
@@ -1508,13 +1519,7 @@ jobs:
           guard let secondWindows = waitForWindowCount(of: first.processIdentifier, atLeast: firstWindows + 1, seconds: timeoutSeconds) else {
               fail("2 つ目の起動の後、ウィンドウ数が \(firstWindows + 1) 以上になりませんでした（引き継いだ側がウィンドウを提示していない）")
           }
-          // **引き継ぎの行は待ち時間を長く取る（30 秒）。** 実測（2026-09-12 の macOS の
-          // ランナー）: 3 つ目の起動（引数なし）が終了してから**最初のインスタンスが
-          // `二重起動を引き継ぎました … ドキュメント要求なし` を記録するまで 10.4 秒**かかり、
-          // 10 秒では足りなかった（最初のインスタンスはその間も生きており、他の行は書いている）。
-          // 引き継ぎの**利用者から見える効果**（2 つ目が常駐せず、ウィンドウが増える）は別の
-          // 主張として短い期限で見ているので、記録の行そのものは長めに待つ。
-          guard let handover = findLine("二重起動を引き継ぎました.*ドキュメント要求 ", from: phaseAB, seconds: 30) else {
+          guard let handover = findLine("二重起動を引き継ぎました.*ドキュメント要求 ", from: phaseAB, seconds: 10) else {
               fail("引き継ぎの行（二重起動を引き継ぎました … ドキュメント要求 …）が記録に現れません")
           }
           guard let docLabelLine = findLine("ウィンドウを開いた: label=doc-", from: phaseAB, seconds: 10) else {
@@ -1535,7 +1540,7 @@ jobs:
           if third.terminationStatus != 0 {
               fail("引数なしの 2 つ目の起動が終了コード \(third.terminationStatus) で終わった（0 であるべき）")
           }
-          guard let argless = findLine("二重起動を引き継ぎました.*ドキュメント要求なし", from: phaseArgless, seconds: 30) else {
+          guard let argless = findLine("二重起動を引き継ぎました.*ドキュメント要求なし", from: phaseArgless, seconds: 10) else {
               fail("引数なしの引き継ぎの行（… ドキュメント要求なし）が記録に現れません")
           }
           let settleEnd = Date().addingTimeInterval(3)
