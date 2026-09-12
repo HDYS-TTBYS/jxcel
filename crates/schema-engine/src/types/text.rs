@@ -210,7 +210,12 @@ impl TextConstraints {
     /// 最大長が分かっているときは、その上限を超えた時点で数えるのをやめる
     /// （`max + 1` 文字まで数えれば比較には足りる。`min <= max` が不変条件である）。
     /// 長さだけを宣言した列の 10 万行の走査（要件 10.1）で、長い値を最後まで数えない。
-    fn length_fits(&self, text: &str) -> bool {
+    ///
+    /// **長さ規則の単一の源である。** [`Self::accepts`] と `compile` 層の
+    /// [`ColumnValidator::check`](crate::compile::plan::ColumnValidator::check) が共有する
+    /// （後者は長さか書式かの切り分けのために同じ述語を呼ぶ。規則を写すと片方だけ直った
+    /// ときに適合と違反が静かに食い違う。structure.md「写すと片方だけ直る」）。
+    pub(crate) fn length_fits(&self, text: &str) -> bool {
         let cap = self
             .max_length
             .map_or(usize::MAX, |max| max.saturating_add(1));

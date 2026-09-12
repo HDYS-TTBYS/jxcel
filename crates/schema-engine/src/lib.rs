@@ -33,8 +33,10 @@
 //! 文法の解析（`declaration::codec` の `parse_schema` / `parse_type_definition`）を置いた。
 //! タスク 3.3 が同じモジュールに正準出力（`schema_to_text` / `type_definition_to_text`）
 //! を足した。タスク 4.1 が登録層 [`registry`] の拡張インターフェース（`CustomType` /
-//! `TypeRegistry`）を置いた。
+//! `TypeRegistry`）を置いた。タスク 4.2 がコンパイル層 [`compile`] の列 1 本分の検証器
+//! （`compile::plan` の `ColumnValidator`）を置いた。
 
+pub mod compile;
 pub mod declaration;
 pub mod error;
 pub mod registry;
