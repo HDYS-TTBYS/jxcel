@@ -1764,6 +1764,609 @@ jobs:
           Write-Host "OK: 単一インスタンス化と複数ウィンドウの 3 経路（(a) 再実行が常駐せずウィンドウが増える / (b) 新しいウィンドウが doc-* で既存が閉じない / (c) 拒否では閉じず許可では閉じる）を検証した"
 
       # ---------------------------------------------------------------------
+      # メニューとショートカットの検証（tasks.md 10.6 / 要件 3.2, 3.5, 3.6）
+      #
+      # 3 つの主張を 3 OS で確かめる:
+      #   (1) 登録した項目がそのプラットフォームのメニューに現れ、選択が登録元へ通知される
+      #   (2) フォーカスされているウィンドウにだけショートカットが作用する
+      #   (3) ショートカットの表示がプラットフォームの表記に従う
+      #
+      # ## 経路がプラットフォームで違うという前提（10.6 の本文）
+      #
+      # 7.4 / 7.5 が吸収した差がここに現れる: **macOS はアプリ全体のメニュー 1 つ**（トップレベルは
+      # すべて部分メニュー）、**Windows / Linux はウィンドウ単位**。したがって「メニューを読む」
+      # 手段も「活性化する」手段も OS ごとに別であり、**開発機（Linux）だけでは 3 OS を確認
+      # できない**。競合の検出（要件 3.4）は環境に依らないので 10.6 は扱わない（`menu.rs` の
+      # テストが担当する）。
+      #
+      # ## 各 OS の証拠が何を証明し、何を証明しないか
+      #
+      #   - **Linux（`scripts/check-menu-shortcut.sh` が 1 本で行う。AT-SPI + XSendEvent。最も強い）**
+      #     * (1) 表示 — **AT-SPI** で実アプリのアクセシビリティ木を読む（9.5 が実測した手段。
+      #       `[menu bar] → [menu] ファイル / 診断 → [menu item] …`。アクセシビリティの木は
+      #       `busctl` で D-Bus を直接叩いて読む — ランナーに `gir1.2-atspi` が無いため）。
+      #       **配布物（AppImage）に対して行う**ので、配布物のメニューそのものが読まれる。
+      #       あわせて**配布物に検証専用の項目が現れないこと**も要求する（5.4 / 7.4 の片付けの
+      #       規約を AT-SPI 側からも見る）。
+      #     * (1) 通知 — AT-SPI の `org.a11y.atspi.Action.DoAction` で「診断 > 記録の保存場所を
+      #       表示」を**実際に活性化**し、記録の 2 行（`メニュー項目が選択された: 登録元=app-shell
+      #       項目=app-shell.diagnostics-log-location 対象ウィンドウ=…` と、登録元が送った
+      #       `診断の導線の要求を送った: ウィンドウ = … / 導線 = 記録の保存場所`）を要求する。
+      #       **活性化の経路が本物であること**が Linux の段の強みである（AT-SPI の読みだけでは
+      #       「項目が存在する」ことしか言えず、記録だけでは「活性化が届いた」ことを言えない。
+      #       両方を要求する）。
+      #     * (2) フォーカス — 検証用の形を 2 枚（起動時のウィンドウ + 単一インスタンスの引き継ぎで
+      #       開くドキュメント付きのウィンドウ）開き、`XSetInputFocus` でフォーカスを移して
+      #       `XSendEvent`（`event_mask=0`。7.5 の実測手段。**XTEST はこのツールキットに届かない**）
+      #       で `Ctrl+Shift+J` を送る。7.5 の `verification.probe` が残す
+      #       `[検証] ショートカットが作用した対象ウィンドウ=…` が**フォーカス中のラベルと一致する
+      #       こと**、**フォーカスを移すと追随すること**、**1 回の押下で作用するのが 1 枚だけである
+      #       こと**（もう一方のラベルの行が 0 件であること）を要求する。
+      #     * (3) 表示の表記 — **GTK が報告するキーバインド**（`<Primary>q` /
+      #       `<Primary><Shift>l` など）を AT-SPI から読む。`<Primary>` は GTK の「主修飾キー」の
+      #       表記であり、**アプリの自己申告ではなく基盤の表記**である。アクセラレータを割り当てて
+      #       いない項目（`verification.document-only`）の報告が**空であること**も要求する（対照）。
+      #       加えて検証用の形の記録から、**基盤へ渡した綴りが `ctrl+…` へ解決されていること**を
+      #       要求する。
+      #     * 限界: アクセシビリティの橋（`GTK_MODULES=gail:atk-bridge`。この段が設定する）が
+      #       読み込まれている必要がある。無ければアプリが AT-SPI の一覧に現れず、検査は exit 1 で
+      #       落ちる（**黙って通らない**）。GTK が描く字形そのもの（`Ctrl+Shift+L`）は記録に
+      #       現れない（7.5 はポップアップの画素で確かめた）。この段が覆うのは「基盤がその綴りを
+      #       受理して項目のアクセラレータとして保持していること」までである。
+      #   - **Windows（`GetMenu` / `GetMenuStringW` / `GetMenuItemID` と `WM_COMMAND`）** —
+      #     ネイティブのメニューバーは Win32 で**実際に読める**。
+      #     * (1) 表示 — **配布物**（NSIS で `/S` 導入した実行ファイル）のウィンドウのメニューバーを
+      #       列挙し、部分メニューと項目の文字列を要求する。**muda 0.19.3 の Windows 実装は
+      #       アクセラレータを項目の文字列へ埋め込む**（`format!("{text}\t{}", accelerator)` を
+      #       `AppendMenuW` へ渡す）ので、`GetMenuStringW` が返す `終了\tCtrl+Q` は
+      #       **プラットフォームが実際に描く文字列**である（要件 3.3 の表示の証拠）。
+      #       配布物に検証専用の項目が現れないことも要求する。
+      #     * (1) 通知 — `GetMenuItemID` でコマンド識別子を取り、`PostMessage(hwnd, WM_COMMAND,
+      #       id, 0)` で**実際に活性化**する（muda のウィンドウサブクラスが `WM_COMMAND` の
+      #       LOWORD を項目の識別子として解決し、tauri 2.11.5 は `msg_hook` で
+      #       `TranslateAcceleratorW` を各メニューの `haccel` に当てるので、クリックもキー入力も
+      #       同じ経路を通る）。記録の 2 行を要求する。
+      #     * (2) フォーカス — 検証用の形を 2 枚開き、`SetForegroundWindow` で前面にしたうえで
+      #       `keybd_event` で `Ctrl+Shift+J` を送り、対象が前面のウィンドウと一致し、移すと
+      #       追随することを要求する。**前面化できない環境では主張しない** —
+      #       `GetForegroundWindow` で確認し、効かなければ「注入できず」と出力して (2) を飛ばす
+      #       （偽の緑を作らない。10.5 の macOS (c) と同じ型）。**キー入力そのものを実測するのは
+      #       この段と Linux の段だけである。**
+      #     * (3) 表示の表記 — 上で読んだ**実際のメニュー項目の文字列**（`Ctrl+Q` など）で確かめる。
+      #     * 限界: ランナーは素の利用者機ではない（10.4 と同じ）。
+      #   - **macOS（アプリ全体のメニューの記録 + `menu.rs` のテスト）** — ネイティブのメニューを
+      #     外部から読む唯一の手段はアクセシビリティ API（AX）であり、**GitHub の macOS ランナーは
+      #     その許可を与えない**（actions/runner-images#8214。10.4 が画面収録の許可に依存しない
+      #     判断をしたのと同じ理由であり、10.5 も閉鎖要求の注入で同じ判断をしている）。
+      #     * (1) 表示 — **アプリが実際に組み立てて `AppHandle::set_menu` へ渡したメニュー**を、
+      #       10.6 が `verification-triggers` の下へ足した記録行（`[検証] メニューを配置した:
+      #       配置=アプリ全体 項目=…`）から読む。**検証用の形で測る**（配布物には検証専用の
+      #       コードが入らない — 9.7 の片付けの規約）。記録は**部分メニューの位置・表示名・
+      #       基盤へ渡した綴り**を運ぶ。
+      #     * (3) 表示の表記 — 同じ記録で、**`Cmd` が `super+…` へ解決されていること**を要求する
+      #       （非 macOS の `ctrl+…` との差がここに現れる）。**描画（`⌘Q`）そのものは読めない**。
+      #     * (2) フォーカスと (1) の通知 — **キー入力の配送もメニューの活性化も外部から注入
+      #       できない**ので、macOS 上では `menu.rs` のテスト（項目 → 登録元の通知の seam と、
+      #       対象ウィンドウの解決の規則。`Test` の段と同じものをこの段でも名指しで走らせ、
+      #       結果を出力に残す）で確かめる。**これは「プラットフォームが配送すること」の証明では
+      #       ない** — 配送の実測は Linux と Windows の段が担う。
+      #     * **未検証として残るもの**: macOS のランナーでは、クリックやキー入力を AppKit が
+      #       メニューへ配送する経路を実測できない。許可が与えられた環境（開発機）では AX で同じ
+      #       ことができるが、この段はそれを要求しない（不要な不安定さを持ち込まない）。
+      #
+      # ## 検証用の形（`verification-triggers`）を使う理由
+      #
+      # 7.5 の `verification.probe` / `verification.document-only` と 10.6 の配置の記録は
+      # **非既定の cargo feature の下にしか無い**（配布物に検証専用のコードを入れない決定。
+      # 5.4 / 7.4 の片付け）。直前の 10.4 の段が `npx tauri build --no-bundle --features
+      # verification-triggers` で `target/release/jxcel[.exe]` を作っている。配布物に検証専用の
+      # 識別子が入っていないことは 10.5 の段が既に確かめている。
+      #
+      # ## 終了コード
+      #
+      # Linux の段は `scripts/check-menu-shortcut.sh`（0 = 3 つの主張すべて成立 / 1 = 検査失敗 /
+      # 2 = 入力が使えない）が判定する。macOS / Windows の段は各スパイクが同じ 3 値で終わる。
+      # **無言で通る経路は無い**（メニューが読めない・項目が無い・通知が無い・対象が一致しない、
+      # のいずれも非 0 になる）。macOS の (2) だけは注入できないことを明示して飛ばす。
+      # ---------------------------------------------------------------------
+
+      # Linux の段（tasks.md 10.6）。検査本体は POSIX sh の
+      # `scripts/check-menu-shortcut.sh`（ローカルでも同じものを実行できる）である。
+      #
+      # AT-SPI の前提を出力に残す: アクセシビリティの木を読むには GTK のアクセシビリティの橋
+      # （`GTK_MODULES=gail:atk-bridge`。検査器が自分で設定する）、D-Bus のセッションバス
+      # （`dbus-run-session` があれば専用のものを使う。10.5 と同じ退避）、at-spi2-core
+      # （`at-spi-bus-launcher`）が要る。**無ければ検査は非 0 で落ちる**（ここでは人の読める形で
+      # 前提を出すだけである）。
+      #
+      # 検査は 3 つの主張を 1 回の実行で確かめ、そのあと**反証**を 1 回行う（検証用の形の代わりに
+      # 配布物を渡すと、7.5 の検証専用の項目が無いので非 0 で落ちなければならない。落ちなければ
+      # 検査が項目を本当に見ていないことになる）。
+      - name: Verify menu items and shortcuts (Linux / Xvfb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -eu
+          # 4.4 の解決（Linux はアプリケーションデータ領域の下の logs。空の XDG_DATA_HOME は
+          # 未設定として $HOME へ落ちる — アプリ側の解決と同じ）。
+          record="${XDG_DATA_HOME:-$HOME/.local/share}/com.jxcel.app/logs/jxcel.log"
+          echo "診断記録: $record"
+          set -- target/release/bundle/appimage/*.AppImage
+          appimage=$1
+          # 展開先を変えた後（`cd` の後）でも同じファイルを指せるよう絶対パスにする。
+          appimage=$(CDPATH='' cd -- "$(dirname -- "$appimage")" && pwd)/$(basename -- "$appimage")
+          document="$RUNNER_TEMP/jxcel-10-6-document.txt"
+          # 7.7 は位置を読まないが、渡す位置は実在させる（検査側も実在を要求する）。
+          printf 'jxcel 10.6 の検証で開くドキュメント（内容は読まれない。tasks.md 7.7）\n' > "$document"
+
+          if command -v at-spi-bus-launcher >/dev/null 2>&1; then
+            echo "AT-SPI: at-spi-bus-launcher あり（at-spi2-core が導入されている）"
+          else
+            echo "AT-SPI: at-spi-bus-launcher が無い（at-spi2-core が無い。メニューの AT-SPI 読みは成立しない）" >&2
+          fi
+          echo "AT-SPI: busctl = $(command -v busctl || echo '(見つからない)') $(busctl --version 2>/dev/null | head -n 1)"
+
+          # <検証用の実行ファイル> を差し替えて検査を走らせる（反証で配布物を渡すため）。
+          run_check() {
+            _verify=$1
+            if command -v dbus-run-session >/dev/null 2>&1; then
+              xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+                dbus-run-session -- env GTK_MODULES=gail:atk-bridge \
+                sh scripts/check-menu-shortcut.sh \
+                  "$appimage" "$_verify" jxcel 60 100 100 "$record" "$document"
+            else
+              xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+                env GTK_MODULES=gail:atk-bridge \
+                sh scripts/check-menu-shortcut.sh \
+                  "$appimage" "$_verify" jxcel 60 100 100 "$record" "$document"
+            fi
+          }
+
+          echo "検証: 配布物のメニュー項目（AT-SPI）・選択の通知・フォーカス先への作用・解決済みの綴り"
+          if ! run_check target/release/jxcel; then
+            echo "FUSE 経由で配布物を起動できなかったため、APPIMAGE_EXTRACT_AND_RUN=1 で再試行します" >&2
+            export APPIMAGE_EXTRACT_AND_RUN=1
+            run_check target/release/jxcel
+          fi
+
+          # 反証: 検証用の形の代わりに配布物を渡す（7.5 の検証専用の項目が無い）。
+          echo "反証: 検証用の形の代わりに配布物を渡す（検証専用の項目が無いので非 0 で落ちるはず）"
+          rc=0
+          output=$(run_check "$appimage" 2>&1) || rc=$?
+          printf '%s\n' "$output" | tail -n 20
+          if [ "$rc" -eq 0 ]; then
+            echo "NG: 検証専用の項目が無いのに検査が成功してしまった（検査が項目を本当に見ていない）" >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$output" | grep -q "に項目 '検証: 対象ウィンドウを記録' がありません"; then
+            echo "NG: 反証が「検証専用の項目の不在」以外の理由で落ちた（検査器が動いていない可能性がある）" >&2
+            exit 1
+          fi
+          echo "反証: 期待どおり非 0 で落ちました（検証専用の項目が無いことを検査が見ている）"
+
+      # macOS の段（tasks.md 10.6）。検証用の形を起動し、**アプリが組み立てて `set_menu` へ渡した
+      # アプリ全体のメニュー**を記録から読む（AX の許可が無いランナーでは、これが唯一の客観的な
+      # 観測である）。記録・アプリの出力は**別のファイル**にする（10.4 と同じ理由 — 同一ファイル
+      # だと 2 人の書き手が同じ offset を触りうる）。
+      #
+      # (2) フォーカスへの作用と (1) の通知の seam は、同じランナーで走る `menu.rs` のテストで
+      # 名指しに確かめ、その結果を出力に残す（**プラットフォームの配送ではない**ことを明記する）。
+      - name: Verify menu items and shortcuts (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 4.4 の解決（macOS は $HOME/Library/Logs/{識別子}。`logs` 接尾辞は付かない）。
+          record="$HOME/Library/Logs/com.jxcel.app/jxcel.log"
+          output="$RUNNER_TEMP/jxcel-10-6-macos-output.log"
+          mkdir -p "$(dirname "$record")" "$(dirname "$output")"
+          echo "診断記録: $record"
+          echo "アプリの出力: $output（記録とは別ファイル）"
+          verify="target/release/jxcel"
+          if [ ! -x "$verify" ]; then
+            echo "NG: 検証用の形の実行ファイルがありません: $verify" >&2
+            exit 1
+          fi
+          # 記録は消さない（起動中のアプリが書き続ける）。**段の開始時の行数**を取り、それ以降だけを
+          # 調べる（前の段の行で偽の成功をしない）。
+          phase=0
+          if [ -f "$record" ]; then
+            phase=$(wc -l < "$record" | tr -d ' ')
+          fi
+          : > "$output"
+          "$verify" >"$output" 2>&1 &
+          pid=$!
+          cleanup() {
+            if kill -0 "$pid" 2>/dev/null; then
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT INT TERM
+
+          # 起動の直後に書かれる「配置の記録」を待つ（登録はウィンドウの生成より前である）。
+          line=""
+          deadline=$(( $(date +%s) + 60 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            line=$(tail -n "+$((phase + 1))" "$record" 2>/dev/null |
+              grep -E '\[検証\] メニューを配置した: ' | tail -n 1 || true)
+            [ -n "$line" ] && break
+            if ! kill -0 "$pid" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$line" ]; then
+            echo "NG: 配置の記録（[検証] メニューを配置した: …）が 60 秒以内に現れませんでした（--features verification-triggers のビルドではないか、起動できていない）" >&2
+            tail -n 40 "$record" >&2 || true
+            tail -n 40 "$output" >&2 || true
+            exit 1
+          fi
+          echo "検証（配置の記録）: $line"
+          for expected in \
+            "配置=アプリ全体" \
+            "項目数=7" \
+            "app-shell.open-document(ファイル > 開く…, ショートカット=super+KeyO)" \
+            "app-shell.quit(ファイル > 終了, ショートカット=super+KeyQ)" \
+            "verification.document-only(ファイル > 検証: ドキュメント付きのみ, ショートカット=(なし))" \
+            "verification.probe(ファイル > 検証: 対象ウィンドウを記録, ショートカット=shift+super+KeyJ)" \
+            "app-shell.diagnostics-export(診断 > 診断情報を書き出す…, ショートカット=shift+super+KeyE)" \
+            "app-shell.diagnostics-log-location(診断 > 記録の保存場所を表示, ショートカット=shift+super+KeyL)" \
+            "app-shell.diagnostics-verbosity(診断 > 記録の詳細度…, ショートカット=shift+super+KeyV)"
+          do
+            case "$line" in
+              *"$expected"*) ;;
+              *)
+                echo "NG: 配置の記録に ${expected} がありません（アプリ全体のメニューの位置・表示名・解決済みの綴りが期待と違う）" >&2
+                exit 1
+                ;;
+            esac
+          done
+          echo "OK: macOS: アプリ全体のメニュー（配置=アプリ全体）に 7 項目が期待の位置・表示名で並び、ショートカットは super+…（Cmd）へ解決されている"
+
+          # 記録が「配置」だけを覆うことを明示する（配布物のメニューは AX 無しには読めない）。
+          echo "限界: macOS ではアクセシビリティ許可が無いため、ネイティブのメニューを外部から読めず、クリック・キー入力を配送できない（actions/runner-images#8214）"
+          echo "限界: したがって (2) フォーカス先への作用の実測は Linux と Windows の段が担い、この段は通知の seam と対象の規則をクレートのテストで確かめる"
+
+          # (2) フォーカスと (1) の通知の seam（`テストが 1 本だけの dispatch を通る`）。
+          echo "検証（macOS）: menu.rs のテスト（項目 → 登録元の通知・対象ウィンドウの解決）"
+          cargo test -p jxcel --bin jxcel menu:: 2>&1 | tee "$RUNNER_TEMP/jxcel-10-6-menu-tests.txt"
+          grep -q 'test result: ok' "$RUNNER_TEMP/jxcel-10-6-menu-tests.txt" ||
+            { echo "NG: menu.rs のテストが成立しませんでした" >&2; exit 1; }
+          echo "OK: macOS: 通知の seam と対象ウィンドウの解決の 20 テストがこのランナーで成立した（プラットフォームの配送そのものは未検証）"
+
+          # 検証用の形が残っていないことを確かめる（後続の段に残さない）。**ゾンビは数えない**
+          # （終了したプロセスが名前を保持しても常駐してはいない。10.5 の Linux 検査と同じ判断）。
+          cleanup
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "NG: 後始末の後に jxcel（pid=$pid）が残っています" >&2
+            exit 1
+          fi
+          remaining=$(ps -Ao stat=,comm= | awk '$1 !~ /^Z/ && $2 == "jxcel" { n += 1 } END { print n + 0 }')
+          if [ "$remaining" -ne 0 ]; then
+            echo "NG: 後始末の後に jxcel のプロセスが残っています（${remaining} 件）" >&2
+            ps -Ao pid=,stat=,comm= | awk '$3 == "jxcel"' >&2
+            exit 1
+          fi
+          echo "検証（後始末）: jxcel のプロセスは残っていない（ゾンビを除いて 0 件）"
+
+      # Windows の段（tasks.md 10.6）。配布物のメニューバーを Win32 で読み、`WM_COMMAND` で
+      # 実際に活性化し、検証用の形の 2 枚でフォーカス先への作用を実測する。**`EnumWindows` は
+      # 所有者 pid と**題名の完全一致**で絞る（単一インスタンスのプラグインは同じ pid に可視の
+      # 隠しウィンドウ `com.jxcel.app-siw` を作るため、10.5 と同じ前提が要る）。
+      - name: Verify menu items and shortcuts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $title = "jxcel"
+          $record = Join-Path $env:LOCALAPPDATA "com.jxcel.app\logs\jxcel.log"
+          New-Item -ItemType Directory -Force -Path (Split-Path $record) | Out-Null
+          Write-Host "診断記録: $record"
+
+          # 導入先は 1.5 の段と同じ前提（既定の installMode は currentUser）。見つからない場合は
+          # 1.5 の段と同じ探索に退避する（導入先が変わっても偽の失敗をしない）。
+          $installed = Join-Path $env:LOCALAPPDATA "jxcel\jxcel.exe"
+          if (-not (Test-Path $installed)) {
+            $found = Get-ChildItem -Path $env:LOCALAPPDATA -Filter "jxcel.exe" -Recurse -Depth 3 -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($found) { $installed = $found.FullName }
+          }
+          if (-not (Test-Path $installed)) { throw "導入された実行ファイルが見つかりません: $installed" }
+          $verify = "target/release/jxcel.exe"
+          if (-not (Test-Path $verify)) { throw "検証用の形が見つかりません: $verify（--features verification-triggers のビルドではない）" }
+          $document = Join-Path $env:RUNNER_TEMP "jxcel-10-6-document.txt"
+          Set-Content -Path $document -Value "jxcel 10.6 の検証で開くドキュメント（内容は読まれない。tasks.md 7.7）" -Encoding UTF8
+
+          # メニューの列挙・活性化・前面化・キー送信（1 つの型にまとめる）。**here-string を
+          # 使わない** — YAML の中では終端 `"@` を行頭に置けず、PowerShell の here-string が
+          # 成立しない（10.5 の段と同じ）。
+          $menuApi = @(
+            'using System;',
+            'using System.Collections.Generic;',
+            'using System.Text;',
+            'using System.Runtime.InteropServices;',
+            '',
+            'public static class JxcelMenuApi {',
+            '  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);',
+            '  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);',
+            '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);',
+            '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextLength(IntPtr hWnd);',
+            '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);',
+            '  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);',
+            '  [DllImport("user32.dll")] public static extern IntPtr GetMenu(IntPtr hWnd);',
+            '  [DllImport("user32.dll")] public static extern int GetMenuItemCount(IntPtr hMenu);',
+            '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetMenuStringW(IntPtr hMenu, uint uIDItem, StringBuilder text, int count, uint flags);',
+            '  [DllImport("user32.dll")] public static extern IntPtr GetSubMenu(IntPtr hMenu, int position);',
+            '  [DllImport("user32.dll")] public static extern uint GetMenuItemID(IntPtr hMenu, int position);',
+            '  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);',
+            '  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int command);',
+            '  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);',
+            '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+            '  [DllImport("user32.dll")] public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);',
+            '  public const uint MF_BYPOSITION = 0x400;',
+            '  public const uint WM_COMMAND = 0x0111;',
+            '  public const uint KEYEVENTF_KEYUP = 0x0002;',
+            '  public const int SW_RESTORE = 9;',
+            '  public const byte VK_CONTROL = 0x11;',
+            '  public const byte VK_SHIFT = 0x10;',
+            '  public const byte VK_J = 0x4A;',
+            '  public static List<IntPtr> WindowsOf(int ownerPid, string title) {',
+            '    var result = new List<IntPtr>();',
+            '    EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {',
+            '      uint owner;',
+            '      GetWindowThreadProcessId(hWnd, out owner);',
+            '      if (owner != (uint)ownerPid) { return true; }',
+            '      int length = GetWindowTextLength(hWnd);',
+            '      if (length <= 0) { return true; }',
+            '      var text = new StringBuilder(length + 1);',
+            '      GetWindowText(hWnd, text, text.Capacity);',
+            '      if (text.ToString() == title) { result.Add(hWnd); }',
+            '      return true;',
+            '    }, IntPtr.Zero);',
+            '    return result;',
+            '  }',
+            '  public static string ItemText(IntPtr menu, int position) {',
+            '    var text = new StringBuilder(512);',
+            '    GetMenuStringW(menu, (uint)position, text, text.Capacity, MF_BYPOSITION);',
+            '    return text.ToString();',
+            '  }',
+            '  public static void SendShortcut() {',
+            '    keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);',
+            '    keybd_event(VK_SHIFT, 0, 0, UIntPtr.Zero);',
+            '    keybd_event(VK_J, 0, 0, UIntPtr.Zero);',
+            '    keybd_event(VK_J, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);',
+            '    keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);',
+            '    keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);',
+            '  }',
+            '}'
+          ) -join "`n"
+          Add-Type -TypeDefinition $menuApi
+
+          function Get-RecordLines {
+            param([int]$Skip = 0)
+            if (-not (Test-Path $record)) { return @() }
+            $lines = @(Get-Content -Path $record -Encoding UTF8 -ErrorAction SilentlyContinue)
+            if ($lines.Count -le $Skip) { return @() }
+            return $lines[$Skip..($lines.Count - 1)]
+          }
+          function Find-RecordLine {
+            param([int]$Skip, [string]$Pattern, [int]$Seconds = 10)
+            $deadline = (Get-Date).AddSeconds($Seconds)
+            while ((Get-Date) -lt $deadline) {
+              $hit = Get-RecordLines -Skip $Skip | Where-Object { $_ -match $Pattern } | Select-Object -First 1
+              if ($hit) { return $hit }
+              Start-Sleep -Milliseconds 200
+            }
+            return $null
+          }
+          function Get-RecordCount {
+            param([int]$Skip, [string]$Pattern)
+            return @(Get-RecordLines -Skip $Skip | Where-Object { $_ -match $Pattern }).Count
+          }
+          function Wait-Windows {
+            param([int]$OwnerPid, [int]$AtLeast, [int]$Seconds)
+            $deadline = (Get-Date).AddSeconds($Seconds)
+            while ((Get-Date) -lt $deadline) {
+              $handles = @([JxcelMenuApi]::WindowsOf($OwnerPid, $title))
+              if ($handles.Count -ge $AtLeast) { return $handles }
+              Start-Sleep -Milliseconds 100
+            }
+            return $null
+          }
+          function Wait-Exit {
+            param([System.Diagnostics.Process]$Target, [int]$Seconds)
+            return $Target.WaitForExit($Seconds * 1000)
+          }
+          function Stop-Instance {
+            param([System.Diagnostics.Process]$Target)
+            if ($Target -and -not $Target.HasExited) { $Target.Kill() }
+            if ($Target) { $Target.WaitForExit(10000) | Out-Null }
+          }
+          function Get-HandleLabel {
+            param([System.Collections.IEnumerable]$Handles)
+            return (($Handles | ForEach-Object { '0x{0:x}' -f $_.ToInt64() }) -join ' ')
+          }
+          # メニューバーを「部分メニュー名 → (項目の文字列 → コマンド識別子)」として読む。
+          function Get-MenuTree {
+            param([IntPtr]$Menu)
+            $tree = [ordered]@{}
+            $count = [JxcelMenuApi]::GetMenuItemCount($Menu)
+            for ($i = 0; $i -lt $count; $i++) {
+              $label = [JxcelMenuApi]::ItemText($Menu, $i)
+              $sub = [JxcelMenuApi]::GetSubMenu($Menu, $i)
+              if ($sub -eq [IntPtr]::Zero) { continue }
+              $items = [ordered]@{}
+              $n = [JxcelMenuApi]::GetMenuItemCount($sub)
+              for ($j = 0; $j -lt $n; $j++) {
+                $items[[JxcelMenuApi]::ItemText($sub, $j)] = [JxcelMenuApi]::GetMenuItemID($sub, $j)
+              }
+              $tree[$label] = $items
+            }
+            return $tree
+          }
+          function Assert-MenuItem {
+            param($Tree, [string]$Menu, [string]$Item, [string]$What)
+            if (-not $Tree.Contains($Menu)) {
+              throw "${What}: 部分メニュー '$Menu' がありません（あるのは $($Tree.Keys -join ', ')）"
+            }
+            $items = $Tree[$Menu]
+            if (-not $items.Contains($Item)) {
+              throw "${What}: '$Menu' に項目 '$Item' がありません（あるのは $($items.Keys -join ' / ')）"
+            }
+            Write-Host "OK: Win32: $Menu > $Item （コマンド識別子=$($items[$Item])）"
+          }
+          # そのウィンドウを前面へ出せたかを返す（**効かなければ主張しない**）。
+          function Set-ForegroundChecked {
+            param([IntPtr]$Handle)
+            [JxcelMenuApi]::ShowWindow($Handle, [JxcelMenuApi]::SW_RESTORE) | Out-Null
+            [JxcelMenuApi]::SetForegroundWindow($Handle) | Out-Null
+            $deadline = (Get-Date).AddSeconds(5)
+            while ((Get-Date) -lt $deadline) {
+              if ([JxcelMenuApi]::GetForegroundWindow() -eq $Handle) { return $true }
+              Start-Sleep -Milliseconds 200
+            }
+            return $false
+          }
+
+          # -------------------------------------------------------------------
+          # (1) 配布物: メニューバーの読み（項目の出現とショートカットの表示）と活性化（通知）
+          # -------------------------------------------------------------------
+          $phaseShipping = @(Get-RecordLines).Count
+          $shipping = Start-Process -FilePath $installed -PassThru
+          try {
+            # **題名の完全一致で絞る**（単一インスタンスのプラグインは同じ pid に可視の隠し
+            # ウィンドウ `com.jxcel.app-siw` を作る。`MainWindowHandle` はそれを指しうる）。
+            $shippingHandles = Wait-Windows -OwnerPid $shipping.Id -AtLeast 1 -Seconds 60
+            if (-not $shippingHandles) {
+              if ($shipping.HasExited) { throw "配布物がウィンドウを出す前に終了しました (exit=$($shipping.ExitCode))" }
+              throw "配布物のウィンドウが 60 秒以内に現れませんでした"
+            }
+            if ($shippingHandles.Count -ne 1) { throw "配布物のウィンドウが $($shippingHandles.Count) 枚あります（1 枚であるべき）" }
+            Write-Host "検証 1/2: 配布物: ウィンドウ '$title' pid=$($shipping.Id) ハンドル=$(Get-HandleLabel -Handles $shippingHandles)"
+
+            $menu = [JxcelMenuApi]::GetMenu($shippingHandles[0])
+            if ($menu -eq [IntPtr]::Zero) { throw "配布物のウィンドウにメニューバーがありません（GetMenu が 0）" }
+            $tree = Get-MenuTree -Menu $menu
+            Write-Host "OK: Win32: 配布物のウィンドウのメニューバーを読んだ（部分メニュー: $($tree.Keys -join ', ')）"
+            Assert-MenuItem $tree "ファイル" "開く…`tCtrl+O" "配布物"
+            Assert-MenuItem $tree "ファイル" "終了`tCtrl+Q" "配布物"
+            Assert-MenuItem $tree "診断" "診断情報を書き出す…`tCtrl+Shift+E" "配布物"
+            Assert-MenuItem $tree "診断" "記録の保存場所を表示`tCtrl+Shift+L" "配布物"
+            Assert-MenuItem $tree "診断" "記録の詳細度…`tCtrl+Shift+V" "配布物"
+            foreach ($menuLabel in $tree.Keys) {
+              foreach ($itemLabel in $tree[$menuLabel].Keys) {
+                if ($itemLabel -like "*検証*") {
+                  throw "配布物のメニューに検証専用の項目 '$itemLabel' が現れています（既定のビルドに入ってはならない）"
+                }
+              }
+            }
+            Write-Host "検証 1/2: 配布物のメニューに検証専用の項目は現れない（アクセラレータは項目の文字列に埋め込まれている）"
+
+            Write-Host "検証 1/2: 診断 > 記録の保存場所を表示 を WM_COMMAND で活性化する（選択が登録元へ通知されること）"
+            $itemId = $tree["診断"]["記録の保存場所を表示`tCtrl+Shift+L"]
+            if (-not [JxcelMenuApi]::PostMessage($shipping.MainWindowHandle, [JxcelMenuApi]::WM_COMMAND, [IntPtr]$itemId, [IntPtr]::Zero)) {
+              throw "WM_COMMAND を送れませんでした（コマンド識別子=$itemId）"
+            }
+            $notified = Find-RecordLine -Skip $phaseShipping -Pattern "メニュー項目が選択された: 登録元=app-shell 項目=app-shell.diagnostics-log-location " -Seconds 10
+            if (-not $notified) { throw "活性化の通知の行（メニュー項目が選択された: 登録元=app-shell 項目=app-shell.diagnostics-log-location …）が記録に現れません" }
+            Write-Host "検証 1/2: 記録（通知）: $notified"
+            $requested = Find-RecordLine -Skip $phaseShipping -Pattern "診断の導線の要求を送った: ウィンドウ = [a-z0-9_-]+ / 導線 = 記録の保存場所" -Seconds 10
+            if (-not $requested) { throw "登録元が要求を送った行（診断の導線の要求を送った: ウィンドウ = … / 導線 = 記録の保存場所）が記録に現れません" }
+            Write-Host "検証 1/2: 記録（登録元の処理）: $requested"
+          } finally {
+            Stop-Instance $shipping
+          }
+
+          # -------------------------------------------------------------------
+          # (2) 検証用の形: フォーカスされているウィンドウにだけショートカットが作用すること
+          # -------------------------------------------------------------------
+          $phaseShortcut = @(Get-RecordLines).Count
+          Write-Host "検証 2/2: 検証用の形を起動する（1 枚目はドキュメントなし）"
+          $first = Start-Process -FilePath $verify -PassThru
+          $second = $null
+          try {
+            $firstHandles = Wait-Windows -OwnerPid $first.Id -AtLeast 1 -Seconds 60
+            if (-not $firstHandles) { throw "検証用の形のウィンドウが 60 秒以内に現れませんでした" }
+            if (-not (Find-RecordLine -Skip $phaseShortcut -Pattern "ウィンドウを開いた: label=empty-1 " -Seconds 10)) {
+              throw "1 枚目のウィンドウが label=empty-1 として記録に現れません"
+            }
+            Write-Host "検証 2/2: 1 枚目: ラベル=empty-1 ハンドル=$(Get-HandleLabel -Handles $firstHandles)"
+
+            $subPhase = @(Get-RecordLines).Count
+            if (-not (Set-ForegroundChecked -Handle $firstHandles[0])) {
+              Write-Host "限界: 1 枚目を前面にできなかった（SetForegroundWindow が効かない環境）。フォーカス先への作用の実測は Linux の段が担う。"
+            } else {
+              [JxcelMenuApi]::SendShortcut()
+              $emptyHit = Find-RecordLine -Skip $subPhase -Pattern "\[検証\] ショートカットが作用した対象ウィンドウ=empty-1$" -Seconds 10
+              if (-not $emptyHit) { throw "1 枚目にフォーカスしたときのショートカットの対象が empty-1 として記録に現れません（ショートカットが作用していないか、対象がフォーカスと一致していません）" }
+              if ((Get-RecordCount -Skip $subPhase -Pattern "\[検証\] ショートカットが作用した対象ウィンドウ=doc-1$") -ne 0) {
+                throw "1 枚目にフォーカスしたのに doc-1 へ作用しました"
+              }
+              Write-Host "検証 2/2: 記録（1 枚目にフォーカス）: $emptyHit"
+            }
+
+            Write-Host "検証 2/2: 同じ検証用の形をドキュメント位置つきで再度実行する（単一インスタンスが引き継ぐ）"
+            $second = Start-Process -FilePath $verify -ArgumentList $document -PassThru
+            if (-not (Wait-Exit -Target $second -Seconds 60)) {
+              throw "2 つ目の起動が 60 秒以内に終了しません（2 つ目が常駐している）"
+            }
+            if ($second.ExitCode -ne 0) { throw "2 つ目の起動が終了コード $($second.ExitCode) で終わった（0 であるべき）" }
+            $allHandles = Wait-Windows -OwnerPid $first.Id -AtLeast ($firstHandles.Count + 1) -Seconds 60
+            if (-not $allHandles) { throw "2 つ目の起動の後、ウィンドウ数が $($firstHandles.Count + 1) 以上になりませんでした" }
+            $newHandles = @($allHandles | Where-Object { $firstHandles -notcontains $_ })
+            if ($newHandles.Count -ne 1) { throw "増えたウィンドウが 1 枚ではありません（$($newHandles.Count) 枚）" }
+            $docLine = Find-RecordLine -Skip $phaseShortcut -Pattern "ウィンドウを開いた: label=doc-" -Seconds 10
+            if (-not $docLine) { throw "新しいウィンドウが label=doc-* として記録に現れません" }
+            $docLabel = (($docLine -split "label=")[1] -split " ")[0]
+
+            # **2 枚目のウィンドウにも自分用のメニューバーがある**（ウィンドウ単位の配置。要件 3.6）。
+            $secondMenu = [JxcelMenuApi]::GetMenu($newHandles[0])
+            if ($secondMenu -eq [IntPtr]::Zero) { throw "2 枚目のウィンドウにメニューバーがありません（ウィンドウ単位のメニューが付いていない）" }
+            $secondTree = Get-MenuTree -Menu $secondMenu
+            Assert-MenuItem $secondTree "ファイル" "検証: 対象ウィンドウを記録`tCtrl+Shift+J" "2 枚目（ウィンドウ単位のメニュー）"
+            Write-Host "検証 2/2: 2 枚目: ラベル=$docLabel ハンドル=$(Get-HandleLabel -Handles $newHandles)（1 枚目とは別のハンドル）"
+
+            $subPhase2 = @(Get-RecordLines).Count
+            if (-not (Set-ForegroundChecked -Handle $newHandles[0])) {
+              Write-Host "限界: 2 枚目を前面にできなかった（SetForegroundWindow が効かない環境）。フォーカス先への作用の実測は Linux の段が担う。"
+            } else {
+              [JxcelMenuApi]::SendShortcut()
+              $docHit = Find-RecordLine -Skip $subPhase2 -Pattern "\[検証\] ショートカットが作用した対象ウィンドウ=$docLabel$" -Seconds 10
+              if (-not $docHit) { throw "2 枚目にフォーカスしたときのショートカットの対象が $docLabel として記録に現れません（フォーカス先へ振り向いていない）" }
+              if ((Get-RecordCount -Skip $subPhase2 -Pattern "\[検証\] ショートカットが作用した対象ウィンドウ=$docLabel$") -ne 1) {
+                throw "2 枚目にフォーカスしたときの作用が 1 回ではありません"
+              }
+              if ((Get-RecordCount -Skip $subPhase2 -Pattern "\[検証\] ショートカットが作用した対象ウィンドウ=empty-1$") -ne 0) {
+                throw "2 枚目にフォーカスしたのに empty-1 へ作用しました（フォーカスされていないウィンドウに作用している）"
+              }
+              Write-Host "検証 2/2: 記録（2 枚目にフォーカス）: $docHit"
+
+              # フォーカスを 1 枚目へ戻すと対象も戻ること（追随すること）。
+              $subPhase3 = @(Get-RecordLines).Count
+              if (Set-ForegroundChecked -Handle $firstHandles[0]) {
+                [JxcelMenuApi]::SendShortcut()
+                $backHit = Find-RecordLine -Skip $subPhase3 -Pattern "\[検証\] ショートカットが作用した対象ウィンドウ=empty-1$" -Seconds 10
+                if (-not $backHit) { throw "フォーカスを 1 枚目へ戻したときの対象が empty-1 として記録に現れません（フォーカスの移動に追随していない）" }
+                if ((Get-RecordCount -Skip $subPhase3 -Pattern "\[検証\] ショートカットが作用した対象ウィンドウ=$docLabel$") -ne 0) {
+                  throw "フォーカスを 1 枚目へ戻したのに $docLabel へ作用しました"
+                }
+                Write-Host "検証 2/2: 記録（フォーカスを 1 枚目へ戻した）: $backHit"
+                Write-Host "OK: Windows: ショートカットの対象はフォーカスに追随した（キー入力の実測）"
+              } else {
+                Write-Host "限界: 1 枚目へ戻す前面化が効かなかったため、追随の実測は行わなかった"
+              }
+            }
+          } finally {
+            Stop-Instance $second
+            Stop-Instance $first
+          }
+
+          if (@(Get-Process -Name "jxcel" -ErrorAction SilentlyContinue).Count -ne 0) {
+            throw "後始末の後に常駐しているインスタンスが残っています"
+          }
+          Write-Host "検証（後始末）: 常駐インスタンス数=0（残存プロセスなし）"
+          Write-Host "OK: Windows: 配布物のメニューバー（項目とアクセラレータの文字列）・WM_COMMAND による活性化の通知・2 枚のウィンドウのフォーカス先への作用を検証した"
+      # ---------------------------------------------------------------------
       # 配布物の検証（tasks.md 10.2 / 要件 6.4, 6.5, 6.6）
       #
       # 生成した配布物から補助プロセスの実行ファイルを取り出し、起動できることを確かめ、

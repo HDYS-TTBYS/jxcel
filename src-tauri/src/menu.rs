@@ -1252,14 +1252,74 @@ fn apply_app_wide<R: Runtime>(app: &AppHandle<R>, model: &MenuModel) -> tauri::R
 ///   [`attach_to_window`] が受ける。
 fn apply<R: Runtime>(app: &AppHandle<R>, model: &MenuModel) -> tauri::Result<()> {
     match PLACEMENT {
-        MenuPlacement::ApplicationWide => apply_app_wide(app, model),
+        MenuPlacement::ApplicationWide => apply_app_wide(app, model)?,
         MenuPlacement::PerWindow => {
             for window in app.webview_windows().values() {
                 apply_to_window(app, window, model)?;
             }
-            Ok(())
         }
     }
+    // **検証専用**: 配置した内容（部分メニューの位置・表示名・基盤へ渡した綴り・配置方式）を
+    // 記録に残す（tasks.md 10.6）。配布物には入らない（`verification-triggers` feature）。
+    #[cfg(feature = "verification-triggers")]
+    record_placement(model);
+    Ok(())
+}
+
+/// **検証専用**: 配置したメニューの内容を 1 行で記録する（tasks.md 10.6 / 要件 3.2, 3.3, 3.6）。
+///
+/// 要件 3.2（登録した項目が指定された位置に表示されること）と要件 3.3（割り当てた
+/// ショートカットがメニュー上に表示されること）は、本来**プラットフォームのメニューを読んで**
+/// 確かめる。Linux は AT-SPI、Windows は Win32 の列挙で読める（`scripts/check-menu-shortcut.sh`
+/// と `ci.yml` の 10.6 節）が、**macOS にはアクセシビリティ許可が無ければメニューを外部から
+/// 読む手段が無い**（CI ランナーは許可を与えない。10.4 が画面収録の許可に依存しない判断を、
+/// 10.5 が閉鎖要求の注入で同じ判断をしている）。
+///
+/// そこで**アプリが実際に組み立てて基盤へ渡した内容**を記録に残す。macOS ではこれが唯一の
+/// 客観的な証拠になり、Linux / Windows では実測（AT-SPI / Win32）と突き合わせる第 2 の証拠に
+/// なる。**「表示」そのものではなく「基盤へ渡した綴り」までである** — 描画は基盤が行う
+/// （7.5 の決定。表示用の別文字列をアプリは持たない）。
+///
+/// [`build_native_item`] も渡した綴りを残すが、あちらは `debug` 水準であり（既定の詳細度
+/// `Info` では記録に残らない）、部分メニューの位置も配置方式も運ばない。**この関数は
+/// `verification-triggers` feature の下にだけコンパイルされる**（5.4 の片付けの規約。
+/// 配布物には 1 行も入らない）。
+#[cfg(feature = "verification-triggers")]
+fn record_placement(model: &MenuModel) {
+    /// 部分メニュー 1 つを平坦化する（`親 > 子` の形で位置を運ぶ）。
+    fn flatten(submenu: &SubmenuNode, prefix: &str, out: &mut Vec<String>) {
+        let path = if prefix.is_empty() {
+            submenu.label().to_owned()
+        } else {
+            format!("{prefix} > {}", submenu.label())
+        };
+        for child in submenu.children() {
+            match child {
+                MenuNode::Item(item) => out.push(format!(
+                    "{}({path} > {}, ショートカット={})",
+                    item.item(),
+                    item.label(),
+                    item.accelerator()
+                        .map(Accelerator::as_str)
+                        .unwrap_or("(なし)"),
+                )),
+                MenuNode::Submenu(nested) => flatten(nested, &path, out),
+            }
+        }
+    }
+    let placement = match PLACEMENT {
+        MenuPlacement::ApplicationWide => "アプリ全体",
+        MenuPlacement::PerWindow => "ウィンドウ単位",
+    };
+    let mut items = Vec::new();
+    for submenu in model.top() {
+        flatten(submenu, "", &mut items);
+    }
+    log::info!(
+        "[検証] メニューを配置した: 配置={placement} 項目数={} 項目={}",
+        items.len(),
+        items.join(" | "),
+    );
 }
 
 // ---------------------------------------------------------------------------
