@@ -31,7 +31,8 @@
 //! タスク 3.1 が宣言層 [`declaration`] のデータ構造（`Schema` / `ColumnDecl` /
 //! `FieldDecl` / `TypeDecl` / `Constraints`）を置いた。タスク 3.2 が不透明ペイロードの
 //! 文法の解析（`declaration::codec` の `parse_schema` / `parse_type_definition`）を置いた。
-//! 正準出力はタスク 3.3 が `declaration::codec` に足す。
+//! タスク 3.3 が同じモジュールに正準出力（`schema_to_text` / `type_definition_to_text`）
+//! を足した。
 
 pub mod declaration;
 pub mod error;

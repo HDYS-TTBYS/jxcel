@@ -16,7 +16,8 @@
 //! 「This Spec Owns」）。その**中身**の文法は本機能が所有し、本モジュールが宣言テキスト
 //! （ルートスキーマの `root` ペイロードと、各型定義の `definition` ペイロード）を
 //! [`Schema`] / [`TypeDecl`](super::TypeDecl) へ読み下す唯一の場所である。正準出力は
-//! `declaration::codec` の出力側（tasks.md 3.3）が受け持つ。
+//! 同じモジュールの出力側（[`schema_to_text`] / [`type_definition_to_text`]。
+//! tasks.md 3.3）が受け持つ。
 //!
 //! 文法は design.md の 3 つの規則に従う:
 //!
@@ -27,6 +28,21 @@
 //!   追跡できる唯一の形であるため、`$ref` に他のキーを併記することも拒否する。
 //! - **既定値はセル値と同一の wire 形**で読む（`document-format` の `value` が定める形。
 //!   `{"$t":"text","v":"…"}` の脱出口を含む）。宣言のための第 2 の値表現を作らない。
+//!   書き出し側も同じ経路（`document-format::to_json_bytes`）を通る。
+//!
+//! # 正準出力（tasks.md 3.3。要件 1.4）
+//!
+//! 上流はこのペイロードを**逐語のバイト列として保持する**（design.md「スキーマ宣言の
+//! 文法」）。したがって「同一内容の宣言が常に同一のバイト列になること」と「宣言 →
+//! テキスト → 宣言で内容が一致すること」は本モジュールの責任である。
+//! [`schema_to_text`] と [`type_definition_to_text`] が満たす:
+//!
+//! - 列とフィールドのキーは宣言順に固定する（`name` → `type` → `required` →
+//!   `unique` → `default` → `description`）。`required` / `unique` は `true` のときだけ
+//!   書く（読みの既定値である `false` を書かない。design.md のルート例と同じ）。
+//! - 余分な空白を含めない。数値・真偽はそのまま、文字列は `serde_json` の脱出を通す。
+//! - 組み立てたテキストは出力の直前に既存の解析器へ通す（文法の規則を書き出し側に
+//!   二重実装しない。上流へ渡せば読み戻せなくなるペイロードを黙って返さない）。
 //!
 //! # 責務の境界 — その場で判定できる既定値の適合（tasks.md 3.2）
 //!
@@ -88,9 +104,12 @@ use crate::types::datetime::{OffsetPolicy, TemporalForm};
 use crate::types::decimal::{self, DecimalDigits};
 use crate::types::text::{TextConstraints, TextPattern};
 use crate::types::{Acceptance, TypeKind};
-use document_format::{from_json_bytes, CellValue, NestedValue, RowId, SheetId, TypeDefId};
+use document_format::{
+    from_json_bytes, to_json_bytes, CellValue, NestedValue, RowId, SheetId, TypeDefId,
+};
 use serde_json::value::RawValue;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::{Display, Write as _};
 use std::str::FromStr;
 
 /// ルートスキーマの `columns` キー。
@@ -1125,6 +1144,316 @@ fn malformed(position: &str, reason: &str) -> SchemaError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 正準出力（tasks.md 3.3。要件 1.4）
+// ---------------------------------------------------------------------------
+
+/// ルートスキーマの宣言を正準テキストへ書き出す（tasks.md 3.3。要件 1.4）。
+///
+/// 上流の `document-format` はこのペイロードを**逐語のバイト列として保持する**ため
+/// （design.md「スキーマ宣言の文法」）、正準形の責任は本関数にある。規則は design.md が
+/// 定める 2 つである:
+///
+/// - 列のキーは宣言順に固定する（`name` → `type` → `required` → `unique` → `default`
+///   → `description`）。
+/// - 余分な空白を含めない。
+///
+/// `required` / `unique` は `true` のときだけ書き、読みの既定値である `false` は書かない
+/// （省略しても読み戻すと同じ値になり、情報は落ちない。design.md のルート例も `false` を
+/// 書いていない）。列を 1 つも持たない宣言（要件 1.8）は `{"columns":[]}` になる。
+/// 名前付き型定義の `definition` ペイロードは [`type_definition_to_text`] が書き出す。
+///
+/// # 出力は常に読み戻せる
+///
+/// 文法の規則（種別ごとに意味を持つパラメータ、`ref` の `sheet`、`datetime` の
+/// `offset`、`array` の `items` の必須、未知のキーの拒否、列名とフィールド名の妥当性、
+/// その場で判定できる既定値の適合）を**書き出し側に二重実装しない**。組み立てたテキストを
+/// そのまま [`parse_schema`] に通すことで、文法に合わない宣言（種別に対して意味を
+/// 持たない位置が設定された [`Constraints`]、空の列名、重複した列名やフィールド名、
+/// 既定値の不適合）は位置つきの [`SchemaError`] として拒否される。上流へ渡せば読み戻せなく
+/// なるペイロードを黙って返さないための、唯一の検査点である。
+pub fn schema_to_text(schema: &Schema) -> Result<String, SchemaError> {
+    let mut writer = Canonical::new();
+    writer.push('{');
+    writer.key(COLUMNS_KEY);
+    writer.push('[');
+    for (index, column) in schema.columns.iter().enumerate() {
+        if index > 0 {
+            writer.push(',');
+        }
+        write_column(&mut writer, column, &format!("{COLUMNS_KEY}[{index}]"))?;
+    }
+    writer.push(']');
+    writer.push('}');
+    let text = writer.finish();
+    // 読み戻し検査（上記「出力は常に読み戻せる」）。
+    parse_schema(&text)?;
+    Ok(text)
+}
+
+/// 名前付き型定義の `definition` ペイロードを正準テキストへ書き出す（tasks.md 3.3。要件 1.4）。
+///
+/// 位置は [`parse_type_definition`] と同じく `definition` を起点に付ける。書き出しの規則と
+/// 読み戻し検査は [`schema_to_text`] と同じである（型定義側は [`parse_type_definition`] に
+/// 通す）。
+pub fn type_definition_to_text(ty: &TypeDecl) -> Result<String, SchemaError> {
+    let mut writer = Canonical::new();
+    write_type(&mut writer, ty, TYPE_DEFINITION_POSITION)?;
+    let text = writer.finish();
+    // 読み戻し検査（`schema_to_text` の docs「出力は常に読み戻せる」）。
+    parse_type_definition(&text)?;
+    Ok(text)
+}
+
+/// 列 1 つを書く。キーの順序は design.md「スキーマ宣言の文法」が定めるものである。
+fn write_column(
+    writer: &mut Canonical,
+    column: &ColumnDecl,
+    position: &str,
+) -> Result<(), SchemaError> {
+    writer.push('{');
+    writer.key(NAME_KEY);
+    writer.string(&column.name);
+    writer.next_key(TYPE_KEY);
+    write_type(writer, &column.ty, &child(position, TYPE_KEY))?;
+    if column.required {
+        writer.next_key(REQUIRED_KEY);
+        writer.boolean(true);
+    }
+    if column.unique {
+        writer.next_key(UNIQUE_KEY);
+        writer.boolean(true);
+    }
+    if let Some(value) = &column.default {
+        writer.next_key(DEFAULT_KEY);
+        writer.cell(value, &child(position, DEFAULT_KEY))?;
+    }
+    if let Some(description) = &column.description {
+        writer.next_key(DESCRIPTION_KEY);
+        writer.string(description);
+    }
+    writer.push('}');
+    Ok(())
+}
+
+/// 入れ子のフィールド 1 つを書く（`unique` を持たない。tasks.md 3.1 の申し送り）。
+fn write_field(
+    writer: &mut Canonical,
+    field: &FieldDecl,
+    position: &str,
+) -> Result<(), SchemaError> {
+    writer.push('{');
+    writer.key(NAME_KEY);
+    writer.string(&field.name);
+    writer.next_key(TYPE_KEY);
+    write_type(writer, &field.ty, &child(position, TYPE_KEY))?;
+    if field.required {
+        writer.next_key(REQUIRED_KEY);
+        writer.boolean(true);
+    }
+    if let Some(value) = &field.default {
+        writer.next_key(DEFAULT_KEY);
+        writer.cell(value, &child(position, DEFAULT_KEY))?;
+    }
+    if let Some(description) = &field.description {
+        writer.next_key(DESCRIPTION_KEY);
+        writer.string(description);
+    }
+    writer.push('}');
+    Ok(())
+}
+
+/// 型 1 つを書く（design.md の文法の「`kind` を持つか `$ref` を持つかのいずれか一方」）。
+fn write_type(writer: &mut Canonical, ty: &TypeDecl, position: &str) -> Result<(), SchemaError> {
+    writer.push('{');
+    match ty {
+        TypeDecl::Ref(id) => {
+            writer.key(REF_KEY);
+            writer.string(&id.to_string());
+        }
+        TypeDecl::Kind { kind, constraints } => {
+            writer.key(KIND_KEY);
+            match kind {
+                DeclaredKind::Known(kind) => writer.string(kind_token(*kind)),
+                // 未知の種別はそのトークンのまま書き戻す（要件 11.7）。往復でトークンが
+                // 変わると、その列を使用不能にする判断を `compile` 層（タスク 4.4）が
+                // 下せなくなる。
+                DeclaredKind::Unknown(token) => writer.string(token),
+            }
+            write_constraints(writer, constraints, position)?;
+        }
+    }
+    writer.push('}');
+    Ok(())
+}
+
+/// 型のパラメータ（値の制約）を、設定されている位置だけ書く。
+///
+/// 順序はここが**唯一の源**である（`precision` / `scale` → `min` / `max` →
+/// `minLength` / `maxLength` → `pattern` → `choices` → `sheet` → `offset` → `fields` →
+/// `items` / `minItems` / `maxItems` → `type`）。設計の型カタログ表（design.md
+/// 「組込型カタログと `CellValue` への写像」）の「パラメータ」欄が挙げる位置を、
+/// 種別をまたいで 1 つの順序に畳んだものである。
+///
+/// **その種別で意味を持たない位置も、設定されていれば書く**（書き出し側に種別ごとの
+/// 可否表を持ち込まない）。読み戻し検査が位置つきで拒否するため、黙って落ちることはない。
+fn write_constraints(
+    writer: &mut Canonical,
+    constraints: &Constraints,
+    position: &str,
+) -> Result<(), SchemaError> {
+    if let Some(digits) = &constraints.digits {
+        writer.next_key(PRECISION_KEY);
+        writer.number(digits.precision());
+        writer.next_key(SCALE_KEY);
+        writer.number(digits.scale());
+    }
+    if let Some(value) = &constraints.min {
+        writer.next_key(MIN_KEY);
+        writer.cell(value, &child(position, MIN_KEY))?;
+    }
+    if let Some(value) = &constraints.max {
+        writer.next_key(MAX_KEY);
+        writer.cell(value, &child(position, MAX_KEY))?;
+    }
+    if let Some(value) = constraints.min_length {
+        writer.next_key(MIN_LENGTH_KEY);
+        writer.number(value);
+    }
+    if let Some(value) = constraints.max_length {
+        writer.next_key(MAX_LENGTH_KEY);
+        writer.number(value);
+    }
+    if let Some(pattern) = &constraints.pattern {
+        writer.next_key(PATTERN_KEY);
+        writer.string(pattern);
+    }
+    if !constraints.choices.is_empty() {
+        writer.next_key(CHOICES_KEY);
+        writer.push('[');
+        for (index, choice) in constraints.choices.iter().enumerate() {
+            if index > 0 {
+                writer.push(',');
+            }
+            writer.string(choice);
+        }
+        writer.push(']');
+    }
+    if let Some(sheet) = &constraints.sheet {
+        writer.next_key(SHEET_KEY);
+        writer.string(&sheet.to_string());
+    }
+    if let Some(offset) = constraints.offset {
+        writer.next_key(OFFSET_KEY);
+        writer.string(offset_token(offset));
+    }
+    if !constraints.fields.is_empty() {
+        let fields_position = child(position, FIELDS_KEY);
+        writer.next_key(FIELDS_KEY);
+        writer.push('[');
+        for (index, field) in constraints.fields.iter().enumerate() {
+            if index > 0 {
+                writer.push(',');
+            }
+            write_field(writer, field, &format!("{fields_position}[{index}]"))?;
+        }
+        writer.push(']');
+    }
+    if let Some(items) = &constraints.items {
+        writer.next_key(ITEMS_KEY);
+        write_type(writer, items, &child(position, ITEMS_KEY))?;
+    }
+    if let Some(value) = constraints.min_items {
+        writer.next_key(MIN_ITEMS_KEY);
+        writer.number(value);
+    }
+    if let Some(value) = constraints.max_items {
+        writer.next_key(MAX_ITEMS_KEY);
+        writer.number(value);
+    }
+    if let Some(custom) = &constraints.custom_type {
+        writer.next_key(TYPE_KEY);
+        writer.string(custom);
+    }
+    Ok(())
+}
+
+/// 日時のオフセットの扱いのトークン（`offset_at` が読む 2 値の書き出し側。要件 2.4）。
+fn offset_token(policy: OffsetPolicy) -> &'static str {
+    match policy {
+        OffsetPolicy::Forbidden => "forbidden",
+        OffsetPolicy::Required => "required",
+    }
+}
+
+/// 正準テキストを組み立てる書き手（余分な空白を入れない唯一の場所。tasks.md 3.3）。
+///
+/// JSON の文字列の脱出（`"` と制御文字）は解析と同じ `serde_json` に委ねる（独自の脱出を
+/// 書かない）。キーは本モジュールの定数だけであり、脱出を要しない。
+struct Canonical {
+    out: String,
+}
+
+impl Canonical {
+    /// 空の書き手を作る。
+    fn new() -> Self {
+        Self { out: String::new() }
+    }
+
+    /// 組み立てたテキストを取り出す。
+    fn finish(self) -> String {
+        self.out
+    }
+
+    /// 区切り（`{` / `}` / `[` / `]` / `,` / `:`）を 1 文字書く。
+    fn push(&mut self, ch: char) {
+        self.out.push(ch);
+    }
+
+    /// `"<key>":` を書く。
+    fn key(&mut self, key: &str) {
+        self.push('"');
+        self.out.push_str(key);
+        self.out.push_str("\":");
+    }
+
+    /// 要素の区切りの `,` とキーを書く。
+    fn next_key(&mut self, key: &str) {
+        self.push(',');
+        self.key(key);
+    }
+
+    /// 文字列を JSON の文字列として書く。
+    fn string(&mut self, text: &str) {
+        self.out
+            .push_str(&serde_json::to_string(text).expect("文字列は常に書ける"));
+    }
+
+    /// `true` / `false` を書く。
+    fn boolean(&mut self, value: bool) {
+        self.out.push_str(if value { "true" } else { "false" });
+    }
+
+    /// 数を書く（`Display` を直接書き込み、中間の `String` を作らない）。
+    fn number(&mut self, value: impl Display) {
+        write!(self.out, "{value}").expect("String への書き込みは失敗しない");
+    }
+
+    /// セル値を wire 形で書く（宣言のための第 2 の表現を作らない。design.md
+    /// 「既定値はセル値と同一の wire 形」）。
+    ///
+    /// 非有限の浮動小数は JSON に表せないため、`document-format` の検査経路
+    /// （[`to_json_bytes`]）の判断をそのまま誤りとして運ぶ。
+    fn cell(&mut self, value: &CellValue, position: &str) -> Result<(), SchemaError> {
+        let bytes = to_json_bytes(value, position).map_err(|error| {
+            malformed(position, &format!("the value cannot be written: {error}"))
+        })?;
+        self.out
+            .push_str(std::str::from_utf8(&bytes).expect("JSON の出力は UTF-8"));
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1727,8 +2056,8 @@ mod tests {
             SchemaError::MalformedDeclaration { position, reason } => {
                 assert_eq!("definition.fields[2].name", position);
                 assert!(
-                    reason.contains("duplicate") && reason.contains('a'),
-                    "重複した名前を含む: {reason}"
+                    reason.contains("duplicate") && reason.contains("`a`"),
+                    "重複した名前そのものを含む: {reason}"
                 );
             }
             other => panic!("MalformedDeclaration のはず: {other:?}"),
