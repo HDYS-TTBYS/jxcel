@@ -29,6 +29,14 @@
  * ときも同じ（警告して既定へ落ちる）。**9.6 の受け入れ（ドキュメントを関連付けていない
  * ウィンドウの導線）は退行しない。**
  *
+ * **加えて、配布物のフロントエンドには本モジュールが 1 バイトも入らない。** cargo の feature は
+ * TypeScript を括れないため、`src/shell/Layout.tsx` の呼び出しは Vite の `define`
+ * （`vite.config.ts` の `__JXCEL_VERIFICATION__`）で括ってある。既定のビルド（`false`）では
+ * その条件式が定数畳み込みで `null` になり、参照されなくなった本モジュール（および
+ * `__JXCEL_VERIFICATION_INITIAL_SCREEN__` の綴り）はバンドルから落ちる
+ * （`scripts/check-shipping-bundle.sh` が機械検査する）。検証用の形は
+ * `JXCEL_VERIFICATION_BUILD=1` でビルドする。
+ *
  * # 通知との関係（10.1、10.2）
  *
  * 描画成立の通知の送信側は `src/shell/renderHeartbeat.ts` 1 本であり、**画面ごとではなく

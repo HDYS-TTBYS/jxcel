@@ -54,7 +54,7 @@
 - **`src-tauri/` は `crates/app-shell/` にのみ依存する**。業務ロジックを持たない
 - **`src/shared/` は Tauri の通信境界に依存してはならない**。`window.__TAURI__` への参照が現れたら誤りである
 - 依存の向きは **`crates/app-shell/`（コア） → `src-tauri/`（アダプタ） → `src/`（フロント）** の一方向であり、逆流を許容しない
-- 外部依存の下限: `tauri >= 2.11.3`、`tauri-plugin-single-instance >= 2.4.3`
+- 外部依存の下限: `tauri >= 2.11.3`、`tauri-plugin-single-instance >= 2.4.3`、ファイル選択の `gtk >= 0.18`（Linux のみ）と `rfd >= 0.17`（Windows / macOS のみ）。**Tauri 公式の dialog プラグインは採用しない**（理由は Technology Stack。決定 3 / タスク 7.7）
 
 ### Revalidation Triggers
 
@@ -63,8 +63,9 @@
 - **IPC の型定義またはコマンド名の変更** — 生成される `bindings.ts` が変わり、フロント側の全利用者が影響を受ける
 - **コマンド登録の根（`src-tauri/src/commands/mod.rs`）の構造変更** — 全機能スペックが自分のコマンドをここに列挙するため、共有の継ぎ目である
 - **サイドカーの配置方式の変更** — `macro-editor-lsp` の配布形態の前提が変わる
+- **macOS の事前署名を伴わないサイドカーの追加・変更** — macOS のバンドラは同梱した外部バイナリを必ず再署名するため、事前署名の無いサイドカーはバンドル処理で**バイトが変わり**、要件 6.5 のバイト比較と要件 5.3 の実行時照合（不整合なら起動を中止する）が静かに破れる。**サイドカーを増やすスペックは `scripts/stage-sidecars.sh` の macOS 事前署名（一時ディレクトリ・同梱名 `sidecar-smoke` のベース名・`codesign --force -s - --options runtime`）と同じ扱いを用意すること**
 - **`DocumentHost` ポートの契約変更** — ウィンドウとドキュメントを結ぶ機能が影響を受ける
-- **capability / permission の追加** — フロントエンドの到達範囲が広がるため、要件 4.7 の機械検査を再確認する
+- **capability / permission の追加** — フロントエンドの到達範囲が広がるため、要件 4.7 の機械検査を再確認する。**現在の集合は `core:default` / `core:window:allow-destroy`（終了拒否を解除した後にフロントエンドが `destroy()` を呼ぶ経路。タスク 7.6）/ 自前コマンドの `app-shell` である**。追加はこの一覧の更新として扱う
 - **フロントエンドのシェル領域の定義変更** — 全 UI スペックが差し込み先を失う
 - **`tauri` メジャーバージョンの更新、または `dynamic-acl` feature の無効化** — 権限モデルの前提が変わる
 - **描画の代替経路の適用規則（`render.fallback` の消去条件）の変更** — 印は 1 つの真偽値で、消去は `Painted` の観測に結びついている（タスク 8.2 / 8.3）。**この規則は、採用中の回避策の下で `Painted`（通常の描画経路）が観測される環境では、適用と不適用が起動ごとに交互に振動する**（代替経路が描画を成立させている場合、次の起動は適用せず `NoPaint` に戻り、その次にまた適用される）。`SoftwareRaster` で印を下ろさない規則が防ぐのは、回避策の下でソフトウェア描画に落ちる型の振動だけである。振動を消すには「代替経路を適用した起動での成功」と「適用しない起動での成功」を区別する状態が要る（設計変更）。**後続スペックが描画の健全性を扱うときは、この残余を前提に判断すること**（`crates/app-shell/src/render.rs` の「残る仮定」に実測の記録がある）
@@ -99,6 +100,8 @@ graph TB
         AcceleratorRegistry
         SettingsStore
         DiagnosticsPolicy
+        RenderJudgment
+        RenderFallbackPolicy
     end
 
     ShellLayout --> IpcClient
@@ -120,12 +123,17 @@ graph TB
     SidecarHost --> SidecarIntegrity
     SidecarHost --> SidecarSupervisor
     RenderWatchdog --> DiagnosticsPolicy
+    RenderWatchdog --> RenderJudgment
+    AppLifecycle --> RenderFallbackPolicy
+    RenderJudgment --> SettingsStore
+    RenderFallbackPolicy --> SettingsStore
     SidecarSupervisor --> DiagnosticsPolicy
 ```
 
 **Architecture Integration**:
 
-- **選定パターン**: Tauri 非依存コア + 薄いアダプタ。steering の「エンジンと UI の分離」をディレクトリ構造で強制する規則をそのまま適用した。`Core` の 6 コンポーネントはすべて GUI を起動せずにテストできる
+- **選定パターン**: Tauri 非依存コア + 薄いアダプタ。steering の「エンジンと UI の分離」をディレクトリ構造で強制する規則をそのまま適用した。`Core` のコンポーネントはすべて GUI を起動せずにテストできる
+- **`RenderWatchdog` はアダプタとコアに分かれる**（図では `RenderJudgment` / `RenderFallbackPolicy` がコア側）。**初回描画の判定（三値）と印の消去規則は `crates/app-shell/src/render.rs`**、**代替経路（回避策の環境変数）の選択と次回起動での適用は `crates/app-shell/src/render_fallback.rs`** が持ち、アダプタ（`src-tauri/src/watchdog.rs` と `AppLifecycle`）が実時計・記録先・適用点を注入する。判定を GUI 無しで決定的に検証するための分割である（タスク 8.2 / 8.3 の完了状態）
 - **依存の向き**: `Core → TauriAdapter → Frontend`。左のレイヤーのみを import する。`SharedAssets` はどこにも依存しない（図に流入辺がないことが契約である）
 - **境界の分離理由**: プロセス監督・整合性検査・ショートカット競合検査・設定の原子的書き込みはいずれも Tauri の不具合と独立に検証したい対象である。Tauri のプラグインがこれらを埋めていない（後述）以上、自前実装は避けられず、ならば GUI 非依存の場所に置く
 - **`SharedAssets` が孤立している理由**: フォームレンダラのようにデスクトップ内と LAN 配信の Web ページの両方で動く資産の置き場である。ここに IPC 依存が入ると `form-web-server` が成立しない（要件 9.6）
@@ -138,7 +146,8 @@ graph TB
 | Frontend | React 19 + Vite 7 + TypeScript 5 | シェル構造、遷移、外観、スモーク画面 | SPA。Tauri は SSR 非対応。React の選定理由は決定 8（`monaco-languageclient` の一次ラッパが React のみ） |
 | Frontend 型 | `ts-rs` 12.0.1 の生成物 | 境界を越える型の TypeScript 表現 | 生成物をコミットする。lint の `no-explicit-any` 対象外にはしない（生成物に `any` は入らない） |
 | Shell | `tauri` 2.11.5（下限 2.11.3） | ウィンドウ、IPC、バンドル | 2.11.1 に security fix 2 件。2.11.3 で起動性能改善 |
-| Shell プラグイン | `tauri-plugin-single-instance` 2.4.4（下限 2.4.3）、`tauri-plugin-dialog` 2.7.3、`tauri-plugin-log` 2.9.1 | 単一インスタンス、ファイル選択、ログ | `tauri-plugin-fs` と `tauri-plugin-shell` は**依存に入れない**（決定 3） |
+| Shell プラグイン | `tauri-plugin-single-instance` 2.4.4（下限 2.4.3）、`tauri-plugin-log` 2.9.1 | 単一インスタンス、ログ | `tauri-plugin-fs` と `tauri-plugin-shell` は**依存に入れない**（決定 3）。**Tauri 公式の dialog プラグインも採用しない** — 2.0.0〜2.7.3 のすべてで `tauri-plugin-fs` を非 optional の通常依存に持ち、下の行の理由で要件 4.7 の第一の制御を破る |
+| ファイル選択 | `gtk` 0.18（Linux のみ）、`rfd` 0.17（Windows / macOS のみ） | 親ウィンドウ付きネイティブダイアログ（要件 2.4） | **Tauri 公式の dialog プラグインを採らない理由は 2 つ**（タスク 7.7 の実測）: (a) `tauri-plugin-fs` を非 optional に引き込み、要件 4.7 の第一の制御「fs プラグインが依存木に無い」を破る。(b) その Linux 経路は `rfd` 0.16 の GTK3 を呼び、**親ウィンドウを NULL に固定する**ため要件 2.4 の親指定を満たせない（`rfd` 0.17 の GTK3 経路も同じ。`gtk_file_chooser_native_new` に親を渡さない）。採用は Linux の `gtk` 0.18 `FileChooserNative` と Windows / macOS の `rfd` 0.17（`set_parent` が実際に効く）。`Cargo.lock` に増えるのは `rfd` のみで、`cargo tree -p jxcel` に fs / dialog / shell のプラグインは 0 件である |
 | Core | Rust 2021、`serde` / `serde_json`、`sha2`、`thiserror` | 監督・整合性・設定・診断 | `crates/app-shell/`。tauri 非依存 |
 | Core プラットフォーム | `windows-sys`（Job Object）、`libc`（プロセスグループ） | サイドカーの終了保証 | `cfg` で分岐。決定 5 |
 | Infrastructure | GitHub Actions（既存 `ci.yml` を拡張） | 3 OS ビルド、整合性検査、起動時間計測 | 新設しない（要件 6.2） |
@@ -177,7 +186,9 @@ crates/app-shell/                   # Tauri 非依存のコア。GUI なしで�
 │   │   ├── mod.rs                  # キー空間・既定値・未知キー保持・変更通知
 │   │   └── atomic.rs               # temp + rename + fsync
 │   ├── accelerator.rs              # ショートカットの一意性検査
-│   └── diagnostics.rs              # ログ保持方針・秘匿規則・書き出し束ね
+│   ├── diagnostics.rs              # ログ保持方針・秘匿規則・書き出し束ね
+│   ├── render.rs                   # 初回描画の判定（三値）と印の消去規則。時計・記録先を注入
+│   └── render_fallback.rs          # 代替経路の選択と次回起動での適用（要件 10.3）
 └── tests/
     ├── bindings_drift.rs           # export_to_string とコミット済み .ts のバイト比較
     ├── sidecar_lifecycle.rs        # 終了保証と孤児不在の検証
@@ -189,7 +200,7 @@ src-tauri/                          # Tauri アダプタ。業務ロジックを
 ├── Cargo.toml
 ├── build.rs
 ├── tauri.conf.json                 # externalBin / appimage.files / CSP / removeUnusedCommands
-├── capabilities/default.json       # core:default のみ。fs と shell を含めない
+├── capabilities/default.json       # core:default + core:window:allow-destroy + app-shell。fs と shell を含めない
 ├── permissions/app.toml            # __app-acl__ を有効化し自前コマンドを ACL 対象にする
 └── src/
     ├── main.rs                     # 環境変数 → single-instance → Builder → run の順序を固定する
@@ -205,7 +216,7 @@ src-tauri/                          # Tauri アダプタ。業務ロジックを
     │   └── bulk.rs                 # 生バイト応答の経路
     ├── sidecar_host.rs             # プラットフォーム別パス解決と supervisor の束ね
     ├── dialog.rs                   # 親ウィンドウを指定したネイティブダイアログ
-    ├── watchdog.rs                 # 初回描画ハートビート
+    ├── watchdog.rs                 # 初回描画ハートビート（アダプタ側。判定と印は crates/app-shell/src/render*.rs）
     └── ports.rs                    # DocumentHost ポートと既定実装
 
 src/                                # フロントエンド
@@ -226,6 +237,7 @@ src/                                # フロントエンド
         └── EditorSmoke.tsx         # 文字編集を伴う描画
 
 scripts/
+├── stage-sidecars.sh               # サイドカー原本の配置（唯一の文書化された手順。macOS は事前署名）
 ├── check-capabilities.sh           # gen/schemas/capabilities.json の機械検査
 ├── check-shared-assets.sh          # src/shared/ が通信境界に依存していないことの検査
 ├── check-startup-budget.sh         # 起動 2 秒予算の判定
@@ -331,7 +343,7 @@ stateDiagram-v2
 | 2.7 | 位置とサイズの記憶と復元 | WindowManager, SettingsStore | `geometry` | 終了拒否 |
 | 2.8 | 最後のウィンドウで終了 | AppLifecycle | `RunEvent` 処理 | — |
 | 2.9 | 常駐慣習を持つ環境では常駐 | AppLifecycle | `RunEvent::ExitRequested` | — |
-| 2.10 | 生成失敗が他に波及しない | WindowManager | `WindowError` | — |
+| 2.10 | 生成失敗が他に波及しない | WindowManager | `WindowManager::open`（失敗は記録と登録の巻き戻し。専用の型は持たない） | — |
 | 3.1 | メニューの登録口 | MenuSurface | `MenuRegistry::register` | — |
 | 3.2 | 登録項目の表示と通知 | MenuSurface | `MenuRegistry` | — |
 | 3.3 | ショートカットの割当と表示 | MenuSurface, AcceleratorRegistry | `Accelerator` | — |
@@ -342,7 +354,7 @@ stateDiagram-v2
 | 4.2 | 型は単一定義から | IpcContract, IpcClient | `bindings.ts` | — |
 | 4.3 | 不一致でビルド失敗 | IpcContract, BuildPipeline | `bindings_drift.rs` + `tsc --noEmit` | — |
 | 4.4 | 失敗を成功と区別できる形で返す | IpcContract, CommandSurface | `IpcError` | — |
-| 4.5 | 10 万行を 1 回の呼び出しで | CommandSurface | `BulkResponse` | — |
+| 4.5 | 10 万行を 1 回の呼び出しで | CommandSurface | `tauri::ipc::Response`（生バイト）と `invokeRaw` — 封筒の規則の意図的な例外 | — |
 | 4.6 | 呼び出し元ウィンドウの識別 | CommandSurface, WindowManager | `WindowContext` | — |
 | 4.7 | 任意のファイル・プロセス経路を与えない | CommandSurface, BuildPipeline | `check-capabilities.sh` | — |
 | 5.1 | 補助プロセスの同梱 | SidecarIntegrity, SidecarHost | `tauri.conf.json` | サイドカー起動 |
@@ -387,6 +399,8 @@ stateDiagram-v2
 | 10.3 | 代替経路での起動と記録 | RenderWatchdog, AppLifecycle | 環境変数の条件付き適用 | 初回描画の監視 |
 | 10.4 | 3 OS 描画確認の最小画面 | SmokeScreens | `TableSmoke` / `EditorSmoke` | — |
 
+**Interfaces 列の名前について**: `WindowError` と `BulkResponse` は実装に存在せず、それぞれ「専用の型を持たず記録と登録の巻き戻しで報告する（2.10）」と「`tauri::ipc::Response` の生バイト経路に置き換わった（4.5）」を表す。この列は設計上の契約名であり、実装の入口名と一致しない場合がある — `WindowManager::open_empty` / `open_for` は `src-tauri/src/window/mod.rs` の `open(app, WindowRequest::Empty | Document(..))`、`DialogGate::pick_document` は `src-tauri/src/dialog.rs` の `pick_document_file`（コマンド名も同名）、`SidecarHost::resolve` は `src-tauri/src/sidecar_host.rs` の `resolve_executable` が実装である。名前が実装に見つからない場合は各コンポーネントの節と実ファイルを参照すること
+
 ## Components and Interfaces
 
 | Component | Domain/Layer | Intent | Req Coverage | Key Dependencies | Contracts |
@@ -403,8 +417,8 @@ stateDiagram-v2
 | MenuSurface | Adapter | メニューの登録口とプラットフォーム差の吸収 | 3.1, 3.2, 3.5, 3.6 | AcceleratorRegistry (P0), WindowManager (P1) | Service |
 | CommandSurface | Adapter | コマンドの面・エラー封筒・一括経路 | 4.1, 4.4, 4.5, 4.6, 4.7, 7.4 | IpcContract (P0) | Service, Event |
 | SidecarHost | Adapter | プラットフォーム別パス解決 | 5.1, 5.2, 5.3, 5.5 | SidecarSupervisor (P0) | Service |
-| DialogGate | Adapter | 親ウィンドウ付きネイティブダイアログ | 2.4 | tauri-plugin-dialog (P1) | Service |
-| RenderWatchdog | Adapter | 初回描画の監視と判定 | 10.1, 10.2, 10.3 | DiagnosticsPolicy (P1) | Service, Event |
+| DialogGate | Adapter | 親ウィンドウ付きネイティブダイアログ | 2.4 | gtk 0.18 (Linux) / rfd 0.17 (Windows / macOS) (P0)。**Tauri 公式の dialog プラグインは使わない**（`tauri-plugin-fs` を非 optional に引き込み、Linux では親を指定できない） | Service |
+| RenderWatchdog | Adapter + Core | 初回描画の監視と判定 | 10.1, 10.2, 10.3 | render.rs / render_fallback.rs (P0), DiagnosticsPolicy (P1) | Service, Event |
 | DocumentHostPort | Adapter | ドキュメント所有者への委譲点 | 2.1, 2.6 | なし | Service |
 | ShellLayout | Frontend | 領域・遷移・外観・エラー隔離 | 9.1〜9.5 | React (P0) | State |
 | IpcClient | Frontend | 生成された型の上の薄いラッパ | 4.1, 4.2, 4.4 | bindings.ts (P0) | Service |
@@ -458,6 +472,11 @@ pub enum IpcError {
     Sidecar { message: String },
     #[error("ウィンドウを生成できない")]
     Window { message: String },
+    /// 診断情報の提示・書き出しに失敗した（タスク 9.5 で追加。要件 8.1、8.6）。
+    /// **設定の失敗と混ぜない** — 保存先の解決と書き出しは設定ストアを通らないため、
+    /// 原因を区別できるように分ける（要件 4.4）。
+    #[error("診断情報を扱えない")]
+    Diagnostics { message: String },
 }
 
 /// 生成物とコミット済みファイルの一致を検査する入口。
@@ -525,8 +544,11 @@ pub enum SpawnError {
     NotFound { path: PathBuf },
     #[error("実行権限がない")]
     NotExecutable { path: PathBuf },
+    /// 原因（内容不一致 / 読み取り不能 / 期待値が未登録）は `IntegrityError` が区別する。
+    /// **`source` は上の列挙に対する追加である** — 5.3 が求める期待値と実測値を報告から
+    /// 落とさないため（タスク 3.2）。
     #[error("整合性検査に失敗した")]
-    IntegrityMismatch { path: PathBuf },
+    IntegrityMismatch { path: PathBuf, source: IntegrityError },
     #[error("プロセスの起動に失敗した")]
     Spawn { message: String },
 }
@@ -571,12 +593,17 @@ pub enum IntegrityError {
     Mismatch { kind: SidecarKind, expected: String, actual: String },
     #[error("補助プロセスを読み取れない")]
     Unreadable { path: PathBuf },
+    /// その種類の期待値がビルド時に埋め込まれていない（原本が未配置のビルド）。
+    /// **内容不一致とも読み取り不能とも区別する** — 混同すると、期待値の無いビルドが
+    /// 沈黙して通るか、原因を誤って報告する（タスク 1.7 の申し送りで追加。要件 5.3）。
+    #[error("補助プロセスの期待ダイジェストが登録されていない")]
+    Unregistered { kind: SidecarKind, path: PathBuf },
 }
 ```
 
 **Implementation Notes**
 - Integration: 同じ定数を `scripts/check-sidecar-integrity.sh` が CI で参照し、**バンドル後**の配布物から取り出したファイルと照合する（要件 6.5）。すなわち実行時の防御と CI のカナリアが同一の値を共有する
-- Risks: これは Linux のバンドル処理が実行ファイルを書き換える既知の問題に対する検出器である。回避配置（決定 4）が破れた日に、静かにではなく明確に落ちる
+- Risks: これは**バンドル処理が同梱した実行ファイルを書き換える**既知の問題に対する検出器である — Linux は linuxdeploy が `usr/bin` 配下の ELF を無条件に patchelf で書き換え（回避配置は決定 4）、macOS はバンドラが外部バイナリを再署名してバイトを変える（回避は `scripts/stage-sidecars.sh` の事前署名）。回避策が破れた日に、静かにではなく明確に落ちる
 
 #### SettingsStore
 
@@ -600,6 +627,9 @@ pub enum IntegrityError {
 ##### Service Interface
 
 ```rust
+/// 設定ストアの契約。メソッドがジェネリックであるため **object-safe ではない** —
+/// `Arc<dyn SettingsStore>` は作れない（E0038）。共有実体は具象型 `Arc<FileSettingsStore>`
+/// として持つ（design の `Arc<dyn SettingsStore>` はこの理由で実装できない。タスク 4.1）。
 pub trait SettingsStore: Send + Sync {
     fn get<T: serde::de::DeserializeOwned>(&self, key: &SettingsKey) -> Option<T>;
     fn set<T: serde::Serialize>(&self, key: &SettingsKey, value: &T) -> Result<(), SettingsError>;
@@ -607,11 +637,14 @@ pub trait SettingsStore: Send + Sync {
     fn subscribe(&self) -> Receiver<SettingsChanged>;
 }
 
-pub fn open(dir: &Path) -> (Arc<dyn SettingsStore>, Option<RecoveredFrom>);
+/// 同一ディレクトリにつき 1 つの実体を共有して返す。内容の失敗は `Err` にせず、既定値で
+/// 起動して復旧の事実を `OpenReport`（design の `Option<RecoveredFrom>` に対応する受け口）に
+/// 載せる（要件 7.5）。`Err` は保存先ディレクトリを用意できない場合だけである。
+pub fn open(directory: &Path) -> Result<(Arc<FileSettingsStore>, OpenReport), SettingsError>;
 ```
 
 - Preconditions: `dir` は各 OS 標準のアプリケーションデータ領域である
-- Postconditions: `open` は必ず利用可能なストアを返す。破損時は `RecoveredFrom` に事実を載せる（要件 7.5）
+- Postconditions: 設定の**内容**を読めない場合は `Err` を返さない（既定値で起動し、`OpenReport::recovered_from` に事実を載せる。要件 7.5）。保存先ディレクトリを用意できない場合だけ `Err(SettingsError)` を返し、呼び出し元（アダプタ）が要件 1.4 の前提不成立として扱う
 - Invariants: 保存されたファイルは、書き込みの途中でプロセスが落ちても、直前の完全な内容か新しい完全な内容のいずれかである
 
 ##### State Management
@@ -658,7 +691,7 @@ pub fn open(dir: &Path) -> (Arc<dyn SettingsStore>, Option<RecoveredFrom>);
 |---|---|---|---|
 | WindowManager | ウィンドウの生成とレジストリの保持 | 2.1, 2.2, 2.3, 2.5, 2.7, 2.10, 4.6 | **ウィンドウ生成は非同期でなければならない。**同期コマンドおよびイベントハンドラ内での生成は Windows でデッドロックする。ウィンドウ単位の状態管理機構は Tauri に存在しないため、ラベルをキーとするレジストリを保持する。ラベル規約は `doc-<連番>` と `empty-<連番>` であり、位置とサイズの記憶は**この規約に依存せず単一のキーへ束ねる** |
 | WindowCloseGate | 終了拒否の仲介 | 2.6 | 拒否の可否は非ブロッキングに読まれるため、待ってから拒否することはできない。非同期の可否問い合わせはフロントエンド側のリスナ経路に載せる。確定後は `destroy` のみを使う（`close` は終了要求を再発火し拒否に再突入する） |
-| DocumentHostPort | ドキュメント所有者への委譲点 | 2.1, 2.6 | `trait DocumentHost { fn may_close(&self, window: &WindowId) -> CloseVerdict; fn attach(&self, window: &WindowId, path: &Path) -> Result<(), AttachError>; }`。**既定実装は常に許可し、パスを受け取っても何もしない。**下流スペックが差し替える。このポートの所有権は本スペックにある |
+| DocumentHostPort | ドキュメント所有者への委譲点 | 2.1, 2.6 | `trait DocumentHost { fn may_close(&self, window: &WindowLabel) -> CloseVerdict; fn attach(&self, window: &WindowLabel, path: &Path) -> Result<(), AttachError>; }`（`WindowLabel` は `app_shell::ipc::WindowLabel`。design の模式図の `WindowId` という型は存在せず、ウィンドウの識別子は既に通信境界（`WindowContext`）とレジストリの両方で `WindowLabel` として単一定義になっているため、3 つ目の識別子を作らない。タスク 6.2）。**既定実装は常に許可し、パスを受け取っても何もしない。**下流スペックが差し替える。このポートの所有権は本スペックにある |
 
 WindowManager は位置とサイズをウィンドウを閉じた時点で保存する。採用を見送ったプラグインは終了イベントでのみ書き出すため、通常の終了経路以外で失われる。
 
@@ -671,7 +704,7 @@ WindowManager は位置とサイズをウィンドウを閉じた時点で保存
 
 **Responsibilities & Constraints**
 - **コマンド登録の根は全機能スペックの共有継ぎ目である。**ハンドラの一覧はコンパイル時に集中して列挙する必要があり、完全な動的登録はできない。各機能は自分のモジュールにコマンド関数を持ち、根はそれを列挙するだけに留める
-- すべてのコマンドは `IpcResult` を返す。例外に頼らない（要件 4.4）
+- すべてのコマンドは `IpcResult` を返す。例外に頼らない（要件 4.4）。**唯一の意図的な例外は生バイトの一括転送経路である** — `bulk_echo` は封筒を返さず `tauri::ipc::Response` で応答する（封筒は JSON 直列化であり、要件 4.5 が避けよという経路そのもの。成功は生バイト、失敗は `invoke` の拒否として現れる。タスク 7.2）
 - 呼び出し元ウィンドウは引数として受け取る（要件 4.6）
 - **大きなペイロードは JSON を経由しない経路を使う**（要件 4.5）。応答の内容型が JSON でもテキストでもない場合、フロントエンドには `ArrayBuffer` として届く。引数側で生バイトを送る場合、バッファは引数全体でなければならない（入れ子にすると数値配列へ変換される）
 - **フロントエンドにファイルシステムとプロセス起動の経路を与えない**（要件 4.7）
@@ -687,9 +720,9 @@ WindowManager は位置とサイズをウィンドウを閉じた時点で保存
 | Component | Intent | Requirements | 要点 |
 |---|---|---|---|
 | MenuSurface | メニューの登録口とプラットフォーム差の吸収 | 3.1, 3.2, 3.5, 3.6 | **要件 3.5 の経路がプラットフォームで異なる。**ウィンドウ単位のメニューを持てる環境では、メニューイベントを発生元ウィンドウとともに受け取る。**アプリ全体で 1 つのメニューしか持てない環境ではウィンドウ単位のメニュー設定が非対応であるため、`WindowManager` が保持する現在フォーカス中のウィンドウへイベントを振り向ける。**同じ理由から、項目の有効・無効はフォーカス移動のたびに更新する。トップレベル項目はすべて部分メニューでなければならない |
-| SidecarHost | プラットフォーム別のパス解決と supervisor の束ね | 5.1, 5.2, 5.3, 5.5 | **配置がプラットフォームごとに異なる**（決定 4）。Windows と macOS は標準の同梱機構を使い実行ファイルの隣に置く。macOS ではバンドラが署名する。**Linux は標準の同梱機構を使えない** — バンドル処理が `usr/bin` 配下の実行ファイルを無条件に書き換えるため。`usr/share/jxcel/` に配置し、走査対象の外に置く。通常経路では展開しない |
+| SidecarHost | プラットフォーム別のパス解決と supervisor の束ね | 5.1, 5.2, 5.3, 5.5 | **配置がプラットフォームごとに異なる**（決定 4）。Windows と macOS は標準の同梱機構を使い実行ファイルの隣に置く。**macOS ではバンドラが同梱した外部バイナリを必ず再署名するため、素の成果物をそのまま置くと同梱物のバイトが変わり、要件 6.5 のバイト比較と要件 5.3 の実行時照合（不整合なら起動を中止する）がどちらも必ず失敗する。**したがって `scripts/stage-sidecars.sh` が、**同梱名 `sidecar-smoke` のベース名に合わせた一時コピーを bundler と同じ引数（`codesign --force -s - --options runtime`、`-i` なし・entitlements なし）で事前署名**してから配置し、同梱時の再署名をバイト中立にする（ad-hoc 署名は同じ入力ならバイト単位で同一。識別子は署名対象のファイル名から導かれるためベース名を合わせるのが要点である。タスク 10.2）。**Linux は標準の同梱機構を使えない** — バンドル処理が `usr/bin` 配下の実行ファイルを無条件に書き換えるため。`usr/share/jxcel/` に配置し、走査対象の外に置く。通常経路では展開しない |
 | DialogGate | 親ウィンドウを指定したネイティブファイル選択 | 2.4 | **親ウィンドウの指定が必須である。**複数ウィンドウのアプリで親を指定しないダイアログは誤ったウィンドウに乗る。選択されたパスは `DocumentHost::attach` へ渡す。本機能はパスを読まない |
-| RenderWatchdog | 初回描画の監視とラスタライザの判定 | 10.1, 10.2, 10.3 | **描画失敗を検出する API は存在しない。**ウィンドウ生成時に期限付きの監視を開始し、フロントエンドが描画フレーム内から通知する。期限超過時はソフトウェアラスタライズかどうかを判定して記録する。`RenderVerdict` は `Painted` / `SoftwareRaster` / `NoPaint` の三値である。**代替経路の適用は次回の起動で行う** — 回避策の環境変数は描画基盤の初期化前に設定する必要があり、検出時点では既に手遅れである。`NoPaint` を検出したら設定に印を残し、`AppLifecycle` が次回起動時に `Builder` の前でそれを読んで適用する。適用した事実は診断情報に記録し、`Painted` が観測できたら印を消す |
+| RenderWatchdog | 初回描画の監視とラスタライザの判定 | 10.1, 10.2, 10.3 | **描画失敗を検出する API は存在しない。**ウィンドウ生成時に期限付きの監視を開始し、フロントエンドが描画フレーム内から通知する。期限超過時はソフトウェアラスタライズかどうかを判定して記録する。`RenderVerdict` は `Painted` / `SoftwareRaster` / `NoPaint` の三値である。**判定と印の規則は Tauri 非依存のコアにある**（`crates/app-shell/src/render.rs` の判定・`render_fallback.rs` の適用。アダプタは実時計・記録先・適用点を注入する。タスク 8.2 / 8.3）。**代替経路の適用は次回の起動で行う** — 回避策の環境変数は描画基盤の初期化前に設定する必要があり、検出時点では既に手遅れである。`NoPaint` を検出したら設定に印を残し、`AppLifecycle` が次回起動時に `Builder` の前でそれを読んで適用する。適用した事実は診断情報に記録する。**印の消去は `Painted` の観測にだけ結びつける**（`SoftwareRaster` では印を保つ — 消すと、回避策の下でソフトウェア描画に落ちる環境で「適用 → 消去 → `NoPaint` → 適用」の振動になる）。この規則の残余（`Painted` が出る環境での振動）は Revalidation Triggers に記載する |
 
 **Implementation Notes（MenuSurface・タスク 7.5）**
 - **tauri 2.11.5 のメニューイベントは項目 id しか運ばず、発生元ウィンドウを渡す API は存在しない**（`MenuEvent { id }`。`Window::on_menu_event` のリスナは全イベントで「自分の」ウィンドウとともに呼ばれるのであって、発生元ではない）。上の表の「ウィンドウ単位の環境では発生元ウィンドウとともに受け取る」はこの版では実現できない。**代わりに、ウィンドウ単位の環境でも発生元は活性化時点のフォーカスから復元している**（メニューバーのアクセシブルなショートカットはフォーカスを持つウィンドウでしか発火しない性質に依拠。`menu.rs` の `activation_target` / `routed_target`）。両環境で振り向け先は活性化時点の操作対象ウィンドウであり、要件 3.5 は満たされる。**10.6 が 3 OS で実キー入力により、作用先がフォーカス中のウィンドウであることを確認する**
@@ -747,7 +780,7 @@ WindowManager は位置とサイズをウィンドウを閉じた時点で保存
 | `window.geometry` | オブジェクト | 直近に閉じられたウィンドウの位置とサイズ（要件 2.7） |
 | `appearance.theme` | 列挙 | `system` / `light` / `dark`（要件 9.3, 9.4） |
 | `diagnostics.level` | 列挙 | ログの詳細度（要件 8.7） |
-| `render.fallback` | 真偽 | 前回の起動で描画が成立しなかった印。次回起動時に代替経路を適用する（要件 10.3） |
+| `render.fallback` | 真偽 | 前回の起動で描画が成立しなかった印（`NoPaint` で立てる）。次回起動時に代替経路を適用する（要件 10.3）。**消去は `Painted` の観測にだけ結びつける**（`SoftwareRaster` では保つ。タスク 8.3） |
 | （未知のキー） | 生の値 | 解釈せずに保持し、書き戻す（要件 7.6） |
 
 **Consistency & Integrity**

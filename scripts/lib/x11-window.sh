@@ -3,7 +3,10 @@
 #
 # `scripts/check-x11-window.sh`（配布物の起動と起動時間の計測。10.3）と
 # `scripts/check-x11-render.sh`（初回描画と画面の識別。10.4）、
-# `scripts/check-multi-window.sh`（単一インスタンスと複数ウィンドウの経路。10.5）が source する。
+# `scripts/check-multi-window.sh`（単一インスタンスと複数ウィンドウの経路。10.5）、
+# `scripts/check-window-failure.sh` / `scripts/check-crash-record.sh` /
+# `scripts/check-no-paint.sh`（生成の失敗の提示・異常終了の記録・描画不成立の提示。
+# 要件 2.10 / 8.2 / 10.2）が source する。
 # **ウィンドウの観測の仕方は 1 つでなければならない** — タイトル一致と最小寸法の判定、
 # `xwininfo` の行の解析、起動したプロセス木の片付けは、どの段でも同じ前提（GTK の補助ウィンドウを
 # 除く・AppImage の展開実行ではラッパーだけを終了しても本体が残る）に立つ。**この前提が
@@ -24,10 +27,12 @@
 # を返しうる）。
 #
 # この置き場が定義する変数（`x11_pid` / `x11_log` / `x11_poll_sleep` / `x11_window_match` /
-# `x11_window_lines` / `x11_window_ids` / `x11_window_count` / `x11_died`）は **source する側が
-# 読む**契約である。単体で shellcheck にかけると「未使用」に見えるため、ファイル全体で抑止する
-# （呼び出し側は `scripts/check-x11-window.sh` / `scripts/check-x11-render.sh` /
-# `scripts/check-multi-window.sh`）。
+# `x11_window_lines` / `x11_window_ids` / `x11_window_count` / `x11_died` / `x11_exit_status`）は
+# **source する側が読む**契約である。単体で shellcheck にかけると「未使用」に見えるため、
+# ファイル全体で抑止する（呼び出し側は `scripts/check-x11-window.sh` /
+# `scripts/check-x11-render.sh` / `scripts/check-multi-window.sh` /
+# `scripts/check-window-failure.sh` / `scripts/check-crash-record.sh` /
+# `scripts/check-no-paint.sh`）。
 # shellcheck disable=SC2034
 set -eu
 
@@ -174,6 +179,76 @@ x11_collect_windows() {
 # 見る検査器で、`xwininfo` の解析が 2 箇所に分かれないようにする）。
 x11_observe_window() { x11_collect_windows "$@"; }
 
+# タイトル一致のウィンドウ集合が**2 回続けて同じ**になるまで待つ。
+#
+#   x11_settle_windows <タイトル部分文字列> <最小幅> <最小高さ> <上限秒>
+#
+# **消えかけのウィンドウを「自分のウィンドウ」と取り違えないための入口である。** 直前の検査が
+# 起動したアプリのプロセスを終わらせた直後は、X のウィンドウがまだツリーに残っていることが
+# ある。1 回目の観測だけで識別子の集合を確定すると、その消えかけのウィンドウが次の観測で
+# 消え、**「別のウィンドウになった」と誤判定する**（実測: 別の検査の直後に走らせた
+# `check-window-failure.sh` が、消えかけの 400x400 のウィンドウを拾って失敗した）。
+#
+# 集合が安定したら 0 を返し、`x11_window_ids` / `x11_window_count` / `x11_window_lines` /
+# `x11_window_match` をその安定した観測で埋める。上限を過ぎたら 1 を返す（呼び出し側が失敗に
+# する）。**待つのはこの関数の中だけであり、他の観測の意味は変えない。**
+x11_settle_windows() {
+  _x11_settle_title=$1
+  _x11_settle_w=$2
+  _x11_settle_h=$3
+  _x11_settle_deadline=$(( $(date +%s) + $4 ))
+  _x11_settle_previous=""
+  while :; do
+    x11_collect_windows "$_x11_settle_title" "$_x11_settle_w" "$_x11_settle_h"
+    if [ "$x11_window_count" -gt 0 ] && [ "$x11_window_ids" = "$_x11_settle_previous" ]; then
+      return 0
+    fi
+    _x11_settle_previous=$x11_window_ids
+    if [ "$(date +%s)" -ge "$_x11_settle_deadline" ]; then
+      return 1
+    fi
+    sleep "${x11_poll_sleep:-1}"
+  done
+}
+
+# ウィンドウの題名を**識別子で**引く（`xwininfo -id` の題名行）。
+#
+#   x11_window_title <ウィンドウ識別子>
+#
+# `x11_collect_windows` の題名一致は**引用符を含む題名の先頭**に限られる（`"jxcel"` のような
+# 先頭一致でしか引けない）。題名の**途中**の語で引く場面 — 8.2 の提示の題名
+# `jxcel — 描画が成立しませんでした（…）` を語で確かめる場面 — ではその一致が成立しないため、
+# **識別子から題名を読む入口をここに 1 つだけ**置く（`check-no-paint.sh` が使う。実際、
+# 先頭一致だけで書いた初版は題名の変化を観測できずに失敗した）。
+#
+# 取れなければ空を返す（呼び出し側が空で判定する）。`xwininfo -id` の出力は先頭に空行が
+# 入るため、題名行は `^xwininfo: Window id: ` で引く（行番号に依存しない）。
+x11_window_title() {
+  xwininfo -id "$1" 2>/dev/null |
+    sed -n 's/^xwininfo: Window id: [^ ]* "\(.*\)"$/\1/p' |
+    head -n 1 || true
+}
+
+# ウィンドウを所有するプロセスの識別子（`_NET_WM_PID`）を引く。
+#
+#   x11_window_pid <ウィンドウ識別子>
+#
+# **起動した pid（`$!`）が使えない場面のための入口である。** 配布物（AppImage）の起動では、
+# 起動ラッパーが本体を切り離すため `$!` は本体を指さない（実測: `$!` は起動の直後に無関係な
+# 死んだプロセスを指し、本体はセッションの回収先へ再親付けされる）。GTK は自ウィンドウに
+# `_NET_WM_PID` を設定するので、**観測したウィンドウから本体の pid を引ける** —
+# これが「アプリのプロセスが生きている」ことを観測したウィンドウと結び付ける唯一の手段である。
+#
+# 取れなければ空を返す（`xprop` が無い・プロパティが無い。呼び出し側が空で判定する）。
+x11_window_pid() {
+  if ! command -v xprop >/dev/null 2>&1; then
+    return 0
+  fi
+  xprop -id "$1" _NET_WM_PID 2>/dev/null |
+    sed -n 's/^_NET_WM_PID(CARDINAL) = \([0-9][0-9]*\)$/\1/p' |
+    head -n 1 || true
+}
+
 # 起動したプロセスの終了を観測しても即座に失敗とはしない（展開実行ではラッパーが本体より
 # 先に終了する）。**注意を 1 回だけ出し、観測を続ける**（`x11_died`）。
 x11_note_if_process_died() {
@@ -181,6 +256,38 @@ x11_note_if_process_died() {
     echo "注意: 起動したプロセス（pid=${x11_pid}）が先に終了しました。ウィンドウの出現を待ち続けます" >&2
     x11_died=1
   fi
+}
+
+# プロセスが生きているか。**ゾンビは「生きていない」**と判定する。
+#
+# `kill -0` は**未回収のゾンビにも成功する**（1.6 の申し送りと同じ理由）。起動したアプリが
+# 自ら終了したことを観測したい検査器（`check-window-failure.sh` /
+# `check-crash-record.sh` / `check-no-paint.sh`）は、そのままでは「終了した」を観測できないため、
+# 実行状態の 1 文字を見る。Linux は `/proc`、それ以外は `ps` に退避する。
+x11_process_alive() {
+  _x11_state=$(sed -n 's/^[^)]*) \([A-Z]\).*/\1/p' "/proc/$1/stat" 2>/dev/null || true)
+  if [ -z "$_x11_state" ]; then
+    _x11_state=$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ' | cut -c1 || true)
+  fi
+  [ -n "$_x11_state" ] && [ "$_x11_state" != "Z" ]
+}
+
+# プロセスの終了を待ち、**回収して**終了コードを `x11_exit_status` に入れる（期限を超えたら 1）。
+#
+# **回収するのは、終了コードそのものが証拠になるためである**（意図的なパニックは非 0、
+# 通常終了は 0。`check-crash-record.sh` が両方を要求する）。呼ぶ側が起動した子であること
+# （`wait` は子でないプロセスを待てない）。
+x11_wait_for_exit() {
+  _x11_wait_deadline=$(( $(date +%s) + $2 ))
+  while x11_process_alive "$1"; do
+    if [ "$(date +%s)" -ge "$_x11_wait_deadline" ]; then
+      return 1
+    fi
+    sleep "${x11_poll_sleep:-1}"
+  done
+  x11_exit_status=0
+  wait "$1" || x11_exit_status=$?
+  return 0
 }
 
 # ファイルの末尾を見出しつきで診断へ出す（失敗の理由を人の読める形で残す）。

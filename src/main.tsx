@@ -18,7 +18,6 @@ import { installCloseVeto } from "./shell/closeVeto";
 import { Layout } from "./shell/Layout";
 import { installRenderHeartbeat } from "./shell/renderHeartbeat";
 import { bootstrapAppearance } from "./shell/theme";
-import { installVerificationBulkTransfer } from "./shell/verificationBulk";
 
 // `src/index.html` のマウント先。欠けたまま起動すると無内容のウィンドウが残るため、
 // 黙って握り潰さずに失敗させる（要件 10.2 の趣旨に沿う）。
@@ -59,10 +58,26 @@ async function mountShell(root: HTMLElement): Promise<void> {
   // 通知の送信側は 1 つだけである（9.7 はこれを再利用し、2 つ目を足さない）。
   installRenderHeartbeat();
 
-  // 検証専用: 大きなペイロードの一括転送の駆動側（要件 4.5。タスク 10.8）。**既定のビルドの
-  // 起動では何もしない**（検証ビルドの初期化スクリプトが載せたグローバルがあるときだけ働く）。
+  // 検証専用: 大きなペイロードの一括転送の駆動側（要件 4.5。タスク 10.8）。**既定のビルド
+  // （配布物）にはこのモジュールが 1 バイトも入らず、動的 import の塊も生成されない** —
+  // `__JXCEL_VERIFICATION__` は Vite の `define` が埋め込むビルド時定数であり、既定のビルド
+  // では `false` なので、この分岐ごと定数畳み込みで消える（`vite.config.ts`。
+  // `scripts/check-shipping-bundle.sh` が配布物の `dist/` を機械検査する）。
+  // 検証用の形（`JXCEL_VERIFICATION_BUILD=1 npx tauri build --no-bundle --features
+  // verification-triggers`）では、初期化スクリプトが載せたグローバルがあるときだけ働く。
   // 転送は初回描画の後に回るので、8.2 のハートビートと起動予算（10.3）は変わらない。
-  installVerificationBulkTransfer();
+  //
+  // **この 1 箇所だけ意図的に動的 import を使う**（静的 import では要件を満たせない）。
+  // 静的 import は到達不能な分岐の中にあってもモジュールグラフへ引き込まれ、依存先
+  // （`@tauri-apps/api/event` など）が副作用を持つと Rollup が木を落とせない。配布物から
+  // 確実に落ちるのは、**到達不能な動的 import の塊**（Rollup が生成自体を取りやめる）だけ
+  // である。
+  if (__JXCEL_VERIFICATION__) {
+    const { installVerificationBulkTransfer } = await import(
+      "./shell/verificationBulk"
+    );
+    installVerificationBulkTransfer();
+  }
 
   createRoot(root).render(
     <StrictMode>

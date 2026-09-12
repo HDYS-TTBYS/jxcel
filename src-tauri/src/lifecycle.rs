@@ -208,10 +208,29 @@ const CRASH_RECORD_FILE_NAME: &str = "jxcel-crash.log";
 /// スタックトレースには 64 KiB で十分であり、これを超える分は文字境界で切り詰める。
 const MAX_CRASH_RECORD_BYTES: usize = 64 * 1024;
 
-/// 異常終了の記録ファイルを足しても保持合計が方針の合計上限を超えないことをコンパイル時に固定する
-/// （要件 8.5。記録機構の保持上限 + このファイルの上限 ≦ 合計上限）。
+/// ウィンドウの生成に失敗した事実を残すファイルの名前（要件 2.10。タスク 6.1）。
+///
+/// 方針の保存先（[`diagnostics::log_dir`]）の直下に置く。**記録機構の 1 行だけでは「失敗を
+/// 提示した」ことにならない** — 記録の行は詳細度の設定で落ちうるし、利用者が記録の保存場所と
+/// その中の該当行を探し当てることを前提にしてしまう。1.4 の [`persist_startup_failure`] と
+/// 同じ形で、**失敗そのものを 1 件の記録として**利用者が見つけられる場所へ残す。
+///
+/// 拡張子が `log` なので、4.4 の書き出し（`diagnostics::export`）が連結する対象にも含まれる
+/// （利用者が「診断情報を書き出す…」を選んだときに、この記録も一緒に取れる）。
+const WINDOW_FAILURE_FILE_NAME: &str = "jxcel-window-error.log";
+
+/// ウィンドウ生成失敗の記録 1 件の上限（バイト）。[`MAX_CRASH_RECORD_BYTES`] と同じ大きさに
+/// 選ぶ理由も同じである — 記録は**置換**なのでこのファイルは常にこの大きさ以下であり、
+/// 方針の余裕（2 MB）をほとんど食わない（下のコンパイル時検査）。
+const MAX_WINDOW_FAILURE_RECORD_BYTES: usize = 64 * 1024;
+
+/// 方針の保存先へ置く**置換型の記録ファイル**（異常終了の記録とウィンドウ生成失敗の記録）を
+/// 足しても、保持合計が方針の合計上限を超えないことをコンパイル時に固定する
+/// （要件 8.5。記録機構の保持上限 + 2 つの記録の上限 ≦ 合計上限）。
 const _: () = assert!(
-    diagnostics::MAX_RETAINED_LOG_BYTES + MAX_CRASH_RECORD_BYTES as u64
+    diagnostics::MAX_RETAINED_LOG_BYTES
+        + MAX_CRASH_RECORD_BYTES as u64
+        + MAX_WINDOW_FAILURE_RECORD_BYTES as u64
         <= diagnostics::MAX_TOTAL_LOG_BYTES
 );
 
@@ -1662,6 +1681,69 @@ fn persist_startup_failure(record: &str) -> Option<PathBuf> {
         .find(|path| fs::write(path, record).is_ok())
 }
 
+/// ウィンドウの生成に失敗した事実を、**利用者が見つけられる記録として**残す
+/// （要件 2.10。タスク 6.1）。
+///
+/// # 何が提示になるのか（この関数の存在理由）
+///
+/// `window` モジュールの失敗側の分岐は記録機構へ `log::error!` の 1 行を出すが、**それだけでは
+/// 「失敗を提示した」とは言えない** — 記録の行は設定された詳細度で落ちうるし、利用者が記録の
+/// 保存場所（8.1）とその中の該当行を探し当てることを前提にしてしまう。そこで
+/// [`report_startup_failure`]（要件 1.4。**既に同じ形で受け入れられている提示**）と揃えて、
+/// 失敗そのものを 1 件の記録として診断の保存先の直下へ残す:
+///
+/// 1. **記録機構の行**（`log::error!`。標準出力と診断の記録へ出る）。
+/// 2. **この記録ファイル**（[`WINDOW_FAILURE_FILE_NAME`]）。診断の保存先の直下に 1 件だけ置き、
+///    失敗のたびに置き換える。保存先は 9.5 の「記録の保存場所を表示」項目と
+///    `diagnostics_log_location` コマンドが利用者へ示す場所であり、8.6 の書き出し
+///    （拡張子 `log` の連結）にも含まれる。
+///
+/// # 何を運び、何を運ばないか
+///
+/// 運ぶのは**失敗したウィンドウのラベル・対象のドキュメントの説明・失敗の理由**だけである。
+/// ドキュメントの内容は運ばない（要件 8.4。ラベルと説明は 6.1 の既存の記録と同じものであり、
+/// 位置の文字列であって内容ではない）。**他のウィンドウについては何も述べない** — この関数は
+/// 他のウィンドウに触れず、そのことを 1 行で述べる（要件 2.10 の後半）。
+///
+/// # 可視のダイアログを持たない理由（正直に記す）
+///
+/// 起動を継続できない前提（[`report_startup_failure`]）と同じ事情である。この層の提示は
+/// 「利用者が見つけられる記録」であり、**可視のダイアログは持たない**:
+///
+/// - 3 OS で成立するネイティブのメッセージ提示は、7.7 が親付きのファイル選択のために既に
+///   解いた複雑さ（Linux は `gtk`、macOS / Windows は `rfd` の別経路）をそのまま持ち込む。
+/// - CI で観測できない — macOS / Windows のランナーはアクセシビリティ許可を持たず、ダイアログの
+///   テキストを外部から読めない（10.5 / 10.6 が同じ理由で経路を Linux に限定している）。
+///   観測できない提示を要求すると、**検証できない主張**が CI に載る。
+///
+/// ダイアログ提示を要する後続スペックは、7.7 の選択器と同じ seam（親ウィンドウを渡す経路）を
+/// 使える。ここでその実装を先取りしない。
+pub(crate) fn persist_window_failure(label: &str, document: &str, error: &str) {
+    let record = format!(
+        "jxcel: ウィンドウを生成できませんでした。\n対象のウィンドウ: {label}\n対象のドキュメント: {document}\n理由: {error}\n既に開いている他のウィンドウの動作は中断していません。\n"
+    );
+    let Ok(directory) = diagnostics::log_dir() else {
+        log::error!(
+            "{record}診断情報の保存先を解決できないため、この内容をファイルに記録できなかった。"
+        );
+        return;
+    };
+    let path = directory.join(WINDOW_FAILURE_FILE_NAME);
+    let written = settings::atomic::replace_with(&path, |file| {
+        file.write_all(
+            clamp_to_char_boundary(&record, MAX_WINDOW_FAILURE_RECORD_BYTES).as_bytes(),
+        )?;
+        file.flush()
+    });
+    match written {
+        Ok(()) => log::error!("{record}この内容を {} に記録しました。", path.display()),
+        Err(error) => log::error!(
+            "{record}この内容を {} に記録できなかった: {error}",
+            path.display()
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 単一インスタンスの引き継ぎ（要件 1.5）
 // ---------------------------------------------------------------------------
@@ -2380,6 +2462,25 @@ mod tests {
 
         // macOS は `code: None`（最後のウィンドウが閉じられた経路）だけ常駐する（要件 2.9）。
         assert!(vetoes_exit(Residency::StayResident, None, false));
+    }
+
+    #[test]
+    fn the_current_residency_policy_follows_the_running_platform() {
+        // **実行中のプラットフォームの慣習**を固定する（要件 2.8 / 2.9）。上のテストは変種を
+        // 明示的に渡すので、`Residency::CURRENT` の選び方（`cfg!` の分岐）が壊れても気づけない
+        // — 非 macOS で常駐に倒れる・macOS で終了に倒れる、のどちらもこの検査だけが捕まえる
+        // （3 OS の `cargo test` がそれぞれの期待を検査するので、**1 OS の取り違えは
+        // そのランナーで落ちる**）。
+        let expected_resident = cfg!(target_os = "macos");
+        assert_eq!(
+            vetoes_exit(Residency::CURRENT, None, false),
+            expected_resident,
+            "最後のウィンドウを閉じたときの扱いが実行中のプラットフォームの慣習と一致しない\
+             （macOS だけが常駐する。要件 2.8 / 2.9）",
+        );
+        // 常駐の慣習でも、明示的な終了（掛け金）と終了コードつきの要求は通る（5.4 の条件 3）。
+        assert!(!vetoes_exit(Residency::CURRENT, None, true));
+        assert!(!vetoes_exit(Residency::CURRENT, Some(0), false));
     }
 
     #[test]

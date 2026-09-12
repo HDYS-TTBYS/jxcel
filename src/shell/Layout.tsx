@@ -191,8 +191,10 @@ function InitialScreen(): ReactElement {
  * この配列は「最初にどの画面を領域へ差し込むか」だけを決める。
  *
  * **既定の初期画面は 9.6 の空ウィンドウの画面である。**9.7 の 2 画面はユーザー向けの導線を
- * 持たず、検証専用の経路（`verification-triggers` ビルドの
- * `JXCEL_VERIFICATION_INITIAL_SCREEN`。`./verificationScreen`）だけが初期画面として選ぶ。
+ * 持たず、**検証用の形**（`JXCEL_VERIFICATION_BUILD=1` のフロントエンドと `verification-triggers`
+ * の Rust。`JXCEL_VERIFICATION_INITIAL_SCREEN`）だけが `./verificationScreen` 経由で初期画面
+ * として選ぶ。**配布物には `./verificationScreen` が入らない**（`vite.config.ts` の
+ * `__JXCEL_VERIFICATION__`）。
  */
 export const SHELL_SCREEN_REGISTRY: ShellScreenRegistry = {
   initial: EMPTY_WINDOW_SCREEN_ID,
@@ -390,12 +392,23 @@ export function ShellRegion({
  * 持つのは選択の表示と入口（[`AppearanceControl`]）だけである。
  */
 export function Layout(): ReactElement {
-  // 検証専用の初期画面の選択（要件 10.4。`./verificationScreen`）。**既定のビルドでは常に
-  // `null`** なので、この解決は登録簿の内容を変えない — 既定の初期画面は 9.6 の空ウィンドウの
-  // 画面のままである。マウント時に 1 回だけ読む（値は文書の他のスクリプトより前に走る初期化
-  // スクリプトが載せるので、この時点で確定している）。
+  // 検証専用の初期画面の選択（要件 10.4。`./verificationScreen`）。**`__JXCEL_VERIFICATION__`
+  // は Vite の `define` が埋め込むビルド時定数であり、既定のビルド（配布物）では `false` で
+  // ある。したがってこの条件式は定数畳み込みで `null` になり、参照されなくなった
+  // `./verificationScreen` は配布物のバンドルから落ちる**（`vite.config.ts` のヘッダ。
+  // `scripts/check-shipping-bundle.sh` が配布物の `dist/` を機械検査する）。
+  //
+  // **静的な分岐で書く理由**: この解決は描画時に同期で必要であり、動的 import では
+  // 間に合わない。`./verificationScreen` は副作用を持たない（関数と型だけ）ので、Rollup は
+  // 未使用になったモジュールを落とせる。
+  //
+  // 検証用の形でも、指定が無ければ `null` を返すので、この解決は登録簿の内容を変えない —
+  // 既定の初期画面は 9.6 の空ウィンドウの画面のままである。マウント時に 1 回だけ読む（値は
+  // 文書の他のスクリプトより前に走る初期化スクリプトが載せるので、この時点で確定している）。
   const registry = useMemo<ShellScreenRegistry>(() => {
-    const verification = resolveVerificationInitialScreen(SHELL_SCREEN_REGISTRY);
+    const verification = __JXCEL_VERIFICATION__
+      ? resolveVerificationInitialScreen(SHELL_SCREEN_REGISTRY)
+      : null;
     return verification === null
       ? SHELL_SCREEN_REGISTRY
       : { ...SHELL_SCREEN_REGISTRY, initial: verification };

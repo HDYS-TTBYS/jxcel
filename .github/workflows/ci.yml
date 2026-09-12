@@ -177,6 +177,10 @@ jobs:
       #     1 OS だけの実行では他方のプラットフォーム向けに足された tauri 依存を見逃す。
       #   - capability の逸脱検査は、そのランナーの tauri-build が実際に書き出した
       #     記述を検査する（手元の生成物ではなく、各 OS のビルド結果が対象になる）。
+      #     **登録コマンドと権限の対応（`scripts/check-command-acl.sh`）も同じ生成物
+      #     （`acl-manifests.json` / `capabilities.json`）を読む**ので、Build の後で走らせる。
+      #   - 禁止プラグインの検査（`scripts/check-forbidden-plugins.sh`）は依存の解決だけを要し、
+      #     3 OS で走らせる意味がある（対象の依存は `[target.'cfg(...)'.dependencies]` で変わる）。
       #
       # 位置は `Build` の直後・`Test` の直前である。
       #   - capability の逸脱検査の入力（`src-tauri/gen/schemas/capabilities.json`）は
@@ -203,6 +207,20 @@ jobs:
       # `typecheck` は `build`（Vite のみ）とは別のスクリプトである（tasks.md 1.4）。
       - name: Typecheck frontend (tsc --noEmit)
         run: npm run typecheck
+
+      # ESLint（tasks.md 1.4 の規約を 10.1 が CI のゲートにする）。**`any` の禁止はこの段で
+      # しか強制されない** — `tsc --noEmit` も `npm run build`（Vite のみ）も ESLint を
+      # 走らせないため、`@typescript-eslint/no-explicit-any: error` は CI に入れなければ
+      # ローカルの善意だけに依存する（1.4 が `npm run typecheck` と `npm run lint` を独立の
+      # スクリプトにしてあるのは、この 2 つを別のゲートとして呼べるようにするためである）。
+      # 対象は `eslint.config.js` の `ignores` で `src/` と設定ファイルに限られ、生成物
+      # `src/ipc/bindings.ts` も検査対象に含まれる（生成物に `any` は現れない）。
+      # 依存は先の `npm ci`（devDependency の eslint 一式）で入る。
+      # Windows の npm は既定で cmd.exe からスクリプトを起動するため、`shell: bash` を
+      # 明示する（`check:shared-assets` と同じ扱い。スクリプト本体は `eslint .` である）。
+      - name: Lint frontend (eslint, no-explicit-any)
+        shell: bash
+        run: npm run lint
 
       # 配信先中立な資産の依存検査（要件 9.6、tasks.md 9.4）。`src/shared/` はデスクトップ内と
       # LAN 配信の Web ページの両方で動くため、Tauri の通信境界（`@tauri-apps/*` /
@@ -235,6 +253,30 @@ jobs:
         shell: bash
         run: bash scripts/check-core-deps.sh app-shell
 
+      # ファイルシステム系・シェル系のプラグインが依存ツリーに無いことの検査（要件 4.7 の
+      # 制御の第 1 段、tasks.md 1.3）。**推移的依存まで見る**。上の `check-core-deps.sh` は
+      # **ドメインコアクレート**（`crates/*`）が tauri 一族に依存しないことを検査するが、
+      # アプリ（`jxcel`）は tauri に依存するので、アプリ側で禁じるべきプラグインの検査は別に
+      # 要る — `tauri-plugin-fs` / `-shell` / `-store` / `-dialog`（`-dialog` は `-fs` を
+      # 非 optional の通常依存として引き込む。タスク 1.3 の実測）。`check-capabilities.sh` は
+      # 「権限を与えないこと」を検査するが、依存を 1 行足せば `fs:` / `shell:` の権限を書ける
+      # 状態になる。**依存に入れないことが最も強い制御である**（src-tauri/Cargo.toml の依存方針）。
+      - name: Check no filesystem/shell plugin is in the dependency tree
+        shell: bash
+        run: bash scripts/check-forbidden-plugins.sh jxcel
+
+      # 登録されたコマンドが capability の権限で許可されていることの検査（要件 4.7、
+      # tasks.md 7.3）。`build.removeUnusedCommands: true` により、`command_root!` へ登録して
+      # `COMMAND_NAMES` へ足し `bindings.ts` を再生成しても、`src-tauri/permissions/app.toml`
+      # （および `[[set]]`）から漏れているコマンドは**配布物から静かに削られる** —
+      # ドリフト検査・`tsc --noEmit`・capability 検査・core-deps 検査はいずれも緑のままで、
+      # 失敗は実行時にしか現れない。検査は tauri-build が書き出した `acl-manifests.json` と
+      # `capabilities.json` を読み、**capability が実際に与える権限の `commands.allow`** と
+      # 登録の一覧を突き合わせる（capability 検査と同じく生成物が入力なので Build の後に置く）。
+      - name: Check registered commands are granted by the ACL permissions
+        shell: bash
+        run: bash scripts/check-command-acl.sh
+
       # `--no-fail-fast`: 既定の `cargo test` は最初に落ちたテストターゲットで止まり、
       # 残りの統合テストと doctest を走らせない。OS 固有の失敗は 1 回の実行ですべて
       # 見えている必要がある（Windows で lib の 1 件が落ちた結果、統合テストが
@@ -264,6 +306,31 @@ jobs:
       # 形式はマトリクスの `bundles` で OS ごとに指定する（上記の include を参照）。
       - name: Build platform bundle
         run: npx tauri build --bundles ${{ matrix.bundles }}
+
+      # 配布物のフロントエンド資産の衛生検査（tasks.md 5.4 / 8.2 の決定、要件 4.7 の精神）。
+      #
+      # **なぜ `dist/` を検査するのか（重要）**: Tauri は `compression` feature（既定で有効）で
+      # フロントエンド資産を **brotli 圧縮して**実行ファイルへ埋め込むため、実行ファイルに対する
+      # `strings -a` では**埋め込み資産の本文が見えない**（実行ファイルに残るのは内容ハッシュ付きの
+      # 資産のファイル名だけである）。直前の `npx tauri build --bundles` が `beforeBuildCommand`
+      # （`npm run build`）で書いた `dist/` は、その実行ファイルへ埋め込まれる入力そのものである。
+      # したがってここで `dist/` を検査する。**実行ファイルに対する `strings` の検査（10.5 の段）は
+      # Rust 側のためにそのまま残す。**
+      #
+      # 第 2 引数（`target/release/jxcel[.exe]`。Windows は接尾辞を補う）を渡すと、
+      # **資産のファイル名の一致**で「その実行ファイルが検査した dist を埋め込んでいる」ことも
+      # 確かめる（ファイル名は Vite が内容から決めるので、一致は埋め込み内容の同一性の根拠になる）。
+      #
+      # **10.4 の段より前に置く** — 10.4 は `npm run build` をやり直して `dist/` を検証用の形で
+      # 上書きするためである。ここで配布物の `dist/` を `target/shipping-frontend-dist` へ退避し、
+      # 10.4 の形の突き合わせ（`scripts/check-bundle-forms.sh`）が使う。
+      - name: Check the shipping frontend bundle contains no verification-only code
+        shell: bash
+        run: |
+          set -eu
+          bash scripts/check-shipping-bundle.sh dist target/release/jxcel
+          rm -rf target/shipping-frontend-dist
+          cp -r dist target/shipping-frontend-dist
 
       # 起動の検証（tasks.md 1.5 の完了状態）。プロセスの起動ではなく、**ウィンドウが
       # 現れること**を確認する。GUI を持たないランナーでは仮想ディスプレイ（Xvfb）上で
@@ -555,17 +622,27 @@ jobs:
       #     ランナーで安定して与えられない）。Linux では `XSendEvent` が使えるが、**3 OS 分の
       #     メニュー駆動を CI で安定させる保証が無い**。
       #   - A は配布物に検証専用のコードを一切足さない（上記の不在確認を破らない）。
-      #   - **両画面のコードは 2 つの形で同一である**（同じ `src/features/smoke/` と
-      #     `src/shell/Layout.tsx` の登録簿が `dist/` に埋め込まれる。違うのは環境変数を読んで
-      #     初期化スクリプトを足す Rust 側の 1 箇所だけ）。配布物の描画は (1) の初回描画の
-      #     記録が担保する。
+      #   - **両方の形が共有するのは、10.4 の両画面のコード（`src/features/smoke/`）とシェルの
+      #     登録簿・領域（`src/shell/Layout.tsx` / `src/shell/router.tsx`）である。**
+      #     `npx tauri build` はそのたびに `beforeBuildCommand`（`npm run build`）をやり直すので、
+      #     **2 つの形の `dist/` は同一ではない** — 検証用の形だけが検証専用の入口
+      #     （`src/shell/verificationScreen.ts` / `src/shell/verificationBulk.ts`。前者は初期画面の
+      #     選択、後者は 10.8 の一括転送の駆動）を持ち、配布物は Vite の `define`
+      #     （`vite.config.ts` の `__JXCEL_VERIFICATION__`）がそれをバンドルから落とす。
+      #     **以前の版のこのコメントは「埋め込み資産は配布物と同一である」と書いていたが、
+      #     それは誤りであった**（検証専用入口の除外を入れる前から、検証専用の到達経路を持つ形と
+      #     持たない形で `dist` は別物になり得る）。共有される資産は
+      #     `scripts/check-bundle-forms.sh` が機械検査する（両方の形にスモーク画面と
+      #     `jxcel-shell-region` があること、検証専用の識別子が配布物に無く検証用の形にあること）。
+      #     配布物の描画は (1) の初回描画の記録が担保する。
       #
       # **トレードオフ（正直に記す）**: 検証用の形は**バンドルしない**リリース実行ファイル
-      # （`npx tauri build --no-bundle --features verification-triggers` が作る
-      # `target/release/jxcel[.exe]`）を起動する。したがって CI が実測するのは「配布物そのものが
-      # 両画面を描く」ことではなく、「**配布物が起動して初回描画が成立し**、**同じフロントエンド
-      # 資産を持つ検証用の形が両画面を描く**」ことである。配布物の中に両画面へ至る入口が無い
-      # という 9.7 の決定と、要件 10.4 の文言の間の差はここに残る。
+      # （`JXCEL_VERIFICATION_BUILD=1 npx tauri build --no-bundle --features verification-triggers`
+      # が作る `target/release/jxcel[.exe]`）を起動する。したがって CI が実測するのは「配布物
+      # そのものが両画面を描く」ことではなく、「**配布物が起動して初回描画が成立し**、
+      # **スモーク画面のコードとシェルの構造を共有する**検証用の形が両画面を描く」ことである。
+      # 配布物の中に両画面へ至る入口が無いという 9.7 の決定と、要件 10.4 の文言の間の差は
+      # ここに残る。
       #
       # ## 各 OS の証拠が何を証明するか（要件 1.1, 1.2）
       #
@@ -630,10 +707,32 @@ jobs:
 
       # 検証用の形（バンドルしない）。**配布物を上書きしない** — `--no-bundle` なので直前までに
       # 生成した配布物（AppImage / deb / .app / dmg / NSIS インストーラ）はそのまま残り、
-      # `target/release/jxcel[.exe]` だけが差し替わる。`beforeBuildCommand`（`npm run build`）が
-      # フロントエンドを生成してから release ビルドを行うので、埋め込み資産は配布物と同一である。
+      # `target/release/jxcel[.exe]` だけが差し替わる。
+      #
+      # **`JXCEL_VERIFICATION_BUILD=1` がフロントエンドを検証用の形にする**（`vite.config.ts` の
+      # `__JXCEL_VERIFICATION__`）。cargo の feature は TypeScript を括れないため、検証専用の
+      # モジュール（`src/shell/verificationScreen.ts` / `src/shell/verificationBulk.ts`）の出入りは
+      # この環境変数が決める。`beforeBuildCommand`（`npm run build`）はこの環境変数を継承するので、
+      # **tauri CLI のコマンド自体は変えずに済む**。`env:` で渡すのは、Windows ランナーの既定の
+      # シェル（pwsh）では `VAR=1 cmd` の前置が使えないためである。
+      #
+      # したがって検証用の形の `dist/` は**配布物の `dist/` とは同一ではない**（配布物は
+      # 検証専用の入口を持たない）。両者が共有するものは上の「方式 A」の節を参照。
       - name: Build verification form (no bundle, --features verification-triggers)
+        env:
+          JXCEL_VERIFICATION_BUILD: "1"
         run: npx tauri build --no-bundle --features verification-triggers
+
+      # 10.4 の方式 A の前提（**両方の形がスモーク画面のコードとシェルの構造を共有する**）の
+      # 機械検査（要件 10.4）。直前の 2 つのビルドはどちらも `npm run build` をやり直すので、
+      # 埋め込み資産は同一ではない — **等しくなければならないもの**（両方の形に
+      # `smoke-table` / `smoke-editor` / `jxcel-shell-region` があること）と、
+      # **違わなければならないもの**（配布物の `dist/` に検証専用の識別子が無く、検証用の形には
+      # あること＝検証の錠前が空回りしていないこと）を突き合わせる。入力は
+      # `target/shipping-frontend-dist`（配布物のビルドの直後に退避したもの）と、いま書かれた `dist/`。
+      - name: Check both frontend forms share the smoke-screen code
+        shell: bash
+        run: bash scripts/check-bundle-forms.sh target/shipping-frontend-dist dist
 
       # Linux の描画検証（tasks.md 10.4）。4 回起動する（配布物・smoke-table・smoke-editor・
       # 反証）。検査本体は POSIX sh の `scripts/check-x11-render.sh`（ローカルでも同じものを
@@ -660,10 +759,10 @@ jobs:
             xvfb-run -a --server-args="-screen 0 1280x1024x24" \
               sh scripts/check-x11-render.sh "$appimage" jxcel 60 100 100 "$record" empty-window
           fi
-          echo "検証 2/4: 表形式の最小画面 smoke-table（検証用の形。埋め込み資産は配布物と同一）"
+          echo "検証 2/4: 表形式の最小画面 smoke-table（検証用の形。スモーク画面のコードとシェルの構造は配布物と共通）"
           xvfb-run -a --server-args="-screen 0 1280x1024x24" \
             sh scripts/check-x11-render.sh target/release/jxcel jxcel 60 100 100 "$record" smoke-table
-          echo "検証 3/4: 文字編集の最小画面 smoke-editor（検証用の形。埋め込み資産は配布物と同一）"
+          echo "検証 3/4: 文字編集の最小画面 smoke-editor（検証用の形。スモーク画面のコードとシェルの構造は配布物と共通）"
           xvfb-run -a --server-args="-screen 0 1280x1024x24" \
             sh scripts/check-x11-render.sh target/release/jxcel jxcel 60 100 100 "$record" smoke-editor
           # 反証: 埋め込み可能だが**登録簿に無い**識別子を期待として渡す。実際に描画されるのは
@@ -871,9 +970,9 @@ jobs:
           # 9.6 の空ウィンドウの画面なので `画面=empty-window` が成立する）。
           echo "検証 1/3: 配布物（.app）をそのまま起動する。追加のインストール手順は無い（インストーラを使わない）"
           swift "$spike" "target/release/bundle/macos/jxcel.app/Contents/MacOS/jxcel" "empty-window" "$record" "$appout" 60
-          echo "検証 2/3: 表形式の最小画面 smoke-table（検証用の形。埋め込み資産は配布物と同一）"
+          echo "検証 2/3: 表形式の最小画面 smoke-table（検証用の形。スモーク画面のコードとシェルの構造は配布物と共通）"
           swift "$spike" target/release/jxcel smoke-table "$record" "$appout" 60
-          echo "検証 3/3: 文字編集の最小画面 smoke-editor（検証用の形。埋め込み資産は配布物と同一）"
+          echo "検証 3/3: 文字編集の最小画面 smoke-editor（検証用の形。スモーク画面のコードとシェルの構造は配布物と共通）"
           swift "$spike" target/release/jxcel smoke-editor "$record" "$appout" 60
 
       # Windows の描画検証（tasks.md 10.4）。3 回起動する（配布物・smoke-table・smoke-editor）。
@@ -972,9 +1071,9 @@ jobs:
           # それでも `画面=empty-window` を要求する（配布物でも画面の報告経路が働くことの証明）。
           Write-Host "検証 1/3: 配布物（NSIS インストーラで /S 導入済みの実行ファイル）を起動する。追加の操作は無い"
           Test-Render -Exe $installed -Expected "empty-window" -What "配布物"
-          Write-Host "検証 2/3: 表形式の最小画面 smoke-table（検証用の形。埋め込み資産は配布物と同一）"
+          Write-Host "検証 2/3: 表形式の最小画面 smoke-table（検証用の形。スモーク画面のコードとシェルの構造は配布物と共通）"
           Test-Render -Exe "target/release/jxcel.exe" -Expected "smoke-table" -What "画面 smoke-table"
-          Write-Host "検証 3/3: 文字編集の最小画面 smoke-editor（検証用の形。埋め込み資産は配布物と同一）"
+          Write-Host "検証 3/3: 文字編集の最小画面 smoke-editor（検証用の形。スモーク画面のコードとシェルの構造は配布物と共通）"
           Test-Render -Exe "target/release/jxcel.exe" -Expected "smoke-editor" -What "画面 smoke-editor"
 
       # ---------------------------------------------------------------------
@@ -1233,8 +1332,9 @@ jobs:
           }
 
           // アプリを起動する。検証専用の環境変数は親から漏らさず、`denyClose` のときだけ
-          // `JXCEL_VERIFICATION_DENY_CLOSE` を渡す（配布物は読まない）。
-          func launch(_ executable: String, arguments: [String], denyClose: String?) -> Process {
+          // `JXCEL_VERIFICATION_DENY_CLOSE` を、`exitAfterMs` のときだけ
+          // `JXCEL_VERIFICATION_EXIT_AFTER_MS` を渡す（配布物はどちらも読まない）。
+          func launch(_ executable: String, arguments: [String], denyClose: String?, exitAfterMs: String? = nil) -> Process {
               outputCounter += 1
               let outputPath = "\(outputPrefix)-\(outputCounter).log"
               _ = FileManager.default.createFile(atPath: outputPath, contents: nil)
@@ -1247,6 +1347,9 @@ jobs:
               environment.removeValue(forKey: "JXCEL_VERIFICATION_EXIT_AFTER_MS")
               if let denyClose = denyClose {
                   environment["JXCEL_VERIFICATION_DENY_CLOSE"] = denyClose
+              }
+              if let exitAfterMs = exitAfterMs {
+                  environment["JXCEL_VERIFICATION_EXIT_AFTER_MS"] = exitAfterMs
               }
               process.environment = environment
               if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: outputPath)) {
@@ -1406,7 +1509,7 @@ jobs:
 
                   stop(denied)
                   let phaseAllow = recordLines().count
-                  note("検証 (c): 対照 — 検証用の形を起動する（JXCEL_VERIFICATION_DENY_CLOSE なし → 常に許可する委譲先）")
+                  note("検証 (c-2): 対照 — 検証用の形を起動する（JXCEL_VERIFICATION_DENY_CLOSE なし → 常に許可する委譲先）")
                   let allowed = launch(verifyApp, arguments: [documentPath], denyClose: nil)
                   guard waitForWindowCount(of: allowed.processIdentifier, atLeast: 1, seconds: timeoutSeconds) != nil else {
                       fail("対照のウィンドウが \(Int(timeoutSeconds)) 秒以内に現れませんでした")
@@ -1419,15 +1522,24 @@ jobs:
                       if !waitForWindowsGone(of: allowed.processIdentifier, seconds: timeoutSeconds) {
                           fail("拒否しない委譲先で閉鎖要求を送ったが、ウィンドウが消えませんでした（許可が効いていない）")
                       }
-                      if !waitForExit(allowed, seconds: timeoutSeconds) {
-                          fail("最後のウィンドウが閉じた後にプロセスが終了しませんでした（要件 2.8）")
+                      note("検証 (c-2): ウィンドウは消えました")
+                      // **macOS の慣習に合わせる（要件 2.9。`Residency::CURRENT` = StayResident）。**
+                      // 最後のウィンドウを閉じてもプロセスは**終了しない**。ここで「終了する」ことを
+                      // 期待してはならない — 期待すると、プラットフォームの慣習どおりの常駐を
+                      // 「欠陥」として報告してしまう（旧い形がそうなっていた）。**要件 2.8
+                      // （最後のウィンドウが閉じたら終了する）は Linux と Windows の段が実測する** —
+                      // `vetoes_exit` が拒否するのは macOS の `code: None` だけである。
+                      let settleResident = Date().addingTimeInterval(3)
+                      while Date() < settleResident {
+                          if !allowed.isRunning {
+                              fail("最後のウィンドウを閉じた後にプロセスが終了しました（macOS は常駐する。要件 2.9）")
+                          }
+                          Thread.sleep(forTimeInterval: 0.2)
                       }
-                      if allowed.terminationStatus != 0 {
-                          fail("対照のプロセスが終了コード \(allowed.terminationStatus) で終わった（0 であるべき）")
-                      }
-                      note("検証 (c): 対照 — ウィンドウは消え、プロセスは終了コード 0 で終わった")
+                      note("検証 (c-2): 最後のウィンドウを閉じてもプロセス pid=\(allowed.processIdentifier) は常駐している（要件 2.9）")
+                      stop(allowed)
                   } else {
-                      note("検証 (c): 対照の閉じるボタンを押せなかった（注入できず）")
+                      note("検証 (c-2): 対照の閉じるボタンを押せなかった（注入できず）")
                       stop(allowed)
                   }
               } else {
@@ -1438,6 +1550,26 @@ jobs:
               note("macOS: アクセシビリティ許可が無いため、外部からウィンドウの閉鎖要求を注入できない（GitHub の macOS ランナーは許可を与えない。actions/runner-images#8214）。**経路 (c) の拒否と許可の実測は Linux と Windows の段が担う** — この段は (a)/(b) と、検証用の形が doc-1 を開くことまでを実測した。許可が与えられた環境ではこの分岐が閉じるボタンの押下で同じ検査を行う。")
               stop(denied)
           }
+
+          // 検証 (d): **明示的な終了は常駐の慣習でもプロセスを終わらせる**（要件 2.9、5.4 の
+          // 完了状態）。検証用の引き金 `<ミリ秒>` は 5.4 の明示的な終了（`request_exit`）そのもので、
+          // メニューの「終了」項目と終了コマンドが呼ぶ関数と同じである。**アクセシビリティ許可を
+          // 要さない**ので、許可の無いランナーでもこの検査は成立する（(c) と違い注入が要らない）。
+          // 待ちは 6 秒にしてある — ウィンドウの出現（起動予算 2 秒。要件 1.3）より確実に後に
+          // 終了させるためである（2 秒だと出現と終了が競合しうる）。
+          note("検証 (d): 検証用の形を起動し、明示的な終了（JXCEL_VERIFICATION_EXIT_AFTER_MS=6000 → request_exit）でプロセスが終わることを確かめる")
+          let quitting = launch(verifyApp, arguments: [], denyClose: nil, exitAfterMs: "6000")
+          guard waitForWindowCount(of: quitting.processIdentifier, atLeast: 1, seconds: timeoutSeconds) != nil else {
+              fail("明示的な終了の検証でウィンドウが \(Int(timeoutSeconds)) 秒以内に現れませんでした")
+          }
+          if !waitForExit(quitting, seconds: timeoutSeconds) {
+              stop(quitting)
+              fail("明示的な終了（request_exit）の後にプロセスが終了しませんでした（常駐の慣習でも明示的な終了は効かなければならない。要件 2.9 / 5.4）")
+          }
+          if quitting.terminationStatus != 0 {
+              fail("明示的な終了が終了コード \(quitting.terminationStatus) で終わった（通常終了は 0）")
+          }
+          note("検証 (d): 明示的な終了でプロセスは終了コード 0 で終わった（常駐の慣習でも明示的な終了は確実に効く）")
 
           stopAll()
           note("検証 (後始末): 起動したプロセスをすべて終了した")
@@ -3082,6 +3214,171 @@ jobs:
           # （直前の段が /S で導入済み）。Git Bash の bash からは `$LOCALAPPDATA` がそのまま
           # 見え、MSYS のランタイムは `\` と `/` のどちらの区切りも受け付ける。
           bash scripts/check-sidecar-integrity.sh "${LOCALAPPDATA}/jxcel" sidecar-smoke.exe
+
+      # ---------------------------------------------------------------------
+      # 生成の失敗の提示・異常終了の記録・描画不成立の提示（要件 2.10 / 8.2 / 10.2）
+      #
+      # **Linux の段だけを足す。**3 つの主張はいずれも X11 のウィンドウ観測（または
+      # ウィンドウの画素の読み取り）を要し、`xwininfo` と `libX11` を使うためである。
+      # 検査本体は POSIX sh の
+      # `scripts/check-window-failure.sh` / `scripts/check-crash-record.sh` /
+      # `scripts/check-no-paint.sh`（ローカルでも同じものを実行できる）。
+      #
+      # 実測する形は tasks.md の片付けの規約どおりに分ける:
+      #   - 検証専用の引き金（`fail-window:<ms>` / `panic:<ms>` /
+      #     `JXCEL_VERIFICATION_SUPPRESS_HEARTBEAT=1`）を読むのは**検証用の形**だけである
+      #     （10.4 の段が `JXCEL_VERIFICATION_BUILD=1 npx tauri build --no-bundle --features
+      #     verification-triggers` で作った `target/release/jxcel`）。
+      #   - **配布物（AppImage）は同じ環境変数を無視する。**これが負の対照である —
+      #     「検査が存在しない経路を通っていない」ことと「記録が引き金の起こした出来事のもの
+      #     である」ことを示す（常に成功する検査器では段が緑にならない）。
+      #
+      # ## 位置（この節を最後に置く理由）
+      #
+      # 3 つの検査はどれも**アプリの状態を変える**（8.3 の印を立てる・パニックでプロセスを
+      # 終わらせる）。**この節より前の段が測るもの**（10.4 の初回描画、10.5 の複数ウィンドウ、
+      # 10.6 のメニュー、10.7 / 10.8）に影響しないよう、段落の最後（成果物の保存の直前）に
+      # 置く。とくに `render.fallback` の印は**次の起動の描画経路を変える**ので、描画を測る段
+      # より後に置かなければならない。
+      #
+      # ## 各段が何を証明し、何を証明しないか
+      #
+      #   - 2.10: 生成の失敗が**提示され**（診断の保存先の 1 件の記録 `jxcel-window-error.log`。
+      #     失敗したラベル・対象のドキュメント・理由を名指しする）、既に開いているウィンドウの
+      #     動作を中断させない（同じ識別子のまま残り、失敗の後でも引き継ぎで開いた新しい
+      #     ウィンドウが**描画まで成立する**）。
+      #     **可視のダイアログは検証しない**（実装に無い。理由は
+      #     `lifecycle::persist_window_failure` の doc にある）。
+      #   - 8.2: 意図的なパニックで**異常終了の記録**（`jxcel-crash.log`）が残り、記録が
+      #     パニックを握り潰さず、そのあとの起動が通常に成立して終了コード 0 で終わる。
+      #   - 10.2: 期限超過が**記録され**（`初回描画が成立しなかった: … 期限=3000 ms`）、
+      #     ネイティブの題名が変わり、**全画面の注意書きが描かれ**（画素を読んで確かめる）、
+      #     8.3 の印が立ち、アプリは終了コード 0 まで動作を続ける。
+      #     **この 3 つはいずれも tasks.md の完了状態の記述が要求していたものであり、
+      #     これまで実測する段が無かった**（8.2 の `panic:<ms>` と 10.2 の抑止の引き金は
+      #     実装されているのに駆動されていなかった）。
+      # ---------------------------------------------------------------------
+
+      # 2.10（生成の失敗の提示と隔離）。検査器は**配布物を入力として拒む**（引き金が無い）ので、
+      # 段は配布物を渡して exit 2 を確かめる（負の対照）。10.7 の「検証用でない形は exit 2」と
+      # 同じ判断である。
+      - name: Verify a failed window creation is presented and isolated (Linux / Xvfb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -eu
+          # 4.4 の解決（Linux はアプリケーションデータ領域の下の logs）。
+          record="${XDG_DATA_HOME:-$HOME/.local/share}/com.jxcel.app/logs/jxcel.log"
+          echo "診断記録: $record"
+          document="$RUNNER_TEMP/jxcel-2-10-document.txt"
+          # 7.7 は位置を読まないが、渡す位置は実在させる（検査側も実在を要求する）。
+          printf 'jxcel 2.10 の検証で開くドキュメント（内容は読まれない。tasks.md 7.7）\n' > "$document"
+          echo "検証: 検証用の形を fail-window:<ms> で起動し、失敗の提示と隔離を確かめる"
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            sh scripts/check-window-failure.sh \
+              target/release/jxcel jxcel "$record" "$document" 60 100 100
+          set -- target/release/bundle/appimage/*.AppImage
+          appimage=$1
+          echo "反証: 配布物を渡すと検査器が引き金の不在で exit 2 になることを確かめる"
+          rc=0
+          output=$(sh scripts/check-window-failure.sh \
+            "$appimage" jxcel "$record" "$document" 60 100 100 2>&1) || rc=$?
+          printf '%s\n' "$output" | tail -n 3
+          if [ "$rc" -eq 0 ]; then
+            echo "NG: 引き金を持たない配布物で検査が成功してしまった（検査が引き金を本当に見ていない）" >&2
+            exit 1
+          fi
+          if [ "$rc" -ne 2 ]; then
+            echo "NG: 配布物の対照が exit 2（入力が使えない）ではありません: ${rc}" >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$output" | grep -q "引き金 'fail-window' がありません"; then
+            echo "NG: 配布物の対照が「引き金の不在」以外の理由で落ちた（検査器が動いていない可能性がある）" >&2
+            exit 1
+          fi
+          echo "反証: 期待どおり exit 2 で落ちました（配布物には引き金が無い）"
+
+      # 8.2（異常終了の記録）。検証用の形で意図的なパニックを起こし、記録の契約・記録が
+      # パニックを握り潰していないこと・そのあとの起動が壊れていないことを要求する。
+      # **配布物を同じ環境変数で起動する負の対照は、この節の最後の段**（配布物の対照）が行う。
+      - name: Verify a crash record is written for a real panic (Linux / Xvfb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -eu
+          logs="${XDG_DATA_HOME:-$HOME/.local/share}/com.jxcel.app/logs"
+          record="$logs/jxcel.log"
+          crash="$logs/jxcel-crash.log"
+          echo "診断記録: $record"
+          echo "異常終了の記録: $crash"
+          echo "検証: 検証用の形を panic:<ms> で起動し、異常終了の記録とそのあとの起動を確かめる"
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            sh scripts/check-crash-record.sh \
+              target/release/jxcel jxcel "$record" "$crash" panic 60 100 100
+
+      # 10.2（描画不成立の提示）。抑止した検証用の形で期限超過の経路を起こし、記録・題名・
+      # **全画面の注意書き（画素）**・8.3 の印・通常終了を要求する。
+      # **この段は 8.3 の印（`render.fallback`）を立てる**ので、描画を測る段（10.4）より後に
+      # 置く（印は次の起動の描画経路を変える）。
+      - name: Verify the no-paint presentation (Linux / Xvfb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -eu
+          logs="${XDG_DATA_HOME:-$HOME/.local/share}/com.jxcel.app/logs"
+          record="$logs/jxcel.log"
+          echo "診断記録: $record"
+          echo "検証: 検証用の形を JXCEL_VERIFICATION_SUPPRESS_HEARTBEAT=1 で起動し、期限超過の提示を確かめる"
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            sh scripts/check-no-paint.sh target/release/jxcel jxcel "$record" suppressed 60 100 100
+
+      # ---------------------------------------------------------------------
+      # 配布物の負の対照（既定のビルドは検証専用の引き金を読まない）
+      #
+      # **この段を最後に置く理由**: 配布物（AppImage）の起動では、配布物の起動ラッパーが本体を
+      # 切り離すため（実測: 起動した pid の子ではなくなる）、検査器の後始末が本体に届かない。
+      # CI では各段を `xvfb-run` が包むので**仮想ディスプレイの終了が本体を終わらせる**が、
+      # その終了を待たずに次の起動が始まると単一インスタンスの機構に引き継がれうる。したがって
+      # 配布物を起動する段は**最後にまとめ**、後続の段（成果物の保存）に影響しないようにする。
+      #
+      # 確かめるのは 2 つである（いずれも「**存在しない経路を通っていない**」ことの反証）:
+      #   - 8.2: `panic:<ms>` を渡した配布物が**終了せず、異常終了の記録も残さない**
+      #     （これが無いと、記録が「引き金の起こしたパニック」のものであることを言えない）
+      #   - 10.2: 抑止の環境変数を渡した配布物が**抑止されず**（成立行が出て題名も変わらず、
+      #     注意書きの赤が画面を覆わない）、期限超過の経路に入らない
+      # ---------------------------------------------------------------------
+
+      - name: Verify the shipping bundle ignores the verification triggers (Linux / Xvfb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -eu
+          logs="${XDG_DATA_HOME:-$HOME/.local/share}/com.jxcel.app/logs"
+          record="$logs/jxcel.log"
+          crash="$logs/jxcel-crash.log"
+          echo "診断記録: $record"
+          set -- target/release/bundle/appimage/*.AppImage
+          appimage=$1
+          # 展開先を変えた後（`cd` の後）でも同じファイルを指せるよう絶対パスにする。
+          appimage=$(CDPATH='' cd -- "$(dirname -- "$appimage")" && pwd)/$(basename -- "$appimage")
+          echo "反証 1/2: 配布物を panic:<ms> で起動する（引き金は無視されなければならない）"
+          if ! xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            sh scripts/check-crash-record.sh \
+              "$appimage" jxcel "$record" "$crash" ignored 60 100 100; then
+            echo "FUSE 経由で配布物を起動できなかったため、APPIMAGE_EXTRACT_AND_RUN=1 で再試行します" >&2
+            export APPIMAGE_EXTRACT_AND_RUN=1
+            xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+              sh scripts/check-crash-record.sh \
+                "$appimage" jxcel "$record" "$crash" ignored 60 100 100
+          fi
+          echo "反証 2/2: 配布物を JXCEL_VERIFICATION_SUPPRESS_HEARTBEAT=1 で起動する（抑止されない）"
+          if ! xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            sh scripts/check-no-paint.sh "$appimage" jxcel "$record" ignored 60 100 100; then
+            echo "FUSE 経由で配布物を起動できなかったため、APPIMAGE_EXTRACT_AND_RUN=1 で再試行します" >&2
+            export APPIMAGE_EXTRACT_AND_RUN=1
+            xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+              sh scripts/check-no-paint.sh "$appimage" jxcel "$record" ignored 60 100 100
+          fi
 
       # 成果物の保存（要件 6.7）。名前は `jxcel-bundle-<runner os>` で安定させ、1 回の
       # 実行で 3 プラットフォーム分を取得できるようにする。`if-no-files-found: error`

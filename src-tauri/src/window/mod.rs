@@ -34,7 +34,11 @@
 //! 生成の失敗は他のウィンドウの動作を中断させない（要件 2.10）。[`open`] の非同期タスクは
 //! 失敗を記録して登録を取り消して戻るだけで、パニックも `?` の伝播もイベントループへ届かない
 //! （タスクのパニックは非同期ランタイムが隔離し、返った `JoinHandle` を捨てているため外へ
-//! 出ない）。強制的に失敗させる検証用の入口は `force_creation_failure` にあり、
+//! 出ない）。**提示は 2 段である** — 記録機構の `log::error!` の 1 行（標準出力と診断の記録）と、
+//! 診断の保存先へ残す 1 件の記録
+//! （`crate::lifecycle::persist_window_failure`。失敗したラベル・対象のドキュメント・理由を
+//! 名指しし、他のウィンドウに触れていないことを述べる）。強制的に失敗させる検証用の入口は
+//! `force_creation_failure` にあり、
 //! **`verification-triggers` feature でのみコンパイルされる**（既定のビルドには検証専用の
 //! 経路が入らない。tasks.md 5.4 の申し送り）。
 //!
@@ -167,6 +171,15 @@ fn spawn_creation<R: Runtime>(app: AppHandle<R>, state: WindowState) {
                 log::error!(
                     "ウィンドウを生成できなかった: label={label} ドキュメント={} / {error}",
                     describe_document(state.document()),
+                );
+                // **失敗の提示**（要件 2.10）。記録機構の 1 行だけでは利用者に届く保証が無いため、
+                // 診断の保存先へ 1 件の記録として残す（`lifecycle::persist_window_failure` の doc
+                // を参照）。**他のウィンドウには触れない** — ここで行うのは登録の取り消しと記録だけ
+                // であり、既に開いているウィンドウは動作を続ける。
+                crate::lifecycle::persist_window_failure(
+                    &label,
+                    &describe_document(state.document()),
+                    &error.to_string(),
                 );
             }
         }
