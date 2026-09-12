@@ -35,8 +35,10 @@
 //! を足した。タスク 4.1 が登録層 [`registry`] の拡張インターフェース（`CustomType` /
 //! `TypeRegistry`）を置いた。タスク 4.2 がコンパイル層 [`compile`] の列 1 本分の検証器
 //! （`compile::plan` の `ColumnValidator`）を置いた。タスク 4.3 が同じ層に型定義参照の
-//! 解決と循環の検出（`compile::resolve` の `resolve` / `Resolver`）を足した。
+//! 解決と循環の検出（`compile::resolve` の `resolve` / `Resolver`）を足した。タスク 6.1 が
+//! 型強制の層 [`coerce`] の変換の規則表（`coerce` / `coerce_by` / `Coercion`）を置いた。
 
+pub mod coerce;
 pub mod compile;
 pub mod declaration;
 pub mod error;
