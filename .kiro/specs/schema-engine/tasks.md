@@ -512,3 +512,23 @@
 - 9.4 の申し送り: `validate_batch` の**本番の呼び出し元は `src/validate/mod.rs` の 1 箇所**である（他は `#[cfg(test)]`）。5.4 の結線が効いていることを確認済み。
 - **9.4 の申し送り（最終検証で扱う未対応の申し送り）**: `tests/custom_types.rs` には**組込型のみの実行との直接の対照が無い**（同一列で実装を差し替えた 2 つの台帳の `SheetReport` を突き合わせる形が最も直接的）。現在は trait レベルの一致と併合経路の一致で代替している。
 - 9.4 の申し送り: `tests/custom_types.rs` は design の Integration Tests 一覧に**名前が挙げられている**ファイルである（design が求める内容＝上書き/既定の一致と `Err` での完走を満たす）。
+
+## Validation Result（kiro-validate-impl。全 30 サブタスク完了後）
+
+- **DECISION: GO**
+- 機械検査: `cargo test -p schema-engine` = 全区 273 件 green（lib 243 / 統合 30）。`cargo test --workspace --no-fail-fast` = 失敗 0。`cargo build -p schema-engine --all-targets` = 警告 0。`cargo bench -p schema-engine --no-run` = 成功。`bash scripts/check-core-deps.sh schema-engine` = OK（`tauri` なし）。`bash scripts/check-bench-budget.sh` = exit 0（open 0.622s/3s、save 1.435s/2s、**validate 0.255s/1s**）。TBD/TODO/FIXME 等のマーカー = 0 件。秘密情報 = 0 件（grep の 1 件は `codec.rs` の局所変数 `token`＝文法トークンであり資格情報ではない）。
+- 実測（本機、release）: 全件検証 **255.32 ms**（予算 1 秒、余裕 約 3.9 倍）/ 一意列 1 本の再検証 **30.75 ms**。
+- 要件被覆: **要件 1.1〜11.7 の 66 基準すべて**が実装行とテストの双方に対応する（被覆の穴 0、どのタスクからも参照されない要件番号 0）。
+- 依存の向き: `error / types → declaration → registry → compile → { coerce, validate } → write → evolution → api` の**逆向き参照 0 件**。23 ファイルの `mod.rs` 冒頭の鎖の文言が design と一致。`document-format` 以外の兄弟クレートと `tauri` への依存なし。
+- 設計の突合: `src/` と `benches/` のファイル配置は design と 1 対 1。19 コンポーネントはすべて対応ファイルに実在。Service Interface の相違は 2 件のみ（`WriteVerdict` の経路ごとの和、`SchemaDeclaration` → `Schema`）で、いずれも裁定として記録済み。
+- 境界の監査: 境界違反 0 件。下流（`data-grid` / `schema-editor` / `form-web-server`）の責務の肩代わり、上流（`document-format`）の責務の侵食、設計が宣言していない新しい依存・共有状態はいずれも検出されなかった。
+- 重複実装: 検出された 3 件（長さ規則・違反理由の写像・種別トークン）はいずれも本実装中に単一の源へ寄せて解消済み。残る重複は「既定値のオブジェクト構造の合否判定」が `declaration/codec.rs` と `compile/mod.rs` に分かれる構造の歩きのみで、design がその場で判定できる分と型解決後でしか判定できない分を分けており、**葉の適合判定は 4.2 の検証器を再利用**している（意図的な分担）。
+- ブロックされたタスク: 0 件。
+
+### 申し送り（いずれも非ブロッキング。担当を明記）
+
+1. **`unique::scan` / `refs::scan` の前提の表明**（担当: 本クレートに次に触るタスク）: 絞り込みは**昇順・重複除去済みの列**を前提とし、doc に書かれているが、crate 外から未整列の列を渡すと**黙って取りこぼす**。走査側で正規化するか `debug_assert` で表明するのが望ましい。
+2. **組込型のみの実行との直接の対照**（担当: `custom-types` の実装時、または本クレートの次回改修時）: `tests/custom_types.rs` は trait レベルの一致と併合経路の一致で要件 11.6 を示しているが、**同一列で拡張型を上書き実装と既定実装に差し替えた 2 つの台帳の `SheetReport`** を突き合わせる形がより直接的。
+3. **名前付き型定義の本文の変更の差分**（担当: `schema-editor` の影響プレビュー）: `diff` は `Schema` しか受け取らず型定義集合を持たないため、**型定義の本文の変更を検出できない**（7.1 の申し送り）。上流エンベロープが所有する集合を渡す形が要る。
+4. **`Sample::column_count` / `row_values` が `document.sheets()[0]` を直接引く**（担当: 標本に触る次のタスク）: 現状は 1 シート前提で実害なし。
+5. **`tests/common/mod.rs` の「同じ引数なら常に同じ内容」**という文言（担当: 同上）: 値だけの生成器については正しいが、**識別子を含む標本**については 9.1 の裁定（形と違反の位置・種別のみ同一）に揃えるのが望ましい。
