@@ -39,11 +39,14 @@
 //! 型強制の層 [`coerce`] の変換の規則表（`coerce` / `coerce_by` / `Coercion`）を置いた。
 //! タスク 6.2 が書き込み経路の層 [`write`] の経路ごとの判定（`WriteOrigin` /
 //! `EditVerdict` / `CollectVerdict` / `WriteVerdict` と `validate_write`）を置いた。
+//! タスク 7.1 がスキーマ変更の層 [`evolution`] の変更の抽出（`evolution::diff` の
+//! `diff` / `ColumnChange` / `ColumnConstraints` / `SchemaDiff`）を置いた。
 
 pub mod coerce;
 pub mod compile;
 pub mod declaration;
 pub mod error;
+pub mod evolution;
 pub mod registry;
 pub mod types;
 pub mod validate;
