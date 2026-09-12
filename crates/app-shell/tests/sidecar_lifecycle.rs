@@ -1022,9 +1022,22 @@ fn shutdown_all_returns_promptly_when_the_child_is_already_dead() {
     supervisor
         .shutdown_all()
         .expect("既に終了した子でも成功する");
+    // **上限は猶予に対する比で表す（猶予の半分）。** 契約（tasks.md 3.3）は「既に終了した子で
+    // ハングしない」であり、猶予を無条件に消費する退行はここで落ちる（`grace` = 5 秒に対して
+    // 上限 2.5 秒）。
+    //
+    // **以前は 1 秒固定だったが、Windows の CI でその 1 秒を超えた**（2026-09-12、
+    // `shutdown_all_returns_promptly_when_the_child_is_already_dead` が「既に終了した子に
+    // 猶予 5s を消費した」で失敗。**同じコードで 5 回は成功していた**）。経路は `terminate` の
+    // ループで、`Child::try_wait` が終了を報告した後も **Job Object の `ActiveProcesses` が
+    // 0 になるまで待つ**（`job_windows.rs` の `exists`）。プロセスの終了から job の会計が 0 に
+    // なるまでの遅れは、負荷の高いランナーで 1 秒を超えうる — **アプリの契約は破られていない**
+    // （猶予を使い切ってはいない）ので、上限は猶予に対する比にする。**実測値をメッセージに
+    // 残す**ので、次に落ちたときは「遅れがどれだけだったか」が分かる。
+    let elapsed = started.elapsed();
     assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "既に終了した子に猶予 {grace:?} を消費した（ハングしない要件に反する）"
+        elapsed < grace / 2,
+        "既に終了した子に猶予 {grace:?} の半分以上を消費した（ハングしない要件に反する）: {elapsed:?}"
     );
     assert!(
         supervisor.get(SidecarKind::Smoke).is_none(),
