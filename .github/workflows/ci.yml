@@ -606,7 +606,13 @@ jobs:
       #       こと**、**フォーカスを移すと追随すること**、**1 回の押下で作用するのが 1 枚だけである
       #       こと**（もう一方のラベルの行が 0 件であること）を要求する。
       #     * (3) 表示の表記 — **GTK が報告するキーバインド**（`<Primary>q` /
-      #       `<Primary><Shift>l` など）を AT-SPI から読む。`<Primary>` は GTK の「主修飾キー」の
+      #       `<Primary><Shift>l` など）を AT-SPI から読む。**読むのは `Action.GetKeyBinding`
+      #       であり、`Action.GetActions` ではない** — 22.04 の libatk-bridge 2.38 は後者の応答
+      #       `a(sss)` を組み立てる途中で**被検体を abort させる**（`scripts/check-menu-shortcut.sh`
+      #       の「キーバインドは `GetKeyBinding` で読む」に実測がある）。`GetKeyBinding` の応答は
+      #       文字列であり、AT-SPI の仕様が「`GetActions` は `GetLocalizedName` / `GetDescription` /
+      #       `GetKeyBinding` の等価」と定めているので**読める内容は同じ**である。
+      #       `<Primary>` は GTK の「主修飾キー」の
       #       表記であり、**アプリの自己申告ではなく基盤の表記**である。アクセラレータを割り当てて
       #       いない項目（`verification.document-only`）の報告が**空であること**も要求する（対照）。
       #       加えて検証用の形の記録から、**基盤へ渡した綴りが `ctrl+…` へ解決されていること**を

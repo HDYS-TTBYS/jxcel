@@ -24,8 +24,9 @@
 #       対象ウィンドウ=…` と、登録元が送った `診断の導線の要求を送った: ウィンドウ = … /
 #       導線 = …`）を要求する。**配布物に対して行う**ので、配布物のメニューそのものが読まれ、
 #       駆動される。
-#       **`GetActions`（項目ごとのキーバインドの読み取り）は呼ばない** — 理由は下の
-#       「キーバインドは AT-SPI から読まない」。表示の綴りの証拠は (3) と (2) が担う。
+#       あわせて**各項目のキーバインド**（基盤が表示に使う綴り。`<Primary>q` など）を読む。
+#       **読むのは `GetKeyBinding` であり、`GetActions` ではない** — 理由は下の
+#       「キーバインドは `GetKeyBinding` で読む」。
 #   (2) **フォーカスされているウィンドウにだけショートカットが作用する** — 検証用の形を起動し、
 #       ドキュメント付きの 2 枚目を単一インスタンスの引き継ぎで開く。`XSetInputFocus` で
 #       フォーカスを移し、`XSendEvent`（`event_mask=0`。7.5 の実測手段。**XTEST はこの
@@ -41,10 +42,10 @@
 #       macOS は `super+…`（＝`Cmd`）であり、**同じ論理ショートカットがプラットフォームごとの
 #       綴りへ解決されていること**がここに現れる。
 #
-# # キーバインドは AT-SPI から読まない（`GetActions` を呼んではならない）
+# # キーバインドは `GetKeyBinding` で読む（`GetActions` を呼んではならない）
 #
-# 以前は項目ごとに `org.a11y.atspi.Action.GetActions` を呼び、**GTK が報告するキーバインド**
-# （`<Primary>q` など）を読んでいた。**これは 10.6 の Linux 段では成立しない。**
+# **`org.a11y.atspi.Action.GetActions` を呼んではならない。** 応答が `a(sss)` であるため、
+# 基盤がその構造体の配列を組み立てる途中で**被検体のアプリが abort する**:
 #
 #   - CI が固定している**最も古い対象環境（ubuntu-22.04）の `libatk-bridge-2.0.so.0` は 2.38.0**
 #     であり、その `impl_GetActions` は `a(sss)` の構造体へ**4 つ目の文字列**を書こうとする。
@@ -54,9 +55,19 @@
 #     見える）。上流の修正（GNOME/at-spi2-core `dc0dc331`、2022-04-07）は 2.38 より後であり、
 #     22.04 には入らない。**アプリのバグではなく、ランナーの a11y スタックの性質である**
 #     （配布物が同梱する a11y スタックでも、ホストのものを読ませても 2.38 なので同じ）。
-#   - したがって**表示の綴りの証拠は (3) の記録（アプリが基盤へ渡した解決済みの綴り）と
-#     (2) のキー送出（そのショートカットが実際に作用する）で取る**。ポップアップの字形そのものは
-#     7.5 がホストで画素により実測済みである（こちらはランナーで再現できない）。
+#   - **要るのはキーバインドの文字列 1 本だけ**である。同じ `org.a11y.atspi.Action` の
+#     `GetKeyBinding(index) -> s` は**応答が文字列**なので構造体の組み立てを通らず、この abort を
+#     踏まない。AT-SPI の仕様が「`GetActions` は各項目について `GetLocalizedName` /
+#     `GetDescription` / `GetKeyBinding` を呼ぶのと等価」と定めている（`xml/Action.xml`）ので、
+#     **読める内容は同じ**であり、この段が確かめる主張（項目ごとの表示の綴り）は変わらない。
+#   - 項目ごとの有無は `Action` の `NActions` プロパティ（読取専用）で見る。**アクションを
+#     持たない項目**（キーバインドを割り当てていない項目）はここで空を返し、(3) の「キーが無い」
+#     対照が成立する。
+#
+# したがって表示の綴りの証拠は **(1) の基盤の報告（`<Primary>…`。GTK が表示に使う綴り）** と
+# (3) の記録（アプリが基盤へ渡した解決済みの綴り `ctrl+…`）と (2) のキー送出（そのショートカットが
+# 実際に作用する）の 3 つで取る。**ポップアップの字形そのものは見ていない**（7.5 がホストで
+# 画素により実測済み。ランナーでは再現できない）。
 #
 # # 証拠が何を証明し、何を証明しないか
 #
@@ -70,16 +81,17 @@
 #     `activation_target`）である。「作用した」ことの直接の証拠はログの 1 行であり、
 #     どのウィンドウのウィジェットが反応したかは見ていない。**それでも「フォーカスと一致する
 #     こと」「フォーカスを移すと追随すること」は、この 1 行の比較で成立する。**
+#   - (1) のキーバインドは**基盤（GTK / ATK）が報告する綴り**であり、アプリの自己申告ではない。
+#     **アクセラレータを割り当てていない項目が空を報告すること**（対照）も同じ経路で確かめる。
 #   - (3) の「表示」は**基盤へ渡した綴りまで**である。GTK が描く字形（`Ctrl+Shift+L`）そのものは
-#     アプリの記録には現れない（7.5 がポップアップの画素で確かめた）。(1) の AT-SPI の読みからは
-#     **キーバインドを読まない**（上の「キーバインドは AT-SPI から読まない」）。
+#     アプリの記録には現れない（7.5 がポップアップの画素で確かめた）。
 #   - **配布物（既定のビルド）は検証専用の引き金を読まない**（9.7 の片付けの規約）ので、
 #     (1) は配布物で、(2)(3) は検証用の形で測る。段はその 2 つを別の引数で受け取る。
 #     配布物の記録に検証専用の行が 1 つも現れないことも (1) で確かめる。
 #   - **AT-SPI の呼び出しが失敗したら、アプリの出力と記録を添えて落ちる**（`atspi` の wrapper）。
 #     読み取りの失敗の原因（アプリが消えた・橋が落ちた・D-Bus が拒否した）は、被検体の出力に
-#     しか現れないことがある — 実際、上の `GetActions` の abort はこの wrapper が無い間は
-#     見えなかった。
+#     しか現れないことがある — 実際、`GetActions` の abort（下の「キーバインドは
+#     `GetKeyBinding` で読む」）はこの wrapper が無い間は見えなかった。
 #
 # # 記録の読み方
 #
@@ -412,17 +424,28 @@ PRUNE_ROLES = {"scroll pane", "document web", "document frame", "table", "text"}
 
 EXPECTED = {
     "shipping": {
-        "ファイル": ("開く…", "終了"),
-        "診断": ("診断情報を書き出す…", "記録の保存場所を表示", "記録の詳細度…"),
+        "ファイル": {
+            "開く…": (("primary",), "o"),
+            "終了": (("primary",), "q"),
+        },
+        "診断": {
+            "診断情報を書き出す…": (("primary", "shift"), "e"),
+            "記録の保存場所を表示": (("primary", "shift"), "l"),
+            "記録の詳細度…": (("primary", "shift"), "v"),
+        },
     },
     "verification": {
-        "ファイル": (
-            "開く…",
-            "終了",
-            "検証: 対象ウィンドウを記録",
-            "検証: ドキュメント付きのみ",
-        ),
-        "診断": ("診断情報を書き出す…", "記録の保存場所を表示", "記録の詳細度…"),
+        "ファイル": {
+            "開く…": (("primary",), "o"),
+            "終了": (("primary",), "q"),
+            "検証: 対象ウィンドウを記録": (("primary", "shift"), "j"),
+            "検証: ドキュメント付きのみ": ((), None),
+        },
+        "診断": {
+            "診断情報を書き出す…": (("primary", "shift"), "e"),
+            "記録の保存場所を表示": (("primary", "shift"), "l"),
+            "記録の詳細度…": (("primary", "shift"), "v"),
+        },
     },
 }
 # 配布物（既定のビルド）に現れてはならない検証専用の項目（7.4 / 7.5 の片付けの規約）。
@@ -480,10 +503,28 @@ class Atspi:
     def name(self, dest, path):
         return self.property(dest, path, ACCESSIBLE, "Name")
 
-    # **`GetActions`（キーバインドの読み取り）は持たない。** 呼ぶとランナー（ubuntu-22.04 の
-    # libatk-bridge 2.38）では被検体が abort する（ファイル冒頭の
-    # 「キーバインドは AT-SPI から読まない」を参照）。活性化（`DoAction`）は別の経路であり、
-    # 返り値も真偽値だけなので使える。
+    def keybinding(self, dest, path):
+        """その項目のキーバインド（**基盤が表示に使う綴り**。`<Primary>q` など）。
+
+        **`GetActions` を呼んではならない。** 応答が `a(sss)` であるため、基盤がその構造体の
+        配列を組み立てる途中で**被検体のアプリが abort する**（実測: libdbus の
+        `Array or variant type requires that type end_struct be written, but string was
+        written.` のあと、呼び出し側には
+        `Message recipient disconnected from message bus without replying` が返る）。
+
+        ここで要るのは**キーバインドの文字列 1 本**だけなので、応答が `s` である
+        `GetKeyBinding` で読む（構造体の組み立てを通らない）。AT-SPI の仕様が「`GetActions` は
+        各項目について `GetLocalizedName` / `GetDescription` / `GetKeyBinding` を呼ぶのと
+        等価」と定めている（`xml/Action.xml`）ので、**読める内容は同じ**である。
+        """
+        # アクションを持たない項目（キーバインドを割り当てていない項目）は空を返す。
+        if not self.property(dest, path, ACTION, "NActions"):
+            return ""
+        binding = self.call(dest, path, ACTION, "GetKeyBinding", "i", "0")
+        # 基盤は `ニーモニック;列;ショートカット` の形で返す（`xml/Action.xml` の
+        # `GetKeyBinding`。GTK のメニュー項目では最後の欄が表示される綴りである）。
+        return str(binding).split(";")[-1].strip()
+
     def do_action(self, dest, path, index=0):
         return self.call(dest, path, ACTION, "DoAction", "i", str(index))
 
@@ -515,10 +556,14 @@ def walk(atspi, app):
             role = atspi.role(dest, path)
         except RuntimeError as error:
             ng(f"AT-SPI のロールを読めませんでした（{dest} {path}）: {error}")
-        entry = {"role": role, "name": "", "depth": depth}
+        entry = {"role": role, "name": "", "keybinding": "", "depth": depth}
         if role in ("menu bar", "menu", "menu item"):
             try:
                 entry["name"] = atspi.name(dest, path)
+                # **キーバインドを読むのは `menu item` だけである**（`menu bar` と `menu` には
+                # アクションが無く、`NActions` が 0 を返す）。
+                if role == "menu item":
+                    entry["keybinding"] = atspi.keybinding(dest, path)
             except RuntimeError as error:
                 ng(f"AT-SPI の項目を読めませんでした（{dest} {path}）: {error}")
             nodes.append(entry)
@@ -534,7 +579,7 @@ def walk(atspi, app):
 
 
 def menus(nodes):
-    """`menu bar` の直下の `menu` ごとに、項目名を順に集める。"""
+    """`menu bar` の直下の `menu` ごとに、項目名 → キーバインド を集める。"""
     found = {}
     bar_depth = None
     for node in nodes:
@@ -547,10 +592,36 @@ def menus(nodes):
     for node in nodes:
         if node["role"] == "menu" and node["depth"] == bar_depth + 1:
             current = node["name"]
-            found.setdefault(current, [])
+            found.setdefault(current, {})
         elif node["role"] == "menu item" and current is not None and node["depth"] == bar_depth + 2:
-            found[current].append(node["name"])
+            found[current][node["name"]] = node["keybinding"]
     return found
+
+
+def normalize(binding):
+    """GTK の報告を比較できる形にする（`<Primary>` を小文字の `primary` に、他も小文字に）。"""
+    return binding.lower()
+
+
+def check_binding(item, binding, modifiers, key):
+    """**基盤が報告するキーバインド**が期待どおりかを確かめ、記録に出す 1 行を返す。"""
+    text = normalize(binding)
+    if key is None:
+        # キーバインドを割り当てていない項目の対照。**空であること**を要求する。
+        if text != "":
+            ng(f"AT-SPI: {item} にキーバインドがあってはならないが {binding!r} が付いています")
+        return f"{item}=（キーバインドなし）"
+    if not text.endswith(key):
+        ng(f"AT-SPI: {item} のキーバインド {binding!r} がキー {key!r} で終わっていません")
+    for modifier in modifiers:
+        # `<Primary>` は GTK の「主修飾キー」表記（Linux / Windows は Ctrl、macOS は Command）。
+        # ランナーの GTK 版によって `<Control>` と綴られることがあるため両方を受ける。
+        if modifier == "primary":
+            if "primary" not in text and "control" not in text and "meta" not in text:
+                ng(f"AT-SPI: {item} のキーバインド {binding!r} に主修飾キーがありません")
+        elif modifier not in text:
+            ng(f"AT-SPI: {item} のキーバインド {binding!r} に {modifier} がありません")
+    return f"{item}={binding}"
 
 
 def verify(mode, app_name, timeout):
@@ -566,10 +637,10 @@ def verify(mode, app_name, timeout):
     for menu, items in expected.items():
         if menu not in found:
             ng(f"AT-SPI: 部分メニュー {menu!r} がメニューバーにありません（あるのは {sorted(found)}）")
-        for item in items:
+        for item, (modifiers, key) in items.items():
             if item not in found[menu]:
-                ng(f"AT-SPI: {menu!r} に項目 {item!r} がありません（あるのは {found[menu]}）")
-            print(f"OK: AT-SPI: {menu} > {item}（項目が現れる）")
+                ng(f"AT-SPI: {menu!r} に項目 {item!r} がありません（あるのは {sorted(found[menu])}）")
+            print("OK: AT-SPI: " + check_binding(f"{menu} > {item}", found[menu][item], modifiers, key))
     if found.get("診断") is not None and len(found["診断"]) != DIAGNOSTICS_ITEMS:
         ng(f"AT-SPI: 診断の部分メニューの項目が {len(found['診断'])} 個です（{DIAGNOSTICS_ITEMS} 個であるべき）")
     if mode == "shipping":
@@ -589,7 +660,10 @@ def tree(app_name, timeout):
         ng(f"AT-SPI にアプリ {app_name!r} が現れませんでした（{timeout} 秒）")
     for node in walk(atspi, app):
         indent = "  " * node["depth"]
-        print(f"{indent}{node['role']} | {node['name']!r}")
+        if node["role"] == "menu item":
+            print(f"{indent}{node['role']} | {node['name']!r} | {node['keybinding']!r}")
+        else:
+            print(f"{indent}{node['role']} | {node['name']!r}")
     return 0
 
 
@@ -766,7 +840,7 @@ PY
 # （アプリが消えた・アクセシビリティの橋が落ちた・D-Bus が呼び出しを拒否した）は被検体の出力に
 # しか現れないことがある — 実際、22.04 の libatk-bridge の `GetActions` がアプリを abort させて
 # いたことは、この wrapper（とその wrapper が呼ぶ `report_failure`）を足すまで見えなかった
-# （ファイル冒頭の「キーバインドは AT-SPI から読まない」を参照）。
+# （ファイル冒頭の「キーバインドは `GetKeyBinding` で読む」を参照）。
 atspi() {
   atspi_run "$@" || report_failure "AT-SPI の呼び出しが失敗した（${*}）"
 }

@@ -29,9 +29,10 @@ appimage=$(CDPATH='' cd -- "$(dirname -- "$appimage")" && pwd)/$(basename -- "$a
 # **a11y スタックを入れ替える処置（AppImage の展開＋ホストのライブラリ）は要らない。**
 # 以前それを足したのは、検査器が `org.a11y.atspi.Action.GetActions` を呼んでいて、
 # **22.04 の libatk-bridge 2.38 がそれで被検体を abort させる**ためだった
-# （`scripts/check-menu-shortcut.sh` の「キーバインドは AT-SPI から読まない」を参照。
+# （`scripts/check-menu-shortcut.sh` の「キーバインドは `GetKeyBinding` で読む」を参照。
 # 同梱のものでもホストのものでも 2.38 なので、入れ替えでは直らない）。
-# **この段は `GetActions` を呼ばない**ので、配布物をそのまま使える。
+# **この段は `GetActions` を呼ばない**（キーバインドは応答が `s` である `GetKeyBinding` で読む）
+# ので、配布物をそのまま使える。
 # FUSE が使えないランナーでは起動の置き場が `APPIMAGE_EXTRACT_AND_RUN=1` へ退避する。
 shipping="$appimage"
 document="$RUNNER_TEMP/jxcel-10-6-document.txt"
