@@ -411,7 +411,7 @@
 
 - [ ] 10. Validation: 横断的な検証
 
-- [ ] 10.1 静的なゲートを CI に組み込む
+- [x] 10.1 静的なゲートを CI に組み込む
   - 生成物のドリフト検査を CI で実行し、失敗したらパイプラインを落とす
   - フロントエンドの型検査を CI で実行する。**この 2 つの片方だけでは「不一致がビルドを落とす」は成立しない**
   - 権限の逸脱検査と、配信先中立な資産の依存検査を組み込む
@@ -479,6 +479,17 @@
   - _Depends: 7.2_
 
 ## Implementation Notes
+
+- **10.1（追加した 5 段・重要）**: 既存の `test` ジョブ（3 OS マトリクス）の **`Build` の直後・`Test` の直前**に 5 段を追加。**`if:` 条件は付けず 3 OS すべてで走らせる**（structure.md の「検査スクリプトは 3 OS のランナーで同じものが走る」に従う。加えて**プラットフォーム別の依存節は他 OS では見えない**ため、1 OS だけでは他ターゲット向けの tauri 依存を見逃す。capability 検査も各ランナーが生成した実物を見られる）。**ジョブもワークフローも新設していない**（要件 6.2）。
+  1. `cargo test -p app-shell --test bindings_drift` — 生成物のドリフト（**ワークスペース全体のテストにも含まれるが、不変条件を名指しで落とすために独立の段にする**。`Test` より前なので最初に名指しで落ちる）。
+  2. `npm run typecheck` — 4.3 の後半（生成物は新しいのにフロントが追随していない）。
+  3. `npm run check:shared-assets`（`shell: bash`）。
+  4. `bash scripts/check-capabilities.sh`（`shell: bash`）。**生成物 `gen/schemas/capabilities.json` は `Build`（tauri-build）で初めて生じる**のでこの位置。
+  5. `bash scripts/check-core-deps.sh app-shell`（`shell: bash`、新規スクリプト）。
+- **10.1（`scripts/check-core-deps.sh` の意味論）**: 指定クレートについて `cargo tree --edges normal,build,dev --all-features` を実行し、**行頭のパッケージ名だけを照合する**。したがって**推移的な tauri を捕まえ**（実測: 一時メンバークレート経由の `app-shell → zz-tauri-probe → tauri v2.11.5` で exit 1）、改名依存（`gui = { package = "tauri" }`）でも `tauri v2.11.5` として出るため回避できない。`not-tauri-x` / `tauric` / `libtauri-sys` / `xtauri` のような部分一致は誤検出しない。**`cargo tree` 自体の失敗や存在しないクレートも exit 2** で沈黙して通らない。**限界**: マトリクス外のプラットフォーム（例 android）向けの依存節は見えない（`--target all` にすれば塞げるが、不変条件とマトリクスの範囲では十分）。
+- **10.1（各ゲートの実測・再現手順）**: 4 つの欠陥クラスすべてを**CI 段と同一コマンド**で実測済み — ①型定義を変えて再生成しない → ドリフト段 exit 101（再生成コマンドと食い違い位置を提示）②境界の型を変えて**再生成した上で**フロントを追随させない → `npm run typecheck` exit 2（TS2339）③`"windows": ["*"]` を capability 原本に入れて再生成 → capability 段 exit 1 ④`src/shared/` に境界参照を足す → shared-assets exit 1（`ファイル:行:列`）⑤コアに tauri を推移的依存として入れる → core-deps exit 1。**注意**: capability 原本に `shell:` 権限を直接注入すると **`Build` の方が先に落ちる**（そんなプラグインは依存に無いため `Permission shell:allow-open not found`）。検査器の接頭辞規則そのものは**細工した入力ファイル**で検証する（`fs:default` / `shell:allow-execute` / `webviews:["*"]` → exit 1、散文は誤検出しない、`windows` 不在は逸脱でない、ファイル不在は exit 2）。
+- **10.1（YAML の検証手段）**: **actionlint** を一時的に取得して `ci.yml` / `bench.yml` を検査（exit 0）。qlty 本体には actionlint プラグインの導入が無いので、ワークフローを触ったときは個別に当てる。**このホストに shellcheck は無い**。
+
 
 - **9.7（2 つの画面）**: `src/features/smoke/TableSmoke.tsx` は **200 行 × 8 列 = `td` 1,600**（表だけで 2,013 要素、領域全体で 2,018 要素。シェルのクローム <20・空ウィンドウの画面 5 要素と桁で違う）。**枠に `max-height: 60vh` を与えて画面の中でスクロールさせる**ので、窓を押し広げない（実測: 枠の client 461 / scroll 5,226、`document` の scrollHeight は不変）。`EditorSmoke.tsx` は**素の `<textarea>`**（エディタ依存を足さない）で**64 行 / 3,263 文字**（日本語と ASCII の混在）、編集は状態行（`data-edited` と文字数・行数）に現れる。**登録 id は `smoke-table` / `smoke-editor`**（画面ファイルが単一定義を持ち、検証の指定と同じ綴りを使う）。`ScreenProps` 以外は受け取らず、9.3 の境界は既存の 1 箇所がそのまま効く。**実用画面ではない**（育てるのは `data-grid` と `macro-editor-lsp`。**ユーザー向けの導線は持たない**）。
 - **9.7（検証専用の到達経路・重要）**: `verification-triggers` の下でのみ `JXCEL_VERIFICATION_INITIAL_SCREEN` を **Rust 側が読み**、ウィンドウの初期化スクリプトに埋め込む。**埋め込みは `is_embeddable_screen_id` で「素の画面 id」に制限**してある（変異検査で load-bearing を実測。スクリプト注入を許さない）。**既定ビルドには環境変数の痕跡が無く（`strings -a` で 0 件）、既定ビルドは環境変数を無視して 9.6 の空ウィンドウ画面を初期画面にする**（9.6 の受入は不変）。**10.4 はこの環境変数で 3 OS の画面を指定できる。**

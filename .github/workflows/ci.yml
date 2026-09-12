@@ -163,6 +163,75 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
+      # ---------------------------------------------------------------------
+      # 静的ゲート（tasks.md 10.1 / 要件 4.3, 4.7, 9.6）
+      #
+      # 既存のマトリクスへ段を足すだけであり、プラットフォーム別のワークフローもジョブも
+      # 新設しない（要件 6.2）。**3 OS すべてで走らせる**（`if:` で 1 OS に絞らない）:
+      #   - structure.md「機械検査は scripts/ に置き CI から呼ぶ」は、検査スクリプトが
+      #     3 OS のランナーで同じく動くことを要求している。`zip floor check` と同じ扱い。
+      #   - 対象の依存は `[target.'cfg(...)'.dependencies]` で OS ごとに変わるため、
+      #     1 OS だけの実行では他方のプラットフォーム向けに足された tauri 依存を見逃す。
+      #   - capability の逸脱検査は、そのランナーの tauri-build が実際に書き出した
+      #     記述を検査する（手元の生成物ではなく、各 OS のビルド結果が対象になる）。
+      #
+      # 位置は `Build` の直後・`Test` の直前である。
+      #   - capability の逸脱検査の入力（`src-tauri/gen/schemas/capabilities.json`）は
+      #     tauri-build が `cargo build --workspace` の中で書き出すため、Build より前には
+      #     存在しない（無ければスクリプトが exit 2 で落ちる）。
+      #   - フロントエンドの段は、先の `npm ci` で devDependency（`typescript`）が
+      #     入っていることを前提にする。
+      #   - ドリフト検査は `cargo test --workspace` にも含まれるが、そこで落ちると原因が
+      #     ワークスペース全体の出力に埋もれる。境界の型・コマンド名の変更に対して
+      #     最初に名指しで落ちる段を `Test` より前に置く。
+      # ---------------------------------------------------------------------
+
+      # 生成物のドリフト検査（要件 4.3 の前半、tasks.md 2.3）。`src/ipc/bindings.ts` は
+      # `crates/app-shell/src/ipc/` の境界の型と `COMMAND_NAMES` から生成される追跡対象の
+      # 成果物である。正本を変えて生成をやり直さない変更（および生成物の手編集）は
+      # ここで落ちる。失敗メッセージには再生成コマンドが含まれる。
+      - name: Check generated bindings drift
+        run: cargo test -p app-shell --test bindings_drift
+
+      # フロントエンドの型検査（要件 4.3 の後半）。ドリフト検査と**両方**必要である:
+      #   - ドリフト検査 = 「Rust 側が変わったのに生成物が古い」
+      #   - `tsc --noEmit` = 「生成物は新しいがフロント側が追随していない」
+      # 片方だけでは「不一致がビルドを落とす」は成立しない（tasks.md 2.3）。
+      # `typecheck` は `build`（Vite のみ）とは別のスクリプトである（tasks.md 1.4）。
+      - name: Typecheck frontend (tsc --noEmit)
+        run: npm run typecheck
+
+      # 配信先中立な資産の依存検査（要件 9.6、tasks.md 9.4）。`src/shared/` はデスクトップ内と
+      # LAN 配信の Web ページの両方で動くため、Tauri の通信境界（`@tauri-apps/*` /
+      # `window.__TAURI__` / `../ipc`）に依存してはならない。検査は TypeScript の構文木を
+      # 走査するので、コメントや散文を誤検出しない。
+      # 0 = 依存なし / 1 = 逸脱（ファイル:行:列 と理由） / 2 = 入力が使えない。
+      # node と devDependency `typescript` を要する（`npm ci` の後であることが前提）。
+      # Windows の npm は既定で cmd.exe からスクリプトを起動するため、`shell: bash` を
+      # 明示して Git Bash のある PATH を引き継がせる（スクリプト本体は POSIX sh）。
+      - name: Check shared assets do not depend on the IPC boundary
+        shell: bash
+        run: npm run check:shared-assets
+
+      # capability の逸脱検査（要件 4.7、tasks.md 7.3）。tauri-build が書き出した実行時の
+      # capability 記述を node で構造的に解析し（説明文の散文では誤検出しない）、
+      # fs / shell 系の権限識別子と「全ウィンドウ」指定（`windows` / `webviews` の `"*"`）を
+      # 逸脱として落とす。`windows` キーの不在は逸脱ではない（tasks.md 7.1 の訂正）。
+      # 0 = 適合 / 1 = 逸脱 / 2 = 入力が使えない（生成物の不在は 2。Build の後なので存在する）。
+      - name: Check capability deviations
+        shell: bash
+        run: bash scripts/check-capabilities.sh
+
+      # コアクレートの tauri 非依存（tasks.md 10.1、structure.md「Rust ドメインクレート」、
+      # tech.md「Testing」）。本スペックで最も破られやすい不変条件であり、手作業の確認では
+      # 守れない。検査本体は POSIX sh の `scripts/check-core-deps.sh`（ローカルでも同じものを
+      # 実行できる）。`cargo tree` の出力全体（normal / build / dev の 3 辺、全 feature）を
+      # 行頭のパッケージ名で照合するので、**推移的に引き込まれた tauri** も捕まえる。
+      # ドメインコアは GUI を起動せずにテストできなければならない。
+      - name: Check core crate does not depend on tauri (transitively)
+        shell: bash
+        run: bash scripts/check-core-deps.sh app-shell
+
       # `--no-fail-fast`: 既定の `cargo test` は最初に落ちたテストターゲットで止まり、
       # 残りの統合テストと doctest を走らせない。OS 固有の失敗は 1 回の実行ですべて
       # 見えている必要がある（Windows で lib の 1 件が落ちた結果、統合テストが
