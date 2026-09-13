@@ -348,53 +348,79 @@ fn check_integer_literals(bytes: &[u8]) -> Result<(), DocumentError> {
     let mut cursor = 0usize;
     while cursor < end {
         match bytes[cursor] {
-            b'"' => {
-                // 文字列の中身はデータ(エスケープを含めて読み飛ばす)。
-                cursor += 1;
-                while cursor < end {
-                    match bytes[cursor] {
-                        b'"' => break,
-                        b'\\' => cursor += 2,
-                        _ => cursor += 1,
-                    }
-                }
-                cursor += 1; // 閉じ引用符の外へ(未閉じなら serde_json が後で弾く)
-            }
+            // 文字列の中身はデータである(範囲外の数字を書いてよい)。
+            b'"' => cursor = skip_string(bytes, cursor),
             b'-' | b'0'..=b'9' => {
-                let start = cursor;
-                cursor += usize::from(bytes[cursor] == b'-');
-                while cursor < end && bytes[cursor].is_ascii_digit() {
-                    cursor += 1;
-                }
-                if matches!(bytes.get(cursor), Some(b'.') | Some(b'e') | Some(b'E')) {
-                    // 小数リテラル: 小数部と指数部まで進める(指数の数字を
-                    // 別個の整数リテラルと誤認させない)。
-                    if bytes[cursor] == b'.' {
-                        cursor += 1;
-                        while cursor < end && bytes[cursor].is_ascii_digit() {
-                            cursor += 1;
-                        }
-                    }
-                    if matches!(bytes.get(cursor), Some(b'e') | Some(b'E')) {
-                        cursor += 1;
-                        cursor += usize::from(matches!(bytes.get(cursor), Some(b'+') | Some(b'-')));
-                        while cursor < end && bytes[cursor].is_ascii_digit() {
-                            cursor += 1;
-                        }
-                    }
-                } else if magnitude_beyond_i64(&bytes[start..cursor]) {
+                let (next, integer) = scan_number_literal(bytes, cursor);
+                // **整数リテラルのときだけ**大きさを見る。`.` や `e` を含むものは
+                // `f64` として正当な値であり(`9223372036854775808.0` / `1e300`)、
+                // 整数リテラルではないので範囲の対象外である。
+                if integer && magnitude_beyond_i64(&bytes[cursor..next]) {
                     return Err(DocumentError::InvalidContainer {
                         entry: format!(
                             "value: integer `{}` is out of i64 range",
-                            String::from_utf8_lossy(&bytes[start..cursor])
+                            String::from_utf8_lossy(&bytes[cursor..next])
                         ),
                     });
                 }
+                cursor = next;
             }
             _ => cursor += 1,
         }
     }
     Ok(())
+}
+
+/// 文字列リテラル 1 件を読み飛ばし、閉じ引用符の**次**の位置を返す。
+///
+/// エスケープ(`\`)は次の 1 バイトごと読み飛ばす。閉じ引用符が無い場合は終端を越えた
+/// 位置を返す(その不正は `serde_json` が後で弾く。ここでは判定しない)。
+fn skip_string(bytes: &[u8], quote: usize) -> usize {
+    let end = bytes.len();
+    let mut cursor = quote + 1;
+    while cursor < end {
+        match bytes[cursor] {
+            b'"' => break,
+            b'\\' => cursor += 2,
+            _ => cursor += 1,
+        }
+    }
+    cursor + 1
+}
+
+/// 数値リテラル 1 件を走査し、(`次の位置`, `整数リテラルか`) を返す。
+///
+/// 文法は `-? 数字+ [. 数字*] [eE [+-]? 数字+]` である。**指数部の数字を別個の
+/// 整数リテラルと誤認させない**ためにここで 1 件ずつ切り出す
+/// ([`check_integer_literals`] の docs)。確保しない 1 パス。
+///
+/// 「整数リテラルか」は `.` も `e` / `E` も現れなかったことを意味する。範囲外でも
+/// `9223372036854775808.0` や `1e300` は `f64` として正当な値であり、整数リテラル
+/// ではないので範囲の対象外である。
+fn scan_number_literal(bytes: &[u8], start: usize) -> (usize, bool) {
+    let mut cursor = start + usize::from(bytes.get(start) == Some(&b'-'));
+    cursor = skip_digits(bytes, cursor);
+    let mut integer = true;
+    if matches!(bytes.get(cursor), Some(b'.')) {
+        integer = false;
+        cursor = skip_digits(bytes, cursor + 1);
+    }
+    if matches!(bytes.get(cursor), Some(b'e') | Some(b'E')) {
+        integer = false;
+        cursor += 1;
+        cursor += usize::from(matches!(bytes.get(cursor), Some(b'+') | Some(b'-')));
+        cursor = skip_digits(bytes, cursor);
+    }
+    (cursor, integer)
+}
+
+/// ASCII 数字の連なりを読み飛ばし、その次の位置を返す。
+fn skip_digits(bytes: &[u8], from: usize) -> usize {
+    let mut cursor = from;
+    while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+        cursor += 1;
+    }
+    cursor
 }
 
 /// [`check_integer_literals`] が切り出した整数リテラル(`-?` に ASCII 数字だけが
@@ -1242,6 +1268,28 @@ mod tests {
             assert!(
                 matches!(decode(wire), CellValue::Float(_)),
                 "{wire} は Float"
+            );
+        }
+    }
+
+    /// 数値リテラルの**内側**の数字を、独立した整数リテラルと誤認しない。
+    ///
+    /// 小数部と指数部の数字は、それだけを見れば `i64` を超えることがある。数値リテラルを
+    /// 1 件として走査しないと、これらを「範囲外の整数」として**正当な入力を誤って拒否
+    /// する**: `1e-18446744073709551616` は `f64` へアンダーフローして `0.0` になる
+    /// 正当な値であり、`1.18446744073709551616` も `f64` として正当である。
+    ///
+    /// 範囲外の整数を拒否すること(上の 2 件)と、範囲外の数字を含む**小数**を通すことは
+    /// 別の規則である。片方を直すときにもう片方を壊さないための対照がこれである。
+    #[test]
+    fn digits_inside_a_number_are_not_separate_integer_literals() {
+        for wire in [
+            "1e-18446744073709551616", // 指数部の数字が i64 を超える(0.0 へアンダーフロー)
+            "1.18446744073709551616",  // 小数部の数字が i64 を超える
+        ] {
+            assert!(
+                matches!(decode(wire), CellValue::Float(_)),
+                "{wire} は Float(数値リテラルの内側の数字を独立した整数と誤認している)"
             );
         }
     }
