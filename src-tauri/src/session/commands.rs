@@ -100,10 +100,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use app_shell::ipc::{
-    command_names, DocumentDiscardResponse, DocumentNewOutcome, DocumentNewResponse, DocumentOrigin,
-    DocumentSaveOutcome, DocumentSaveResponse, DocumentSessionStatus, DocumentSheet,
-    DocumentStateResponse, DocumentSummary, IpcError, IpcResult, WindowContext, WindowLabel,
-    DOCUMENT_SESSION_CHANGED_EVENT,
+    command_names, DocumentDiscardResponse, DocumentNewOutcome, DocumentNewResponse,
+    DocumentOrigin, DocumentSaveOutcome, DocumentSaveResponse, DocumentSessionStatus,
+    DocumentSheet, DocumentStateResponse, DocumentSummary, IpcError, IpcResult, WindowContext,
+    WindowLabel, DOCUMENT_SESSION_CHANGED_EVENT,
 };
 use document_session::{
     DocumentSessionsApi, Origin, SaveReport, SessionError, SessionState, SheetSummary,
@@ -255,14 +255,10 @@ fn should_notify(before: &SessionState, after: &SessionState) -> bool {
 fn failure_reason(label: &WindowLabel, error: &SessionError) -> String {
     match error {
         SessionError::Read { source } => unavailable_reason(label, &source.to_string()),
-        SessionError::Busy => format!(
-            "{} のドキュメントで別の操作が進行中である",
-            label.as_str()
-        ),
-        SessionError::UnsavedChanges => format!(
-            "{} のドキュメントに未保存の変更がある",
-            label.as_str()
-        ),
+        SessionError::Busy => format!("{} のドキュメントで別の操作が進行中である", label.as_str()),
+        SessionError::UnsavedChanges => {
+            format!("{} のドキュメントに未保存の変更がある", label.as_str())
+        }
         SessionError::NoDocument => format!("{} はドキュメントを保持していない", label.as_str()),
     }
 }
@@ -294,16 +290,10 @@ fn refusal_reason(label: &WindowLabel, error: &SessionError) -> String {
             "{} のドキュメントに未保存の変更があるため、新しいドキュメントを用意できない",
             label.as_str()
         ),
-        SessionError::Busy => format!(
-            "{} のドキュメントで別の操作が進行中である",
-            label.as_str()
-        ),
+        SessionError::Busy => format!("{} のドキュメントで別の操作が進行中である", label.as_str()),
         // セッションを用意できなかったのは、購読を登録できないウィンドウだった場合だけである
         // （`watch.create` はウィンドウを引けないとき何も作らない）。
-        SessionError::NoDocument => format!(
-            "{} のウィンドウを特定できなかった",
-            label.as_str()
-        ),
+        SessionError::NoDocument => format!("{} のウィンドウを特定できなかった", label.as_str()),
         SessionError::Read { source } => unavailable_reason(label, &source.to_string()),
     }
 }
@@ -362,7 +352,10 @@ pub(crate) fn answer_state(
 ///
 /// **セッションを作らない**読み取りである（[`DocumentSessionsApi::state`] の契約）。
 /// **メニュー面（[`super::menu`]）も記録の 1 行のためにこれを呼ぶ** — 状態の写しを 2 つ持たない。
-pub(crate) fn boundary_status(watch: &WindowDestroyWatch, label: &WindowLabel) -> DocumentSessionStatus {
+pub(crate) fn boundary_status(
+    watch: &WindowDestroyWatch,
+    label: &WindowLabel,
+) -> DocumentSessionStatus {
     to_boundary(watch.sessions().state(label), label)
 }
 
@@ -374,7 +367,10 @@ pub(crate) fn boundary_status(watch: &WindowDestroyWatch, label: &WindowLabel) -
 ///
 /// **メニュー面（[`super::menu`]）もこの本体を呼ぶ** — 応答を返す先が無いので、結果の境界の型を
 /// 捨てるだけである（task 3.6 の受入:「画面からの操作とメニューからの操作で結果が一致する」）。
-pub(crate) fn answer_new(watch: &WindowDestroyWatch, label: &WindowLabel) -> (DocumentNewOutcome, bool) {
+pub(crate) fn answer_new(
+    watch: &WindowDestroyWatch,
+    label: &WindowLabel,
+) -> (DocumentNewOutcome, bool) {
     let before = watch.sessions().state(label);
     let outcome = watch.create(label);
     let after = watch.sessions().state(label);
@@ -698,7 +694,10 @@ pub async fn document_save(
 /// 応答の `status` は作成の**あとの**状態である。作成が通れば名前は空文字（出所を持たない）で、
 /// シートが 1 つ見える（要件 1.7）。
 #[tauri::command]
-pub fn document_new(app: AppHandle, window: WebviewWindow) -> IpcResult<DocumentNewResponse, IpcError> {
+pub fn document_new(
+    app: AppHandle,
+    window: WebviewWindow,
+) -> IpcResult<DocumentNewResponse, IpcError> {
     let command = command_names::DOCUMENT_NEW;
     let context = caller_context(&window);
     let label = context.window.clone();
@@ -757,7 +756,11 @@ pub fn document_discard(
     log::info!(
         "{command}: 呼び出し元ウィンドウ = {} / 結果 = {} / 状態 = {}",
         label.as_str(),
-        if notify { "破棄の印を付けた" } else { "変わらなかった" },
+        if notify {
+            "破棄の印を付けた"
+        } else {
+            "変わらなかった"
+        },
         describe_status(&status),
     );
     IpcResult::Ok {
@@ -844,10 +847,7 @@ mod tests {
 
     /// 二重のウィンドウの側から入口を作る（テストの標準の組み立て）。
     fn watch() -> WindowDestroyWatch {
-        WindowDestroyWatch::new(
-            Arc::new(AlwaysPresent),
-            Arc::new(DocumentSessions::new()),
-        )
+        WindowDestroyWatch::new(Arc::new(AlwaysPresent), Arc::new(DocumentSessions::new()))
     }
 
     /// 未保存の変更を 1 つ適用する（**コアの適用の口**を通す。印を立てる唯一の経路）。
@@ -908,7 +908,10 @@ mod tests {
         assert_eq!("台帳.jxcel", summary.name);
         assert!(!summary.name.contains('/'), "位置が名前へ混ざっている");
         assert_eq!(DocumentOrigin::File, summary.origin);
-        assert!(!summary.unsaved, "読み込みの完了で未保存は落ちる（要件 4.4）");
+        assert!(
+            !summary.unsaved,
+            "読み込みの完了で未保存は落ちる（要件 4.4）"
+        );
         assert_eq!(
             vec![DocumentSheet {
                 id: summary.sheets[0].id.clone(),
@@ -949,7 +952,10 @@ mod tests {
         let DocumentSessionStatus::Unavailable { reason } = &status else {
             panic!("読み込めないはずである: {status:?}");
         };
-        assert!(reason.contains("doc-1"), "どのウィンドウかが理由に無い: {reason}");
+        assert!(
+            reason.contains("doc-1"),
+            "どのウィンドウかが理由に無い: {reason}"
+        );
         assert!(!reason.is_empty());
         assert!(changed, "覚えた失敗も状態の変化である");
 
@@ -976,13 +982,19 @@ mod tests {
             panic!("未保存なら拒否されるはずである: {outcome:?}");
         };
         assert!(reason.contains("doc-1"), "理由にウィンドウが無い: {reason}");
-        assert!(reason.contains("未保存"), "理由が拒否の内容を伝えていない: {reason}");
+        assert!(
+            reason.contains("未保存"),
+            "理由が拒否の内容を伝えていない: {reason}"
+        );
         assert!(!changed, "拒否は何も変えない");
 
         // 破棄の印を付けると通る（以後そのウィンドウは閉じてよい。要件 6.5）。
         let (notify, failure) = answer_discard(&watch, &label);
         assert!(notify, "破棄の印は状態を変える");
-        assert!(failure.is_none(), "保持しているウィンドウへの破棄は失敗しない");
+        assert!(
+            failure.is_none(),
+            "保持しているウィンドウへの破棄は失敗しない"
+        );
         let (outcome, changed) = answer_new(&watch, &label);
         assert_eq!(app_shell::ipc::DocumentNewOutcome::Created, outcome);
         assert!(changed, "新規作成は状態を変える");
@@ -992,7 +1004,10 @@ mod tests {
         };
         assert_eq!("", summary.name, "出所を持たない文書の名前は空文字");
         assert_eq!(DocumentOrigin::New, summary.origin);
-        assert!(!summary.unsaved, "作成は未保存でない状態から始まる（要件 7.2）");
+        assert!(
+            !summary.unsaved,
+            "作成は未保存でない状態から始まる（要件 7.2）"
+        );
     }
 
     /// **出所を持たない文書の保存は保存先を尋ねる**（要件 5.2）。
@@ -1049,8 +1064,15 @@ mod tests {
             answer_save(&watch, &label, |_name| SaveLocation::Chosen(chosen.clone()));
 
         assert_eq!(app_shell::ipc::DocumentSaveOutcome::Saved, outcome);
-        assert!(changed, "保存の成功は状態を変える（未保存が落ち、出所が確定する）");
-        assert_eq!(vec![chosen.clone()], scratch.entries(), "1 つのファイルができる");
+        assert!(
+            changed,
+            "保存の成功は状態を変える（未保存が落ち、出所が確定する）"
+        );
+        assert_eq!(
+            vec![chosen.clone()],
+            scratch.entries(),
+            "1 つのファイルができる"
+        );
         let (name, origin) = summary(&watch, &label);
         assert_eq!("保存した.jxcel", name, "以後の出所がファイル名として見える");
         assert_eq!(DocumentOrigin::File, origin);
@@ -1072,7 +1094,10 @@ mod tests {
         let app_shell::ipc::DocumentSaveOutcome::Failed { reason } = outcome else {
             panic!("失敗として答えなければならない");
         };
-        assert!(reason.contains("empty-1"), "理由にウィンドウが無い: {reason}");
+        assert!(
+            reason.contains("empty-1"),
+            "理由にウィンドウが無い: {reason}"
+        );
         assert!(!changed);
     }
 
@@ -1111,7 +1136,10 @@ mod tests {
         observe(changed, "拒否");
         // 破棄の印（状態を変える）
         let (notify, failure) = answer_discard(&watch, &label);
-        assert!(failure.is_none(), "保持しているウィンドウへの破棄は失敗しない");
+        assert!(
+            failure.is_none(),
+            "保持しているウィンドウへの破棄は失敗しない"
+        );
         observe(notify, "破棄の印");
         // 新規作成（状態を変える）
         let (_, changed) = answer_new(&watch, &label);
@@ -1187,7 +1215,9 @@ mod tests {
     fn the_mapping_drops_the_location_and_caps_the_counts() {
         assert_eq!(
             DocumentOrigin::File,
-            origin_to_boundary(document_session::Origin::File(PathBuf::from("/秘密/場所.jxcel")))
+            origin_to_boundary(document_session::Origin::File(PathBuf::from(
+                "/秘密/場所.jxcel"
+            )))
         );
         assert_eq!(
             DocumentOrigin::New,
@@ -1221,7 +1251,8 @@ mod tests {
             }
         }
 
-        let watch = WindowDestroyWatch::new(Arc::new(GoneWindows), Arc::new(DocumentSessions::new()));
+        let watch =
+            WindowDestroyWatch::new(Arc::new(GoneWindows), Arc::new(DocumentSessions::new()));
         let label = WindowLabel::new("doc-消えた");
 
         let (status, notify) = answer_state(&watch, &label, None);
@@ -1354,7 +1385,11 @@ mod tests {
         };
         assert_eq!("", summary.name);
         assert_eq!(DocumentOrigin::New, summary.origin);
-        assert_eq!(1, summary.sheets.len(), "新規はシートを 1 つ持つ（要件 7.1）");
+        assert_eq!(
+            1,
+            summary.sheets.len(),
+            "新規はシートを 1 つ持つ（要件 7.1）"
+        );
         assert_eq!("シート1", summary.sheets[0].name);
         assert_eq!(0, summary.sheets[0].rows);
         assert_eq!(0, summary.sheets[0].columns);

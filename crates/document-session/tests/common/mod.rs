@@ -64,8 +64,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use document_format::parts::{DocumentParts, ManifestEntry, ManifestPart};
 use document_format::{
-    to_json_bytes, CellValue, Document, DocumentFormat, DocumentFormatApi, EntryName, FormatVersion,
-    IdFactory, NestedValue, RowId, SchemaPart, Sheet, SheetId,
+    to_json_bytes, CellValue, Document, DocumentFormat, DocumentFormatApi, EntryName,
+    FormatVersion, IdFactory, NestedValue, RowId, SchemaPart, Sheet, SheetId,
 };
 
 /// 列の型（標本の値の型を現実の表に寄せる。tasks.md 1.4）。
@@ -399,8 +399,8 @@ fn encode_rows(sheet: SheetId, spec: &SampleSpec) -> (EntryName, Vec<u8>) {
             out.push(b',');
             push_json_string(&mut out, name);
             out.push(b':');
-            let bytes =
-                to_json_bytes(&value_at(row, column), &location).expect("標本のセル値は符号化できる");
+            let bytes = to_json_bytes(&value_at(row, column), &location)
+                .expect("標本のセル値は符号化できる");
             out.extend_from_slice(&bytes);
         }
         out.extend_from_slice(b"}\n");

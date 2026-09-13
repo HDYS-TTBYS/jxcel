@@ -245,7 +245,9 @@ mod tests {
                 // 保持側を解放してから、失敗として落とす（ハングさせない）。
                 drop(release_tx);
                 holder.join().ok();
-                panic!("他のウィンドウの操作が待たされた（セッションごとにロックが分かれていない）");
+                panic!(
+                    "他のウィンドウの操作が待たされた（セッションごとにロックが分かれていない）"
+                );
             }
         }
     }
@@ -263,14 +265,14 @@ mod tests {
             "同じウィンドウに 2 回目のアクセスで別のセッションができた"
         );
         assert!(
-            Arc::ptr_eq(
-                &first,
-                &sessions.existing(&window).expect("表にある")
-            ),
+            Arc::ptr_eq(&first, &sessions.existing(&window).expect("表にある")),
             "参照が挿入した実体と別のものを返した"
         );
 
-        assert!(sessions.existing(&other).is_none(), "作っていない窓が表にある");
+        assert!(
+            sessions.existing(&other).is_none(),
+            "作っていない窓が表にある"
+        );
         let other_slot = sessions.slot(&other);
         assert!(
             !Arc::ptr_eq(&first, &other_slot),
@@ -356,7 +358,10 @@ mod tests {
             "触っていない窓がドキュメントを保持している"
         );
         assert!(
-            matches!(blank.read(&mut |_document| ()), Err(SessionError::NoDocument)),
+            matches!(
+                blank.read(&mut |_document| ()),
+                Err(SessionError::NoDocument)
+            ),
             "触っていない窓の文書が読めた"
         );
     }
@@ -389,10 +394,7 @@ mod tests {
         // 版を進める経路は必ず文書を据えるので、実体・状態・内容が不変であることが
         // 版が動いていないことを捉える。）
         assert!(
-            Arc::ptr_eq(
-                &blank,
-                &sessions.existing(&blank_label).expect("表にある")
-            ),
+            Arc::ptr_eq(&blank, &sessions.existing(&blank_label).expect("表にある")),
             "触っていない窓のセッションが差し替わった"
         );
         assert_eq!(
@@ -406,7 +408,10 @@ mod tests {
             "触っていない窓が未保存になった"
         );
         assert!(
-            matches!(blank.read(&mut |_document| ()), Err(SessionError::NoDocument)),
+            matches!(
+                blank.read(&mut |_document| ()),
+                Err(SessionError::NoDocument)
+            ),
             "触っていない窓の文書が読めた"
         );
     }
@@ -447,11 +452,7 @@ mod tests {
             "他方のセッションが差し替わった"
         );
         assert_eq!(second_state, second.state(), "他方の状態が変わった");
-        assert_eq!(
-            second_cell,
-            first_cell(&second),
-            "他方の内容が変わった"
-        );
+        assert_eq!(second_cell, first_cell(&second), "他方の内容が変わった");
         assert_eq!(
             CloseAnswer::Allow,
             second.may_close(),
@@ -475,7 +476,10 @@ mod tests {
 
         // 表に無い窓を忘れても何も起きない。
         sessions.forget(&WindowLabel::new("ghost"));
-        assert!(sessions.existing(&kept_label).is_some(), "居ない窓の除去で表が壊れた");
+        assert!(
+            sessions.existing(&kept_label).is_some(),
+            "居ない窓の除去で表が壊れた"
+        );
 
         sessions.forget(&forgotten_label);
         assert!(
@@ -506,7 +510,11 @@ mod tests {
         );
         assert_eq!(kept_state, kept.state(), "他の窓の状態が変わった");
         assert_eq!(kept_cell, first_cell(&kept), "他の窓の内容が変わった");
-        assert_eq!(CloseAnswer::Allow, kept.may_close(), "他の窓が未保存になった");
+        assert_eq!(
+            CloseAnswer::Allow,
+            kept.may_close(),
+            "他の窓が未保存になった"
+        );
     }
 
     #[test]
@@ -531,9 +539,7 @@ mod tests {
             assert!(
                 Arc::ptr_eq(
                     &observed_second,
-                    &observed_sessions
-                        .existing(&second_label)
-                        .expect("表にある")
+                    &observed_sessions.existing(&second_label).expect("表にある")
                 ),
                 "参照が他方の実体を返さない"
             );
@@ -580,7 +586,10 @@ mod tests {
                     slot.read(&mut |document| document.sheets()[0].rows().len())
                         .expect("読み取れる"),
                 );
-                assert!(matches!(slot.state(), SessionState::Open { .. }), "状態が読めない");
+                assert!(
+                    matches!(slot.state(), SessionState::Open { .. }),
+                    "状態が読めない"
+                );
                 replace_first_cell(&slot, CellValue::Text("changed".to_owned()));
                 assert!(
                     matches!(slot.save(), Ok(crate::error::SaveReport::Saved { .. })),

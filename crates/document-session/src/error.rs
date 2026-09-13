@@ -251,13 +251,11 @@ mod tests {
             "取り消しは誤りではなく、source を持たない"
         );
         assert!(SaveReport::NeedsLocation.source().is_none());
-        assert!(
-            SaveReport::Saved {
-                location: PathBuf::from("/tmp/doc.jxcel")
-            }
-            .source()
-            .is_none()
-        );
+        assert!(SaveReport::Saved {
+            location: PathBuf::from("/tmp/doc.jxcel")
+        }
+        .source()
+        .is_none());
     }
 
     /// 誤りと保存の結果は、適応層が保持してスレッドを跨げる

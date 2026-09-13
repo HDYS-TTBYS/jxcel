@@ -158,7 +158,9 @@ fn large_session(c: &mut Criterion) {
             // 保持している文書を実際に読む（`resolve` が復元した文書の行数。呼び出しが
             // 最適化で消えないようにする）。
             let held = sessions
-                .read(&open_window, &mut |document| document.sheets()[0].rows().len())
+                .read(&open_window, &mut |document| {
+                    document.sheets()[0].rows().len()
+                })
                 .expect("読み込んだ文書を読める");
             std::hint::black_box(held)
         })

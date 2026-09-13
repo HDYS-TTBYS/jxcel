@@ -181,17 +181,27 @@ mod tests {
             matches!(slot.state(), SessionState::Open { unsaved: false, .. }),
             "読み込みの直後が未保存である"
         );
-        assert_eq!(CloseAnswer::Allow, slot.may_close(), "読み込みの直後に閉じられない");
+        assert_eq!(
+            CloseAnswer::Allow,
+            slot.may_close(),
+            "読み込みの直後に閉じられない"
+        );
 
         let replacement = CellValue::Text("changed".to_owned());
-        let first = edit(&slot, &mut |document| write_first_cell(document, &replacement))
-            .expect("適用できる");
+        let first = edit(&slot, &mut |document| {
+            write_first_cell(document, &replacement)
+        })
+        .expect("適用できる");
         assert_eq!(
             2, first.revision,
             "適用で版がちょうど 1 進んでいない（読み込みの完了の 1 からの差分）"
         );
         assert!(first.unsaved, "適用で未保存の印が立っていない");
-        assert_eq!(CloseAnswer::Deny, slot.may_close(), "適用の後に閉じてよいと答えた");
+        assert_eq!(
+            CloseAnswer::Deny,
+            slot.may_close(),
+            "適用の後に閉じてよいと答えた"
+        );
         assert!(
             matches!(slot.state(), SessionState::Open { unsaved: true, .. }),
             "適用で未保存の印が立っていない"
@@ -247,7 +257,11 @@ mod tests {
                 matches!(slot.state(), SessionState::Open { unsaved: false, .. }),
                 "読み取りが未保存の印を立てた"
             );
-            assert_eq!(CloseAnswer::Allow, slot.may_close(), "読み取りが閉じてよくした");
+            assert_eq!(
+                CloseAnswer::Allow,
+                slot.may_close(),
+                "読み取りが閉じてよくした"
+            );
         }
 
         // 版を運ぶのは適用の戻り値だけである（状態の写しは版を持たない）。適用の直後に同じ
@@ -387,7 +401,9 @@ mod tests {
         let first = sessions.slot(&first_label);
         let second = sessions.slot(&second_label);
         first.resolve(Some(&first_path)).expect("標本を読み込める");
-        second.resolve(Some(&second_path)).expect("標本を読み込める");
+        second
+            .resolve(Some(&second_path))
+            .expect("標本を読み込める");
 
         let second_state = second.state();
         let second_cell = first_cell(&second);

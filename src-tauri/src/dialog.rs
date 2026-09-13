@@ -981,7 +981,11 @@ mod tests {
         assert_ne!(cancelled, chosen);
         assert_ne!(cancelled, unavailable);
         assert_ne!(chosen, unavailable);
-        assert_eq!(cancelled, SaveLocation::Cancelled, "取り消しは取り消しである");
+        assert_eq!(
+            cancelled,
+            SaveLocation::Cancelled,
+            "取り消しは取り消しである"
+        );
 
         // 取り消しの記録の行は「提示できなかった」の行と異なる（実画面の観測が取り違えない）。
         assert_ne!(
@@ -1100,8 +1104,9 @@ mod tests {
 
         let picked = save_location_from_pick(PickResult::Picked(chosen_path.clone()));
         let cancelled = save_location_from_pick(PickResult::Cancelled);
-        let unavailable =
-            save_location_from_pick(PickResult::Unavailable("親ウィンドウを取得できなかった".to_owned()));
+        let unavailable = save_location_from_pick(PickResult::Unavailable(
+            "親ウィンドウを取得できなかった".to_owned(),
+        ));
 
         // 位置は保たれる（別の位置へ写す変異で落ちる）。
         assert_eq!(picked, SaveLocation::Chosen(chosen_path));

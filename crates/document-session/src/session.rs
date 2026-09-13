@@ -418,7 +418,8 @@ impl Slot {
             // 出所が無い: 書き出す位置が決まらないため、選択を要することを結果として返す
             // （誤りではない。design.md「Error Strategy」の第 3 分類）。
             Inner::Resolved {
-                origin: Origin::New, ..
+                origin: Origin::New,
+                ..
             } => return Ok(SaveReport::NeedsLocation),
             // 出所がある: その位置へ書き出す（出所は既にこの位置であるため差し替えない）。
             Inner::Resolved {
@@ -640,7 +641,10 @@ mod tests {
         );
         let mut edit = |_document: &mut Document| ();
         assert!(
-            matches!(slot.with_document_mut(&mut edit), Err(SessionError::NoDocument)),
+            matches!(
+                slot.with_document_mut(&mut edit),
+                Err(SessionError::NoDocument)
+            ),
             "未解決のセッションの可変の借用が失敗しない"
         );
         assert!(
@@ -734,7 +738,9 @@ mod tests {
             failing.read(&mut read),
             Err(SessionError::NoDocument)
         ));
-        failing.create().expect("読み込めなかった窓でも新規作成できる");
+        failing
+            .create()
+            .expect("読み込めなかった窓でも新規作成できる");
         assert!(matches!(failing.state(), SessionState::Open { .. }));
 
         // (2) 既に文書を保持している場合: 失敗しても保持内容を変えない。
@@ -860,14 +866,9 @@ mod tests {
         failing
             .attach(&missing)
             .expect_err("存在しない位置は読み込めない");
-        assert!(matches!(
-            failing.state(),
-            SessionState::Unavailable { .. }
-        ));
+        assert!(matches!(failing.state(), SessionState::Unavailable { .. }));
         assert_eq!(0, failing.revision.load(Ordering::SeqCst));
-        failing
-            .attach(&chosen)
-            .expect("選び直した位置で復帰できる");
+        failing.attach(&chosen).expect("選び直した位置で復帰できる");
 
         let SessionState::Open { name, unsaved, .. } = failing.state() else {
             panic!("復帰の後に保持していない");
@@ -898,7 +899,10 @@ mod tests {
         // 「Data Models → Domain Model」）。
         let revision = slot.revision.load(Ordering::SeqCst);
         slot.discard().expect("破棄の印は文書があるとき通る");
-        assert!(!slot.unsaved.load(Ordering::SeqCst), "破棄の印が落ちていない");
+        assert!(
+            !slot.unsaved.load(Ordering::SeqCst),
+            "破棄の印が落ちていない"
+        );
         assert_eq!(
             revision,
             slot.revision.load(Ordering::SeqCst),
@@ -1020,7 +1024,8 @@ mod tests {
     #[test]
     fn create_prepares_one_empty_sheet_without_unsaved_changes() {
         let slot = Slot::new();
-        slot.create().expect("ドキュメントを持たない窓で新規作成できる");
+        slot.create()
+            .expect("ドキュメントを持たない窓で新規作成できる");
 
         let SessionState::Open {
             name,
@@ -1144,7 +1149,11 @@ mod tests {
             !slot.unsaved.load(Ordering::SeqCst),
             "成功しても未保存の印が落ちていない"
         );
-        assert_eq!(CloseAnswer::Allow, slot.may_close(), "成功の後に閉じられない");
+        assert_eq!(
+            CloseAnswer::Allow,
+            slot.may_close(),
+            "成功の後に閉じられない"
+        );
         assert_eq!(
             revision,
             slot.revision.load(Ordering::SeqCst),
@@ -1258,7 +1267,9 @@ mod tests {
         let revision = slot.revision.load(Ordering::SeqCst);
         let before = slot.state();
 
-        let report = slot.save_to(&missing).expect("書き出しの失敗は結果として返る");
+        let report = slot
+            .save_to(&missing)
+            .expect("書き出しの失敗は結果として返る");
         assert!(
             matches!(report, SaveReport::Failed { .. }),
             "書き出せない位置への保存が失敗を報告しない: {report:?}"
@@ -1267,7 +1278,11 @@ mod tests {
             slot.unsaved.load(Ordering::SeqCst),
             "失敗が未保存の印を落とした"
         );
-        assert_eq!(CloseAnswer::Deny, slot.may_close(), "失敗の後に閉じてよいと答えた");
+        assert_eq!(
+            CloseAnswer::Deny,
+            slot.may_close(),
+            "失敗の後に閉じてよいと答えた"
+        );
         assert_eq!(before, slot.state(), "失敗が状態（出所）を変えた");
         assert_eq!(
             revision,

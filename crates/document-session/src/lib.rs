@@ -264,7 +264,9 @@ impl DocumentSessions {
     /// 操作の口（[`DocumentSessionsApi`]）がセッションを作るのは `resolve` / `attach` /
     /// `create` の 3 つだけであり、それ以外はこの入口（`table::Sessions::existing`）を通る。
     fn session(&self, window: &WindowLabel) -> Result<Arc<Slot>, SessionError> {
-        self.sessions.existing(window).ok_or(SessionError::NoDocument)
+        self.sessions
+            .existing(window)
+            .ok_or(SessionError::NoDocument)
     }
 }
 

@@ -289,11 +289,7 @@ impl WindowDestroyWatch {
 /// 手放す（他のウィンドウの文書と未保存の状態を変えない。要件 1.5）。**記録はここでは出さない**
 /// — 呼び出し元が「破棄」か「掃除」かで文言を分ける（同じ関数を使う 2 つの経路の区別を
 /// 記録から読み取れるようにする）。
-fn release(
-    registered: &Mutex<HashSet<String>>,
-    sessions: &DocumentSessions,
-    window: &WindowLabel,
-) {
+fn release(registered: &Mutex<HashSet<String>>, sessions: &DocumentSessions, window: &WindowLabel) {
     registered
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -551,7 +547,11 @@ mod tests {
             );
         }
         assert_eq!(
-            vec!["doc-1".to_owned(), "empty-1".to_owned(), "empty-2".to_owned()],
+            vec![
+                "doc-1".to_owned(),
+                "empty-1".to_owned(),
+                "empty-2".to_owned()
+            ],
             registered(&watch)
         );
     }
@@ -576,7 +576,10 @@ mod tests {
             sessions.state(&label),
             "破棄されたウィンドウの状態が「保持していない」へ戻っていない"
         );
-        assert!(registered(&watch).is_empty(), "登録済みのラベルが残っている");
+        assert!(
+            registered(&watch).is_empty(),
+            "登録済みのラベルが残っている"
+        );
         // 文書そのものも表から落ちている（読み取りが「保持していない」で失敗する）。
         assert!(
             matches!(
@@ -619,12 +622,13 @@ mod tests {
         );
         // 残った窓の文書は中身まで読める（表から落ちていない）。
         let note = sessions
-            .read(&two, &mut |document| {
-                match &document.sheets()[0].rows()[0].values()[0] {
+            .read(
+                &two,
+                &mut |document| match &document.sheets()[0].rows()[0].values()[0] {
                     CellValue::Text(text) => text.clone(),
                     other => panic!("標本の値がテキストでない: {other:?}"),
-                }
-            })
+                },
+            )
             .expect("残った窓の文書を読める");
         assert_eq!("残る", note);
         assert_eq!(vec!["doc-2".to_owned()], registered(&watch));
@@ -660,7 +664,10 @@ mod tests {
             sessions.state(&label),
             "掃除の経路が表から取り除いていない"
         );
-        assert!(registered(&watch).is_empty(), "登録済みのラベルが残っている");
+        assert!(
+            registered(&watch).is_empty(),
+            "登録済みのラベルが残っている"
+        );
 
         // 解決と引き渡しの入口でも同じである（セッションを作らない）。
         assert!(
@@ -732,7 +739,11 @@ mod tests {
         // 冪等な解決の反復（2 回目は読み込みを起こさない）。
         watch.resolve(&label, Some(&path)).expect("1 度目");
         watch.resolve(&label, Some(&path)).expect("2 度目");
-        assert_eq!(1, fake.subscription_count("doc-1"), "購読が二重に登録された");
+        assert_eq!(
+            1,
+            fake.subscription_count("doc-1"),
+            "購読が二重に登録された"
+        );
 
         // 読み込みに失敗したあとの再試行でも増えない。**コアは覚えた失敗を繰り返さない**ので
         // 2 度目は `Ok` であり（`Slot::resolve` の冪等）、購読も二重にならない。

@@ -137,10 +137,7 @@ impl DocumentHost for SessionDocumentHost {
 /// 2 値しか持たない）。将来 3 択の提示（要件 6.2）が選択肢を出す材料としても読めるよう、
 /// 「未保存の変更がある」という事実だけを短く伝える。
 fn unsaved_reason(window: &WindowLabel) -> String {
-    format!(
-        "{} のドキュメントに未保存の変更がある",
-        window.as_str()
-    )
+    format!("{} のドキュメントに未保存の変更がある", window.as_str())
 }
 
 /// 引き渡しを受け取れなかった理由（要件 2.1、2.2）。
@@ -153,14 +150,8 @@ fn attach_reason(window: &WindowLabel, error: &SessionError) -> String {
             "{} のドキュメントに未保存の変更があるため、別のドキュメントを開けない",
             window.as_str()
         ),
-        SessionError::Busy => format!(
-            "{} のドキュメントで別の操作が進行中である",
-            window.as_str()
-        ),
-        SessionError::NoDocument => format!(
-            "{} のドキュメントを受け取れなかった",
-            window.as_str()
-        ),
+        SessionError::Busy => format!("{} のドキュメントで別の操作が進行中である", window.as_str()),
+        SessionError::NoDocument => format!("{} のドキュメントを受け取れなかった", window.as_str()),
         SessionError::Read { source } => format!(
             "{} のドキュメントを読み込めなかった: {source}",
             window.as_str()
@@ -178,12 +169,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use app_shell::ipc::WindowLabel;
-    use document_format::{
-        CellValue, Document, DocumentFormat, DocumentFormatApi, SchemaPart,
-    };
-    use document_session::{
-        CloseAnswer, DocumentSessions, DocumentSessionsApi, SessionState,
-    };
+    use document_format::{CellValue, Document, DocumentFormat, DocumentFormatApi, SchemaPart};
+    use document_session::{CloseAnswer, DocumentSessions, DocumentSessionsApi, SessionState};
 
     use super::SessionDocumentHost;
     use crate::ports::{AttachError, CloseVerdict, DocumentHost};
@@ -267,10 +254,7 @@ mod tests {
             Arc::new(AlwaysPresent),
             Arc::clone(&sessions),
         ));
-        (
-            SessionDocumentHost::new(watch, inner),
-            sessions,
-        )
+        (SessionDocumentHost::new(watch, inner), sessions)
     }
 
     /// 一時ディレクトリを作る（プロセスごとに一意。`document-session` の `Scratch` と同じ規律）。

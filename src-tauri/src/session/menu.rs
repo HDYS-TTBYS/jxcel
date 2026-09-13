@@ -158,14 +158,8 @@ fn document_menu_path() -> MenuPath {
 /// `handler` を差し替えられる形にしてあるのは、**GUI 無しで登録の受理と内容を検査できる**
 /// ようにするためである（[`MenuRegistry::enroll`] は画面を要しない。「開く」と同じ形）。
 fn new_item_spec(handler: impl Fn(&MenuSelection) + Send + Sync + 'static) -> MenuItemSpec {
-    MenuItemSpec::new(
-        OWNER,
-        NEW_ITEM_ID,
-        document_menu_path(),
-        NEW_LABEL,
-        handler,
-    )
-    .with_accelerator(NEW_ACCELERATOR_SPELLING)
+    MenuItemSpec::new(OWNER, NEW_ITEM_ID, document_menu_path(), NEW_LABEL, handler)
+        .with_accelerator(NEW_ACCELERATOR_SPELLING)
 }
 
 /// 「保存」の登録内容を組み立てる（[`new_item_spec`] と同旨）。
@@ -414,7 +408,11 @@ mod tests {
             .expect("標本のシートは実在する");
         let row = document.add_row(sheet).expect("標本のシートは実在する");
         document
-            .set_row_values(sheet, row, vec![document_format::CellValue::Text(value.to_owned())])
+            .set_row_values(
+                sheet,
+                row,
+                vec![document_format::CellValue::Text(value.to_owned())],
+            )
             .expect("標本の行は実在する");
         DocumentFormat::new()
             .save(&document, path)
@@ -503,12 +501,18 @@ mod tests {
         let quit_path = MenuPath::new([crate::menu::FILE_MENU_LABEL]).expect("空でない");
         registry
             .enroll(
-                crate::menu::MenuItemSpec::new("app-shell", "app-shell.quit", quit_path.clone(), "終了", noop)
-                    .with_accelerator(if cfg!(target_os = "macos") {
-                        "Cmd+Q"
-                    } else {
-                        "Ctrl+Q"
-                    }),
+                crate::menu::MenuItemSpec::new(
+                    "app-shell",
+                    "app-shell.quit",
+                    quit_path.clone(),
+                    "終了",
+                    noop,
+                )
+                .with_accelerator(if cfg!(target_os = "macos") {
+                    "Cmd+Q"
+                } else {
+                    "Ctrl+Q"
+                }),
             )
             .expect("終了との競合が無い");
         registry
@@ -551,7 +555,11 @@ mod tests {
                 Some(&Accelerator::parse(spelling).expect("解決済みの綴り")),
                 "{label} のショートカットがプラットフォーム解決済みの綴りではない"
             );
-            assert_eq!(item.owner().as_str(), OWNER, "登録元が本スペックの名前空間でない");
+            assert_eq!(
+                item.owner().as_str(),
+                OWNER,
+                "登録元が本スペックの名前空間でない"
+            );
         }
 
         // **解決済みの綴りである**: 正準形が `ctrl+…` / `super+…` へ畳まれている
@@ -560,7 +568,11 @@ mod tests {
             .iter()
             .find(|item| item.item() == &MenuItemId::new(NEW_ITEM_ID))
             .expect("「新規」がある");
-        let expected_key = if cfg!(target_os = "macos") { "super+" } else { "ctrl+" };
+        let expected_key = if cfg!(target_os = "macos") {
+            "super+"
+        } else {
+            "ctrl+"
+        };
         assert!(
             new_item
                 .accelerator()
@@ -821,7 +833,10 @@ mod tests {
             summary.contains("保存.jxcel") && summary.contains("未保存=false"),
             "保存のあとに未保存が落ち、出所が確定していない: {summary}"
         );
-        assert!(menu_path.exists() && command_path.exists(), "書き出されていない");
+        assert!(
+            menu_path.exists() && command_path.exists(),
+            "書き出されていない"
+        );
 
         // **同じ文書の 2 度目の保存は同じバイト列である**（要件 5.7 の決定性。出所が確定した
         // あとの保存は提示を経ない）。メニュー面が最初に書いた内容と、コマンド面が同じセッション
@@ -873,9 +888,10 @@ mod tests {
         let after_menu = std::fs::read(&shared).expect("メニュー面が書き出した");
 
         // コマンド面の保存（同じ位置へ同じ内容が書かれる）。
-        let (command_outcome, command_changed) = commands::answer_save(&command_side, &label, |_s| {
-            panic!("出所があるので保存先を尋ねてはならない")
-        });
+        let (command_outcome, command_changed) =
+            commands::answer_save(&command_side, &label, |_s| {
+                panic!("出所があるので保存先を尋ねてはならない")
+            });
         assert_eq!(DocumentSaveOutcome::Saved, command_outcome);
         assert_eq!(menu_outcome, command_outcome, "結果が食い違う");
         assert!(command_changed, "保存の成功は状態を変える");
@@ -910,14 +926,16 @@ mod tests {
         }
 
         let mut menu_notifications = 0u32;
-        let menu_outcome = activate_save(&menu_side, &label, |_suggested| {
-            panic!("出所があるので保存先を尋ねてはならない")
-        }, || menu_notifications += 1);
-        let (command_outcome, command_changed) = commands::answer_save(
-            &command_side,
+        let menu_outcome = activate_save(
+            &menu_side,
             &label,
             |_suggested| panic!("出所があるので保存先を尋ねてはならない"),
+            || menu_notifications += 1,
         );
+        let (command_outcome, command_changed) =
+            commands::answer_save(&command_side, &label, |_suggested| {
+                panic!("出所があるので保存先を尋ねてはならない")
+            });
 
         assert_eq!(DocumentSaveOutcome::Saved, menu_outcome, "出所へ書き出す");
         assert_eq!(menu_outcome, command_outcome);
@@ -950,11 +968,10 @@ mod tests {
             |_suggested| panic!("保持していないので保存先を尋ねてはならない"),
             || panic!("保持していないウィンドウへの操作は通知しない"),
         );
-        let (command_outcome, command_changed) = commands::answer_save(
-            &command_side,
-            &label,
-            |_suggested| panic!("保持していないので保存先を尋ねてはならない"),
-        );
+        let (command_outcome, command_changed) =
+            commands::answer_save(&command_side, &label, |_suggested| {
+                panic!("保持していないので保存先を尋ねてはならない")
+            });
 
         assert!(
             matches!(menu_outcome, DocumentSaveOutcome::Failed { .. }),
@@ -973,7 +990,10 @@ mod tests {
     /// 実画面の観測はこの行を突き合わせるので、語が分かれれば観測が成立しなくなる。
     #[test]
     fn the_record_words_come_from_the_same_mapping_as_the_commands() {
-        assert_eq!("用意した", commands::describe_new(&DocumentNewOutcome::Created));
+        assert_eq!(
+            "用意した",
+            commands::describe_new(&DocumentNewOutcome::Created)
+        );
         assert_eq!(
             "保存した",
             commands::describe_save(&DocumentSaveOutcome::Saved)
