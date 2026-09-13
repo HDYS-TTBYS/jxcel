@@ -94,7 +94,7 @@ use crate::declaration::codec::{parse_schema, parse_type_definition};
 use crate::declaration::{Constraints, DeclaredKind, Schema, TypeDecl, TypeDefinition};
 use crate::error::SchemaError;
 use crate::registry::{CustomTypeId, TypeRegistry};
-use crate::types::datetime::{TemporalForm, TemporalValue};
+use crate::types::datetime::TemporalForm;
 use crate::types::decimal;
 use crate::types::text::{TextConstraints, TextPattern};
 use crate::types::TypeKind;
@@ -430,71 +430,26 @@ impl Compiler<'_> {
         };
         let validator = match known {
             TypeKind::Int => ColumnValidator::Int {
-                bounds: Bounds::new(
-                    constraints.min.clone(),
-                    constraints.max.clone(),
-                    endpoint(
-                        constraints.min.as_ref(),
-                        &child(position, MIN_KEY),
-                        |value| match value {
-                            CellValue::Int(found) => Some(*found),
-                            _ => None,
-                        },
-                    )?,
-                    endpoint(
-                        constraints.max.as_ref(),
-                        &child(position, MAX_KEY),
-                        |value| match value {
-                            CellValue::Int(found) => Some(*found),
-                            _ => None,
-                        },
-                    )?,
-                ),
+                bounds: declared_bounds(constraints, position, |value| match value {
+                    CellValue::Int(found) => Some(*found),
+                    _ => None,
+                })?,
             },
             TypeKind::Float => ColumnValidator::Float {
-                bounds: Bounds::new(
-                    constraints.min.clone(),
-                    constraints.max.clone(),
-                    endpoint(
-                        constraints.min.as_ref(),
-                        &child(position, MIN_KEY),
-                        |value| match value {
-                            CellValue::Float(found) => Some(*found),
-                            _ => None,
-                        },
-                    )?,
-                    endpoint(
-                        constraints.max.as_ref(),
-                        &child(position, MAX_KEY),
-                        |value| match value {
-                            CellValue::Float(found) => Some(*found),
-                            _ => None,
-                        },
-                    )?,
-                ),
+                bounds: declared_bounds(constraints, position, |value| match value {
+                    CellValue::Float(found) => Some(*found),
+                    _ => None,
+                })?,
             },
             TypeKind::Decimal => {
                 // 桁数は宣言**できる**ものであり必須ではない（要件 2.3）。宣言が無ければ
                 // `None` のまま計画へ渡り、桁の判定を行わない（`plan::ColumnValidator`）。
-                let min = endpoint(
-                    constraints.min.as_ref(),
-                    &child(position, MIN_KEY),
-                    |value| match value {
-                        CellValue::Decimal(text) => decimal::canonicalize(text),
-                        _ => None,
-                    },
-                )?;
-                let max = endpoint(
-                    constraints.max.as_ref(),
-                    &child(position, MAX_KEY),
-                    |value| match value {
-                        CellValue::Decimal(text) => decimal::canonicalize(text),
-                        _ => None,
-                    },
-                )?;
                 ColumnValidator::Decimal {
                     digits: constraints.digits,
-                    bounds: Bounds::new(constraints.min.clone(), constraints.max.clone(), min, max),
+                    bounds: declared_bounds(constraints, position, |value| match value {
+                        CellValue::Decimal(text) => decimal::canonicalize(text),
+                        _ => None,
+                    })?,
                 }
             }
             TypeKind::Text => {
@@ -516,47 +471,22 @@ impl Compiler<'_> {
                 ColumnValidator::Text { constraints: text }
             }
             TypeKind::Bool => ColumnValidator::Bool,
-            TypeKind::Date => {
-                let form = TemporalForm::Date;
-                ColumnValidator::Date {
-                    bounds: Bounds::new(
-                        constraints.min.clone(),
-                        constraints.max.clone(),
-                        temporal_endpoint(
-                            constraints.min.as_ref(),
-                            &child(position, MIN_KEY),
-                            form,
-                        )?,
-                        temporal_endpoint(
-                            constraints.max.as_ref(),
-                            &child(position, MAX_KEY),
-                            form,
-                        )?,
-                    ),
-                }
-            }
+            TypeKind::Date => ColumnValidator::Date {
+                bounds: declared_bounds(constraints, position, |value| match value {
+                    CellValue::Text(text) => TemporalForm::Date.parse(text),
+                    _ => None,
+                })?,
+            },
             TypeKind::DateTime => {
                 let offset = constraints.offset.ok_or_else(|| {
                     malformed(&child(position, OFFSET_KEY), "`datetime` requires `offset`")
                 })?;
                 let form = TemporalForm::DateTime { offset };
-                ColumnValidator::DateTime {
-                    form,
-                    bounds: Bounds::new(
-                        constraints.min.clone(),
-                        constraints.max.clone(),
-                        temporal_endpoint(
-                            constraints.min.as_ref(),
-                            &child(position, MIN_KEY),
-                            form,
-                        )?,
-                        temporal_endpoint(
-                            constraints.max.as_ref(),
-                            &child(position, MAX_KEY),
-                            form,
-                        )?,
-                    ),
-                }
+                let bounds = declared_bounds(constraints, position, |value| match value {
+                    CellValue::Text(text) => form.parse(text),
+                    _ => None,
+                })?;
+                ColumnValidator::DateTime { form, bounds }
             }
             TypeKind::Enum => ColumnValidator::Enum {
                 choices: constraints.choices.clone().into_boxed_slice(),
@@ -773,16 +703,35 @@ fn endpoint<T>(
     }
 }
 
-/// 日時の範囲の端点を、その形の解釈済みの値へ取り出す。
-fn temporal_endpoint(
-    declared: Option<&CellValue>,
+/// `min` / `max` の宣言を、端点の解釈（`extract`）を通して計画の範囲へ落とす。
+///
+/// **キーと端点の対応（`min` ↔ `MIN_KEY`、`max` ↔ `MAX_KEY`）はこの 1 箇所が持つ。**
+/// 端点の**解釈**は種別ごとに違ってよいが（整数の取り出し・10 進数の正準化・日時の解析）、
+/// **キーと端点の対応は種別に依らない**。種別を並べる側（`kind_validator`）にこの対応を
+/// 繰り返させると、種別を足すときに片方だけ書き漏らす／取り違える余地が残る。
+///
+/// 端点の解釈は `declaration::codec` が宣言の段で検査済みであり、`endpoint` の誤り
+/// （宣言された端点がその種別の値でない）は通常ここでは現れない。それでも返すのは、
+/// 宣言の誤りとして報告できる形を保つためである（`kind_validator` の docs 参照）。
+fn declared_bounds<T>(
+    constraints: &Constraints,
     position: &str,
-    form: TemporalForm,
-) -> Result<Option<TemporalValue>, SchemaError> {
-    endpoint(declared, position, |value| match value {
-        CellValue::Text(text) => form.parse(text),
-        _ => None,
-    })
+    extract: impl Fn(&CellValue) -> Option<T>,
+) -> Result<Bounds<T>, SchemaError> {
+    Ok(Bounds::new(
+        constraints.min.clone(),
+        constraints.max.clone(),
+        endpoint(
+            constraints.min.as_ref(),
+            &child(position, MIN_KEY),
+            &extract,
+        )?,
+        endpoint(
+            constraints.max.as_ref(),
+            &child(position, MAX_KEY),
+            &extract,
+        )?,
+    ))
 }
 
 /// 宣言の誤りを、位置と理由つきで組み立てる（要件 1.7）。

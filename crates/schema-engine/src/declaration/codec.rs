@@ -945,17 +945,13 @@ fn int_conforms(value: &CellValue, constraints: &Constraints) -> bool {
     let CellValue::Int(value) = value else {
         return false;
     };
-    let min_ok = match &constraints.min {
+    let within = |bound: &Option<CellValue>, lower: bool| match bound {
         None => true,
-        Some(CellValue::Int(min)) => value >= min,
+        Some(CellValue::Int(limit)) if lower => value >= limit,
+        Some(CellValue::Int(limit)) => value <= limit,
         Some(_) => false,
     };
-    let max_ok = match &constraints.max {
-        None => true,
-        Some(CellValue::Int(max)) => value <= max,
-        Some(_) => false,
-    };
-    min_ok && max_ok
+    within(&constraints.min, true) && within(&constraints.max, false)
 }
 
 /// 倍精度小数の既定値が範囲に収まるか。
@@ -963,17 +959,13 @@ fn float_conforms(value: &CellValue, constraints: &Constraints) -> bool {
     let CellValue::Float(value) = value else {
         return false;
     };
-    let min_ok = match &constraints.min {
+    let within = |bound: &Option<CellValue>, lower: bool| match bound {
         None => true,
-        Some(CellValue::Float(min)) => value >= min,
+        Some(CellValue::Float(limit)) if lower => value >= limit,
+        Some(CellValue::Float(limit)) => value <= limit,
         Some(_) => false,
     };
-    let max_ok = match &constraints.max {
-        None => true,
-        Some(CellValue::Float(max)) => value <= max,
-        Some(_) => false,
-    };
-    min_ok && max_ok
+    within(&constraints.min, true) && within(&constraints.max, false)
 }
 
 /// 10 進数の既定値が桁数の宣言と範囲に収まるか（値の比較は正準形で行う。tasks.md 2.2）。
