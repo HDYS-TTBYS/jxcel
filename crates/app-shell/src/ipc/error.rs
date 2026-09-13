@@ -45,4 +45,14 @@ pub enum IpcError {
     /// （要件 8.1、8.6）ため、原因を区別できるようにここへ分ける（要件 4.4）。
     #[error("診断情報を扱えない")]
     Diagnostics { message: String },
+    /// ドキュメントの経路の失敗（タスク 3.1。要件 1.6、1.7、7.1）。
+    ///
+    /// **経路レベルの失敗だけを載せる。** ドメインの側の失敗（読み込めなかった・未保存のため
+    /// 差し替えできない・書き出せなかった・保存先の選択の取り消し）は、封筒の**成功腕**が
+    /// [`super::document::DocumentSessionStatus`] / [`super::document::DocumentSaveOutcome`] /
+    /// [`super::document::DocumentNewOutcome`] として運ぶ（`design.md`「Error Handling」の表）。
+    /// ここへ来るのは、コマンドの経路そのものが成立しなかった場合だけである
+    /// （[`IpcError::Window`] がウィンドウの制御の失敗だけを運ぶのと同じ切り分け）。
+    #[error("ドキュメントを扱えない")]
+    Document { message: String },
 }

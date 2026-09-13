@@ -30,6 +30,7 @@ export const COMMAND_NAMES = [
  */
 export const SETTINGS_CHANGED_EVENT = "settings_changed";
 export const DIAGNOSTICS_REQUESTED_EVENT = "diagnostics_requested";
+export const DOCUMENT_SESSION_CHANGED_EVENT = "document_session_changed";
 
 // ---------------------------------------------------------------------------
 // 境界を越える型（crates/app-shell/src/ipc/ の定義から ts-rs が生成）
@@ -181,6 +182,69 @@ export type DiagnosticsVerbositySetRequest = {
  */
 level: DiagnosticsLevel, };
 /**
+ * 破棄の印の応答（タスク 3.1。要件 6.5）。
+ *
+ * **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。破棄の印は失敗しうる操作ではない
+ * （未保存を落とすだけである）ため、結果の型を持たず、結果の状態だけを運ぶ。
+ */
+export type DocumentDiscardResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈。
+ */
+context: WindowContext, 
+/**
+ * 破棄の印のあとのセッションの状態。
+ */
+status: DocumentSessionStatus, };
+// 破棄の印の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を名指し
+// しないため、境界が名指しできる具体形を明示的に置く。
+export type DocumentDiscardResult = IpcResult<DocumentDiscardResponse, IpcError>;
+/**
+ * 新規作成の指示の結果（タスク 3.1。要件 7.1、7.3）。
+ *
+ * [`DocumentSaveOutcome`] と同じく、正常な結果を封筒の成功腕に載せる。**`Refused` は失敗では
+ * ない** — 未保存の変更があるため作成できなかったという、ドメインの側の正しい答えであり、
+ * 利用者へ伝えるための理由（`reason`）を運ぶ（要件 7.3）。
+ */
+export type DocumentNewOutcome = { "outcome": "Created" } | { "outcome": "Refused", 
+/**
+ * 拒否の理由。
+ */
+reason: string, };
+/**
+ * 新規作成の応答（タスク 3.1。要件 4.6、7.1）。
+ *
+ * **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。[`DocumentSaveResponse`] と同じ形で、
+ * `status` は作成のあとの状態、`outcome` はこの指示の結果である。
+ */
+export type DocumentNewResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈。
+ */
+context: WindowContext, 
+/**
+ * 作成のあとのセッションの状態。
+ */
+status: DocumentSessionStatus, 
+/**
+ * この新規作成の指示の結果。
+ */
+outcome: DocumentNewOutcome, };
+// 新規作成の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を名指し
+// しないため、境界が名指しできる具体形を明示的に置く。
+export type DocumentNewResult = IpcResult<DocumentNewResponse, IpcError>;
+/**
+ * ドキュメントの出所（タスク 3.1。要件 1.6、7.1）。
+ *
+ * **位置は運ばない。** 出所がファイルであることは判別できるが、そのファイルがどこにあるかは
+ * 境界を越えない — 位置を知るのはドメインの側（`document-session`）だけでよい。新規の
+ * ドキュメントは保存先を持たないため、保存の指示で保存先の選択を要する（要件 5.2）。
+ *
+ * 綴りは小文字（`"file"` / `"new"`）であり、既存の閉じた列挙
+ * （[`super::WindowDocumentState`]）と同じ `#[serde(rename_all = "lowercase")]` に従う。
+ */
+export type DocumentOrigin = "file" | "new";
+/**
  * ファイル選択の結果（タスク 7.7。要件 2.4）。
  *
  * 選択手段（`src-tauri/src/dialog.rs` の DialogGate）が得た結果と、その位置をドキュメント
@@ -203,13 +267,142 @@ export type DocumentPickOutcome = { "outcome": "Cancelled" } | { "outcome": "Att
  */
 reason: string, };
 /**
+ * 保存の指示の結果（タスク 3.1。要件 5.1、5.3、5.4）。
+ *
+ * **`Cancelled` は失敗ではない。** 利用者が保存先の選択を取り消したという正常な結果であり、
+ * 封筒の `status: "error"` の腕には載せない（`design.md`「Error Handling」。
+ * [`super::DocumentPickOutcome::Cancelled`] と同じ判断）。`Failed` は書き出せなかったことを
+ * 意味し、利用者へ伝えるための理由（`reason`）を運ぶ。**失敗と取り消しでは未保存が保たれる。**
+ */
+export type DocumentSaveOutcome = { "outcome": "Saved" } | { "outcome": "Cancelled" } | { "outcome": "Failed", 
+/**
+ * 書き出せなかった理由。
+ */
+reason: string, };
+/**
+ * 保存の応答（タスク 3.1。要件 4.6、5.1）。
+ *
+ * **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。`status` は保存のあとのセッションの
+ * 状態であり、`outcome` はこの指示の結果である。**未保存が落ちたかどうかは `status` の
+ * [`DocumentSummary::unsaved`] を読めば分かる**ので、結果の型に重複して持たない。
+ */
+export type DocumentSaveResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈。
+ */
+context: WindowContext, 
+/**
+ * 保存のあとのセッションの状態。
+ */
+status: DocumentSessionStatus, 
+/**
+ * この保存の指示の結果。
+ */
+outcome: DocumentSaveOutcome, };
+// 保存の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を名指ししない
+// ため、境界が名指しできる具体形を明示的に置く。
+export type DocumentSaveResult = IpcResult<DocumentSaveResponse, IpcError>;
+/**
+ * あるウィンドウのドキュメントのセッションの状態（タスク 3.1。要件 1.6、1.7、2.1）。
+ *
+ * `state` を判別子とする判別可能な合併型であり、フロントエンドは `switch` で網羅的に分岐
+ * できる（`assertNever` が新しい変種をコンパイルエラーにする。`src/ipc/client.ts`）。
+ * タグの語は「どの状態か」を表す `state` であり、封筒の `status`（成功か失敗か）とは別の
+ * 判別子である。
+ *
+ * **`Unavailable` は封筒の失敗ではない。** ドキュメントを読み込めなかったという**ドメインの
+ * 結果**であり、コマンドは正常に答えた。したがって [`super::IpcError`] の腕には載せず、
+ * 成功の腕（[`DocumentStateResponse`]）がこの状態として運ぶ（`design.md`「Error Handling」）。
+ * 理由の文言は適応層が組み立てたものをそのまま運び、見せ方を決めるのは呼び出し元である。
+ *
+ * **判別子の語は `state` であり、値は変種名のまま（`"Absent"` / `"Open"` / `"Unavailable"`）
+ * である。** 本列挙には `#[serde(rename_all = "lowercase")]` を付けない — 同じく判別可能な
+ * 合併型である [`super::WindowCloseVerdict`] / [`super::DocumentPickOutcome`] と揃える
+ * （小文字へ落とすのは [`DocumentOrigin`] のような閉じた「種類」の列挙だけである）。
+ * 生成物（`src/ipc/bindings.ts`）は
+ * `{ "state": "Absent" } | { "state": "Open" } & DocumentSummary | …` となり、
+ * 分岐を書く側は `case "Absent":` のように**変種名のまま**照合しなければ絞り込みが効かない。
+ */
+export type DocumentSessionStatus = { "state": "Absent" } | { "state": "Open" } & DocumentSummary | { "state": "Unavailable", 
+/**
+ * 読み込めなかった理由。
+ */
+reason: string, };
+/**
+ * 保持しているドキュメントのシートの要約（タスク 3.1。要件 1.7）。
+ *
+ * 識別子は**文字列**、件数（列数・行数）は [`u32`] で運ぶ。どちらも境界の規約
+ * （64 ビット整数を出さない・他のドメインクレートの型を参照しない）に従った結果である。
+ * `document-format` の `SheetId` / `usize` をそのまま出さない — 境界の型はドメインの型に
+ * 依存せず、写すのは適応層の仕事である。
+ */
+export type DocumentSheet = { 
+/**
+ * シートの識別子（文字列表現）。
+ */
+id: string, 
+/**
+ * 利用者に見せるシートの名前。
+ */
+name: string, 
+/**
+ * 列数。
+ */
+columns: number, 
+/**
+ * 行数。
+ */
+rows: number, };
+/**
+ * セッションの状態の問い合わせの応答（タスク 3.1。要件 1.6、1.7）。
+ *
+ * **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。要求の型は無い — 必要な入力は操作の
+ * 対象ウィンドウだけで、それは基盤が注入する（[`super::CanCloseWindowResponse`] と同じ形）。
+ */
+export type DocumentStateResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈。
+ */
+context: WindowContext, 
+/**
+ * そのウィンドウのセッションの状態。
+ */
+status: DocumentSessionStatus, };
+// セッションの状態の問い合わせの応答の具体形。ジェネリックな `IpcResult` の宣言は
+// ペイロード型を名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type DocumentStateResult = IpcResult<DocumentStateResponse, IpcError>;
+/**
+ * 保持しているドキュメントの要約（タスク 3.1。要件 1.6、1.7）。
+ *
+ * 要件 1.6 が求める「開いているドキュメントの名前」と「未保存の変更があるかどうか」、および
+ * 要件 1.7 が求める「シートの一覧」を 1 つの形にまとめる。**名前はファイル名のみ**であり
+ * （位置は境界を越えない）、新規のドキュメントは空文字で運ぶ。
+ */
+export type DocumentSummary = { 
+/**
+ * ファイル名のみ。新規のドキュメントは空文字。
+ */
+name: string, 
+/**
+ * 出所。
+ */
+origin: DocumentOrigin, 
+/**
+ * 未保存の変更があるかどうか（要件 4.3）。
+ */
+unsaved: boolean, 
+/**
+ * 保持しているシートの一覧（要件 1.7）。
+ */
+sheets: Array<DocumentSheet>, };
+/**
  * 失敗の原因を区別できる列挙（要件 4.4）。文字列だけのエラーにしない。
  *
  * `kind` を判別子とし、原因ごとの詳細を `detail` に持つ判別可能な合併型として TypeScript へ
  * 落ちる。利用側は `kind` で網羅的に分岐でき、原因ごとに異なる扱いを型で強制できる
  * （tasks.md 2.4）。
  */
-export type IpcError = { "kind": "Settings", "detail": { message: string, } } | { "kind": "Sidecar", "detail": { message: string, } } | { "kind": "Window", "detail": { message: string, } } | { "kind": "Diagnostics", "detail": { message: string, } };
+export type IpcError = { "kind": "Settings", "detail": { message: string, } } | { "kind": "Sidecar", "detail": { message: string, } } | { "kind": "Window", "detail": { message: string, } } | { "kind": "Diagnostics", "detail": { message: string, } } | { "kind": "Document", "detail": { message: string, } };
 /**
  * 境界を越えるすべてのコマンドが返す封筒（要件 4.2、4.4）。
  *

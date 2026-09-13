@@ -27,13 +27,26 @@
 //!   およびメニューの活性化を画面へ引き渡すイベント（[`DIAGNOSTICS_REQUESTED_EVENT`] /
 //!   [`DiagnosticsRequestedEvent`] / [`DiagnosticsSection`]）。**実体は 4.4 / 4.5 にあり、
 //!   ここは境界の形だけを持つ**（`crates/app-shell/src/diagnostics.rs`）
+//! - 3.1: ドキュメントのセッションの境界（[`DocumentSummary`] / [`DocumentSheet`] /
+//!   [`DocumentOrigin`] / [`DocumentSessionStatus`] と、状態・保存・新規作成・破棄の
+//!   4 つの応答型、および保存と新規作成の結果の列挙 [`DocumentSaveOutcome`] /
+//!   [`DocumentNewOutcome`] の 2 つ）と、状態変化のイベント
+//!   （[`DOCUMENT_SESSION_CHANGED_EVENT`]）。**実体は `document-session` にあり、ここは
+//!   境界の形だけを持つ**（`crate::ipc::document`）。位置は境界を越えない — 名前は
+//!   ファイル名のみ、件数は `u32` である
 
 use serde::{Deserialize, Serialize};
 
 pub mod command_names;
+pub mod document;
 pub mod error;
 
 pub use command_names::COMMAND_NAMES;
+pub use document::{
+    DOCUMENT_SESSION_CHANGED_EVENT, DocumentDiscardResponse, DocumentNewOutcome,
+    DocumentNewResponse, DocumentOrigin, DocumentSaveOutcome, DocumentSaveResponse,
+    DocumentSessionStatus, DocumentSheet, DocumentStateResponse, DocumentSummary,
+};
 pub use error::IpcError;
 
 /// 境界を越えるすべてのコマンドが返す封筒（要件 4.2、4.4）。
@@ -600,10 +613,11 @@ fn command_names_constant() -> String {
     out
 }
 
-/// イベント名の定数を生成する（タスク 7.1 / 9.5。要件 7.4、8.1、8.6、8.7）。
+/// イベント名の定数を生成する（タスク 7.1 / 9.5 / 3.1。要件 7.4、8.1、8.6、8.7、1.6）。
 ///
-/// 設定変更の通知（[`SETTINGS_CHANGED_EVENT`]）と診断の導線の要求
-/// （[`DIAGNOSTICS_REQUESTED_EVENT`]）は `invoke` の宛先を持たないため
+/// 設定変更の通知（[`SETTINGS_CHANGED_EVENT`]）・診断の導線の要求
+/// （[`DIAGNOSTICS_REQUESTED_EVENT`]）・ドキュメントの状態変化
+/// （[`DOCUMENT_SESSION_CHANGED_EVENT`]）は `invoke` の宛先を持たないため
 /// [`command_names::COMMAND_NAMES`] には現れないが、**フロントエンドが文字列リテラルを
 /// 綴り間違えない**ように、名前を生成物へ定数として出す。生成物はタスク 2.3 のドリフト検査が
 /// バイト比較するので、名前の変更は生成のやり直しを強制する。
@@ -622,6 +636,7 @@ fn event_names_constant() -> String {
     for (constant, event) in [
         ("SETTINGS_CHANGED_EVENT", SETTINGS_CHANGED_EVENT),
         ("DIAGNOSTICS_REQUESTED_EVENT", DIAGNOSTICS_REQUESTED_EVENT),
+        ("DOCUMENT_SESSION_CHANGED_EVENT", DOCUMENT_SESSION_CHANGED_EVENT),
     ] {
         out.push_str(&format!("export const {constant} = \"{event}\";\n"));
     }
@@ -781,6 +796,66 @@ fn concrete_diagnostics_verbosity_result(cfg: &ts_rs::Config) -> (String, String
     (NAME.to_owned(), text)
 }
 
+/// セッションの状態の問い合わせの応答の具体形（タスク 3.1）。 [`concrete_window_context_result`]
+/// と同じ理由で置く。ペイロード型は [`DocumentStateResponse`] である。
+fn concrete_document_state_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "DocumentStateResult";
+    let mut text = String::from(
+        "// セッションの状態の問い合わせの応答の具体形。ジェネリックな `IpcResult` の宣言は\n\
+         // ペイロード型を名指ししないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<DocumentStateResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
+/// 保存の応答の具体形（タスク 3.1）。 [`concrete_window_context_result`] と同じ理由で置く。
+/// ペイロード型は [`DocumentSaveResponse`] である。
+fn concrete_document_save_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "DocumentSaveResult";
+    let mut text = String::from(
+        "// 保存の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を名指ししない\n\
+         // ため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<DocumentSaveResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
+/// 新規作成の応答の具体形（タスク 3.1）。 [`concrete_window_context_result`] と同じ理由で置く。
+/// ペイロード型は [`DocumentNewResponse`] である。
+fn concrete_document_new_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "DocumentNewResult";
+    let mut text = String::from(
+        "// 新規作成の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を名指し\n\
+         // しないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<DocumentNewResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
+/// 破棄の印の応答の具体形（タスク 3.1）。 [`concrete_window_context_result`] と同じ理由で置く。
+/// ペイロード型は [`DocumentDiscardResponse`] である。
+fn concrete_document_discard_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "DocumentDiscardResult";
+    let mut text = String::from(
+        "// 破棄の印の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を名指し\n\
+         // しないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<DocumentDiscardResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
 /// 境界を越える型とコマンド名から、追跡対象の TypeScript（`src/ipc/bindings.ts`）を生成する
 /// （tasks.md 2.2、design.md「IpcContract」の Service Interface）。
 ///
@@ -818,6 +893,16 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<DiagnosticsExportResponse>(&cfg),
         declared::<DiagnosticsVerbosityResponse>(&cfg),
         declared::<DiagnosticsVerbositySetRequest>(&cfg),
+        declared::<DocumentOrigin>(&cfg),
+        declared::<DocumentSheet>(&cfg),
+        declared::<DocumentSummary>(&cfg),
+        declared::<DocumentSessionStatus>(&cfg),
+        declared::<DocumentStateResponse>(&cfg),
+        declared::<DocumentSaveOutcome>(&cfg),
+        declared::<DocumentSaveResponse>(&cfg),
+        declared::<DocumentNewOutcome>(&cfg),
+        declared::<DocumentNewResponse>(&cfg),
+        declared::<DocumentDiscardResponse>(&cfg),
         declared::<IpcError>(&cfg),
         declared::<IpcResult<WindowContext, IpcError>>(&cfg),
         concrete_window_context_result(&cfg),
@@ -829,6 +914,10 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         concrete_diagnostics_log_location_result(&cfg),
         concrete_diagnostics_export_result(&cfg),
         concrete_diagnostics_verbosity_result(&cfg),
+        concrete_document_state_result(&cfg),
+        concrete_document_save_result(&cfg),
+        concrete_document_new_result(&cfg),
+        concrete_document_discard_result(&cfg),
     ];
     declarations.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -1217,13 +1306,20 @@ mod tests {
         }
     }
 
-    /// 生成物に型の位置の `any` が無いこと。**整数の数値型も同様に検査する** — 境界の型を
-    /// 数値で露出させないことが 2.1 の不変条件であり、生成物はその合算である。
+    /// 生成物に型の位置の `any` が無いこと、および **64 ビット整数の数値型が現れない**こと。
+    /// 生成物の全体（境界の型の合算）をここで検査する。
+    ///
+    /// **`number` は禁止しない。** ドキュメントのセッションの境界は、シートの件数を `u32` で
+    /// 運ぶ（design.md「Data Contracts & Integration」）。`u32` は IEEE 754 の倍精度で正確に
+    /// 表せるので、JavaScript の `number` へ落ちても値を取り違えない。禁止しているのは
+    /// `i64` / `u64` / `i128` / `u128` であり、ts-rs はこれらを `bigint` へ落とす
+    /// （`WindowLabel` が識別子を文字列で運ぶのと同じ理由。2.1 の不変条件）。
+    /// 数値を含まない型については、従来どおり `assert_no_numeric_type` を個別に当てる。
     #[test]
-    fn bindings_contain_no_any() {
+    fn bindings_contain_no_any_and_no_64_bit_numbers() {
         let ts = render_bindings().unwrap();
         assert_no_any(&ts);
-        assert_no_numeric_type(&ts);
+        assert_no_type_token(&ts, "bigint");
     }
 
     #[test]
@@ -1545,6 +1641,50 @@ mod tests {
         assert!(
             ts.contains("\"kind\": \"Diagnostics\""),
             "封筒の失敗の原因に診断の導線の種別が無い:\n{ts}"
+        );
+    }
+
+    /// 生成物が 3.1 の境界（型・封筒の具体形・イベント名）をすべて宣言していることを固定する。
+    ///
+    /// **ドリフト検査だけでは足りない。** あれは「生成物と生成器の出力が一致すること」を見る
+    /// のであって、宣言そのものを消して再生成すれば一致したまま通ってしまう。ここで面の存在を
+    /// 名指しで固定する（[`bindings_declare_the_diagnostics_surface`] と同じ形）。
+    ///
+    /// **状態の判別子の値も固定する。** [`DocumentSessionStatus`] は
+    /// `serde(rename_all = "lowercase")` を付けないため、生成物の腕は `"Absent"` / `"Open"` /
+    /// `"Unavailable"` のままである。小文字だと思って `case "absent":` と書く実装が
+    /// 絞り込みの効かない分岐を作らないよう、正しい値をここで固定する。
+    #[test]
+    fn bindings_declare_the_document_surface() {
+        let ts = render_bindings().unwrap();
+        for declaration in [
+            "export type DocumentOrigin = \"file\" | \"new\";",
+            "export type DocumentSheet = {",
+            "export type DocumentSummary = {",
+            "export type DocumentSessionStatus =",
+            "{ \"state\": \"Absent\" }",
+            "{ \"state\": \"Open\" }",
+            "{ \"state\": \"Unavailable\"",
+            "export type DocumentStateResponse = {",
+            "export type DocumentSaveResponse = {",
+            "export type DocumentNewResponse = {",
+            "export type DocumentDiscardResponse = {",
+            "export type DocumentSaveOutcome =",
+            "export type DocumentNewOutcome =",
+            "export type DocumentStateResult = IpcResult<DocumentStateResponse, IpcError>;",
+            "export type DocumentSaveResult = IpcResult<DocumentSaveResponse, IpcError>;",
+            "export type DocumentNewResult = IpcResult<DocumentNewResponse, IpcError>;",
+            "export type DocumentDiscardResult = IpcResult<DocumentDiscardResponse, IpcError>;",
+            "export const DOCUMENT_SESSION_CHANGED_EVENT = \"document_session_changed\";",
+        ] {
+            assert!(
+                ts.contains(declaration),
+                "生成物に `{declaration}` が無い:\n{ts}"
+            );
+        }
+        assert!(
+            ts.contains("\"kind\": \"Document\""),
+            "封筒の失敗の原因にドキュメントの種別が無い:\n{ts}"
         );
     }
 

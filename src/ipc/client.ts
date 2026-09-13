@@ -73,7 +73,8 @@ export type FrontendIpcError = {
 };
 
 /**
- * ラッパが返しうる失敗の全体。生成物の `IpcError`（設定・補助プロセス・ウィンドウ）に
+ * ラッパが返しうる失敗の全体。生成物の `IpcError`（設定・補助プロセス・ウィンドウ・
+ * 診断情報・ドキュメント）に
  * フロントエンド局所の変種を加えたもので、`kind` で網羅的に分岐できる。
  */
 export type IpcClientError = IpcError | FrontendIpcError;
@@ -109,6 +110,8 @@ export function describeIpcError(error: IpcClientError): string {
       return `ウィンドウの失敗: ${error.detail.message}`;
     case "Diagnostics":
       return `診断情報の失敗: ${error.detail.message}`;
+    case "Document":
+      return `ドキュメントの失敗: ${error.detail.message}`;
     case "Frontend":
       return `通信境界の失敗: ${error.detail.message}`;
     default:
@@ -241,10 +244,10 @@ export async function invokeExampleNonExhaustive<T>(command: CommandName): Promi
 }
 
 /**
- * 負例: 生成された種別（設定・補助プロセス・ウィンドウ）だけを分岐し、`Frontend` を放置した
- * 利用側。`switch` が 4 種のうち 3 種しか覆わないため、`@ts-expect-error` を外すと
- * `tsc --noEmit` が TS2366 で落ちる。**`kind` の絞り込みが効いていること**、および
- * `invoke` の拒否の腕が放置できないことの証拠である。
+ * 負例: 生成された種別の一部（設定・補助プロセス・ウィンドウ）だけを分岐し、診断・
+ * ドキュメントと `Frontend` を放置した利用側。`switch` が 6 種のうち 3 種しか覆わないため、
+ * `@ts-expect-error` を外すと `tsc --noEmit` が TS2366 で落ちる。**`kind` の絞り込みが
+ * 効いていること**、および `invoke` の拒否の腕が放置できないことの証拠である。
  */
 // @ts-expect-error `Frontend`（`invoke` の拒否）の分岐を網羅していない
 export function describeGeneratedKindsOnly(error: IpcClientError): string {
