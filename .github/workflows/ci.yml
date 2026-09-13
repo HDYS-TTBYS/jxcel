@@ -221,20 +221,18 @@ jobs:
       # 実行できる）。`cargo tree` の出力全体（normal / build / dev の 3 辺、全 feature）を
       # 行頭のパッケージ名で照合するので、**推移的に引き込まれた tauri** も捕まえる。
       # ドメインコアは GUI を起動せずにテストできなければならない。
-      - name: Check core crate does not depend on tauri (transitively)
+      #
+      # **引数なしで呼ぶ（1 段で `crates/` 配下の全部を検査する）。** 検査器は引数が無いとき
+      # `crates/*/Cargo.toml` を列挙して全ドメインクレートを回す。クレートを足したときに
+      # この段へ名前を足し忘れる余地をなくすためである — 2026-09-12 まで `app-shell` だけ
+      # が対象で、その後 `schema-engine` を足した時点でも `document-format` と
+      # `sidecar-smoke` が抜けていた（`document-format` は依存グラフの根であり、
+      # `sidecar-smoke` は `crates/` 配下で自ら tauri 非依存を宣言している）。
+      # 対象の依存は `[target.'cfg(...)'.dependencies]` で OS ごとに変わるため、
+      # **3 OS すべてで走らせる**（`if:` で 1 OS に絞らない）。
+      - name: Check core crates do not depend on tauri (transitively)
         shell: bash
-        run: bash scripts/check-core-deps.sh app-shell
-
-      # schema-engine も同じ検査に載せる（tasks.md 1.1。design.md「Modified Files」、
-      # structure.md「検査器は対象を引数で受け取る形にし、クレートを足したら CI の段も足す」）。
-      # 検査器 `check-core-deps.sh` は引数でパッケージ名を取る汎用のものであり、
-      # 2026-09-12 時点では app-shell にしか掛かっていなかった。依存グラフの根である
-      # document-format の上に載るドメインクレートも、tauri（`tauri-*` / `tauri_*` を含む）を
-      # 推移的に持たないことを要求される（`cargo tree` の normal / build / dev の 3 辺、
-      # 全 feature を走査する）。
-      - name: Check core crate does not depend on tauri (schema-engine)
-        shell: bash
-        run: bash scripts/check-core-deps.sh schema-engine
+        run: bash scripts/check-core-deps.sh
 
       # ファイルシステム系・シェル系のプラグインが依存ツリーに無いことの検査（要件 4.7 の
       # 制御の第 1 段、tasks.md 1.3）。**推移的依存まで見る**。上の `check-core-deps.sh` は
