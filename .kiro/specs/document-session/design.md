@@ -418,7 +418,7 @@ sequenceDiagram
 pub(crate) struct Slot {
     inner: Mutex<Inner>,          // 出所と文書（解決済みのときだけ Some）
     unsaved: AtomicBool,          // ロックの外（待たずに読む）
-    revision: AtomicU64,          // 変更の版（適用のたびに 1 進む）
+    revision: AtomicU64,          // 変更の版（文書が入れ替わるか適用されたときに 1 進む）
 }
 
 pub(crate) enum Inner {
@@ -426,11 +426,17 @@ pub(crate) enum Inner {
     Unresolved,
     /// 解決済み。出所と文書を 1 対で持つ。
     Resolved { origin: Origin, document: Box<Document> },
+    /// 読み込みに失敗したことを覚えている（理由つき）。**覚えないと、同じ位置への読み込みを
+    /// 問い合わせのたびに試みることになる**（起動時の読み込みは画面の問い合わせが引き金）。
+    /// 利用者が別の位置を選び直したときは `attach` がここから読み直す。
+    Unavailable { reason: String },
 }
 ```
 - Preconditions: 変更の適用は `Resolved` のときだけ可能
 - Postconditions: `edit` のあと `revision` はちょうど 1 進み、`unsaved` は真になる
 - Invariants: 読み取りと `state` は `revision` と `unsaved` を変えない
+- Invariants: **未保存と版の更新は、文書のロックを保持したまま行う。** 判定（未保存か）と更新（文書の差し替え・印・版）を同じ臨界区間に入れる。でなければ「未保存でない」と判定した直後に別の経路が変更を適用し、その変更が差し替えで黙って失われる
+- Invariants: **文書が入れ替わる操作（読み込みの完了・新規作成）でも版は 1 進む。** 版は「内容が変わりうる操作の回数」であり、下流は版の変化で「自分が見たあとに変わった」ことを知る（内容が入れ替わったのに版が据え置かれると、下流の窓が古い内容を表示し続ける）
 
 #### DocumentSessions（公開面）
 
@@ -438,6 +444,11 @@ pub(crate) enum Inner {
 pub trait DocumentSessionsApi {
     /// ウィンドウの生成要求（あれば）を渡してセッションを確定させる。**冪等**。
     fn resolve(&self, window: &WindowLabel, requested: Option<&Path>) -> Result<(), SessionError>;
+    /// **利用者が選んだ位置**をそのウィンドウへ読み込む（未保存なら `UnsavedChanges` を返して
+    /// 拒否し、読み込みに失敗しても保持している文書を変えない）。起動時の解決と違い、
+    /// **`Resolved` / `Unavailable` のどちらからでも読み直して出所を更新する**（利用者の
+    /// 明示の操作であるため、覚えている失敗を繰り返さない）。
+    fn attach(&self, window: &WindowLabel, location: &Path) -> Result<(), SessionError>;
     /// 保持している文書を読む。**未解決なら `NoDocument`**（セッションを作るのは適応層の 3 つの入口だけ）。
     fn read<R>(&self, window: &WindowLabel, f: &mut dyn FnMut(&Document) -> R) -> Result<R, SessionError>;
     /// 変更を適用する。閉包の戻り値・版・未保存を返す。
@@ -670,7 +681,7 @@ stateDiagram-v2
 
 - **集約**: 1 つのセッションが 1 つの `Document` を排他的に所有する。`Document` の寿命はウィンドウの寿命に一致し、`forget` で終わる
 - **不変条件**: 1 ウィンドウ 1 ドキュメント。出所は `New` か `File`。未保存は「適用を要求した」ことの記録であり、保存の成功と明示の破棄だけが落とす
-- **版**: 適用のたびに 1 進む単調増加の `u64`。**内容の同一性を表すものではない**（適用の回数を数える）。下流が「自分が見たあとに変わった」ことを知る最小の材料であり、**検証では一括の適用が 1 回で起きたことの証拠**として使う
+- **版**: 文書が入れ替わるか変更が適用されたときに 1 進む単調増加の `u64`（読み込みの完了・新規作成・変更の適用）。**内容の同一性を表すものではない**（内容が変わりうる操作の回数である）。下流が「自分が見たあとに変わった」ことを知る最小の材料であり、**検証では一括の適用が 1 回で起きたことの証拠**として使う
 
 ### Logical Data Model
 
@@ -678,7 +689,7 @@ stateDiagram-v2
 |---|---|---|
 | 出所 | `Origin::{New, File(PathBuf)}` | `New` の保存は保存先の選択を要する |
 | 未保存 | `AtomicBool` | ロックの外。`may_close` が待たずに読む |
-| 変更の版 | `AtomicU64` | ロックの外。適用のたびに 1 進む |
+| 変更の版 | `AtomicU64` | ロックの外。**文書が入れ替わるか変更が適用されたときに 1 進む** |
 | 文書 | `Box<Document>` | `document-format` の集約ルート。1 実体 |
 | 状態の写し | `SessionState` | `Absent` / `Open { name, origin, unsaved, sheets }` / `Unavailable { reason }` |
 | 一括の変更 | `&[(RowId, usize, CellValue)]` | セルの位置と値。行の索引を 1 度作って適用 |
