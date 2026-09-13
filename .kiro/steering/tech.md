@@ -23,7 +23,7 @@
 | マクロランタイム | `deno_core`（V8） | TS フルサポート、default-deny サンドボックス |
 | TS トランスパイル | `deno_ast` + `swc` | `deno_core` は素では TS を実行できないため必須 |
 | バージョン管理 | `git2-rs`（libgit2） | merge / conflict まで完備。`gitoxide` は push/merge/rebase が未完成 |
-| グリッド | canvas ベースの仮想化グリッド（未確定） | 10 万行で定常メモリ。**Glide Data Grid は stable が 2024-02 で止まり alpha が 2.5 年続いているため第一候補から外れた。**選定は `data-grid` スペックで行う |
+| グリッド | `@glideapps/glide-data-grid` **6.0.4-alpha24**（`data-grid` が選定。**実装はこれから**。stable 6.0.3 は React 19 の peer を受け付けない） | 10 万行で定常メモリ。**stable は 2024-02 で止まり alpha が続いている**ため、「移植口（`RendererPort`）の背後の実装」という形で採り、タスク最初期の実測で毎秒 60 回に届かなければ同じ口の背後に自前 canvas を置く（投機的な抽象ではなく退路）。MIT |
 | マクロエディタ | Monaco + `monaco-languageclient` | LSP 統合の既製経路 |
 | xlsx | `umya-spreadsheet`（テンプレート差し込み） / `rust_xlsxwriter`（新規作成） | 前者は既存ブックを開いて書き換えられる |
 | HTTP | `axum` | フォームの LAN 配信 |
@@ -60,7 +60,7 @@ CI に `cargo audit` を必須とする。本プロジェクトは advisory 履�
 ### Testing
 - ドメインコアは GUI を起動せずにテストできること。Tauri への依存がテストを妨げるなら、それは層の分離が壊れている兆候
 - 性能要件を持つ機能はベンチマークを伴うこと（例: 10 万行で開く 3 秒 / 保存 2 秒。`schema-engine` は 10 万行 × 30 列の全件検証 1 秒 / 1 セルの判定 16 ミリ秒。**後者は要件値であり、CI のゲートには載せない** — 予算に対して桁違いに小さく、ゲートにする価値がないためテスト内の計測に留める）
-- **性能予算は CI のゲートにすること。**計測して記録するだけでは回帰は止まらない。判定器は**計測が無いときに `0` を返してはならない**（fail-closed。`structure.md`「計測が存在しない状態で予算ゲートだけ先に結線しない」と対になる）。**計測が無い状態でゲートだけ先に結線すると CI が赤のままになるため、結線は計測を入れるタスクが行う**
+- **性能予算は CI のゲートにすること。**計測して記録するだけでは回帰は止まらない。判定器は**計測が無いときに `0` を返してはならない**（fail-closed。`structure.md`「計測が存在しない状態で予算ゲートだけ先に結線しない」と対になる）。**計測が無い状態でゲートだけ先に結線すると CI が赤のままになるため、結線は計測を入れるタスクが行う**。現在の対象と予算: `document-format` の open 3 秒 / save 2 秒、`schema-engine` の全件検証 1 秒、`document-session` の open+hold 3 秒 / save 2 秒 / **一括の適用 1 秒**（10 万行 × 30 列の全 300 万セルを 1 回の `edit` で置き換える）。予算の既定値は判定器（`scripts/check-bench-budget.sh`）が持ち、**CI は引数なしで呼ぶ**（閾値を CI から渡さない）
 - **不変条件は検査スクリプトにすること。**目視確認で守る規則は、いずれ守られなくなる（`scripts/` に置き CI から呼ぶ。structure.md 参照）
 - **GUI・配布物・プラットフォーム差を含む主張は、実物を起動して観測した結果で裏付けること。**単体テストは回帰の網であって受入の証明ではない
 - **観測できないことは未確認として書くこと。**「CI で確認する」は確認済みではない。残るリスクを明示する
@@ -79,7 +79,7 @@ Cargo ワークスペース（`crates/*` + `src-tauri`）とフロントエン�
 | 生成物のドリフト | `cargo test -p app-shell --test bindings_drift` |
 | 生成物の再生成 | `cargo run -p app-shell --bin generate-bindings` |
 | フロントエンドの型検査 / lint / ビルド | `npm run typecheck` / `npm run lint` / `npm run build` |
-| ベンチマーク | `cargo bench -p document-format -p schema-engine -- --save-baseline=main` |
+| ベンチマーク | `cargo bench -p document-format -p schema-engine -p document-session -- --save-baseline=main` |
 | 性能予算の判定 | `bash scripts/check-bench-budget.sh` |
 | 起動時間予算の判定 | `bash scripts/check-startup-budget.sh` |
 | 依存下限の検査 | `bash scripts/check-zip-floor.sh Cargo.lock` |
@@ -87,7 +87,7 @@ Cargo ワークスペース（`crates/*` + `src-tauri`）とフロントエン�
 | 配布物の生成 | `npx tauri build --bundles <形式>` |
 | 検証用の形の生成 | `JXCEL_VERIFICATION_BUILD=1 npx tauri build --no-bundle --features verification-triggers` |
 
-**不変条件の検査は `scripts/check-*.sh` に揃っている**（依存下限・性能予算・起動時間・生成物のドリフト・権限の逸脱・配信先中立な資産の依存・コアクレートの tauri 非依存・禁止プラグイン・コマンドと権限の一致・出荷物への検証コード混入・配布物の補助プロセス整合性・3 OS の実画面検証）。**規約と一覧の考え方は `.kiro/steering/verification.md` に置く。**
+**不変条件の検査は `scripts/check-*.sh` に揃っている**（依存下限・性能予算・起動時間・生成物のドリフト・権限の逸脱・配信先中立な資産の依存・コアクレートの tauri 非依存・禁止プラグイン・コマンドと権限の一致・出荷物への検証コード混入・配布物の補助プロセス整合性・3 OS の実画面検証・**文書のセッションの 3 OS 観測**）。**規約と一覧の考え方は `.kiro/steering/verification.md` に置く。**
 
 `Cargo.lock` は追跡する。jxcel はライブラリではなくアプリケーションであり、下記の依存下限を固定する方針は lockfile が追跡されていて初めて意味を持つ。
 
@@ -115,7 +115,7 @@ tsserver は C-ABI を持たない JS プログラムであり、ライブラリ
 
 1. **`deno_core` を Tauri バイナリ内に埋め込む** — V8 isolate は `Send` でなく current-thread ランタイムを要求するが、Tauri の既定は multi-thread。専用 OS スレッド + チャネル橋渡しが必要。**この組み合わせに既知の前例が見つかっていない**（既存の tauri + deno プロジェクトはすべて Deno を別プロセスに逃がしている）
 2. **AppImage + サイドカーバイナリ** — AppImage のバンドル処理が `usr/bin` 配下の ELF に無条件で rpath を書き込み、追記型ペイロードを持つ実行ファイル（Node SEA / pkg / Bun compile / PyInstaller / Nuitka）を破壊する。正典は `tauri-apps/tauri#5189`（2022 年から open、2026-01 に Tauri v2 で再現報告）であり、`#11898` は 2024-12 以降停止している。除外設定は存在せず `NO_STRIP=1` も効かない。**回避配置は `app-shell` の design で確定済み**（`usr/share/` へ置き走査対象の外に出す）
-3. **WebKitGTK 上の canvas グリッドと Monaco** — 白画面、ソフトウェアラスタライズへの無言のフォールバック、描画劣化。**Linux を最高リスクのターゲットとして扱う**。2026-09 の実測で現在 open なのは `#5143`（白画面）、`#15936`（ソフトウェア GL 下の白いウィンドウ。**検出手段がないこと自体が主題**）、`#14721`（NVIDIA 環境の SIGSEGV）、`#10702` / `#14924`（Wayland Error 71）。当初挙げていた `#5761` / `#7021` / `#13157` はいずれもクローズ済み（ただし `#13157` は NOT_PLANNED であり未修正。WebKitGTK 2.48.0 で発現）。**描画失敗を検出する API は存在せず、Tauri も wry も回避策の環境変数を自動設定しない**
+3. **WebKitGTK 上の canvas グリッドと Monaco** — 白画面、ソフトウェアラスタライズへの無言のフォールバック、描画劣化。**Linux を最高リスクのターゲットとして扱う**。2026-09 の実測で現在 open なのは `#5143`（白画面）、`#15936`（ソフトウェア GL 下の白いウィンドウ。**検出手段がないこと自体が主題**）、`#14721`（NVIDIA 環境の SIGSEGV）、`#10702` / `#14924`（Wayland Error 71）。当初挙げていた `#5761` / `#7021` / `#13157` はいずれもクローズ済み（ただし `#13157` は NOT_PLANNED であり未修正。WebKitGTK 2.48.0 で発現）。**基盤側に描画失敗を検出する API は無く、Tauri も wry も回避策の環境変数を自動設定しない** — したがって検出は**アプリ側が自分で持つ**。実装済みの分: 起動の初回描画は `app-shell` の `RenderWatchdog`（`crates/app-shell/src/render.rs`）が**三値**（`Painted` / `SoftwareRaster` / `NoPaint`）で判定し、**通知が期限内に届かないことだけを不成立の根拠**にする（描画を検出する API が無いため）。不成立のときは設定に印（`render.fallback`）を残し、次の起動が代替経路を適用する。**グリッド自身が塗れたかは `data-grid` の `RenderProbe`（`probePaint` / `sampleFrameTimes`）が受け持つ**（要件 12.2 / 12.3）。**起動時の判定とグリッドの判定は別物である** — 前者は「シェルが描けたか」、後者は「canvas が実際に塗れたか」であり、両方を要する
 4. **docx テンプレート差し込み** — Rust に成熟したテンプレータが存在せず ZIP + OOXML の自前実装になる。Word がプレースホルダを複数の run に分割する問題への対処が必要
 
 ---

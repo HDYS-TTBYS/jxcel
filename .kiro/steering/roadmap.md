@@ -85,8 +85,8 @@ JSON をファイル実体とする、データベースとして運用可能な
 **MVP**: Wave 1 + Wave 2 + document-session + data-grid + schema-editor。**2026-09-14 時点で残るのは `data-grid`・`schema-editor` の 2 本**である（Wave 1・2 は実装完了済み、`document-session` は本日完了）。（当初は 2 本としていたが、MVP の文言にある「**開いて**…**保存できる**」を担う持ち主が存在しないことが `data-grid` の設計中に判明したため 1 本増え、いま `document-session` の完了で元へ戻った。）この時点で「開いて・型を定義して・編集して・保存できる型付きスプレッドシート」が成立する。
 
 ## Prototype-First Risks
-以下は spec の design フェーズを待たず、早期にプロトタイプで成立性を確認すべき項目。いずれも失敗した場合にアーキテクチャ全体を変更しうる。
-1. **deno_core を Tauri バイナリ内に埋め込む**（macro-runtime）— V8 isolate の current-thread 制約と Tauri の multi-thread ランタイムの共存。この組み合わせに既知の前例がない
-2. **AppImage + サイドカーバイナリ**（app-shell / macro-editor-lsp）— Tauri の AppImage バンドルが大きな ELF バイナリを破壊しうる未解決 issue
-3. **WebKitGTK 上の canvas グリッドと Monaco**（data-grid / macro-editor-lsp）— Linux での描画問題
-4. **docx テンプレート差し込み**（export-templates）— Rust に成熟したテンプレータが存在せず、zip + OOXML の自前実装になる。Word がプレースホルダを複数の run に分割する問題への対処が必要
+以下は spec の design フェーズを待たず、早期にプロトタイプで成立性を確認すべき項目。いずれも失敗した場合にアーキテクチャ全体を変更しうる。**「確定」とあるものは実装または設計で解消済みであり、残るリスクは未着手の 1・4 である。**
+1. **deno_core を Tauri バイナリ内に埋め込む**（macro-runtime）— V8 isolate の current-thread 制約と Tauri の multi-thread ランタイムの共存。この組み合わせに既知の前例がない。**未着手**（`macro-runtime` は未実装）
+2. **AppImage + サイドカーバイナリ**（app-shell / macro-editor-lsp）— Tauri の AppImage バンドルが大きな ELF バイナリを破壊しうる未解決 issue。**回避配置は `app-shell` で確定・実測済み**（`usr/share/` へ置き走査対象の外に出す。`tech.md`「Known Risks」2 を参照）
+3. **WebKitGTK 上の canvas グリッドと Monaco**（data-grid / macro-editor-lsp）— Linux での描画問題。**検出の仕組みは実装済み**（起動時は `app-shell` の `RenderWatchdog`、グリッドは `data-grid` の `RenderProbe`）。**グリッドライブラリの選定も `data-grid` の design で確定**（Glide 6.0.4-alpha24 + 移植口）。**実装と実描画の実測はこれから**
+4. **docx テンプレート差し込み**（export-templates）— Rust に成熟したテンプレータが存在せず、zip + OOXML の自前実装になる。Word がプレースホルダを複数の run に分割する問題への対処が必要。**未着手**

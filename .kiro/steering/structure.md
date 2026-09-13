@@ -1,6 +1,6 @@
 # Project Structure
 
-> 本ファイルは規定と記述の両方である。`document-format` / `app-shell` / `schema-engine` は実装済みであり、その構造は以下のパターンに従っている。`src-tauri/` と `src/` の実体は `app-shell` が作った。**残るスペックは GUI 側の構造をここから写す**（`app-shell` が確立した画面の契約・検証コードの置き場・機械検査の書き方は後述）。**エンジン側のスペックは「ドメインクレートの内部構造」から写す**（`document-format` と `schema-engine` が確立）。実体が規定から逸脱したら、逸脱を直すか本ファイルを更新するかをその場で決める。
+> 本ファイルは規定と記述の両方である。`document-format` / `app-shell` / `schema-engine` / `document-session` は実装済みであり、その構造は以下のパターンに従っている。`src-tauri/` と `src/` の実体は `app-shell` が作り、`document-session` が文書の寿命と変更の唯一の経路を足した（下の「セッションの所有の規約」）。**残るスペックは GUI 側の構造をここから写す**（`app-shell` が確立した画面の契約・検証コードの置き場・機械検査の書き方は後述）。**エンジン側のスペックは「ドメインクレートの内部構造」から写す**（`document-format` と `schema-engine` が確立）。実体が規定から逸脱したら、逸脱を直すか本ファイルを更新するかをその場で決める。
 
 ## Organization Philosophy
 
@@ -16,12 +16,12 @@ Rust ドメインクレートは Tauri に依存してはならない。この�
 **Location**: `crates/<domain>/`
 **Purpose**: 業務ロジックの実体。Tauri を知らない純粋なライブラリクレート
 **規則**: `Cargo.toml` に `tauri` が現れたら誤り。スペック 1 つがおおむねクレート 1 つに対応する
-**Example**: `crates/document-format/`、`crates/schema-engine/`、`crates/macro-runtime/`
+**Example**: `crates/document-format/`、`crates/schema-engine/`、`crates/app-shell/`、`crates/document-session/`、`crates/macro-runtime/`
 
 ### ドメインクレートの内部構造（`document-format` / `schema-engine` が確立）
 新しいドメインクレートもこの 4 つに従う。
 
-- **依存の鎖を各層の `mod.rs` 冒頭に書く。** 層を一方向に並べ（例 `Ids / Value → Model → Json → Parts → Container → Api`、`error / types → declaration → registry → compile → { coerce, validate } → write → evolution → api`）、**左の層だけを参照する**。鎖の文言そのものを冒頭の doc に置くのは、越境が「読めば分かる」状態を保つためである
+- **依存の鎖を各層の `mod.rs` 冒頭に書く。** 層を一方向に並べ（例 `Ids / Value → Model → Json → Parts → Container → Api`、`error / types → declaration → registry → compile → { coerce, validate } → write → evolution → api`、**`error / state → session → change → table → api`**）、**左の層だけを参照する**。鎖の文言そのものを冒頭の doc に置くのは、越境が「読めば分かる」状態を保つためである
 - **公開面は根の再輸出に集める。** 下位モジュールは `pub mod` のままでよく、根に `pub use` を並べる（`document-format` / `app-shell` と同じ形）。**下流は根の名前だけを使う。** これは**コンパイラ強制ではない規約**である（`pub mod` 経由で下位に到達できる）。強制したくなったら 3 クレート同時の設計変更として扱う
 - **兄弟のドメインクレートへの依存は一方向に限る。** `document-format` が依存グラフの根であり、**下流はこれに依存してよい**（例 `schema-engine → document-format`）。逆流は不可。兄弟同士が循環する形は作らない
 - **誤り型は判別可能な列挙体とし、診断に必要な文脈だけを持ち、表示用の文言を持たない**（表示は呼び出し元が組み立てる。`DocumentError` / `SchemaError` が同じ規約）。**「宣言・入力が壊れている」と「値が合わない」は別の型にする** — 前者は処理を止め、後者は止めない（1 つの型にすると「1 件の不正な値で全体が開けない」という振る舞いが型として表現できてしまう）
@@ -108,7 +108,7 @@ Tauri の機能を使うスペックでも、**GUI なしでテストできる�
 - **フォームレンダラ**（`form-builder` → `form-web-server`）— IPC 非依存を壊さない
 - **サイドカー基盤**（`app-shell` → `macro-editor-lsp`）— 所有権は `app-shell` 側
 - **コマンド登録の根**（`app-shell` → 全 UI スペック）— 登録一覧はコンパイル時に集中して列挙する必要があり、完全な動的登録はできない。**各機能は自分のモジュールに関数を持ち、根は列挙だけを行う**。ここに業務ロジックが漏れ出したら誤り
-- **メニュー項目の登録口**（`app-shell` → 全 UI スペック）— 項目そのものは各機能が所有し、`app-shell` は登録口と競合検査だけを持つ
+- **メニュー項目の登録口**（`app-shell` → 全 UI スペック）— 項目そのものは各機能が所有し、`app-shell` は登録口と競合検査だけを持つ。**項目を足すスペックは、項目数と一覧を主張している検査器（`scripts/check-menu-shortcut.sh` と `scripts/ci/macos/verify-menu-shortcuts.sh`）を同じ作業の中で更新すること** — 更新しないと Linux と macOS の CI 段が落ちる（`verification.md`「検査器の規約」の横断の規則）
 - **IPC の境界**（`app-shell` → 全 UI スペック）— コマンド名の単一の源・生成される TypeScript・封筒の形・呼び出し元ウィンドウの取り方・権限の付与。**規約は `.kiro/steering/ipc-contract.md` に置く**（ここに業務ロジックが漏れ出したら誤り）
 
 ### 性能はドメイン側で守る
