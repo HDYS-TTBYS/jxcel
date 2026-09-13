@@ -59,7 +59,8 @@
 //! design エラー表の 10 変種([`DocumentError`](crate::error::DocumentError))は I/O・
 //! 形式破損の診断である。モデル操作の失敗(実在しないシート・行の指定、順列でない並び替え
 //! 要求)は表のどの変種にも対応しないため、`DocumentError` に増やさず本モジュールの
-//! 最小ローカル型 [`UnknownSheet`] / [`UnknownRow`] / [`ReorderError`] とする
+//! 最小ローカル型 [`UnknownSheet`] / [`UnknownRow`] / [`ReorderError`] /
+//! [`CellWriteError`] とする
 //! ([`IdParseError`](crate::ids::IdParseError) と同じ
 //! 「表に無いものはローカルに暫く置く」パターン)。panic にしないので呼び出し元が
 //! 実行時エラーとして扱える。
@@ -163,6 +164,39 @@ pub struct UnknownSheet {
 pub struct UnknownRow {
     /// 指定されたが存在しなかった行識別子。
     pub row: RowId,
+}
+
+/// [`Document::set_cells`] の失敗。
+///
+/// [`UnknownRow`] / [`ReorderError`] と同じ規律のモデル局所の誤り型である: 判別可能な
+/// 変種がそれぞれ文脈(どのシート・どの行・どの列)だけを持ち、表示用の文言を持たない
+/// (文言は呼び出し元が組み立てる)。design エラー表(I/O・形式診断の 10 変種)に対応
+/// 変種が無いため `DocumentError` には含めない。
+///
+/// 3 変種は[`Document::set_cells`]の事前検査(1 パス)が判別する:
+/// シート自体が未知・対象シートに属さない行・`Sheet::columns` の数を超える列の添字。
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum CellWriteError {
+    /// 指定シート自体が文書に存在しない。
+    #[error("no such sheet in document: {sheet}")]
+    UnknownSheet {
+        /// 指定されたシート識別子。
+        sheet: SheetId,
+    },
+    /// 指定行が対象シートに属さない(他シートの行・他文書の行)。
+    #[error("no row {row} in sheet")]
+    UnknownRow {
+        /// 指定されたが存在しなかった行識別子。
+        row: RowId,
+    },
+    /// 列の添字が `Sheet::columns` の範囲外である。
+    #[error("column {column} is out of range: sheet has {columns} columns")]
+    UnknownColumn {
+        /// 指定された列の添字(`Sheet::columns` の並びに対する位置)。
+        column: usize,
+        /// 対象シートが持つ列の数(範囲の上界)。
+        columns: usize,
+    },
 }
 
 /// jxcel ドキュメントの集約ルート。
@@ -464,6 +498,34 @@ impl Document {
             .find(|s| s.id() == sheet)
             .ok_or(UnknownRow { row })?
             .set_row_values(row, values)
+    }
+
+    /// 指定シートの複数のセルを**1 回の呼び出しで**書き換える(要件 3.5, 3.7)。
+    ///
+    /// `cells` の各要素は（行識別子, 列の添字, 値）であり、列の添字は
+    /// [`Sheet::columns`] の並びに対する位置である。値の個数と列数の一致は**保存時の
+    /// 門**(`RowsCodec::encode`)が担うため、本メソッドは判定しない(既存規約)。
+    ///
+    /// **行の索引を 1 度だけ作り、事前検査を 1 パスで行う**: 合計 O(行数 + 変更数) に
+    /// なる([`Document::set_row_values`] を変更数だけ繰り返すと対象行の線形探索が毎回
+    /// 走り O(行数 × 変更数) になる。10 万行 × 30 列の一括書き換えが要件 3.5 の対象で
+    /// ある）。未知のシート([`CellWriteError::UnknownSheet`])・対象シートに属さない行
+    /// ([`CellWriteError::UnknownRow`])・範囲外の列([`CellWriteError::UnknownColumn`])
+    /// は判別可能な変種として返し、**1 つでも不正ならどのセルも変更しない**
+    /// (部分適用なし)。同じ入力の再適用は同じ結果になる(置換であり加算ではない)。
+    ///
+    /// 書き込みが行の現在の値数より後ろに及ぶ場合は、間を [`CellValue::Null`] で埋める。
+    /// **行の集合・並び・識別子は変えない**(置換であって追加ではない)。
+    pub fn set_cells(
+        &mut self,
+        sheet: SheetId,
+        cells: &[(RowId, usize, CellValue)],
+    ) -> Result<(), CellWriteError> {
+        self.sheets
+            .iter_mut()
+            .find(|s| s.id() == sheet)
+            .ok_or(CellWriteError::UnknownSheet { sheet })?
+            .set_cells(cells)
     }
 }
 

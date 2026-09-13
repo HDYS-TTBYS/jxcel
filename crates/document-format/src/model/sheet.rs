@@ -69,7 +69,7 @@ use crate::json::PreservedFields;
 use crate::value::CellValue;
 
 use super::schema_part::SchemaPart;
-use super::{ReorderError, UnknownRow};
+use super::{CellWriteError, ReorderError, UnknownRow};
 
 /// シート内の行。列順の [`CellValue`] を保持する(design「Domain Model」の
 /// `Row ||--o{ CellValue : holds`)。
@@ -115,6 +115,20 @@ impl Row {
     #[inline]
     pub(crate) fn set_values(&mut self, values: Vec<CellValue>) {
         self.values = values;
+    }
+
+    /// 1 つの列の値を置き換える経路(`Sheet::set_cells` が呼ぶ)。
+    ///
+    /// 列の添字は `Sheet::columns` の並びに対する位置であり、呼び出し元
+    /// ([`Sheet::set_cells`])が列数の範囲内であることを事前検査で保証している。
+    /// 現在の値数より後ろへの書き込みでは、間を [`CellValue::Null`] で埋める
+    /// (値数は `column + 1` までしか伸びない)。行の識別子・値数以外には触れない。
+    #[inline]
+    pub(crate) fn set_cell(&mut self, column: usize, value: CellValue) {
+        if self.values.len() <= column {
+            self.values.resize(column + 1, CellValue::Null);
+        }
+        self.values[column] = value;
     }
 }
 
@@ -265,6 +279,55 @@ impl Sheet {
             }
             None => Err(UnknownRow { row }),
         }
+    }
+
+    /// 複数のセルを**1 回の呼び出しで**書き換える(`Document::set_cells` が呼ぶ)。
+    ///
+    /// 各変更は（行識別子, 列の添字, 値）であり、列の添字は [`Sheet::columns`] の並びに
+    /// 対する位置である。**事前検査を 1 パスで行う**: 行の索引（[`RowId`] → `rows` の
+    /// 位置）を 1 度だけ作り（O(行数)）、各変更を O(1) で検証するため、合計は
+    /// O(行数 + 変更数) になる([`Sheet::set_row_values`] を変更数だけ繰り返すと対象行の
+    /// 線形探索が毎回走り O(行数 × 変更数) になる)。**検証を通過するまで self を一切
+    /// 変更しない**: 未知のシートは呼び出し元([`super::Document`])が、未知の行
+    /// ([`CellWriteError::UnknownRow`])・範囲外の列
+    /// ([`CellWriteError::UnknownColumn`])はここが判別可能な変種として返し、1 つでも
+    /// 不正ならどのセルも変更しない(部分適用なし)。
+    ///
+    /// 適用は事前検査で作った索引を再利用して変更ごとに O(1) で行の位置を引く
+    /// (索引を 2 度作らない)。行の集合・並び・識別子は変えず、1 つの変更が触れるのは
+    /// その行のその列の値だけである(置換であって追加ではない)。行の現在の値数より
+    /// 後ろへの書き込みでは間を [`CellValue::Null`] で埋める([`Row::set_cell`])。
+    /// 同じ入力の再適用は同じ結果になる(冪等)。
+    pub(crate) fn set_cells(
+        &mut self,
+        cells: &[(RowId, usize, CellValue)],
+    ) -> Result<(), CellWriteError> {
+        // 事前検査フェーズ(失敗時は self を一切変更しない)。
+        let columns = self.columns.len();
+        let index: HashMap<RowId, usize> = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(position, row)| (row.id(), position))
+            .collect();
+        for (row, column, _) in cells {
+            if !index.contains_key(row) {
+                return Err(CellWriteError::UnknownRow { row: *row });
+            }
+            if *column >= columns {
+                return Err(CellWriteError::UnknownColumn {
+                    column: *column,
+                    columns,
+                });
+            }
+        }
+        // ここを通ったら全変更が妥当である。索引は上のものを再利用するため、以降の
+        // 失敗経路は無く、行の探索は変更ごとに O(1) である。
+        for (row, column, value) in cells {
+            let position = index[row];
+            self.rows[position].set_cell(*column, value.clone());
+        }
+        Ok(())
     }
 
     /// 行順序を与えられた順列で置き換える。識別子は一切変更しない(要件 1.5)。
