@@ -1101,6 +1101,50 @@ mod tests {
         assert!(!changed);
     }
 
+    /// **書き出しの失敗は理由つきで答える**（要件 5.4 の後半）。
+    ///
+    /// `save_outcome` の `SaveReport::Failed` の腕（write_failure_reason）はこれ以外に
+    /// 到達するテストが無い — **コアが書き出しの失敗を返す実経路**（保存先が書けない）を通す。
+    /// 未保存が保たれ、通知も送らない（失敗は状態を変えない）。
+    #[test]
+    fn a_failed_write_answers_with_a_reason_and_keeps_the_unsaved_mark() {
+        let scratch = Scratch::new("write-failure");
+        let watch = watch();
+        let label = WindowLabel::new("empty-1");
+        answer_new(&watch, &label);
+        mark_unsaved(&watch, &label);
+
+        // **書けない宛先**を選ばせる（既存のファイルを親に持つパスは、親がディレクトリでないため
+        // 書き出しに失敗する）。`save_to` は失敗を結果として返す（panic しない）。
+        let blocker = scratch.file("ふさぐ");
+        std::fs::write(&blocker, b"not a directory").expect("標本のファイルを書ける");
+        let unopenable = blocker.join("書けない.jxcel");
+
+        let (outcome, changed) = answer_save(&watch, &label, |_name| {
+            SaveLocation::Chosen(unopenable.clone())
+        });
+
+        let app_shell::ipc::DocumentSaveOutcome::Failed { reason } = outcome else {
+            panic!("書き出せない場合は失敗として答えなければならない");
+        };
+        assert!(
+            reason.contains("empty-1") && reason.contains("書き出せなかった"),
+            "失敗の理由が用途を伝えていない: {reason}"
+        );
+        assert!(!changed, "失敗は状態を変えない（未保存は保たれる）");
+        let DocumentSessionStatus::Open(summary) = boundary_status(&watch, &label) else {
+            panic!("保持しているはずである");
+        };
+        assert!(
+            summary.unsaved,
+            "書き出しの失敗で未保存が落ちた（要件 5.4）"
+        );
+        assert!(
+            !std::path::Path::new(&unopenable).exists(),
+            "書けない宛先にファイルができた"
+        );
+    }
+
     /// **イベントを送る操作の数がちょうど 4 である**（design.md「セッション状態の通知」）。
     ///
     /// 読み取りと失敗・拒否・取り消しは状態を変えないので送らない。**数えるのは時間ではなく

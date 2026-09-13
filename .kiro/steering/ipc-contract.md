@@ -36,7 +36,7 @@ async fn document_open(window: WebviewWindow, request: Request) -> IpcResult<…
 
 ## 型は 1 か所で定義し、生成物は手で編集しない
 
-- ts-rs の derive を付けてよいのは `crates/app-shell/src/ipc/` の下だけ。**境界に 64 ビット整数を出さない**（TS の数値精度で壊れる）
+- ts-rs の derive を付けてよいのは `crates/app-shell/src/ipc/` の下だけ。**境界に 64 ビット整数を出さない**（TS の数値精度で壊れる）。**門が止めるのは `bigint`（= `i64`/`u64`/`i128`/`u128`）だけである** — `u32` の件数（`document-session` のシートの列数・行数）は `number` へ落ちても正確なので `number` の全面禁止は課していない（`document-session` の 3.1 が門をこの形へ弱めた。`crates/app-shell/src/ipc/mod.rs` の `bindings_contain_no_any_and_no_64_bit_numbers`）。**したがって `number` を境界へ出す型は自分で「64 ビットでないこと」を守ること**（門はそれを見ていない）
 - `src/ipc/bindings.ts` は**追跡する生成物**。再生成は `cargo run -p app-shell --bin generate-bindings`。**手で直さない**（直すのは生成元）
 - ドリフト検査は 2 段で成立する。**片方だけでは足りない**:
   - 生成物と `render_bindings()` のバイト比較 → 「Rust 側が変わったのに生成物が古い」

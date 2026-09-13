@@ -330,6 +330,13 @@ mod tests {
             matches!(verdict, CloseVerdict::Deny { .. }),
             "未保存のウィンドウは拒否される: {verdict:?}"
         );
+        // **理由が与えられること**（要件 6.1 の後半）。空の理由でも `Deny` は成立してしまうので、
+        // 未保存であることに由来する文言が入っているところまで見る（提示はこの文字列を使う）。
+        let reason = verdict.reason().unwrap_or_default();
+        assert!(
+            reason.contains("未保存"),
+            "拒否の理由が未保存の事実を伝えていない: {reason:?}"
+        );
         assert_eq!(0, inner.may_close_calls(), "内側の宿主が呼ばれた");
         assert_eq!(
             CloseAnswer::Deny,

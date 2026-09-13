@@ -71,6 +71,7 @@
 | **`document-format` の 3 ファイルを共有する実装順**（本スペックが `set_cells` を先に入れ、`data-grid` が後から行の削除と位置指定の挿入を足す） | `data-grid` の群 1（実装の後発側が再輸出と決定性テストを再確認する） |
 | **保存の時機と経路** | `version-control`（保存に相乗りする） |
 | **コマンド名・権限・生成物** | `scripts/check-command-acl.sh`、`src/ipc/bindings.ts`、`src-tauri/permissions/app.toml`、既存コマンドの利用側 |
+| **境界の数の門を `number` 全面禁止から `bigint` 禁止へ弱めた**（シートの件数を `u32` で運ぶため。`tasks.md` 3.1 の「境界の数の門の変更」） | `ipc-contract.md` の 64 ビット整数禁止の規約（**文言は不変だが、門が止める範囲が狭くなった**）と、境界へ数値を出す下流スペック（`data-grid` / `version-control` 等。**64 ビットを出さない規約を自分で守る必要がある**） |
 | **アプリ全体の終了の扱い** | `app-shell`（終了の拒否可能性を設計する場合。本スペックは関与しない） |
 
 ## Architecture
@@ -105,6 +106,8 @@ graph TB
         Dialog["dialog.rs<br/>保存先の選択"]
         Commands["commands/mod.rs<br/>登録の根"]
         Registry["window/mod.rs<br/>WindowRegistry"]
+        Port["ports.rs<br/>DocumentHostPort"]
+        Events["TauriWindowEvents<br/>WebviewWindow の破棄"]
     end
 
     subgraph Core["crates/document-session（tauri 非依存）"]
@@ -122,15 +125,17 @@ graph TB
     Prompt --> SessionIpc
     Veto --> Prompt
     SessionIpc --> Cmds
-    Cmds --> Sessions
+    Cmds --> Watch
     Cmds --> Dialog
     Cmds --> Registry
     Menu --> Cmds
     Commands --> Cmds
     Host --> Sessions
+    Host --> Port
+    Host --> Watch
     Watch --> Sessions
-    Registry -.-> Host
-    Registry -.-> Watch
+    Watch --> Events
+    Cmds --> Watch
     Sessions --> Slot
     Slot --> Change
     Slot --> Fmt
@@ -184,7 +189,7 @@ crates/document-format/src/model/sheet.rs # 変更: 一括書き換えの実体�
 crates/document-format/src/lib.rs         # 変更: 再輸出
 crates/app-shell/src/ipc/document.rs      # 新規: 境界型（ts-rs derive を置ける唯一の場所）
 src/ipc/documentSession.ts                # 新規: 4 コマンドの薄いラッパ
-src/shell/SessionClosePrompt.tsx          # 新規: 3 択の提示
+src/shell/sessionClose.tsx                 # 新規: 3 択の提示（コンポーネント SessionClosePrompt + ストア + 設置関数）
 src/features/empty/EmptyWindowScreen.tsx  # 変更: セッション状態の表示
 scripts/check-document-session.sh         # 新規: 3 OS 共用の POSIX 検査器
 scripts/ci/{linux,macos,windows}/verify-document-session.*  # 新規: OS 段の実体
@@ -196,11 +201,13 @@ scripts/ci/{linux,macos,windows}/verify-document-session.*  # 新規: OS 段の�
 - `crates/document-format/src/model/mod.rs` — `Document::set_cells` と `CellWriteError` を追加（モデル局所の誤り型の規律に従う）
 - `crates/document-format/src/model/sheet.rs` — 行の索引を 1 度だけ作る一括書き換えの実体を追加
 - `crates/document-format/src/lib.rs` — `set_cells` と `CellWriteError` を根へ再輸出
-- `crates/app-shell/src/ipc/document.rs`（新規） — `DocumentSummary` / `DocumentSheet` / `DocumentOrigin` / `DocumentSessionStatus` / 4 応答型 / 3 結果型
+- `crates/app-shell/src/ipc/document.rs`（新規） — `DocumentSummary` / `DocumentSheet` / `DocumentOrigin` / `DocumentSessionStatus` / **4 応答型**（`DocumentStateResponse` / `DocumentSaveResponse` / `DocumentNewResponse` / `DocumentDiscardResponse`）/ **4 結果型**（`DocumentStateResult` / `DocumentSaveResult` / `DocumentNewResult` / `DocumentDiscardResult`）
 - `crates/app-shell/src/ipc/mod.rs` — 新モジュールの宣言・再輸出・`render_bindings` の宣言一覧への追加
 - `crates/app-shell/src/ipc/error.rs` — `IpcError::Document { message }` を追加
 - `crates/app-shell/src/ipc/command_names.rs` — コマンド名 4 本の定数と `COMMAND_NAMES` への追加
 - `src-tauri/src/session/{mod,host,watch,commands,menu}.rs`（新規）
+- `src-tauri/src/session/verification.rs`（新規） — 非既定 feature `verification-triggers` の下だけに置く引き金（タスク 5.2。既定ビルドには識別子が残らない）
+- `src-tauri/src/main.rs` — `mod session;` の宣言 1 行（実装時に判明した結線。`src-tauri/Cargo.toml` の `document-session` 依存と `document-format` の dev-dependency も同じ）
 - `crates/document-session/tests/common/mod.rs`（新規） — テストとベンチが共有する標本の生成器（上流の公開 API だけを使う）
 - `src-tauri/src/dialog.rs` — 保存先の選択（`pick_save_location`）。既存の親ウィンドウ指定の規律と、`gtk` / `rfd` の使い分けをそのまま写す
 - `src-tauri/src/commands/mod.rs` — `command_root!` へ 4 行
@@ -651,7 +658,7 @@ pub fn pick_save_location(window: &WebviewWindow, suggested_name: &str) -> SaveL
 メニューからの「開く…」「新規」「保存」は **Rust 側で完結**し、フロントエンドは結果を知らない。したがって状態が変わったことを**イベント 1 つ**で伝える。
 
 - 名前は `DOCUMENT_SESSION_CHANGED_EVENT = "document_session_changed"` として `crates/app-shell/src/ipc/` に置き、**生成物に定数として出す**（`SETTINGS_CHANGED_EVENT` と同じ扱い。綴りを手で書かない）
-- 適応層が、セッションの状態を変えた操作（読み込み・新規作成・保存・破棄の印・ウィンドウの破棄）のあとに**対象ウィンドウへ 1 回**送る
+- 適応層が、セッションの状態を変えた操作（読み込み・新規作成・保存・破棄の印・ファイルの引き渡し）のあとに**対象ウィンドウへ 1 回**送る。**ウィンドウの破棄では送らない** — 送り先のウィンドウが既に無く、`emit` は必ず失敗する。破棄の経路はセッションを表から落とすだけである（実装では `should_notify` が「`Absent` へ落ちる変化は送らない」として同じ規則で扱う。`tasks.md` 3.4 の Implementation Notes）。送るかどうかを決めるのは `should_notify(before, after)` の**1 つの規則**であり、操作ごとに決め打ちしない（決め打ちすると「既に未保存でない文書への破棄の印」でも通知が飛ぶ）
 - フロントエンドは購読して**状態を問い合わせ直す**（イベントは状態そのものを運ばない。状態の唯一の源は `document_state`）。粒度は `settings_changed` と同じ「1 種」であり、種別ごとのイベントは作らない
 - 検証では**速度ではなく呼び出しの形**を見る（連続操作で再問い合わせが何回起きたかを数える。`verification.md`）
 
@@ -725,7 +732,7 @@ pub enum DocumentNewOutcome  { Created, Refused { reason: String } }
 
 | イベント | 送り先 | いつ | 購読側のすること |
 |---|---|---|---|
-| `DOCUMENT_SESSION_CHANGED_EVENT = "document_session_changed"` | 状態を変えたウィンドウ | 読み込み・新規作成・保存・破棄の印・ウィンドウの破棄のあとに 1 回 | `document_state` を問い合わせ直す（**イベントは状態を運ばない**。状態の唯一の源は `document_state`） |
+| `DOCUMENT_SESSION_CHANGED_EVENT = "document_session_changed"` | 状態を変えたウィンドウ | 読み込み・新規作成・保存・破棄の印・ファイルの引き渡しのあとに 1 回（**ウィンドウの破棄では送らない** — 送り先が既に無い。`should_notify` が `Absent` へ落ちる変化として同じ規則で扱う） | `document_state` を問い合わせ直す（**イベントは状態を運ばない**。状態の唯一の源は `document_state`） |
 
 ## Error Handling
 
