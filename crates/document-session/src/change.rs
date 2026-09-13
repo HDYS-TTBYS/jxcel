@@ -70,7 +70,6 @@ use crate::state::Edited;
 /// セッションでは [`SessionError::NoDocument`] を返し、**閉包を呼ばない**。
 ///
 /// **閉包の内側から同じセッションを呼び返してはならない**（モジュール docs「再入禁止」）。
-#[allow(dead_code)] // 公開面（タスク 2.5）が使うまでの seam（`session.rs` の `Slot` と同じ扱い）。
 pub(crate) fn edit<R>(
     slot: &Slot,
     f: &mut dyn FnMut(&mut Document) -> R,

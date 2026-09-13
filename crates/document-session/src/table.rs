@@ -63,13 +63,11 @@ type Entries = HashMap<WindowLabel, Arc<Slot>>;
 /// 表（本型）と操作口（2.5）を別の型に分ける。決定はタスク 2.3 の報告に記す）。
 ///
 /// 本型は crate 可視であり、根の再輸出には現れない（下流が使うのは公開面の名前だけである）。
-#[allow(dead_code)] // 公開面（タスク 2.5）が使うまでの seam（`session.rs` の `Slot` と同じ扱い）。
 pub(crate) struct Sessions {
     /// 識別子 → セッション。ロックの範囲はモジュール docs「ロックの規律」を参照。
     windows: RwLock<Entries>,
 }
 
-#[allow(dead_code)] // `Sessions` と同じ seam（公開面 = 2.5）。
 impl Sessions {
     /// 空の表を作る（どのウィンドウもドキュメントを持たない）。
     pub(crate) fn new() -> Self {
