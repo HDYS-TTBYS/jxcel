@@ -397,6 +397,14 @@ fn skip_string(bytes: &[u8], quote: usize) -> usize {
 /// 「整数リテラルか」は `.` も `e` / `E` も現れなかったことを意味する。範囲外でも
 /// `9223372036854775808.0` や `1e300` は `f64` として正当な値であり、整数リテラル
 /// ではないので範囲の対象外である。
+///
+/// # 必ず前進する(契約)
+///
+/// 呼び出し元は先頭が `-` か ASCII 数字のときにだけ本関数を呼ぶ。その前提では
+/// **符号が 1 バイト、数字が 1 文字以上を消費する**ため、返る位置は必ず `start` より
+/// 後ろである。前進しないと [`check_integer_literals`] の走査が**終わらない**
+/// (同じ位置で同じ結果を繰り返す)ため、契約として表明する。走査が止まらない故障は
+/// テストの失敗ではなくハングとして現れ、原因が見えにくい。
 fn scan_number_literal(bytes: &[u8], start: usize) -> (usize, bool) {
     let mut cursor = start + usize::from(bytes.get(start) == Some(&b'-'));
     cursor = skip_digits(bytes, cursor);
@@ -411,6 +419,7 @@ fn scan_number_literal(bytes: &[u8], start: usize) -> (usize, bool) {
         cursor += usize::from(matches!(bytes.get(cursor), Some(b'+') | Some(b'-')));
         cursor = skip_digits(bytes, cursor);
     }
+    debug_assert!(cursor > start, "数値リテラルの走査は必ず前進する");
     (cursor, integer)
 }
 
