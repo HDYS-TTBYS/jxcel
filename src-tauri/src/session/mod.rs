@@ -4,8 +4,9 @@
 //! `src-tauri/src/session/mod.rs`。タスク 3.2、破棄の購読はタスク 3.3）。要件: 1.3、1.5、2.2、
 //! 4.6、6.1。
 //!
-//! 本モジュールが置く起動の結線は [`install`] の 1 つだけである。4 コマンドは
-//! [`commands`] にあり、**残る非目標**（保存先の選択 = 3.5、メニュー = 3.6）はここに含めない。
+//! 本モジュールが置く起動の結線は [`install`] の 1 つだけである。4 コマンドは [`commands`] に
+//! あり、メニューの 2 項目（「新規」「保存」）は [`menu`] にあり、保存先の選択は `crate::dialog`
+//! が担う（3.5）。
 //!
 //! # 起動の結線
 //!
@@ -13,9 +14,10 @@
 //! 1 行だけ呼ぶ（design.md「SessionDocumentHost」の Integration）。順序が意味を持つのは、
 //! 次の 2 つをどちらも満たすためである:
 //!
-//! 1. **メニューの登録口が構築済みであること** — [`install`] は `MenuRegistry` を要さないが、
-//!    `dialog::install` と同じ起動段（`Builder::build` の中で `app.run` より前）に置くことで、
-//!    以後のタスク（3.6 のメニュー項目）が同じ並びへ足せる
+//! 1. **メニューの登録口が構築済みであること** — [`install`] は [`menu::install`] で
+//!    `MenuRegistry` を引く（`lifecycle::run` の `menu::install` が管理状態へ置いた後）。
+//!    `dialog::install` と同じ起動段（`Builder::build` の中で `app.run` より前）に並ぶので、
+//!    **ウィンドウが 1 枚も無い時点で登録だけが済む**（配置は生成時に受け取る）
 //! 2. **宿主のポートが既に管理状態にあること** — [`install`] は
 //!    `app.state::<DocumentHostPort>()` を引く。ポートは構築の前（`lifecycle::run` の
 //!    `Builder::manage`）に置かれている
@@ -51,6 +53,7 @@
 
 pub mod commands;
 pub mod host;
+pub mod menu;
 pub mod watch;
 
 use std::sync::Arc;
@@ -74,6 +77,9 @@ use crate::session::watch::{TauriWindowEvents, WindowDestroyWatch};
 ///    取り出す**（設置前の宿主を内側に保つ。モジュール doc「なぜ連鎖なのか」）
 /// 3. セッション → 内側の連鎖（[`SessionDocumentHost`]）を
 ///    [`DocumentHostPort::install`] でポートへ入れる
+/// 4. [`menu::install`] で「新規」と「保存」を登録口へ登録する（タスク 3.6。要件 5.1、7.1）。
+///    **1 の後**でなければならない — 活性化の処理が管理状態の同じ入口
+///    （`app.state::<Arc<WindowDestroyWatch>>()`）を引くためである
 ///
 /// **この関数は `app.run` より前に呼ぶ**（`lifecycle::run` の `Builder::build` の後、
 /// `dialog::install` の直後）。走り出した後でも安全に呼べるが、その時点の判定と引き渡しが
@@ -105,4 +111,11 @@ pub fn install(app: &AppHandle) {
 
     // 3. 連鎖をポートへ入れる。以後の判定と引き渡しはセッションを先に見る。
     port.install(Arc::new(SessionDocumentHost::new(watch, inner)));
+
+    // 4. 「新規」と「保存」をメニューへ登録する（タスク 3.6。要件 5.1、7.1）。**登録口が
+    //    構築済みであることが前提**であり、`lifecycle::run` の `menu::install` → `dialog::install`
+    //    → ここ、という並びがそれを満たす。セッションの表を管理状態へ置いた後なので、活性化の
+    //    処理（`spawn_blocking` の中で `app.state::<Arc<WindowDestroyWatch>>()` を引く）が
+    //    同じ入口を取れる（`session/menu.rs` の module doc）。
+    menu::install(app);
 }

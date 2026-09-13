@@ -55,6 +55,21 @@
 //! イベントは作らない。**ウィンドウの破棄では送らない** — 送り先が既に無い（破棄は
 //! [`WindowDestroyWatch`] が表の後始末として受ける）。
 //!
+//! # 本体は 2 つの入口から使われる（コマンド面とメニュー面）
+//!
+//! タスク 3.6 のメニュー項目（[`super::menu`]）は `#[tauri::command]` を通らない — フロント
+//! エンドを経由せず Rust 側で完結するためである（design.md「セッション状態の通知」）。したがって
+//! 同じ処理をメニューへ写すと、**画面からの操作とメニューからの操作で結果が食い違いうる**
+//! （task 3.6 の受入はこの一致を求めている）。そこで次を `pub(crate)` にして、メニュー面が
+//! **同じ本体を直接呼ぶ**:
+//!
+//! - [`answer_new`] / [`answer_save`]（操作の本体。判定・適用・`should_notify` を含む）
+//! - [`emit_session_changed`]（状態変化の通知。**送る規則は 1 箇所に保つ**）
+//! - [`describe_new`] / [`describe_save`]（記録の語。メニュー面の記録行も同じ語を使う）
+//!
+//! **公開面を広げるための可視性ではない。** 唯一の本体へ 2 つ目の入口を通すためのものであり、
+//! メニュー面は境界の写像（封筒・文脈）を必要としない（応答を返す先が無い）。
+//!
 //! # 実行モデル（保存だけが非同期である理由）
 //!
 //! [`document_save`] は `async fn` とし、**保存と保存先の提示を `spawn_blocking` に載せる** —
@@ -119,7 +134,11 @@ fn caller_context(window: &WebviewWindow) -> WindowContext {
 /// 送信に失敗しても操作の結果は変えない（ウィンドウが既に無い等）。**記録に残すだけ**である。
 /// **送る前に 1 行残す** — 実画面の観測と 3 OS の段は、この行で「どの操作が通知を起こしたか」を
 /// 数える（`verification.md`「呼び出しの形を数える」）。
-fn emit_session_changed(window: &WebviewWindow) {
+///
+/// **送るかどうかを決めるのは呼び出し元である**（この関数は送るだけ）。判定は
+/// [`should_notify`] の 1 箇所にあり、コマンド面もメニュー面（[`super::menu`]）もその結果だけを
+/// ここへ渡す — イベントが 2 回飛ぶ経路・飛ばない経路を作らないためである（タスク 3.6）。
+pub(crate) fn emit_session_changed(window: &WebviewWindow) {
     log::info!(
         "セッションの状態変化を通知した: ウィンドウ = {} / イベント = {DOCUMENT_SESSION_CHANGED_EVENT}",
         window.label(),
@@ -336,7 +355,8 @@ fn answer_state(
 /// 現在の状態を境界の形で答える（状態を変えた操作のあとの応答が使う）。
 ///
 /// **セッションを作らない**読み取りである（[`DocumentSessionsApi::state`] の契約）。
-fn boundary_status(watch: &WindowDestroyWatch, label: &WindowLabel) -> DocumentSessionStatus {
+/// **メニュー面（[`super::menu`]）も記録の 1 行のためにこれを呼ぶ** — 状態の写しを 2 つ持たない。
+pub(crate) fn boundary_status(watch: &WindowDestroyWatch, label: &WindowLabel) -> DocumentSessionStatus {
     to_boundary(watch.sessions().state(label), label)
 }
 
@@ -345,7 +365,10 @@ fn boundary_status(watch: &WindowDestroyWatch, label: &WindowLabel) -> DocumentS
 /// 戻り値は（境界の結果, **通知を送るべきか**）。**作成が通れば文書が入れ替わり版が 1 進む**ので
 /// 状態は必ず変わる。拒否（未保存がある・別の操作が進行中・ウィンドウが引けない）は何も変えない
 /// ので、[`should_notify`] が偽を返す（決め打ちしない）。
-fn answer_new(watch: &WindowDestroyWatch, label: &WindowLabel) -> (DocumentNewOutcome, bool) {
+///
+/// **メニュー面（[`super::menu`]）もこの本体を呼ぶ** — 応答を返す先が無いので、結果の境界の型を
+/// 捨てるだけである（task 3.6 の受入:「画面からの操作とメニューからの操作で結果が一致する」）。
+pub(crate) fn answer_new(watch: &WindowDestroyWatch, label: &WindowLabel) -> (DocumentNewOutcome, bool) {
     let before = watch.sessions().state(label);
     let outcome = watch.create(label);
     let after = watch.sessions().state(label);
@@ -434,7 +457,11 @@ fn suggested_name(watch: &WindowDestroyWatch, label: &WindowLabel) -> String {
 /// `save_to` のあとに再び `NeedsLocation` が返っても**提示を繰り返さない**（提示のループを
 /// 作らない）。位置を指定した書き出しで保存先を要することはコアの契約上ありえないが、
 /// 万一その腕が来たら失敗として報告する。
-fn answer_save<P>(
+///
+/// **メニュー面（[`super::menu`]）もこの本体を呼ぶ。** 出所を持たない文書では
+/// `pick`（メニュー面は `crate::dialog::pick_save_location` を渡す）が保存先を尋ねる — メニュー
+/// からの保存でも要件 5.2 が同じように働く（task 3.6 の受入）。
+pub(crate) fn answer_save<P>(
     watch: &WindowDestroyWatch,
     label: &WindowLabel,
     pick: P,
@@ -503,7 +530,10 @@ where
 // ---------------------------------------------------------------------------
 
 /// 状態の問い合わせの記録に出す 1 語。**名前も位置も書かない**（どの状態かを追えれば足りる）。
-fn describe_status(status: &DocumentSessionStatus) -> &'static str {
+///
+/// **メニュー面（[`super::menu`]）の記録行もこの語を使う**（同じ操作が同じ語で記録される。
+/// タスク 3.6）。
+pub(crate) fn describe_status(status: &DocumentSessionStatus) -> &'static str {
     match status {
         DocumentSessionStatus::Absent => "保持していない",
         DocumentSessionStatus::Open(_) => "保持している",
@@ -512,7 +542,10 @@ fn describe_status(status: &DocumentSessionStatus) -> &'static str {
 }
 
 /// 保存の結果の記録に出す 1 語。**位置は書かない**（境界へ出さないのと同じ理由）。
-fn describe_save(outcome: &DocumentSaveOutcome) -> &'static str {
+///
+/// **メニュー面（[`super::menu`]）の記録行もこの語を使う** — 同じ操作がどちらの入口からでも同じ語で
+/// 記録される（タスク 3.6 の受入の観測点）。
+pub(crate) fn describe_save(outcome: &DocumentSaveOutcome) -> &'static str {
     match outcome {
         DocumentSaveOutcome::Saved => "保存した",
         DocumentSaveOutcome::Cancelled => "取り消された",
@@ -520,8 +553,9 @@ fn describe_save(outcome: &DocumentSaveOutcome) -> &'static str {
     }
 }
 
-/// 新規作成の結果の記録に出す 1 語。
-fn describe_new(outcome: &DocumentNewOutcome) -> &'static str {
+/// 新規作成の結果の記録に出す 1 語。**メニュー面（[`super::menu`]）の記録行もこの語を使う**
+/// （同じ操作が同じ語で記録される。タスク 3.6）。
+pub(crate) fn describe_new(outcome: &DocumentNewOutcome) -> &'static str {
     match outcome {
         DocumentNewOutcome::Created => "用意した",
         DocumentNewOutcome::Refused { .. } => "拒否した",
