@@ -31,7 +31,7 @@ JSON をファイル実体とする、データベースとして運用可能な
 - **Why this split**: 「エンジン（意味論）」と「UI（操作）」を一貫して分離している — schema-engine / schema-editor、macro-runtime / macro-editor-lsp、form-builder / form-web-server がその対。エンジン側は Tauri を知らない純粋な Rust ライブラリとして実装・テストでき、UI 側は独立に進められる。また、拡張点を持つスペック（schema-engine の型拡張、data-grid のエディタレジストリ）と、その拡張点を埋めるスペック（custom-types）を分けることで、拡張インターフェースの設計が後付けにならないようにしている。標準マクロライブラリ（macro-stdlib）はランタイム本体とは別物の規模を持つため独立させた。
 - **Shared seams to watch**:
   - **document-format ⇔ version-control**: 決定的な JSON 出力レイアウトが差分の品質を直接決める。最も重要な継ぎ目
-  - **schema-engine ⇔ custom-types**: 拡張インターフェースの所有権は schema-engine 側。実装は custom-types 側。10 万行のバッチ検証経路を両者で整合させること
+  - **schema-engine ⇔ custom-types**: 拡張インターフェースの所有権は schema-engine 側。実装は custom-types 側。**schema-engine 側の一括検証経路は結線済み**（拡張型の列を第 1 段から外し、列ごとに 1 回だけ一括判定を呼ぶ。`validate_sheet` と列指定の再検証が同じ経路を通る）。**custom-types 側は `validate_batch` を上書きし、既定実装と同じ結果を返すことをテストで示すこと**。「列ごとに 1 回」は呼び出し回数を数える観測で固定する（`structure.md`「拡張点は所有者と実装者を分ける」）
   - **macro-runtime ⇔ macro-editor-lsp**: ホスト API の .d.ts 生成責任の所在。補完の質はここで決まる
   - **data-grid ⇔ formula-engine ⇔ macro-runtime**: undo / redo スタックを 3 者で共有する。data-grid が最初から共有可能な形で設計すること
   - **form-builder ⇔ form-web-server**: フォームレンダラを共有する。レンダラは Tauri IPC に依存してはならない
@@ -42,13 +42,13 @@ JSON をファイル実体とする、データベースとして運用可能な
 
 - `document-format` — 実装完了（38 サブタスク）
 - `app-shell` — 実装完了（56 サブタスク）。4 次元の feature 検証（全スイート＋起動の実測 / 要件被覆 / 設計整合と境界 / 横断統合）で一度 **NO-GO** となり、欠けていた検証成果物・出荷物に混入した検証コード・強制検査の欠落・設計の記述のずれを是正して **GO**（2026-09-12）。**ローカルで閉じられない残り（macOS / Windows の実行時、コード署名、3 OS の配布物）は CI の実行で確認する**
-- `schema-engine` — 仕様完了（requirements / design / tasks、31 サブタスク、2026-09-12）。実装未着手。設計で外部依存を `jiff` と `regex` の 2 本に絞り、10 進数クレートは**採らない**と決めた（tech.md 参照）
+- `schema-engine` — **実装完了（31 サブタスク、2026-09-13）**。設計で外部依存を `jiff` と `regex` の 2 本に絞り、10 進数クレートは**採らない**と決めた（tech.md 参照）。feature 検証は **GO**（全スイート green、要件 11 節 66 基準すべてを実装とテストの双方で確認、依存の鎖の逆向き参照 0、境界違反 0）。実測: 10 万行 × 30 列の全件検証 **255 ms**（予算 1 秒）、一意制約を持つ列 1 本の再検証 **31 ms**。**残るスペックがこの実装から写すべき規約は `structure.md`「ドメインクレートの内部構造」と `verification.md`「証拠の取り方」に記録済み**
 - 他 11 本 — `brief.md` のみ
 
 ## Specs (dependency order)
 - [x] document-format -- zip + JSON のドキュメント形式と File/Sheet/Schema/Row のドキュメントモデル。Dependencies: none
 - [x] app-shell -- Tauri v2 の器、IPC 境界、サイドカー基盤、3 OS ビルドパイプライン。Dependencies: none
-- [ ] schema-engine -- ネスト可能な型システム、ANY、検証と型強制、スキーマ移行。Dependencies: document-format
+- [x] schema-engine -- ネスト可能な型システム、ANY、検証と型強制、スキーマ移行。Dependencies: document-format
 - [ ] data-grid -- 10 万行の仮想化グリッド、型別セルエディタ、共有 undo スタック。Dependencies: app-shell, schema-engine
 - [ ] schema-editor -- スキーマのツリー編集 UI と変更の影響プレビュー。Dependencies: app-shell, schema-engine
 - [ ] macro-runtime -- deno_core の埋め込み、TS トランスパイル経路、ホスト API、実行の隔離。Dependencies: document-format, schema-engine, app-shell
@@ -67,12 +67,15 @@ JSON をファイル実体とする、データベースとして運用可能な
 - **Wave 3**: data-grid, schema-editor, macro-runtime, version-control, export-templates, form-builder
 - **Wave 4**: custom-types, macro-stdlib, macro-editor-lsp, formula-engine, form-web-server
 
-**Wave は目安であり、実際に着手できるかは各スペックの Dependencies が決める**。2026-09-12 時点で
-依存が満たされているのは `schema-engine` と `version-control` の 2 本である（version-control の依存は
-document-format と app-shell だけで、schema-engine を待たない。Wave 3 に置いてあるのは束ねの都合である）。
-残り 10 本はいずれも schema-engine か macro-runtime を待つ。
+**Wave は目安であり、実際に着手できるかは各スペックの Dependencies が決める**。2026-09-13 時点で
+依存が満たされているのは **6 本**である: `version-control`（document-format / app-shell のみ）、
+`data-grid`・`schema-editor`・`export-templates`・`form-builder`（app-shell / schema-engine）、
+`macro-runtime`（document-format / schema-engine / app-shell）。
+**`schema-engine` の実装完了で着手可能になったのは後ろの 5 本**であり、これを待っていたスペックが一斉に開く。
+残り 5 本（`custom-types` / `macro-stdlib` / `macro-editor-lsp` / `formula-engine` / `form-web-server`）は
+いずれも `macro-runtime` か `data-grid` を待つ。
 
-**MVP**: Wave 1 + Wave 2 + data-grid + schema-editor。この時点で「開いて・型を定義して・編集して・保存できる型付きスプレッドシート」が成立する。
+**MVP**: Wave 1 + Wave 2 + data-grid + schema-editor。**Wave 1・2 は実装完了済みなので、残りは `data-grid` と `schema-editor` の 2 本**である。この時点で「開いて・型を定義して・編集して・保存できる型付きスプレッドシート」が成立する。
 
 ## Prototype-First Risks
 以下は spec の design フェーズを待たず、早期にプロトタイプで成立性を確認すべき項目。いずれも失敗した場合にアーキテクチャ全体を変更しうる。
