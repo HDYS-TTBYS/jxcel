@@ -19,6 +19,7 @@ members = [
     "crates/document-format",
     "crates/schema-engine",
     "crates/app-shell",
+    "crates/document-session",
     "crates/sidecar-smoke",
     "src-tauri",
 ]

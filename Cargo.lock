@@ -1035,6 +1035,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "document-session"
+version = "0.1.0"
+dependencies = [
+ "app-shell",
+ "criterion",
+ "document-format",
+]
+
+[[package]]
 name = "dom_query"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

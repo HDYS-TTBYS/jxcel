@@ -3,7 +3,7 @@
 > **前提（このスペックの外）**: アプリ全体の終了（`request_exit`）は `app-shell` が無条件に行い、本スペックは関与しない（`design.md`「Risks & Mitigations」）。下流の `data-grid` は **6.1〜6.3 / 群 8 / 9.2・9.3** が本スペックの完了を前提にしており、`design.md` の Revalidation Trigger に従って `document-session` の公開面が確定した時点で `data-grid/design.md` を再検証する。**`document-format` の 3 ファイル（`model/mod.rs` / `model/sheet.rs` / `lib.rs`）は `data-grid` も編集する**ため、本スペックの 1.2 を**先に**実装し、`data-grid` が後から行の削除と位置指定の挿入を足す（後発側が再輸出と決定性テストを再確認する）。
 
 - [ ] 1. Foundation: クレートの足場・上流の拡張・共有の道具
-- [ ] 1.1 クレートをワークスペースへ追加し、tauri 非依存を検査に載せる
+- [x] 1.1 クレートをワークスペースへ追加し、tauri 非依存を検査に載せる
   - `crates/document-session/` をライブラリクレートとして作り、ワークスペースの `members` に登録する
   - `document-format` と `app-shell` への path 依存だけを持つ。`tauri` を推移的にも入れない
   - `Cargo.toml` の冒頭に依存方針のコメントを置く（依存してよい兄弟は 2 つだけ、位置と識別子を境界へ出さない理由、ベンチを持つ理由）

@@ -1,0 +1,59 @@
+[package]
+name = "document-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "jxcel ドキュメントセッション: ウィンドウ単位のドキュメントの保持・変更の適用経路・未保存の追跡と保存（Tauri 非依存のドメインクレート）"
+
+# ---------------------------------------------------------------------------
+# 依存方針（design.md「Allowed Dependencies」・steering structure.md 準拠）
+#
+# 1. tauri 禁止: この Cargo.toml に tauri を追加してはならない。推移的依存も不可であり、
+#    `cargo tree -p document-session` のどこにも tauri（および `tauri-*` / `tauri_*`）が
+#    現れてはならない。開いたドキュメントの保持と変更の適用は、GUI を起動せずに
+#    テストできなければならない（structure.md「Rust ドメインクレート」）。機械検査は
+#    CI の `bash scripts/check-core-deps.sh`（引数なしで `crates/*/Cargo.toml` を全列挙する形）
+#    が行う（tasks.md 1.1）。クレートを足しても段を足す必要はなく、自動的に対象に入る。
+# 2. 依存してよい兄弟は document-format と app-shell の 2 つだけ: 本クレートは
+#    `document-format`（認識済みの文書とその読み書き）と `app-shell`（ウィンドウの識別子）の
+#    上に立つ。**ウィンドウの識別子 `WindowLabel` の単一の定義を `app-shell` から借りる**
+#    ため、同型を本クレートや `src-tauri` で再定義しない（二重定義は識別子の対応が
+#    ずれた時点で静かに壊れる。design.md「Allowed Dependencies」）。依存の向きは一方向で
+#    あり、`app-shell` は本クレートに依存しない（`crates/app-shell/Cargo.toml`）。
+#    他の兄弟（`schema-engine` / `data-grid` / `version-control` 等）へは依存しない。
+# 3. 境界へ出さないもの: **行の識別子・列の添字・位置（`PathBuf`）を本クレートの公開面から
+#    境界へ出さない。** これらはドメインの内部語彙であり、`ts-rs` で TypeScript へ写す型に
+#    混ぜると、境界の型が文書の内部表現に固定されてしまう。境界型を置けるのは
+#    `crates/app-shell/src/ipc/` の下だけであり（`ts-rs` の derive の唯一の許された場所）、
+#    境界が受け渡すのは名前（ファイル名のみ）・未保存の有無・シートの識別子（文字列）と
+#    件数（32 ビット以下）に限る（design.md「Boundary Commitments」）。
+# 4. ベンチを持つ理由: 10 万行 × 30 列の読み込み・変更の適用・保存には予算があり
+#    （読み込み 3 秒 / 一括の適用 1 秒 / 保存 2 秒）、`cargo test` の緑では守れない
+#    （要件 8.1）。実測を criterion のベンチとして置き、`scripts/check-bench-budget.sh` の
+#    ゲートで機械判定するため、本クレートはベンチターゲットを持つ（tasks.md 5.1）。
+# ---------------------------------------------------------------------------
+[dependencies]
+# 上流のドメインクレート（依存グラフの根）。Document / CellValue / SheetId / RowId /
+# DocumentError と DocumentFormatApi（open / save）を使う（design.md「Allowed Dependencies」）。
+document-format = { path = "../document-format" }
+# ウィンドウの識別子 WindowLabel の単一の定義を借りる（上記依存方針 2）。
+app-shell = { path = "../app-shell" }
+
+[dev-dependencies]
+# 10 万行 × 30 列の読み込み・一括の適用・保存の予算（要件 8.1）を計測するベンチハーネス。
+criterion = "0.8"
+
+[lib]
+name = "document_session"
+path = "src/lib.rs"
+# libtest 自動ベンチターゲットを無効化し、criterion のフラグが cargo bench に
+# ファンアウトしても壊れないようにする（crates/document-format/Cargo.toml と同じ形）。
+bench = false
+
+# criterion ベンチターゲット（harness 直結）。計測の対象（tasks.md 5.1）は後続タスクが
+# 埋める。ここではハーネスの結線だけを置き、宣言とファイルの欠落で
+# `cargo bench --no-run` が落ちないようにする。
+[[bench]]
+name = "large_session"
+harness = false
