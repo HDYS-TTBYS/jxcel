@@ -44,15 +44,15 @@ JSON をファイル実体とする、データベースとして運用可能な
 - `document-format` — 実装完了（38 サブタスク）
 - `app-shell` — 実装完了（56 サブタスク）。4 次元の feature 検証（全スイート＋起動の実測 / 要件被覆 / 設計整合と境界 / 横断統合）で一度 **NO-GO** となり、欠けていた検証成果物・出荷物に混入した検証コード・強制検査の欠落・設計の記述のずれを是正して **GO**（2026-09-12）。**ローカルで閉じられない残り（macOS / Windows の実行時、コード署名、3 OS の配布物）は CI の実行で確認する**
 - `schema-engine` — **実装完了（31 サブタスク、2026-09-13）**。設計で外部依存を `jiff` と `regex` の 2 本に絞り、10 進数クレートは**採らない**と決めた（tech.md 参照）。feature 検証は **GO**（全スイート green、要件 11 節 66 基準すべてを実装とテストの双方で確認、依存の鎖の逆向き参照 0、境界違反 0）。実測: 10 万行 × 30 列の全件検証 **255 ms**（予算 1 秒）、一意制約を持つ列 1 本の再検証 **31 ms**。**残るスペックがこの実装から写すべき規約は `structure.md`「ドメインクレートの内部構造」と `verification.md`「証拠の取り方」に記録済み**
-- `data-grid` — **次に仕様化する 1 本として選択（2026-09-13）**。`brief.md` を上流 3 本の実装完了後の事実（`schema-engine` の公開面と実測、`ipc-contract.md` の 64 ビット整数禁止と生バイト経路、画面の契約）で更新済み。仕様はこれから
-- `document-session` — **`data-grid` の設計中に発見された欠落として新設（2026-09-13）**。`document-format` に依存するクレートは `schema-engine` だけで、**開いた `Document` をメモリ上で保持する持ち主がどこにも存在しなかった**。`app-shell` の `pick_document_file`（「ドキュメント所有者へ引き渡すだけ」）と `can_close_window` は、実装済みのまま相手を待っている。`brief.md` のみ
+- `data-grid` — **仕様化済み（requirements / design / tasks。2026-09-14 時点で 3 ファイルとも存在）**。`brief.md` を上流 3 本の実装完了後の事実（`schema-engine` の公開面と実測、`ipc-contract.md` の 64 ビット整数禁止と生バイト経路、画面の契約）で更新済み。**依存（`app-shell` / `schema-engine` / `document-session`）は 2026-09-14 にすべて満たされ、実装を開始できる**（下の「2026-09-14 の更新」）
+- `document-session` — **実装完了（22 サブタスク、2026-09-14。数え方は他のスペックと同じ「`tasks.md` の番号付き小見出しの件数」であり、6 件のタスク群の見出しは数えない。**タスク群の見出しのチェックも他のスペックと同じく完了した群には付ける**）**。**チェックボックスは 22 件すべて確定した**（4.3 は 3b14ae8 で取り込み済み、6.1 は 3 巡のレビューを経て 2026-09-14 に完了）。本スペックの正典は「開いたドキュメントの寿命」と「変更の唯一の経路」の 2 つで、**公開面（`crates/document-session/src/lib.rs` の `DocumentSessionsApi` 11 メソッド）と境界の型（`crates/app-shell/src/ipc/document.rs` の 4 コマンドぶん）が確定した**。検証は**タスク単位では GO**（**振る舞いを持つタスクは**実装担当とレビュー担当の 2 者を通り、実測つきの Implementation Notes を残した。足場だけの 2 件（1.1 / 1.4）は Implementation Notes を持たず、証拠は `Cargo.toml` の依存方針コメントと `research.md` のリスク記録にある — 弟スペックも同じ扱いである）。**フィーチャー横断の 4 次元検証（全スイート / 要件被覆 / 設計整合と境界 / 横断統合）は未実施**であり、これを残る作業として明示する。実測（計測は 2026-09-13 20:30 の commit bad41ce の作業時。このホスト、criterion の mean 点推定値。2026-09-14 に `scripts/check-bench-budget.sh` で再判定し 6 本すべて OK）: 10 万行 × 30 列の **open+hold 0.785 s**（予算 3 秒）/ **save 0.637 s**（予算 2 秒）/ **一括の適用 0.117 s**（予算 1 秒 = 全 300 万セルの置き換えを 1 回の `edit` で）。`scripts/check-bench-budget.sh` は 6 本の判定行すべて OK（exit 0）。**出荷物の検査は緑** — `npm run build` で `dist/` を作り直した上で（4.2・4.3 のフロントエンドが入った状態。50 モジュール / 272.09 kB）、`scripts/check-shipping-bundle.sh` が「配布物の資産に検証専用の識別子はありません（走査 1 資産 / `JXCEL_VERIFICATION`=0 `verificationBulk`=0 `verificationScreen`=0 `verification-triggers`=0 / 必須 `smoke-table`,`smoke-editor` は存在）」で exit 0。**実装が先に在るタスクの拘束力は 4 箇所の変異で実測した**（未保存の印 / `set_cells` の索引構築 / `resolve` の冪等の分岐 / 宿主の連鎖の順序。いずれも対応するテストが落ち、`md5` と空の `git diff` で復元を証明）。**下流が写すべき規約は `structure.md`「セッションの所有の規約」と「共有される継ぎ目」（変更の適用の経路）、および `verification.md`「引き金の語彙」と「検査器の規約」の横断の規則（メニュー項目を足すスペックは 2 つの検査器の項目数と一覧を同時に更新する）に記録済み**。**`data-grid` の再検証は要る**（`data-grid/design.md` の Revalidation Trigger「`document-session` の design 確定」）— 同ファイルの `Allowed Dependencies` の `document-session` の項を、確定した公開面（`edit` の閉包の形・`set_cells`・境界の型）に合わせて更新した（再検証の結果、設計の変更は不要であり、`EditApply` の再入禁止は本記録と同じ作業の中で `data-grid/design.md` の `Allowed Dependencies` の `document-session` の項へ記録した）
 - 他 10 本 — `brief.md` のみ
 
 ## Specs (dependency order)
 - [x] document-format -- zip + JSON のドキュメント形式と File/Sheet/Schema/Row のドキュメントモデル。Dependencies: none
 - [x] app-shell -- Tauri v2 の器、IPC 境界、サイドカー基盤、3 OS ビルドパイプライン。Dependencies: none
 - [x] schema-engine -- ネスト可能な型システム、ANY、検証と型強制、スキーマ移行。Dependencies: document-format
-- [ ] document-session -- ウィンドウ単位のドキュメント保持、変更の適用経路、未保存の追跡と保存。Dependencies: document-format, app-shell
+- [x] document-session -- ウィンドウ単位のドキュメント保持、変更の適用経路、未保存の追跡と保存。Dependencies: document-format, app-shell
 - [ ] data-grid -- 10 万行の仮想化グリッド、型別セルエディタ、共有 undo スタック。Dependencies: app-shell, schema-engine, document-session
 - [ ] schema-editor -- スキーマのツリー編集 UI と変更の影響プレビュー。Dependencies: app-shell, schema-engine
 - [ ] macro-runtime -- deno_core の埋め込み、TS トランスパイル経路、ホスト API、実行の隔離。Dependencies: document-format, schema-engine, app-shell
@@ -69,7 +69,7 @@ JSON をファイル実体とする、データベースとして運用可能な
 - **Wave 1**: document-format, app-shell
 - **Wave 2**: schema-engine
 - **Wave 3**: document-session, schema-editor, macro-runtime, version-control, export-templates, form-builder
-- **Wave 3.5**: data-grid（document-session を待つ）
+- **Wave 3.5**: data-grid（`document-session` を待っていた — **2026-09-14 に充足**）
 - **Wave 4**: custom-types, macro-stdlib, macro-editor-lsp, formula-engine, form-web-server
 
 **Wave は目安であり、実際に着手できるかは各スペックの Dependencies が決める**。2026-09-13 時点で
@@ -80,7 +80,9 @@ JSON をファイル実体とする、データベースとして運用可能な
 残り 5 本（`custom-types` / `macro-stdlib` / `macro-editor-lsp` / `formula-engine` / `form-web-server`）は
 いずれも `macro-runtime` か `data-grid` を待つ。
 
-**MVP**: Wave 1 + Wave 2 + document-session + data-grid + schema-editor。**Wave 1・2 は実装完了済みなので、残りは `document-session`・`data-grid`・`schema-editor` の 3 本**である。（当初は 2 本としていたが、MVP の文言にある「**開いて**…**保存できる**」を担う持ち主が存在しないことが `data-grid` の設計中に判明したため 1 本増えた。）この時点で「開いて・型を定義して・編集して・保存できる型付きスプレッドシート」が成立する。
+**2026-09-14 の更新（`document-session` の実装完了を受けて）**: 上の 2026-09-13 の数え方には**ずれがあった** — `data-grid` の依存は `app-shell` / `schema-engine` だけでなく **`document-session` も含む**（`Specs` の行と Wave 3.5 がそう書いている）が、当時 `document-session` は仕様しか無く、**依存は満たされていなかった**。`document-session` が実装完了したことで、**`document-session` を依存に持つ唯一のスペックである `data-grid` の依存も満たされた**（`data-grid` を待っていた `custom-types` / `formula-engine` はここから開く）。**依存が満たされているスペックは 6 本のままである** — `document-session` の完了で新たに開いたのは `data-grid` の 1 本だけであり、上の 5 本（`schema-editor` / `macro-runtime` / `version-control` / `export-templates` / `form-builder`）は 2026-09-13 から変わらない。
+
+**MVP**: Wave 1 + Wave 2 + document-session + data-grid + schema-editor。**2026-09-14 時点で残るのは `data-grid`・`schema-editor` の 2 本**である（Wave 1・2 は実装完了済み、`document-session` は本日完了）。（当初は 2 本としていたが、MVP の文言にある「**開いて**…**保存できる**」を担う持ち主が存在しないことが `data-grid` の設計中に判明したため 1 本増え、いま `document-session` の完了で元へ戻った。）この時点で「開いて・型を定義して・編集して・保存できる型付きスプレッドシート」が成立する。
 
 ## Prototype-First Risks
 以下は spec の design フェーズを待たず、早期にプロトタイプで成立性を確認すべき項目。いずれも失敗した場合にアーキテクチャ全体を変更しうる。

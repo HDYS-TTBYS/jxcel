@@ -26,6 +26,15 @@ Rust ドメインクレートは Tauri に依存してはならない。この�
 - **兄弟のドメインクレートへの依存は一方向に限る。** `document-format` が依存グラフの根であり、**下流はこれに依存してよい**（例 `schema-engine → document-format`）。逆流は不可。兄弟同士が循環する形は作らない
 - **誤り型は判別可能な列挙体とし、診断に必要な文脈だけを持ち、表示用の文言を持たない**（表示は呼び出し元が組み立てる。`DocumentError` / `SchemaError` が同じ規約）。**「宣言・入力が壊れている」と「値が合わない」は別の型にする** — 前者は処理を止め、後者は止めない（1 つの型にすると「1 件の不正な値で全体が開けない」という振る舞いが型として表現できてしまう）
 
+### セッションの所有の規約（`document-session` が確立。2026-09-14 の実測）
+
+**開いた `Document` をメモリ上に保持する持ち主**（`crates/document-session`）が確立した規約である。**変更の経路を直接使う利用者は `data-grid` / `schema-editor` / `macro-runtime`** である（下の「共有される継ぎ目」）。`formula-engine` は `data-grid` と `macro-runtime` を依存に持ち、再計算の結果を `data-grid` の変更として同じ経路へ流す（`document-session` を直接の依存には持たない）。`version-control` は**保存の時機を観測する相乗り**であり、変更の経路の利用者ではない。
+
+- **ウィンドウ 1 つにつきセッション 1 つ。** 表（`table::Sessions`）は `WindowLabel → Arc<Slot>` の対応を持ち、同じ窓には**同じ実体**を返す（`Arc` の共有がその手段であり、挿入は書きロックの下で二重に確認する）。表のロックは**参照と挿入・除去のためだけ**に取り、`Slot` の処理の間は保持しない — 10 万行の適用が他のウィンドウを待たせないためである（要件 3.6）
+- **読み取りと変更の経路を 1 つに閉じる。** 変更は `change::edit`（`Slot::lock_for_change` で Guard を取り、閉包へ `&mut Document` を貸し、**同じ Guard の生存範囲の内側で**未保存と版を記録する）だけである。**「同じ Guard であること」は型では強制されない** — Guard を取り直す変異はコンパイルが通る。担保は**コードの形状**であり、doc にその旨を明記する。記録しない可変の貸出口（`Slot::with_document_mut`）は `#[cfg(test)]` に閉じ、production の可変経路を `change::edit` ただ 1 つに固定する
+- **未保存（`AtomicBool`）と版（`AtomicU64`）は文書のロックの外に置く。** `DocumentHost::may_close` は**ブロック禁止**（基盤が `prevent_close()` を非ブロッキングに読む）ため、`may_close` が文書のロックを待つとデッドロックする。したがって判定に要る 2 つの値は原子値であり、**未保存の判定と、差し替え・印・版の更新は文書のロックを保持したまま行う**（判定と更新を同じ臨界区間に入れないと、差し替えで変更が黙って失われる）。**版は文書が入れ替わるか変更が適用されたときに 1 進む**（適用回数ではない — 入れ替えで据え置くと下流の窓が古い内容を表示し続ける）。この非ブロッキングは**デッドロック検出のための時間切れ**であり、速度の証拠としての閾値ではない（`verification.md`）旨をコメントに明記する
+- **破棄の購読は適応層の入口 1 つに閉じる。** セッションを作る入口は `resolve` / `attach` / `create` の 3 つだけで、`src-tauri` 側では `session/watch.rs` の `WindowDestroyWatch` が「**ラベルでウィンドウを引き、購読を登録してから、表へ挿入する**」を行う（登録を先に行うので、挿入だけが済んで購読が無い状態は作られない）。**破棄の通知は `WebviewWindow::on_window_event` をテストから駆動できない**（`tauri::test` の `MockWindowDispatcher::on_window_event` は渡された閉包を保持しない。`mock_runtime.rs:711`）ため、`WindowDestroyEvents` の**縫い目 1 つ**に閉じ、本番は `TauriWindowEvents` が担う（`window/geometry.rs` の `GeometryRead` と同じ形）。**「ウィンドウ 1 つにつき 1 回」を保証するのは適応層側の登録済みラベルの集合**である（コアは購読の存在を知らない）。**ただし登録済みかどうかの検査と集合への挿入は別々のロック取得であり、原子的ではない** — 同じラベルへの同時の初回入口が 2 つの購読を作りうる（入口は IPC と起動経路に限られるため実際には影響しないが、絶対の保証ではない。`document-session/tasks.md` の 3.3 の Implementation Notes に記録がある）。`WebviewWindow::on_window_event` は戻り値を持たないので登録の失敗は検出できず、**取得と登録の間に破棄された場合の受け皿**（`forget_unresolvable`）を併せて持つ
+
 ### Tauri アプリケーション
 **Location**: `src-tauri/`
 **Purpose**: ウィンドウ、IPC コマンド定義、サイドカー管理、ビルド設定
@@ -94,6 +103,7 @@ Tauri の機能を使うスペックでも、**GUI なしでテストできる�
 
 - **決定的シリアライズ**（`document-format` → `version-control`）— 差分の品質はここに全面依存する
 - **undo / redo スタック**（`data-grid` ← `formula-engine`、`macro-runtime`）— 最初から共有可能な形で設計する
+- **変更の適用の経路**（`document-session` ← `data-grid`、`schema-editor`、`macro-runtime`）— **所有権は `document-session` 側**（開いた `Document` を保持する唯一の持ち主であり、読み取りと可変の貸出の口を持つ）。下流は変更を `DocumentSessionsApi::edit` の閉包の内側で適用し、`document-format` の一括書き換え（`set_cells`）を直接呼ばない。**閉包の内側から同じセッションを呼び返してはならない**（ロックを保持したまま呼ぶので再入はデッドロックする）。適用の記録（未保存・版）は `document-session` が閉包と同じ臨界区間で行うので、下流は印を立てない
 - **ホスト API の `.d.ts`**（`macro-runtime` → `macro-editor-lsp`）— 生成責任の所在を曖昧にしない
 - **フォームレンダラ**（`form-builder` → `form-web-server`）— IPC 非依存を壊さない
 - **サイドカー基盤**（`app-shell` → `macro-editor-lsp`）— 所有権は `app-shell` 側
