@@ -6,7 +6,8 @@
 # `scripts/check-multi-window.sh`（単一インスタンスと複数ウィンドウの経路。10.5）、
 # `scripts/check-window-failure.sh` / `scripts/check-crash-record.sh` /
 # `scripts/check-no-paint.sh`（生成の失敗の提示・異常終了の記録・描画不成立の提示。
-# 要件 2.10 / 8.2 / 10.2）が source する。
+# 要件 2.10 / 8.2 / 10.2）、`scripts/check-document-session.sh`（引き金の走行の観測。5.3。
+# **ウィンドウは観測せず、片付けの木の走査と検出粒度だけを借りる**）が source する。
 # **ウィンドウの観測の仕方は 1 つでなければならない** — タイトル一致と最小寸法の判定、
 # `xwininfo` の行の解析、起動したプロセス木の片付けは、どの段でも同じ前提（GTK の補助ウィンドウを
 # 除く・AppImage の展開実行ではラッパーだけを終了しても本体が残る）に立つ。**この前提が
@@ -20,6 +21,11 @@
 # source する側の契約:
 #   - POSIX sh。`set -eu` の下で使う（この置き場はトップレベルで変数を参照しない）。
 #   - 実行ファイルのパスとタイトルは呼び出し側が持つ。この置き場は X11 の観測だけを行う。
+#     **`scripts/check-document-session.sh` はこの契約の外側にある** — あちらはウィンドウを
+#     観測せず、片付けの木の走査（`x11_kill_tree`）と検出粒度（`x11_pick_poll_sleep`）だけを
+#     借りる。したがって `x11_pid` を使わず、自分の pid と自分のトラップを持つ（アプリの起動の
+#     仕方が段ごとに違うためであり、置き場の `x11_install_cleanup_trap` は「1 つのアプリを
+#     `x11_pid` で持つ」前提を持っている）。
 #   - 起動したアプリの pid は `x11_pid`、アプリの出力の控えは `x11_log` である
 #     （呼び出し側はこの 2 つを自分で別名へ写さない — 片付けのトラップがここにある）。
 #
@@ -32,7 +38,7 @@
 # ファイル全体で抑止する（呼び出し側は `scripts/check-x11-window.sh` /
 # `scripts/check-x11-render.sh` / `scripts/check-multi-window.sh` /
 # `scripts/check-window-failure.sh` / `scripts/check-crash-record.sh` /
-# `scripts/check-no-paint.sh`）。
+# `scripts/check-no-paint.sh` / `scripts/check-document-session.sh`）。
 # shellcheck disable=SC2034
 set -eu
 
