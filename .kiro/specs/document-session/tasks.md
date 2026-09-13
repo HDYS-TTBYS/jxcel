@@ -107,7 +107,7 @@
   - 連鎖の順序（セッション → 内側）と、未保存のウィンドウの拒否が検証用の宿主を壊さないことをテストで示す
   - _Requirements: 1.3, 2.2, 4.6, 6.1_
 
-- [ ] 3.3 ウィンドウの破棄でセッションを手放す
+- [x] 3.3 ウィンドウの破棄でセッションを手放す
   - セッションを作る 3 つの入口で、**ラベルでウィンドウを引き、破棄の通知を購読してから**表へ挿入する。ウィンドウを引けないときは何も作らない。購読は `WebviewWindow::on_window_event` を使い、通知では表から取り除く操作（`forget`）を呼ぶ。**適応層側の登録済みラベルの集合**で「ウィンドウ 1 つにつき 1 回」を保証する
   - **app-shell の破棄通知（メニューの更新とレジストリの掃除）には触れない。**自前の購読を隣に足すだけで、app-shell 側の変更を要しない
   - 登録は戻り値を持たないため失敗を検出できない。**取得と登録の間に破棄された場合に備え、適応層の入口でラベルのウィンドウが引けないときは先に表から取り除く掃除の経路**を併せて持つ
@@ -228,3 +228,4 @@
 - **2.5**: 公開面は `lib.rs` の trait `DocumentSessionsApi`（11 メソッド）と具象 `DocumentSessions`（オブジェクト安全でない旨を doc に明記）。**セッションを作るのは `resolve` / `attach` / `create` の 3 つだけ**であることは、**根の名前の統合テストでは検出できない**（未解決の `Slot` と不在は根から区別できない）— そのため `lib.rs` の内部テストで私有の表を直接観測する（変異 M1/M2/M3 で落ちることを実測）。`with_document_mut`（記録しない可変貸出）は **`#[cfg(test)]` に閉じた**（production の可変経路は `change::edit` ただ 1 つ）。`#[allow(dead_code)]` の seam はすべて除去。
 - **3.1**: 境界の判別可能な合併型は**既存 3 つ（`IpcResult` / `WindowCloseVerdict` / `DocumentPickOutcome`）と同じ内部タグ + PascalCase** に揃えた（`DocumentSessionStatus` は `state` タグで `"Absent"` / `"Open"` / `"Unavailable"`。`DocumentOrigin` だけは既存に合わせて小文字の値を持つ）。**doc に生成物の実際の綴りを書くこと**（「小文字」と誤記するとフロントエンドが `case "absent"` と書いて絞り込みが静かに効かなくなる）。生成物の正例テスト（`bindings_declare_the_document_surface`）を足した — ドリフト検査だけでは「宣言を消して再生成」を取り逃す。
 - **3.2**: `src-tauri` は **`document-format` を `[dev-dependencies]` のみ**に持つ（テストで本物の文書を作るため。**通常依存には足さない** — 配布物の依存グラフを増やさない）。宿主の連鎖は `install` の中で `port.host()` → `port.install(...)` の順に取り出す。**実装者は報告前に落ちたが、`cargo test -p jxcel` は 111 passed（`verification-triggers` 付きで 123 passed）で作業自体は完了していた**（親が証拠を補ってレビューへ回した）。
+- **3.3**: セッションを作る 3 つの入口は**適応層の `WindowDestroyWatch`**（`session/watch.rs`）に閉じた。**コマンド（3.4）と宿主の連鎖（3.2）はどちらもこの入口を通る** — 宿主が表を直接触ると購読を伴わないセッションが生まれ、要件 1.5 が破れる（`host.rs` は `attach` を入口経由に切り替えた）。**管理状態へ置くのは `Arc<WindowDestroyWatch>` であり `Arc<DocumentSessions>` ではない**（登録済みラベルの集合が 2 つに割れると購読が二重になる）。破棄の購読は `WebviewWindow::on_window_event` を**テストから駆動できない**（`tauri::test` の `MockWindowDispatcher::on_window_event` は渡された閉包を保持しない。`mock_runtime.rs:711`）ため、`WindowDestroyEvents` の縫い目 1 つに閉じ、本番は `TauriWindowEvents` が担う（`window/geometry.rs` の `GeometryRead` と同じ形）。`resolve` / `create` / `forget_unresolvable` には 3.4 が呼び出し元になるまでの `#[allow(dead_code)]` の縫い目を付けた（**3.4 の完了時に外すこと**）。レビューの指摘（非阻害）: 登録済みラベルの検査と挿入は原子的でないため、同じラベルへの同時の初回入口が 2 つの購読を作りうる（IPC 駆動の入口では影響しないが design の「ウィンドウ 1 つにつき 1 回」より弱い）。

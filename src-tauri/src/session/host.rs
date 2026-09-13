@@ -38,10 +38,16 @@
 //!
 //! # 引き渡し（要件 2.2、1.3）
 //!
-//! [`attach`](DocumentHost::attach) は**コアの引き渡しの入口**（`DocumentSessions::attach`）を
-//! 通す。コアの入口は未保存なら拒否し（要件 2.2）、読み込みに失敗しても保持している文書を
-//! 変えない（要件 2.1）。**成功したら内側にも渡す** — 内側が検証用の宿主なら、そこで
-//! 引き渡しの記録が残る（設置しても記録が失われないことが連鎖の目的である）。
+//! [`attach`](DocumentHost::attach) は**適応層の引き渡しの入口**
+//! （[`WindowDestroyWatch::attach`]）を通す。表を直接触ってはならない — 表の `attach` は
+//! 破棄の購読を伴わないセッションを作りうるので、**破棄してもその文書が表に残る**
+//! （要件 1.5 が破れる。`session/watch.rs` の「セッションを作る経路は本型の 3 つの入口に
+//! 閉じる」）。
+//!
+//! その入口は**コアの引き渡しの入口**（`DocumentSessions::attach`）を通す。コアの入口は
+//! 未保存なら拒否し（要件 2.2）、読み込みに失敗しても保持している文書を変えない（要件 2.1）。
+//! **成功したら内側にも渡す** — 内側が検証用の宿主なら、そこで引き渡しの記録が残る
+//! （設置しても記録が失われないことが連鎖の目的である）。
 //!
 //! **失敗したら内側を呼ばない。** 内側は「引き渡しが成立した」ことの記録先であり、
 //! セッションが受け取れなかった位置を渡しても、成立していない引き渡しを記録させるだけである。
@@ -57,7 +63,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use app_shell::ipc::WindowLabel;
-use document_session::{CloseAnswer, DocumentSessions, DocumentSessionsApi, SessionError};
+use document_session::{CloseAnswer, DocumentSessionsApi, SessionError};
+
+use crate::session::watch::WindowDestroyWatch;
 
 use crate::ports::{AttachError, CloseVerdict, DocumentHost};
 
@@ -67,25 +75,26 @@ use crate::ports::{AttachError, CloseVerdict, DocumentHost};
 /// とおりである（**セッション → 内側**）。
 ///
 /// 保持する 2 つはどちらも `Arc` であり、本型は `Send + Sync` である（`DocumentHostPort` が
-/// アプリ全体の管理状態として共有するため）。**セッションは `Arc<DocumentSessions>` で共有する**
-/// — `install` の後に 3.4 のコマンドが同じ実体を `app.state` から取れるようにするためである
-/// （`session/mod.rs` の doc）。
+/// アプリ全体の管理状態として共有するため）。**セッションは [`WindowDestroyWatch`] を経由して
+/// 共有する** — `install` の後に 3.4 のコマンドが同じ実体を `app.state` から取れるようにする
+/// ためであり、かつ**引き渡しの経路が破棄の購読を伴う**ためである
+/// （`session/watch.rs` の「セッションを作る経路は本型の 3 つの入口に閉じる」）。
 pub struct SessionDocumentHost {
-    /// ウィンドウ → セッションの表（この機能が所有するドキュメントの唯一の源）。
-    sessions: Arc<DocumentSessions>,
+    /// セッションの入口と破棄の購読（この機能が所有するドキュメントの唯一の源）。
+    entrances: Arc<WindowDestroyWatch>,
     /// 連鎖の内側（設置前の宿主）。検証ビルドでは `VerificationDocumentHost` が入り、
     /// 拒否の実測と引き渡しの記録を担う。
     inner: Arc<dyn DocumentHost>,
 }
 
 impl SessionDocumentHost {
-    /// セッションと内側の宿主を結びつけた連鎖を作る。
+    /// セッションの入口と内側の宿主を結びつけた連鎖を作る。
     ///
     /// `inner` は **`DocumentHostPort::host()` で取り出した現在の宿主**でなければならない
     /// （設置前の宿主を置き去りにすると、検証用の宿主の拒否と記録が失われる。
     /// `session/mod.rs` の `install` がその順序を守る）。
-    pub fn new(sessions: Arc<DocumentSessions>, inner: Arc<dyn DocumentHost>) -> Self {
-        Self { sessions, inner }
+    pub fn new(entrances: Arc<WindowDestroyWatch>, inner: Arc<dyn DocumentHost>) -> Self {
+        Self { entrances, inner }
     }
 }
 
@@ -96,7 +105,7 @@ impl DocumentHost for SessionDocumentHost {
     /// 読み込みは起きない（design.md「SessionDocumentHost」。読み込みは秒単位かかる）。
     /// **ブロックしない**（`ports.rs` の契約。セッションは未保存の原子値だけを読む）。
     fn may_close(&self, window: &WindowLabel) -> CloseVerdict {
-        match self.sessions.may_close(window) {
+        match self.entrances.sessions().may_close(window) {
             CloseAnswer::Deny => CloseVerdict::Deny {
                 reason: unsaved_reason(window),
             },
@@ -108,12 +117,14 @@ impl DocumentHost for SessionDocumentHost {
 
     /// セッションへ引き渡してから、内側へも渡す（要件 1.3、2.2、2.4）。
     ///
-    /// コアの入口（`DocumentSessions::attach`）は**未保存なら拒否**し、**読み込みに失敗しても
-    /// 保持している文書を変えない**。失敗のときは [`AttachError`] へ写して返し、**内側を
-    /// 呼ばない**（成立していない引き渡しを記録させない）。成功したら内側へも渡す
-    /// （内側が記録を持つ宿主でも、引き渡しの観測が失われない）。
+    /// 経路は**適応層の入口**（[`WindowDestroyWatch::attach`]）である。表を直接触ると
+    /// 破棄の購読を伴わないセッションが生まれ、破棄しても文書が表に残る（要件 1.5）。
+    /// 入口は**コアの引き渡しの入口**（`DocumentSessions::attach`）を通す。コアの入口は
+    /// **未保存なら拒否**し、**読み込みに失敗しても保持している文書を変えない**。失敗のときは
+    /// [`AttachError`] へ写して返し、**内側を呼ばない**（成立していない引き渡しを記録させない）。
+    /// 成功したら内側へも渡す（内側が記録を持つ宿主でも、引き渡しの観測が失われない）。
     fn attach(&self, window: &WindowLabel, path: &Path) -> Result<(), AttachError> {
-        match self.sessions.attach(window, path) {
+        match self.entrances.attach(window, path) {
             Ok(()) => self.inner.attach(window, path),
             Err(error) => Err(AttachError::new(attach_reason(window, &error))),
         }
@@ -176,6 +187,8 @@ mod tests {
 
     use super::SessionDocumentHost;
     use crate::ports::{AttachError, CloseVerdict, DocumentHost};
+    use crate::session::watch::testing::AlwaysPresent;
+    use crate::session::watch::WindowDestroyWatch;
 
     /// 内側の宿主が委譲を受けたことを記録する二重。
     ///
@@ -243,11 +256,19 @@ mod tests {
         WindowLabel::new(raw)
     }
 
-    /// 連鎖を作る（`RecordingHost` とセッションの組）。
+    /// 連鎖を作る（`RecordingHost` とセッションの入口の組）。
+    ///
+    /// セッションの入口は**破棄の購読**（本番では `TauriWindowEvents`）を要する。破棄そのものは
+    /// `session/watch.rs` のテストが確かめるので、ここは常に引けるという二重を渡す
+    /// （連鎖の順序を見るのがここの目的である）。
     fn chained(inner: Arc<RecordingHost>) -> (SessionDocumentHost, Arc<DocumentSessions>) {
         let sessions = Arc::new(DocumentSessions::new());
+        let watch = Arc::new(WindowDestroyWatch::new(
+            Arc::new(AlwaysPresent),
+            Arc::clone(&sessions),
+        ));
         (
-            SessionDocumentHost::new(Arc::clone(&sessions), inner),
+            SessionDocumentHost::new(watch, inner),
             sessions,
         )
     }
