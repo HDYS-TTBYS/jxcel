@@ -135,41 +135,21 @@ impl EntryName {
     /// エントリ名を許可リスト文法で解析する。受理は完全一致、それ以外は
     /// [`DocumentError::InvalidContainer`] として**拒否**（サニタイズ不可、要件 2.5）。
     /// エラーは該当エントリ名を原文のまま保持する。
+    ///
+    /// 文法は 2 種類である: **キーワード形**（ID を持たない 3 形。完全一致）と
+    /// **ディレクトリ形**（`<prefix><構成要素><suffix>` の 3 形。[`DIRECTORY_FORMS`]）。
+    /// ディレクトリ形を表から引くのは、3 形が**接頭辞・接尾辞・構成要素の解析だけ**が
+    /// 異なる同じ規則であり、腕を並べて書くと形を足すときに 1 つ書き漏らしても
+    /// 他の形として受理されてしまう（例: `sheets/` の腕を消すと `schemas/` の腕が
+    /// 拾わないため拒否になるが、接尾辞の対応を書き間違えると**別の形として通る**）。
     pub fn parse(text: &str) -> Result<Self, DocumentError> {
-        match text {
-            MARKER_TEXT => return Ok(EntryName::Marker),
-            MANIFEST_TEXT => return Ok(EntryName::Manifest),
-            DOCUMENT_TEXT => return Ok(EntryName::Document),
-            _ => {}
+        if let Some(name) = keyword_form(text) {
+            return Ok(name);
         }
-        if let Some(rest) = text.strip_prefix(SCHEMAS_PREFIX) {
-            return match rest
-                .strip_suffix(SCHEMAS_SUFFIX)
-                .and_then(parse_canonical_ulid)
-            {
-                Some(sheet) => Ok(EntryName::Schema { sheet }),
-                None => Err(invalid_container(text)),
-            };
-        }
-        if let Some(rest) = text.strip_prefix(SHEETS_PREFIX) {
-            if let Some(sheet) = rest
-                .strip_suffix(SHEETS_SUFFIX)
-                .and_then(parse_canonical_ulid)
-            {
-                return Ok(EntryName::Rows { sheet });
-            }
-            return Err(invalid_container(text));
-        }
-        if let Some(rest) = text.strip_prefix(ATTACHMENTS_PREFIX) {
-            if let Some(attachment) = rest
-                .strip_suffix(ATTACHMENT_SUFFIX)
-                .and_then(parse_canonical_hex)
-            {
-                return Ok(EntryName::Attachment { attachment });
-            }
-            return Err(invalid_container(text));
-        }
-        Err(invalid_container(text))
+        DIRECTORY_FORMS
+            .iter()
+            .find_map(|form| form.parse(text))
+            .ok_or_else(|| invalid_container(text))
     }
 
     /// 表示テキスト（コンテナ内の相対パスそのもの）を `buf` に書いて返す。
@@ -217,6 +197,81 @@ fn fixed_copy<'buf>(buf: &'buf mut [u8; MAX_DISPLAY_LEN], text: &[u8], len: usiz
     buf[..len].copy_from_slice(text);
     ascii(&buf[..len])
 }
+
+/// キーワード形（ID を持たない 3 形）の完全一致。
+///
+/// 表示と解析が同じ定数を読む（[`MARKER_TEXT`] / [`MANIFEST_TEXT`] / [`DOCUMENT_TEXT`]。
+/// 正規化の余地が無い）。相違は `None`。
+fn keyword_form(text: &str) -> Option<EntryName> {
+    match text {
+        MARKER_TEXT => Some(EntryName::Marker),
+        MANIFEST_TEXT => Some(EntryName::Manifest),
+        DOCUMENT_TEXT => Some(EntryName::Document),
+        _ => None,
+    }
+}
+
+/// ディレクトリ形 1 件の文法: `<prefix><構成要素><suffix>`。
+///
+/// 3 形（schema / rows / attachment）は**接頭辞・接尾辞・構成要素の解析**だけが違う。
+/// 本表がその 3 つを 1 箇所に並べ、`parse` が `find_map` で引く。
+struct DirectoryForm {
+    /// ディレクトリ相当の接頭辞（`schemas/` など）。末尾は `/`。
+    prefix: &'static str,
+    /// 拡張子を含む接尾辞（`.json` など）。
+    suffix: &'static str,
+    /// 構成要素を解析してエントリ名を組み立てる。構成要素が正準形でなければ `None`。
+    make: fn(&str) -> Option<EntryName>,
+}
+
+impl DirectoryForm {
+    /// 本形として解析する（接頭辞・接尾辞が合い、構成要素が正準形なら受理）。
+    ///
+    /// 接頭辞と接尾辞の**両方**が一致することを要求する。片方だけでは
+    /// `sheets/..json` のような跨ぎ方を許してしまう。
+    fn parse(&self, text: &str) -> Option<EntryName> {
+        let component = text.strip_prefix(self.prefix)?.strip_suffix(self.suffix)?;
+        (self.make)(component)
+    }
+}
+
+/// `schemas/<sheet-ulid>.json` の構成要素から変種を組み立てる。
+fn make_schema(component: &str) -> Option<EntryName> {
+    parse_canonical_ulid(component).map(|sheet| EntryName::Schema { sheet })
+}
+
+/// `sheets/<sheet-ulid>.jsonl` の構成要素から変種を組み立てる。
+fn make_rows(component: &str) -> Option<EntryName> {
+    parse_canonical_ulid(component).map(|sheet| EntryName::Rows { sheet })
+}
+
+/// `attachments/<hex64>.bin` の構成要素から変種を組み立てる。
+fn make_attachment(component: &str) -> Option<EntryName> {
+    parse_canonical_hex(component).map(|attachment| EntryName::Attachment { attachment })
+}
+
+/// ディレクトリ形の許可リスト（[`LAYOUT_FORMS`] の 3 形と 1 対 1）。
+///
+/// **表の順序は解析の意味を持たない**: 接頭辞が互いに素であるため、一致する形は
+/// 高々 1 つである（`schemas/` / `sheets/` / `attachments/`）。順序に依存した受理が
+/// 生じないので、形を足しても既存の受理は変わらない。
+const DIRECTORY_FORMS: &[DirectoryForm] = &[
+    DirectoryForm {
+        prefix: SCHEMAS_PREFIX,
+        suffix: SCHEMAS_SUFFIX,
+        make: make_schema,
+    },
+    DirectoryForm {
+        prefix: SHEETS_PREFIX,
+        suffix: SHEETS_SUFFIX,
+        make: make_rows,
+    },
+    DirectoryForm {
+        prefix: ATTACHMENTS_PREFIX,
+        suffix: ATTACHMENT_SUFFIX,
+        make: make_attachment,
+    },
+];
 
 /// 表示経路が書くのは常に ASCII（ASCII-only）なので、変換失敗は起こり得ない。
 fn ascii(bytes: &[u8]) -> &str {

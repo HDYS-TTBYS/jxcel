@@ -485,6 +485,59 @@ pub(crate) fn from_parts_with(
     verify_indexed_parts(parts, manifest)?;
 
     // 4. 各パートの復号（検証はまだ行わない: すべての復号結果が揃ってから検証する）。
+    let DecodedParts {
+        document_part,
+        schemas,
+        row_sets,
+        attachments,
+    } = decode_parts(parts)?;
+
+    // 5. 構造検証（要件 4.2, 4.3, 4.4, 1.7, 7.4）。目録は復号済みパート群から組み立てる
+    //    （保存経路 `validate_document` と同じ 1 経路。検証ロジックも報告文面も二重化しない）。
+    let inventory = inventory_of(
+        document_part.sheets().iter().map(|meta| meta.sheet_id()),
+        schemas.iter().map(|(_, sheet, schema)| (*sheet, schema)),
+        row_sets.iter().map(|(_, rows)| (rows.sheet(), rows.rows())),
+        attachments.iter().filter_map(|(entry, _)| match entry {
+            EntryName::Attachment { attachment } => Some(*attachment),
+            _ => None,
+        }),
+    );
+    StructuralValidator::validate(&inventory)?;
+
+    // 6. 行エントリの列順序が `document.json` の列名一覧と一致すること（要件 2.3）。
+    verify_row_columns(&document_part, &row_sets)?;
+
+    // 7. モデル構築（検証済みの内容だけを移す）。
+    build_document(
+        document_part,
+        schemas,
+        row_sets,
+        attachments,
+        converted_from_an_older_format,
+    )
+}
+
+/// `from_parts_with` の段 4（各パートの復号）の産物。
+///
+/// 復号の途中経過を 4 つの束縛へ散らさず 1 つの型にまとめるのは、段 5〜7 が
+/// **同じ 4 つを引き回す**ためであり、段 4 の 6 分岐（エントリ形ごとの復号）を
+/// 段の本体から切り離せるようにするためである。
+struct DecodedParts {
+    document_part: DocumentPart,
+    schemas: Vec<(EntryName, SheetId, SchemaPart)>,
+    row_sets: Vec<(EntryName, SheetRows)>,
+    attachments: Vec<(EntryName, Vec<u8>)>,
+}
+
+/// 集合の全パートをエントリ形ごとに復号する（`from_parts_with` の段 4）。
+///
+/// **検証はしない**: すべての復号結果が揃ってから段 5 以降が検証する（部分的なモデルを
+/// 作らないため、復号と検証を交互に行わない）。
+///
+/// 添付だけは復号ではなく**照合**である: content-addressed なので実バイト列から
+/// 識別子を再計算し、エントリ名と一致しなければならない（要件 7.2。不一致は中止）。
+fn decode_parts(parts: &DocumentParts) -> Result<DecodedParts, DocumentError> {
     let mut document_part: Option<DocumentPart> = None;
     let mut schemas: Vec<(EntryName, SheetId, SchemaPart)> = Vec::new();
     let mut row_sets: Vec<(EntryName, SheetRows)> = Vec::new();
@@ -526,24 +579,29 @@ pub(crate) fn from_parts_with(
     let document_part = document_part.ok_or_else(|| DocumentError::MissingPart {
         name: EntryName::Document.to_string(),
     })?;
+    Ok(DecodedParts {
+        document_part,
+        schemas,
+        row_sets,
+        attachments,
+    })
+}
 
-    // 5. 構造検証（要件 4.2, 4.3, 4.4, 1.7, 7.4）。目録は復号済みパート群から組み立てる
-    //    （保存経路 `validate_document` と同じ 1 経路。検証ロジックも報告文面も二重化しない）。
-    let inventory = inventory_of(
-        document_part.sheets().iter().map(|meta| meta.sheet_id()),
-        schemas.iter().map(|(_, sheet, schema)| (*sheet, schema)),
-        row_sets.iter().map(|(_, rows)| (rows.sheet(), rows.rows())),
-        attachments.iter().filter_map(|(entry, _)| match entry {
-            EntryName::Attachment { attachment } => Some(*attachment),
-            _ => None,
-        }),
-    );
-    StructuralValidator::validate(&inventory)?;
-
-    // 6. 行エントリの列順序が `document.json` の列名一覧と一致すること（要件 2.3）。
-    verify_row_columns(&document_part, &row_sets)?;
-
-    // 7. モデル構築（検証済みの内容だけを移す）。
+/// 検証済みの復号結果からモデルを組み立てる（`from_parts_with` の段 7）。
+///
+/// 段 5（構造検証）と段 6（列順の照合）を通過した内容だけを受け取る。行は行ごとの探索を
+/// しない一括経路（[`Sheet::extend_rows`]）で入れる（要件 8.1）。
+///
+/// 失敗しうるのは [`take_schema`] だけであり、それは「スキーマの無いシート」＝段 5 が
+/// 検出済みのはずの状態である（段 5 と段 7 の間で集合は変わらないため、実際には
+/// 到達しない。それでも `panic` せず報告する）。
+fn build_document(
+    document_part: DocumentPart,
+    mut schemas: Vec<(EntryName, SheetId, SchemaPart)>,
+    mut row_sets: Vec<(EntryName, SheetRows)>,
+    attachments: Vec<(EntryName, Vec<u8>)>,
+    converted_from_an_older_format: bool,
+) -> Result<Document, DocumentError> {
     let mut document = Document::with_document_id(document_part.document_id());
     let mut sheets = Vec::with_capacity(document_part.sheets().len());
     for meta in document_part.sheets() {
@@ -558,7 +616,7 @@ pub(crate) fn from_parts_with(
     }
     document.restore_sheets(sheets);
     for (_, bytes) in attachments {
-        // content-addressed で冪等（識別子の再計算は上の照合で確認済み）。
+        // content-addressed で冪等（識別子の再計算は段 4 の照合で確認済み）。
         document.add_attachment(bytes);
     }
     document.set_preserved_fields(document_part.preserved_fields().clone());
