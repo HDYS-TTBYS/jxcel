@@ -125,13 +125,13 @@ graph TB
     Prompt --> SessionIpc
     Veto --> Prompt
     SessionIpc --> Cmds
-    Cmds --> Watch
     Cmds --> Dialog
     Cmds --> Registry
     Menu --> Cmds
     Commands --> Cmds
     Host --> Sessions
-    Host --> Port
+    Commands --> Port
+    Port --> Host
     Host --> Watch
     Watch --> Sessions
     Watch --> Events
@@ -201,7 +201,7 @@ scripts/ci/{linux,macos,windows}/verify-document-session.*  # 新規: OS 段の�
 - `crates/document-format/src/model/mod.rs` — `Document::set_cells` と `CellWriteError` を追加（モデル局所の誤り型の規律に従う）
 - `crates/document-format/src/model/sheet.rs` — 行の索引を 1 度だけ作る一括書き換えの実体を追加
 - `crates/document-format/src/lib.rs` — `set_cells` と `CellWriteError` を根へ再輸出
-- `crates/app-shell/src/ipc/document.rs`（新規） — `DocumentSummary` / `DocumentSheet` / `DocumentOrigin` / `DocumentSessionStatus` / **4 応答型**（`DocumentStateResponse` / `DocumentSaveResponse` / `DocumentNewResponse` / `DocumentDiscardResponse`）/ **4 結果型**（`DocumentStateResult` / `DocumentSaveResult` / `DocumentNewResult` / `DocumentDiscardResult`）
+- `crates/app-shell/src/ipc/document.rs`（新規） — `DocumentSummary` / `DocumentSheet` / `DocumentOrigin` / `DocumentSessionStatus` / **4 応答型**（`DocumentStateResponse` / `DocumentSaveResponse` / `DocumentNewResponse` / `DocumentDiscardResponse`）/ **4 結果型**（`DocumentStateResult` / `DocumentSaveResult` / `DocumentNewResult` / `DocumentDiscardResult`。**結果型は `crates/app-shell/src/ipc/mod.rs` の `render_bindings` の宣言一覧が組み立てる**（`document.rs` にあるのは応答型））
 - `crates/app-shell/src/ipc/mod.rs` — 新モジュールの宣言・再輸出・`render_bindings` の宣言一覧への追加
 - `crates/app-shell/src/ipc/error.rs` — `IpcError::Document { message }` を追加
 - `crates/app-shell/src/ipc/command_names.rs` — コマンド名 4 本の定数と `COMMAND_NAMES` への追加
@@ -648,7 +648,7 @@ pub fn pick_save_location(window: &WebviewWindow, suggested_name: &str) -> SaveL
 - **チャネルは既存の型を写す**: `closeVeto.ts` の差し替え口が受け取った拒否を、シェルのモジュール局所のストア（購読関数 + 取得関数）へ置き、`Layout` が `useSyncExternalStore` で読む。`theme.ts` / `diagnostics/requests.ts` と**同じ形**であり、2 つ目の React ルートは切らない（例外隔離と配色の契約から外れるため）
 - **`Layout.tsx` に 1 点だけ載せる**: 提示は**シェルのクローム**（領域の外）に置く。画面（`ShellRegion` の中）には置かない — 画面の契約（`ScreenProps` だけを受け、自前のレイアウトを持たない）に触れないためである
 - 拒否の理由と 3 択を提示する。**配色は器が与える `var(--jxcel-*)` の 10 本のみ**を参照する（独自の色を持たない）
-- 「保存して閉じる」は `document_save` を呼び、`Saved` のときだけ**もう一度閉じる**（`close()` で再発火させ、拒否されなければ `destroy()` される既存の経路に戻す）。`Cancelled` / `Failed` は提示を残したまま理由を示す
+- 「保存して閉じる」は `document_save` を呼び、`Saved` のときだけ**もう一度閉じ直す**。閉じ直しは**既存の終了拒否の往復**（`evaluateCloseRequest`）を通し、許可されれば既存の経路が `destroy()` する（**`close()` は使わない** — `CloseRequested` を再発火して拒否の購読に再突入する循環になる。`closeVeto.ts` の既存の判断であり、権限も `core:window:allow-destroy` だけが与えられている）。`Cancelled` / `Failed` は提示を残したまま理由を示す
 - 「破棄して閉じる」は `document_discard` を呼んでから同じく閉じ直す
 - 「やめる」は何もしない
 - 観測用の属性（`data-testid`）を与え、3 OS の段とローカルの実測で読み取れるようにする
