@@ -4,7 +4,7 @@
 //! 所有: `DialogGate`（design.md「Components and Interfaces → Adapter Layer」）。
 //! 要件: 2.4。
 //!
-//! 本モジュールが担うのは 3 つである。
+//! 本モジュールが担うのは 4 つである。
 //!
 //! 1. **選択手段の提示**（[`pick_document_file`] と [`install`] の処理）。操作対象の
 //!    ウィンドウを**必ず親として指定する**。
@@ -12,6 +12,9 @@
 //!    `DocumentHost::attach` へ渡す（tasks.md 6.2 の申し送りをここで履行する）。
 //! 3. **メニューからの引き金**。7.4 の登録口（[`MenuRegistry::register`]）を通して
 //!    「開く」項目を登録し、活性化の対象ウィンドウ（7.5 の振り向け）から提示する。
+//! 4. **引き渡しの成立の通知**（[`hand_off`]）。引き渡しはセッションの状態を変えるので、
+//!    成立したときに対象ウィンドウへ `document_session_changed` を 1 回送る。**2 つの経路
+//!    （メニューとコマンド）が同じ [`hand_off`] を通るため、送る場所は 1 つで足りる。**
 //!
 //! # 本機能はパスを読まない
 //!
@@ -407,6 +410,27 @@ fn pick_and_hand_off(app: &AppHandle, window: &WebviewWindow) -> HandOff {
 /// **拒否（[`crate::ports::AttachError`]）はここで握りつぶさない。** 呼び出し元が結果を
 /// 知る必要がある（利用者へ伝えるかどうかを決めるのは呼び出し元である）ので、
 /// [`HandOff::Rejected`] として理由ごと運ぶ。
+///
+/// # 引き渡しが成立したら状態変化を通知する（ここが唯一の場所である）
+///
+/// **この関数は、利用者が選んだドキュメントを所有者へ引き渡す唯一の場所である。** メニューの
+/// 「開く…」（[`install`]）もコマンドの `pick_document_file` も、同じ [`pick_and_hand_off`] を
+/// 通ってここへ来る。引き渡しは**セッションの状態を変える**（未解決のウィンドウが文書を
+/// 保持し始める）ので、design.md「セッション状態の通知」が挙げる変化の 1 つ（**読み込み**）に
+/// 当たる。したがって成立したときに [`crate::session::commands::emit_session_changed`] を
+/// **1 回だけ**送る。
+///
+/// **送らないと、メニュー経由の「開く…」が状態を黙って変える。** 画面は通知を購読して
+/// 問い合わせ直す設計であり（`EmptyWindowScreen` の doc「状態が変わったら問い合わせ直す」）、
+/// コマンド経路の応答もこの通知も無いメニュー経路では、開いたあとも画面が
+/// 「ドキュメントを保持していません」を出し続ける（実測: 2026-09-13 の実画面。メニューの
+/// 「開く…」→ `委譲先が引き渡しを受け入れた` → **`document_state` の問い合わせが 1 回も
+/// 起きない** → 画面は更新されない）。
+///
+/// **emit の規則をここへ写さない。** 送るのは成功の腕だけであり（拒否・提示できなかったことは
+/// 何も変えない）、送信そのものは [`crate::session::commands::emit_session_changed`] が持つ
+/// 1 箇所の実装をそのまま呼ぶ。この関数は「どの操作が送るか」を判断せず、**成立したという
+/// 事実**だけを渡す。
 fn hand_off(app: &AppHandle, window: &WebviewWindow, path: &Path) -> HandOff {
     let command = command_names::PICK_DOCUMENT_FILE;
     let label = WindowLabel::new(window.label());
@@ -417,6 +441,9 @@ fn hand_off(app: &AppHandle, window: &WebviewWindow, path: &Path) -> HandOff {
                 "{command}: 委譲先が引き渡しを受け入れた（ウィンドウ = {}）",
                 label.as_str()
             );
+            // 引き渡しはセッションの状態を変えた（未解決のウィンドウが文書を保持し始める）。
+            // 画面が古い状態を持ち続けないよう、対象ウィンドウへ 1 回通知する。
+            crate::session::commands::emit_session_changed(window);
             HandOff::Attached
         }
         Err(error) => {

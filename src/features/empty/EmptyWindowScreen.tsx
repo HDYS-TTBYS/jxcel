@@ -1,49 +1,92 @@
 /**
- * ドキュメントを関連付けていないウィンドウの操作導線 — 新規作成と既存ファイルを開く
- * （タスク 9.6。要件 2.2）。
+ * ドキュメントのセッションの状態 — 名前・未保存の有無・シートの一覧と、2 つの操作導線
+ * （新規作成 / 既存ファイルを開く。タスク 4.3。要件 1.6、1.7、2.1）。
  *
- * 所有: 画面の契約（`src/shell/Layout.tsx` の「画面の契約」）。
- * 要件: 2.2（ドキュメントを指定せずに起動したウィンドウへ両方の操作を提示する）、
- * 2.4（既存ファイルを開く操作を OS 標準のファイル選択の経路につなぐ）、4.6。
+ * 所有: 画面の契約（`src/shell/Layout.tsx` の「画面の契約」）、`DocumentStateView`
+ * （design.md「Components and Interfaces → frontend」）。
+ * 要件: 1.6（名前と未保存の読み出し）、1.7（シート一覧の読み出し）、2.1（読み込めなかった
+ * 理由の報告）。既存ファイルを開く導線は 2.4 の経路をそのまま使う。
  *
- * # 何を提示し、何を提示しないか
+ * # 何を提示するか（セッションの状態 3 値 + 経路の失敗）
  *
- * - **関連付けが無いと判定されたウィンドウ**: 「新規作成」と「既存ファイルを開く…」の 2 つを
- *   提示する。後者は 7.7 の `pick_document_file` を呼び、**選ばれた位置をドキュメント所有者へ
- *   引き渡す経路そのもの**につながる（ファイル選択の実装をこの画面は持たない）。
- * - **関連付けがあると判定されたウィンドウ**: 操作は提示せず、**このスペックがドキュメントの
- *   画面を持たない事実**だけを提示する。ドキュメントの画面（何を作り、どう見せるか）は
- *   ドキュメントを所有する後続のスペックの持ち物であり、この画面はそれを装わない。
+ * 判定の材料は `document_state` の答え**だけ**である。3 値と、それに足す 1 つを次へ写す:
  *
- * # 「関連付けが無い」はどう決まるか（**接頭辞ではなく記録から取る**）
+ * | 状態 | 提示 |
+ * |---|---|
+ * | `Absent` | 保持していない事実と、「新規作成」「既存ファイルを開く…」の 2 操作（要件 2.2） |
+ * | `Open` | ドキュメントの名前・未保存の有無・シートの一覧（名前と行数。要件 1.6、1.7） |
+ * | `Unavailable` | 読み込めなかった理由（要件 2.1）。**再試行は出さない** — 失敗はセッションが覚えており、同じ問い合わせは同じ答えを返す（読み込みは 1 回だけ。design.md「起動時に指定されたドキュメントの解決」）。回復の道は 2 操作（別のドキュメントを作る・開く）である |
+ * | 封筒の失敗 | 経路そのものの失敗（IPC 不在・親の消失）。理由と再試行を提示する |
  *
- * 判定はコマンド `window_document_state` の答えだけを使う。このコマンドは 6.1 のレジストリが
- * 生成時に記録した関連付け（`document_of`）を読む。**ラベルの接頭辞（`empty-` / `doc-`）から
- * は判定しない** — 接頭辞は割り当て順の規約であって関連付けの事実ではなく、7.7 のファイル
- * 選択が実行時に `DocumentHost::attach` へ位置を引き渡しても**記録された関連付けは書き換わら
- * ない**（6.2 のポート契約にその操作が無い）ため、接頭辞と記録が食い違いうる。この画面が
- * 一手で提示する 2 つの操作のうち「既存ファイルを開く」は、まさにその経路を踏む。
+ * `Open` は**要約だけ**を提示する。何を作り、どう見せるか（表・編集）はドキュメントを所有する
+ * 後続スペックの持ち物であり、この画面はそれを装わない。
  *
- * **関連付けは生成時に確定する。**したがってこの画面は、表示している間に `attach` が起きた
- * としても判定を引き直さない — 引き直しても記録は同じであり、**見かけの遷移を作る方が嘘に
- * なる**。画面の状態を変えるのは、以後に別のウィンドウが生成され、そのウィンドウがこの画面を
- * 初めて描くときである。
+ * **2 操作は問い合わせが成功したどの状態でも出す。**保持しているウィンドウで「開く」を選ぶと、
+ * 未保存なら所有者が拒否し（`Rejected`）、その理由が結果行に出る。提示を消して選べなくするより、
+ * 断られた事実を見せる方が利用者の次の行動を決められる（要件 2.2 が操作を求める相手は
+ * 「ドキュメントを関連付けていないウィンドウ」だが、状態の写しが「保持している」でも
+ * 操作を隠す理由にはならない）。
  *
- * # 新規作成が何をするか（**正直に、成功を装わない**）
+ * # 判定はセッションの状態だけを使う（関連付けの記録は使わない）
  *
- * **何も作成しない。** このアプリケーションにはドキュメントを所有する機能がまだ組み込まれて
- * おらず（本スペックはドキュメントの読み書きを所有しない）、6.2 の委譲点
- * （`DocumentHost`）にも作成の操作は無い。したがって操作を選ぶと、**作成できない事実と、
- * 作成機能の持ち主（後続スペック）を利用者へ提示する**。次のいずれもしない:
+ * 以前のこの画面は app-shell の `window_document_state`（生成要求の記録）で「関連付けの有無」を
+ * 判定していた。**その判定を `document_state` へ置き換えた**（design.md「既存の関連付け
+ * （`window_document_state`）との関係」）。2 つは別の問いである:
  *
- * - 成功したように見せること（偽の成功・空のウィンドウ・無言の no-op）。
- * - デタラメな位置のドキュメントを作り、`attach` へ渡すこと。
- * - 6.2 のポート契約へ「作成」を足すこと（契約変更は design.md の Revalidation Trigger で
- *   あり、下流スペックの接続点を本タスクの都合で動かすことになる）。
+ * - `window_document_state`: **生成要求**に関連付けがあるか。`attach` でも新規作成でも更新されない
+ * - `document_state`: **今**そのウィンドウがドキュメントを保持しているか、未保存か、どのシートがあるか
  *
- * この操作はコマンドを呼ばない（記録に残す先が無い）。**フロントエンドから記録へ書く経路は
- * 存在しない**（9.3 が同じ理由で診断画面を記録へつないでいない）。提示は利用者に見える形で
- * 行う。
+ * **開いているドキュメントの真実はセッションである。**関連付けの記録で判定すると、ファイル選択の
+ * 直後（引き渡しが成立してセッションが保持している）や新規作成の直後に「関連付けなし」と
+ * 「保持している」が同居し、どちらが本当か画面から読めなくなる。**app-shell のコマンド自体は
+ * 削除しない** — 生成要求の記録は app-shell の成果物であり、この画面が使わなくなっただけである。
+ *
+ * # この問い合わせが起動時の読み込みの引き金になる
+ *
+ * 起動引数で指定された位置のドキュメントは、**ウィンドウの最初の `document_state` が遅延解決の
+ * 引き金**である（design.md「起動時に指定されたドキュメントの解決」。要件 2.1）。したがってこの
+ * 画面はマウント時に必ず 1 回問い合わせる。**この画面を初期画面に残す限り、起動経路の読み込みは
+ * 必ず 1 回起きる**（`src/shell/Layout.tsx` のレジストリがこの画面を `initial` にしている）。
+ *
+ * # 状態が変わったら問い合わせ直す（仕掛けは購読の 1 つだけ）
+ *
+ * メニューからの「保存」「新規」「開く」は **Rust 側で完結**し、この画面は結果を知らない。
+ * そこで適応層が、状態を変えた操作のあとに対象ウィンドウへ `document_session_changed` を
+ * 1 回送る。**この画面はそれを購読して問い合わせ直す**（design.md「セッション状態の通知」）。
+ * 送る側は 3 箇所に分かれているが、どれも「状態を変えたあとに 1 回」という同じ規則に従う:
+ *
+ * | 経路 | 送る場所 |
+ * |---|---|
+ * | メニューの「保存」「新規」 | `src-tauri/src/session/menu.rs` |
+ * | メニューの「開く…」 | `src-tauri/src/dialog.rs`〔`hand_off`。引き渡しが成立したときだけ〕 |
+ * | コマンドの 4 つ（この画面の「新規作成」「既存ファイルを開く…」を含む） | `src-tauri/src/session/commands.rs` |
+ *
+ * **この画面は自分が駆動しない経路のために、自前の再問い合わせを持たない。** 以前は
+ * 「既存ファイルを開く…」の成功後にここで問い合わせ直していたが、`hand_off` が通知を送る
+ * ようになった時点で二重になり、片方（購読）が壊れても気づけない形になる。**状態の源は 1 つ、
+ * 問い合わせ直す引き金も 1 つ**に保つ — 画面は購読だけを張り、どの経路が状態を変えたかを
+ * 知ろうとしない。
+ *
+ * **イベントは状態を運ばない** — 状態の唯一の源は `document_state` である。また**通知のたびに
+ * 「確認しています…」へ戻さない**（購読は [`applySession`] を直に呼び、読み込みの最中を示すのは
+ * 初回と利用者が押した再試行だけである）。解除の後に解決した結果は購読側が捨てる
+ * （`src/ipc/documentSession.ts` の契約）。
+ *
+ * # 新規作成は本物のコマンドを呼ぶ（以前の「未搭載」の提示は消した）
+ *
+ * この画面は以前「このアプリケーションには、ドキュメントを所有する機能がまだ組み込まれて
+ * いません」と提示していた（当時それは事実だった）。**今は事実に反する** — `document_new`
+ * が存在し、行も列も無いシートを 1 つ持つドキュメントを用意する（要件 7.1）。したがって
+ * コマンドを呼び、`Created` と `Refused{reason}` を**別々に**提示する:
+ *
+ * | 結果 | 見せ方 |
+ * |---|---|
+ * | `Created` | 用意した事実。以後の表示は応答の `status`（作成後の状態そのもの）へ差し替える |
+ * | `Refused` | **失敗ではない**。未保存の変更があるため作れなかったというドメインの答えであり、理由を添える（要件 7.3） |
+ * | 封筒の失敗 | 経路の失敗として理由を添える |
+ *
+ * **応答の `status` を使い、通知の再問い合わせを待たない。** 応答は作成後の状態を運んでおり、
+ * これをそのまま画面の状態にすれば、表示が 1 往復分古いままになる瞬間が無い。
  *
  * # 既存ファイルを開くの結果の見せ方（7.7 の契約）
  *
@@ -51,7 +94,7 @@
  *
  * | 結果 | 見せ方 |
  * |---|---|
- * | `Attached` | 選ばれた位置を所有者へ引き渡した事実（**パス自体は応答に無い**。7.7 の契約） |
+ * | `Attached` | 選ばれた位置を所有者へ引き渡した事実（**パス自体は応答に無い**。7.7 の契約）。引き渡しの成立は `dialog::hand_off` が通知するので、**画面の状態は購読の再問い合わせで更新される**（この画面は自分で問い合わせ直さない） |
  * | `Cancelled` | **正常な結果**。取り消したこと、何も起きていないこと |
  * | `Rejected` | 所有者が受け取らなかったこと。理由（`reason`）を添える |
  * | 封筒の失敗 | 選択手段を提示できなかったこと（IPC の失敗・親の消失）として区別する |
@@ -64,20 +107,33 @@
  * 封筒の失敗はこの画面の状態として提示する。**例外を投げない** — 描画中に投げると 9.3 の
  * 画面単位のエラー隔離が発動し、この画面の内容がまるごとエラーの提示へ置き換わる。ここで
  * 扱える失敗はここで出す。エラー隔離は、この画面の描画そのものが壊れたときの最後の砦である。
+ *
+ * # 配色と契約
+ *
+ * 配色は器が与えるカスタムプロパティ（`APPEARANCE_VARS` の `var(--jxcel-*)`）**だけ**を参照し、
+ * 自前のレイアウトと遷移を持たない。`ScreenProps` 以外の props を受け取らない
+ * （画面の契約。`src/shell/Layout.tsx`）。
  */
 import { useCallback, useEffect, useState, type ReactElement } from "react";
 
 import type {
+  DocumentSessionStatus,
+  DocumentSheet,
+  DocumentStateResponse,
   PickDocumentFileResponse,
-  WindowDocumentState,
-  WindowDocumentStateResponse,
 } from "../../ipc/bindings";
 import {
   assertNever,
   describeIpcError,
   invokeCommand,
   type CommandName,
+  type IpcClientResult,
 } from "../../ipc/client";
+import {
+  documentNew,
+  documentState,
+  installDocumentSessionChanged,
+} from "../../ipc/documentSession";
 import { APPEARANCE_VARS } from "../../shell/theme";
 
 /**
@@ -87,37 +143,28 @@ import { APPEARANCE_VARS } from "../../shell/theme";
 export const EMPTY_WINDOW_SCREEN_ID = "empty-window";
 
 /**
- * 関連付けの問い合わせのコマンド名（実体は `src-tauri/src/window/association.rs`）。
+ * 既存ファイルを開くコマンド名（実体は 7.7 の `src-tauri/src/dialog.rs`）。
  *
  * **文字列リテラルを `invoke` へ渡さない。** 型注釈（[`CommandName`]）は生成物の
  * `COMMAND_NAMES` から導かれた合併型であるため、`crates/app-shell/src/ipc/command_names.rs`
  * からこの名前が消えるとこの行で型検査が落ちる（tasks.md 2.2）。
+ *
+ * **関連付けの問い合わせ（`window_document_state`）の定数はここに無い。** この画面は
+ * `document_state` を `src/ipc/documentSession.ts` のラッパ経由で呼ぶ（モジュール doc
+ * 「判定はセッションの状態だけを使う」）。
  */
-const WINDOW_DOCUMENT_STATE_COMMAND: CommandName = "window_document_state";
-
-/** 既存ファイルを開くコマンド名（実体は 7.7 の `src-tauri/src/dialog.rs`）。 */
 const PICK_DOCUMENT_FILE_COMMAND: CommandName = "pick_document_file";
 
 /**
- * 新規作成を選んだときに提示する文言。**ドキュメント所有機能が未搭載である事実と、その
- * 持ち主を述べる**（成功を装わない。モジュール doc「新規作成が何をするか」）。
+ * 名前を持たないドキュメントの見せ方。新規作成直後のドキュメントは名前が空文字である
+ * （`DocumentSummary` の契約。ファイル名のみを運び、新規は空文字）。
  */
-const NEW_DOCUMENT_UNAVAILABLE =
-  "このアプリケーションには、ドキュメントを所有する機能がまだ組み込まれていません。" +
-  "そのため新規作成はできません。ドキュメントを作成する機能は後続のスペックが提供します。";
+const UNNAMED_DOCUMENT = "（無題）";
 
-/**
- * 関連付けがあるウィンドウに提示する文言。**ドキュメントの画面を装わない**（モジュール doc
- * 「何を提示し、何を提示しないか」）。
- */
-const ASSOCIATED_NOTE =
-  "このウィンドウのドキュメントの画面は、ドキュメントを所有する後続のスペックが提供します。" +
-  "このシェルはドキュメントの内容を解釈する画面を持ちません。";
-
-/** 関連付けの問い合わせの状態。 */
-type AssociationState =
+/** セッションの状態の問い合わせの状態。 */
+type SessionState =
   | { readonly status: "loading" }
-  | { readonly status: "ready"; readonly state: WindowDocumentState }
+  | { readonly status: "ready"; readonly state: DocumentSessionStatus }
   | { readonly status: "failed"; readonly message: string };
 
 /** 既存ファイルを開く操作の状態（7.7 の `outcome` と封筒の失敗を区別して持つ）。 */
@@ -129,10 +176,13 @@ type OpenState =
   | { readonly status: "rejected"; readonly reason: string }
   | { readonly status: "failed"; readonly message: string };
 
-/** 新規作成の状態。**成功の状態を持たない**（作成する機能が無いため）。 */
+/** 新規作成の状態（`Created` / `Refused` / 封筒の失敗を区別して持つ）。 */
 type CreateState =
   | { readonly status: "idle" }
-  | { readonly status: "unavailable" };
+  | { readonly status: "running" }
+  | { readonly status: "created" }
+  | { readonly status: "refused"; readonly reason: string }
+  | { readonly status: "failed"; readonly message: string };
 
 /** 画面の枠。シェルの配色（`APPEARANCE_VARS`）だけを参照する。 */
 const PANEL_STYLE = {
@@ -213,33 +263,151 @@ function ResultLine({
 }
 
 /**
- * ドキュメントを関連付けていないウィンドウの操作導線。**`ScreenProps` 以外の props を受け
+ * セッションの状態を提示へ写す。**3 つの変種を網羅的に分岐する**（`default` の
+ * [`assertNever`] が、境界に変種が増えたときここをコンパイルエラーにする。`state` の綴りを
+ * 小文字で書くと絞り込みが効かず、同じ場所で落ちる）。
+ *
+ * 状態ごとの見せ方はモジュール doc の表が唯一の定義である。
+ */
+function SessionBody({
+  state,
+}: {
+  readonly state: DocumentSessionStatus;
+}): ReactElement {
+  switch (state.state) {
+    case "Absent":
+      return (
+        <>
+          <h2 style={{ margin: "0 0 0.5rem", fontSize: "1.125rem" }}>
+            ドキュメントを保持していません
+          </h2>
+          <p style={{ margin: "0 0 1rem" }}>
+            新規作成するか、既存のファイルを開いてください。
+          </p>
+        </>
+      );
+    case "Open":
+      return (
+        <DocumentSummaryView
+          name={state.name}
+          unsaved={state.unsaved}
+          sheets={state.sheets}
+        />
+      );
+    case "Unavailable":
+      return (
+        <>
+          <h2 style={{ margin: "0 0 0.5rem", fontSize: "1.125rem" }}>
+            このウィンドウのドキュメントを読み込めませんでした
+          </h2>
+          {/* 読み込めなかった理由は**既存の結果行の形**で出す（要件 2.1。design.md
+              「DocumentStateView」）。再試行は出さない — 失敗はセッションが覚えており、
+              同じ問い合わせは同じ答えを返す（モジュール doc の表）。 */}
+          <ResultLine
+            testId="jxcel-empty-state-unavailable"
+            text={state.reason}
+            tone="failure"
+          />
+        </>
+      );
+    default:
+      return assertNever(state, "セッションの状態の分岐が網羅されていない");
+  }
+}
+
+/** 保持しているドキュメントの要約（要件 1.6、1.7）。**名前・未保存・シートだけ**を出す。 */
+function DocumentSummaryView({
+  name,
+  unsaved,
+  sheets,
+}: {
+  readonly name: string;
+  readonly unsaved: boolean;
+  readonly sheets: readonly DocumentSheet[];
+}): ReactElement {
+  return (
+    <>
+      <h2 style={{ margin: "0 0 0.5rem", fontSize: "1.125rem" }}>
+        このウィンドウのドキュメント
+      </h2>
+      <p
+        data-testid="jxcel-empty-document-name"
+        style={{ margin: "0 0 0.25rem", fontSize: "0.9375rem" }}
+      >
+        {`名前: ${name === "" ? UNNAMED_DOCUMENT : name}`}
+      </p>
+      <p
+        data-testid="jxcel-empty-document-unsaved"
+        style={{ margin: "0 0 0.75rem", ...MUTED_STYLE }}
+      >
+        {`未保存の変更: ${unsaved ? "あり" : "なし"}`}
+      </p>
+      <p style={{ margin: "0 0 0.25rem", ...MUTED_STYLE }}>{"シート"}</p>
+      <ul
+        data-testid="jxcel-empty-sheet-list"
+        style={{ margin: 0, paddingLeft: "1.25rem", fontSize: "0.875rem" }}
+      >
+        {sheets.map((sheet) => (
+          // 鍵はシートの識別子である（名前は重複しうる。境界の契約）。
+          <li key={sheet.id} data-testid="jxcel-empty-sheet">
+            {`${sheet.name}（${sheet.rows} 行）`}
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+/**
+ * ドキュメントのセッションの状態と、2 つの操作導線。**`ScreenProps` 以外の props を受け
  * 取らない**（画面の契約。`src/shell/Layout.tsx`）。
  */
 export function EmptyWindowScreen(): ReactElement {
-  const [association, setAssociation] = useState<AssociationState>({
-    status: "loading",
-  });
+  const [session, setSession] = useState<SessionState>({ status: "loading" });
   const [open, setOpen] = useState<OpenState>({ status: "idle" });
   const [create, setCreate] = useState<CreateState>({ status: "idle" });
 
-  /** 関連付けを問い合わせる（**例外を外へ出さない**。封筒の失敗は画面の状態として持つ）。 */
-  const loadAssociation = useCallback(async (): Promise<void> => {
-    setAssociation({ status: "loading" });
-    const result = await invokeCommand<WindowDocumentStateResponse>(
-      WINDOW_DOCUMENT_STATE_COMMAND,
-    );
-    setAssociation(
-      result.status === "ok"
-        ? { status: "ready", state: result.data.state }
-        : { status: "failed", message: describeIpcError(result.error) },
-    );
-  }, []);
+  /** 封筒を画面の状態へ写す。**封筒を包み直さない**（`src/ipc/documentSession.ts` の契約）。 */
+  const applySession = useCallback(
+    (result: IpcClientResult<DocumentStateResponse>): void => {
+      setSession(
+        result.status === "ok"
+          ? { status: "ready", state: result.data.status }
+          : { status: "failed", message: describeIpcError(result.error) },
+      );
+    },
+    [],
+  );
 
-  // 画面が現れた時点で、このウィンドウの関連付けを提示する（利用者が操作しなくても見える）。
+  /**
+   * セッションの状態を問い合わせ、「確認しています…」から始める（**例外を外へ出さない**。
+   * 封筒の失敗は画面の状態として持つ）。
+   *
+   * **通知からの再問い合わせはこれを使わない。** 購読は [`applySession`] を直に呼ぶので、
+   * メニュー操作のたびに画面が「確認しています…」へ戻ることはない（読み込みの最中を示すのは
+   * 初回と、利用者が明示的に押した再試行だけである。モジュール doc「状態が変わったら
+   * 問い合わせ直す」）。
+   */
+  const loadSession = useCallback(async (): Promise<void> => {
+    setSession({ status: "loading" });
+    applySession(await documentState());
+  }, [applySession]);
+
+  // 画面が現れた時点で 1 回問い合わせる。**この問い合わせが起動時に指定されたドキュメントの
+  // 読み込みの引き金である**（遅延解決。モジュール doc「この問い合わせが起動時の読み込みの
+  // 引き金になる」）。
   useEffect(() => {
-    void loadAssociation();
-  }, [loadAssociation]);
+    void loadSession();
+  }, [loadSession]);
+
+  // 状態変化の通知を購読して問い合わせ直す。**この 1 つの仕掛けが、この画面が駆動しない経路を
+  // すべて覆う** — メニューの「保存」「新規」は `session/menu.rs` が、メニューの「開く…」は
+  // `dialog::hand_off` が、コマンド経路の 4 つは `session/commands.rs` が、それぞれ状態を
+  // 変えたあとに 1 回送る（design.md「セッション状態の通知」）。解除は購読側が返す関数を
+  // そのまま effect の後片付けに使う（`src/ipc/documentSession.ts`）。
+  useEffect(() => {
+    return installDocumentSessionChanged(applySession);
+  }, [applySession]);
 
   /**
    * 既存ファイルを開く。**7.7 のコマンドをそのまま呼ぶ**（選択手段の実装をこの画面は持たず、
@@ -271,34 +439,51 @@ export function EmptyWindowScreen(): ReactElement {
     }
   }, []);
 
-  /** 新規作成。**作成する機能が無い事実を提示するだけで、何も作成しない**（モジュール doc）。 */
-  const requestNewDocument = useCallback((): void => {
-    setCreate({ status: "unavailable" });
+  /** 新規作成。**本物のコマンドを呼び、`Created` と `Refused` を別々に提示する**（モジュール doc）。 */
+  const requestNewDocument = useCallback(async (): Promise<void> => {
+    setCreate({ status: "running" });
+    const result = await documentNew();
+    if (result.status !== "ok") {
+      setCreate({ status: "failed", message: describeIpcError(result.error) });
+      return;
+    }
+    // 応答の `status` は**作成後の状態そのもの**である。通知の再問い合わせを待たずに反映する
+    // （待つと、表示が 1 往復分古いままになる瞬間ができる）。
+    setSession({ status: "ready", state: result.data.status });
+    setCreate(
+      result.data.outcome.outcome === "Created"
+        ? { status: "created" }
+        : // **拒否は失敗ではない**（要件 7.3）。理由を添えて正常な結果として出す。
+          { status: "refused", reason: result.data.outcome.reason },
+    );
   }, []);
 
   return (
     <section
       data-testid="jxcel-empty-window"
+      // 外から読める観測点。**セッションの状態の判別子**（`Absent` / `Open` / `Unavailable`）と、
+      // 問い合わせ自体の状態（`loading` / `failed`）を出す。関連付けの記録ではない
+      // （モジュール doc「判定はセッションの状態だけを使う」）。
       data-document-state={
-        association.status === "ready" ? association.state : association.status
+        session.status === "ready" ? session.state.state : session.status
       }
       aria-label="ドキュメント"
       style={PANEL_STYLE}
     >
-      {association.status === "loading" ? (
+      {session.status === "loading" ? (
         <p data-testid="jxcel-empty-state" style={{ margin: 0 }}>
           このウィンドウの状態を確認しています…
         </p>
       ) : null}
 
-      {association.status === "failed" ? (
+      {session.status === "failed" ? (
         <>
           <h2 style={{ margin: "0 0 0.5rem", fontSize: "1.125rem" }}>
             このウィンドウの状態を確認できません
           </h2>
           <ResultLine
             testId="jxcel-empty-state-error"
-            text={association.message}
+            text={session.message}
             tone="failure"
           />
           <div style={{ marginTop: "0.75rem" }}>
@@ -307,28 +492,36 @@ export function EmptyWindowScreen(): ReactElement {
               label="再試行"
               disabled={false}
               onClick={() => {
-                void loadAssociation();
+                void loadSession();
               }}
             />
           </div>
         </>
       ) : null}
 
-      {association.status === "ready" &&
-      association.state === "unassociated" ? (
+      {session.status === "ready" ? <SessionBody state={session.state} /> : null}
+
+      {/* 2 操作は「保持していない」「保持している」「読み込めなかった」のいずれでも出す。
+          保持しているウィンドウでは、未保存なら「開く」が所有者に拒否され（`Rejected`）、
+          その理由が結果行に出る — 提示を消して選べなくするより、断られた事実を見せる方が
+          利用者の次の行動を決められる。 */}
+      {session.status === "ready" ? (
         <>
-          <h2 style={{ margin: "0 0 0.5rem", fontSize: "1.125rem" }}>
-            ドキュメントが関連付けられていません
-          </h2>
-          <p style={{ margin: "0 0 1rem" }}>
-            新規作成するか、既存のファイルを開いてください。
-          </p>
-          <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
+          <div
+            style={{
+              display: "flex",
+              gap: "0.75rem",
+              flexWrap: "wrap",
+              marginTop: "1rem",
+            }}
+          >
             <Action
               testId="jxcel-empty-new-document"
               label="新規作成"
-              disabled={false}
-              onClick={requestNewDocument}
+              disabled={create.status === "running"}
+              onClick={() => {
+                void requestNewDocument();
+              }}
             />
             <Action
               testId="jxcel-empty-open-document"
@@ -340,11 +533,25 @@ export function EmptyWindowScreen(): ReactElement {
             />
           </div>
 
-          {create.status === "unavailable" ? (
+          {create.status === "created" ? (
             <ResultLine
               testId="jxcel-empty-new-document-result"
-              text={NEW_DOCUMENT_UNAVAILABLE}
+              text="新しいドキュメントを用意しました。"
               tone="neutral"
+            />
+          ) : null}
+          {create.status === "refused" ? (
+            <ResultLine
+              testId="jxcel-empty-new-document-result"
+              text={`新しいドキュメントを用意できませんでした（理由: ${create.reason}）。`}
+              tone="failure"
+            />
+          ) : null}
+          {create.status === "failed" ? (
+            <ResultLine
+              testId="jxcel-empty-new-document-error"
+              text={`新しいドキュメントを用意できませんでした: ${create.message}`}
+              tone="failure"
             />
           ) : null}
 
@@ -376,18 +583,6 @@ export function EmptyWindowScreen(): ReactElement {
               tone="failure"
             />
           ) : null}
-        </>
-      ) : null}
-
-      {association.status === "ready" &&
-      association.state === "associated" ? (
-        <>
-          <h2 style={{ margin: "0 0 0.5rem", fontSize: "1.125rem" }}>
-            ドキュメントが関連付けられています
-          </h2>
-          <p data-testid="jxcel-empty-associated-note" style={MUTED_STYLE}>
-            {ASSOCIATED_NOTE}
-          </p>
         </>
       ) : null}
     </section>
