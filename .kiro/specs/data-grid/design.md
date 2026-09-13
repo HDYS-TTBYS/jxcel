@@ -1,0 +1,836 @@
+# Technical Design: data-grid
+
+## Overview
+
+**Purpose**: 本機能は、型付きのシートを人が読み書きするための実用水準の画面を提供する。10 万行の走査・セルの編集・違反の提示・入れ子の表現の 4 つが揃うことで、既に成立しているドキュメント形式と型システムが初めて道具になる。
+
+**Users**: 10 万行規模の台帳を日常的に開き、直接打ち替え、他の表から貼り付けて移行するユーザー。
+
+**Impact**: 現在フロントエンドにある表形式の画面は、3 OS の描画確認のための最小画面 1 つだけである（`src/features/smoke/TableSmoke.tsx`。それ自身が「実用水準へ育てるのは data-grid スペック」と書いている）。本機能はこれを置き換えず、実用水準の画面を新たに加え、確認用の最小画面は検証専用の経路に残す。加えて本機能は、後続の 3 スペックが乗る拡張点を 2 つ確定させる — 取り消し履歴（`formula-engine` / `macro-runtime` が加わる）と、セル入力手段の登録簿（`custom-types` が登録する）。
+
+### Goals
+- 10 万行 × 30 列のシートを、毎秒 60 回の描画更新を保ったまま走査・編集できる画面を提供する
+- 値の正否の判断を一切持たず、`schema-engine` の判定結果の提示に徹する
+- 取り消し履歴とセル入力手段の登録簿を、後続スペックが形を変えずに乗れる契約として確定させる
+- 並べ替え・絞り込み・列順の変更を表示に閉じ、保存される順序を一切変更しない
+- 3 OS のいずれでも実用水準のグリッドが描画されることを、実際に起動した観測で示す
+
+### Non-Goals
+- 値が型に適合するかの判断、型強制の規則（`schema-engine` が所有）
+- スキーマの宣言と変更の画面（`schema-editor` が所有）
+- 数式の入力・依存グラフ・再計算（`formula-engine` が所有）
+- マクロの実行と実行トリガ（`macro-runtime` が所有）
+- ドキュメントの読み込み・保持・保存・未保存の追跡（`document-session` が所有）
+- 変更履歴と差分（`version-control` が所有）
+- ユーザー定義型ごとの入力手段の実装（`custom-types` が登録側として所有）
+- 添付ファイルの実体の選択と管理
+- 表示対象のシートを選ぶ画面遷移
+
+## Boundary Commitments
+
+### This Spec Owns
+- **シート 1 枚の表示と操作**: 走査、選択、現在位置、列の表示制御（幅・順・並べ替え・絞り込み）
+- **セルの編集の意味論**: 編集の開始・確定・取消、`schema-engine` への判定依頼、判定結果と型強制の提示、違反値の保持
+- **行の構造操作**: 追加・削除・複製と、既定値の適用
+- **範囲の複製と貼り付け**: 表形式テキストとセル値の相互変換、貼り付け時の一括判定
+- **取り消し履歴（拡張点・所有者）**: ドキュメント単位の命令スタック。`formula-engine` と `macro-runtime` が後から同じ履歴に加わる
+- **セル入力手段の登録簿（拡張点・所有者）**: 型 → 入力手段の対応表。`custom-types` が登録する
+- **表示状態**: 列幅・列順・並べ替え・絞り込み・展開状態。**ドキュメントに保存されない、画面に閉じた状態**
+- **行データの窓単位の転送**: どの範囲を、どの形で、いつ運ぶか
+- **グリッド自身の描画成立の検査**: 塗って読み戻す検査と、フレーム時間の標本
+
+### Out of Boundary
+- 値の正否と型強制の規則の実装（`schema-engine`。本機能は判定を依頼し結果を写すだけで、独自の判定分岐を持たない）
+- スキーマ宣言の変更（列の追加・削除・型変更・制約変更は `schema-editor`）
+- ドキュメントの読み込み・保持・保存・未保存の追跡・終了拒否（`document-session`）
+- 起動時の描画経路の切り替えと環境変数の判定（`app-shell` の要件 10.3 が所有。**本機能は重複して持たない**）
+- ウィンドウ・レイアウト・遷移・配色・例外の隔離（`app-shell` の画面の契約に従う）
+- 数式の評価、マクロの実行、添付の実体、シート間参照をたどる遷移
+
+### Allowed Dependencies
+- `schema-engine`: 型カタログ、検証、型強制、違反の報告。**判定の唯一の源**
+- `document-format`: 行・セル値・識別子のドキュメントモデル
+- `document-session`: ウィンドウに対応する `Document` への参照と、変更を書き戻す手段。**能力の水準でのみ依存し、API の形を本設計で先に決めない**
+- `app-shell`: 画面登録簿、IPC 境界、コマンド登録の根、メニュー登録口、診断の記録
+- **制約**:
+  - `crates/data-grid` は `tauri` に依存しない（`scripts/check-core-deps.sh` が固定する）
+  - `crates/data-grid` が依存してよい兄弟ドメインクレートは `document-format` と `schema-engine` のみ。`app-shell` には依存しない（境界用の型の組み立ては `src-tauri` の適応層が行う）
+  - フロントエンドは `src/ipc/` の生成物経由でのみ境界を越える。`schema-engine` の判定を写した分岐をフロントエンドに作らない
+
+### Revalidation Triggers
+| 変更 | 再検証を要する相手 |
+|---|---|
+| 取り消し履歴の命令の形（何が 1 操作か、何を復元するか） | `formula-engine`, `macro-runtime` |
+| セル入力手段の登録簿の登録インターフェース | `custom-types` |
+| 窓の転送単位・符号化の形 | 要件 11 の予算の再測定 |
+| `schema-engine` の判定 API の形 | 本機能の編集経路 |
+| **`document-session` の design 確定** | **本設計（能力の水準で依存しているため、API の形が決まった時点で整合を取り直す）** |
+| `document-format` への 2 メソッド追加の形 | `document-format` の決定的出力の契約は不変。行の集合と並びのみ |
+| 画面の契約（`ScreenProps`・配色変数・例外隔離） | `app-shell` 側の変更として全 UI スペック |
+
+## Architecture
+
+### Existing Architecture Analysis
+
+本機能が載る土台はすべて実装済みであり、以下は**既に固定されている制約**である。
+
+| 事実 | 出典 | 本設計への帰結 |
+|---|---|---|
+| 画面は `SHELL_SCREEN_REGISTRY` に 1 件足すだけで差し込まれる。受け取るのは `ScreenProps` のみ | `src/shell/router.tsx` / `Layout.tsx` | グリッド画面は 1 エントリ。自前のレイアウト・遷移・配色を持たない |
+| `ScreenBoundary` は **イベントハンドラと非同期の失敗を捕まえない** | `src/shell/ScreenBoundary.tsx` | 走査・編集・IPC の失敗は**画面内で処理する**。器に落とせない |
+| 外観変数は 10 本のみで、**グリッド専用の色は存在しない** | `src/shell/theme.ts` | 既存変数の範囲で配色する。選択は `--jxcel-control-active-background`、罫線は `--jxcel-control-border`、副次の文字は `--jxcel-screen-muted` |
+| ts-rs の derive は `crates/app-shell/src/ipc/` の下だけ。境界に 64 ビット整数を出さない | `ipc-contract.md` | `CellValue::Int` と `RowId` は**そのまま越えられない** |
+| 生バイト経路は封筒も `WindowContext` も運べない。**行指向の API を足してはならない** | `src-tauri/src/commands/bulk.rs` の module doc | 行データは窓単位で運ぶ。1 行ごとのコマンドを作らない |
+| `CellValue` / `Row` / `Violation` は `Serialize` を持たず、`Row` は `Clone` すら持たない | `crates/document-format` | 境界用の型を別に定義する。ドメイン型を直接運ばない |
+| `add_row` は末尾追加のみ。**行の削除と位置指定の挿入が存在しない** | `crates/document-format/src/model/mod.rs` | 下記の 2 メソッドを追加する |
+| 開いた `Document` の持ち主が存在しない | `document-format` の被依存は `schema-engine` のみ | `document-session` に依存する（新設） |
+
+### 上流への最小の追加
+
+要件 6.1・6.2 は現在の公開面では実現できない。`add_row` ＋ `reorder_rows` での代替は 10 万行の並びを毎回渡すことになり要件 11 の予算に入らない。本設計は `document-format` に次の 2 つだけを追加する。
+
+```rust
+// crates/document-format/src/model/mod.rs の Document impl へ追加
+pub fn remove_rows(&mut self, sheet: SheetId, rows: &[RowId]) -> Result<Vec<Row>, UnknownRow>;
+pub fn insert_row_at(&mut self, sheet: SheetId, index: usize) -> Result<RowId, InsertError>;
+```
+
+- `remove_rows` が**取り除いた行を返す**のは、取り消しに値と識別子の両方が要るためである（`Row` は `Clone` を持たない）
+- 一括で受けるのは、範囲削除が 1 操作であり、行ごとに呼ぶと並びの作り直しが繰り返されるため
+- **決定的な出力と往復の契約には触れない。**変わるのは行の集合と並びだけである
+
+### Architecture Pattern & Boundary Map
+
+選定した型は **「ドメインが状態と意味論を持ち、画面は窓と入力だけを持つ」**。`structure.md`「Tauri を必要とするスペックは 2 つに割る」と「性能はドメイン側で守る」の双方から導かれる。
+
+```mermaid
+graph TB
+    subgraph Frontend
+        GridScreen[GridScreen]
+        WindowCache[WindowCache]
+        EditorRegistry[EditorRegistry]
+        RendererPort[RendererPort]
+        GlideAdapter[GlideAdapter]
+        RenderProbe[RenderProbe]
+    end
+    subgraph TauriAdapter
+        GridCommands[grid commands]
+        GridDto[grid DTO under app-shell ipc]
+    end
+    subgraph DomainCrates
+        DataGrid[crates data-grid]
+        SchemaEngine[crates schema-engine]
+        DocumentFormat[crates document-format]
+        DocumentSession[crates document-session]
+    end
+
+    GridScreen --> WindowCache
+    GridScreen --> EditorRegistry
+    GridScreen --> RendererPort
+    GridScreen --> RenderProbe
+    RendererPort --> GlideAdapter
+    WindowCache --> GridCommands
+    GridCommands --> GridDto
+    GridCommands --> DataGrid
+    DataGrid --> SchemaEngine
+    DataGrid --> DocumentFormat
+    GridCommands --> DocumentSession
+    SchemaEngine --> DocumentFormat
+    DocumentSession --> DocumentFormat
+```
+
+**Key Decisions**:
+- **行データは窓単位で運ぶ。**全件をフロントエンドへ送る案は、ドキュメントが Rust と webview に二重に載り要件 11.6 に反するため却下した
+- **並べ替え・絞り込み・違反の集計はすべて Rust 側**にある。フロントエンドは行の集合を持たないので、表示上の並びが保存に漏れる経路が構造的に存在しない（要件 8.5）
+- **描画層は移植口の背後**にある。Glide Data Grid の上流が止まっているという実測に対する退路であり、投機的な抽象ではない
+- `DataGrid` は `app-shell` に依存しない。境界用の型の組み立ては `GridCommands`（適応層）が行う
+
+### Technology Stack
+
+| Layer | Choice / Version | Role in Feature | Notes |
+|-------|------------------|-----------------|-------|
+| Frontend | React 19.3 + Vite 7.3（既存） | 画面と入力 | 既存の構成。変更なし |
+| Frontend | `@glideapps/glide-data-grid` **6.0.4-alpha24** | canvas の描画・当たり判定・文字計測・クリップボードの配管 | **stable 6.0.3 は React 19 を受け付けない**（peer が 18.x 止まり、issue #1189 が open）。MIT。フロントエンド初の重い依存 |
+| Backend | 新設 `crates/data-grid` | 表示状態・編集命令・取り消し履歴・窓の符号化 | `tauri` 非依存。依存してよい兄弟は `document-format` と `schema-engine` |
+| Backend | `crates/schema-engine`（既存） | 型カタログ・検証・型強制・違反 | 判定の唯一の源 |
+| Backend | `crates/document-format`（既存 + 2 メソッド） | 行とセル値の保持 | `remove_rows` / `insert_row_at` を追加 |
+| Backend | `crates/document-session`（別スペック） | `Document` の保持と変更の書き戻し | 能力の水準で依存 |
+| Infrastructure | 既存の Tauri IPC 境界 | 封筒つきコマンド 5 本 + 生バイト 1 本 | `ipc-contract.md` の規約に従う |
+
+### 内部の依存の向き
+
+`crates/data-grid` は 6 層とし、左の層だけを参照する（`structure.md`「ドメインクレートの内部構造」）。この鎖の文言は各層の `mod.rs` 冒頭に置く。
+
+```
+error / types → view → edit → history → transport → api
+```
+
+| 層 | 責務 | 参照してよい層 |
+|---|---|---|
+| `error` / `types` | 誤り型、座標、範囲、表示位置と `RowId` の対 | なし |
+| `view` | 並べ替え・絞り込みの適用結果としての行の順序。**ドキュメントを変更しない** | types |
+| `edit` | 編集命令の定義と適用。`schema-engine` の判定を呼び `document-format` を変更する | types, view |
+| `history` | 取り消し履歴。命令と逆命令の対を積む | types, edit |
+| `transport` | 窓の行データと違反の符号化 | types, view |
+| `api` | 公開面の再輸出と、画面 1 枚ぶんの操作口 | すべて |
+
+## File Structure Plan
+
+### Directory Structure
+```
+crates/data-grid/
+├── Cargo.toml              # tauri 非依存。依存は document-format と schema-engine のみ
+├── benches/
+│   └── large_grid.rs       # 窓の符号化・並べ替え・絞り込み・貼り付けの計測
+└── src/
+    ├── lib.rs              # 層の鎖の宣言と公開面の再輸出
+    ├── error.rs            # GridError。宣言の誤りと値の不適合を混ぜない
+    ├── types/mod.rs        # CellAddress, CellRange, RowOrdinal, ColumnIndex の再輸出
+    ├── view/mod.rs         # ViewState と RowOrder の導出（並べ替え・絞り込み）
+    ├── view/violations.rs   # 可視行の序数に対する違反の索引。編集の結果で差分更新する
+    ├── edit/mod.rs         # EditCommand とその適用。schema-engine の判定を呼ぶ
+    ├── edit/paste.rs       # 表形式テキストとセル値の相互変換
+    ├── history/mod.rs      # UndoStack。命令と逆命令の対
+    ├── transport/mod.rs    # 窓の二進符号化。64 ビット整数を数値として出さない
+    └── api.rs              # GridSession: 画面 1 枚ぶんの操作口
+
+src-tauri/src/commands/
+└── grid.rs                 # 薄い適応層。ドメイン型 ⇄ 境界用の型の変換はここだけ
+
+crates/app-shell/src/ipc/
+└── grid.rs                 # 境界用の型（ts-rs derive）。他のドメインクレートを参照しない
+
+src/features/grid/
+├── GridScreen.tsx          # 画面本体。SHELL_SCREEN_REGISTRY に 1 件登録される
+├── gridClient.ts           # invokeCommand / invokeRaw の薄いラッパ
+├── windowCache.ts          # 窓の記憶と先読み。破棄の方針を持つ
+├── displayState.ts         # 列幅と表示上の列順のみ。窓の中身を変えない状態
+├── editorRegistry.ts       # 拡張点: 型 -> 入力手段。重複登録を検出する
+├── editors/index.ts        # 組込の入力手段 10 種の登録
+├── editors/*.tsx           # text / number / decimal / bool / date / datetime / enum / ref / nested / any
+├── nestedInspector.tsx     # 入れ子の値の詳細表示と編集
+├── violationBar.tsx        # 違反の総数と次の違反への移動
+├── renderer/port.ts        # 描画層の移植口（インターフェース定義）
+├── renderer/glideAdapter.tsx  # 移植口の Glide Data Grid 実装
+└── renderProbe.ts          # 塗って読み戻す検査とフレーム時間の標本
+```
+
+### Modified Files
+- `Cargo.toml` — `members` に `crates/data-grid` を追加
+- `crates/document-format/src/model/mod.rs` — `remove_rows` / `insert_row_at` を追加（本機能が上流へ加える唯一の変更）
+- `crates/app-shell/src/ipc/command_names.rs` — コマンド名の定数 6 本と `COMMAND_NAMES` への追加
+- `crates/app-shell/src/ipc/mod.rs` — `render_bindings()` の `declarations` に境界用の型を追加
+- `src-tauri/src/commands/mod.rs` — `command_root!` に 6 行追加
+- `src-tauri/permissions/app.toml` — 権限ブロック 6 つと、`app-shell` の集合への所属
+- `src/ipc/bindings.ts` — 生成物。`cargo run -p app-shell --bin generate-bindings` で再生成（手で編集しない）
+- `src/shell/Layout.tsx` — `SHELL_SCREEN_REGISTRY` にグリッド画面を 1 件追加
+- `package.json` — `@glideapps/glide-data-grid` を追加
+- `scripts/ci/` — `check-core-deps.sh data-grid` の段、ベンチ予算への `large_grid/*` の追加、および 3 OS で 10 万行の走査と編集を観測する台本（要件 12.1, 12.4）。**既存の 3 OS 検証マトリクスを拡張し、独立した系統を新設しない**
+
+## System Flows
+
+### 窓の取得と先読み
+
+```mermaid
+sequenceDiagram
+    participant Screen as GridScreen
+    participant Cache as WindowCache
+    participant Cmd as grid_rows_window
+    participant Domain as data-grid transport
+    Screen->>Cache: 可視範囲が変わった
+    Cache->>Cache: 記憶にあるか
+    alt 記憶にある
+        Cache-->>Screen: 直ちに返す
+    else 記憶にない
+        Cache->>Cmd: 生バイトで窓を要求
+        Cmd->>Domain: 行の順序から該当区間を符号化
+        Domain-->>Cmd: 二進の窓
+        Cmd-->>Cache: ArrayBuffer
+        Cache-->>Screen: 復号した窓
+    end
+    Cache->>Cmd: 前後の窓を先読み
+```
+
+先読みの幅と窓の大きさは計測で決める。走査中に記憶が外れたセルは**空白ではなく読み込み中として描く** — 空白は「値なし」と区別がつかないため。
+
+### 編集の適用と判定
+
+```mermaid
+sequenceDiagram
+    participant Screen as GridScreen
+    participant Cmd as grid_apply_edit
+    participant Edit as data-grid edit
+    participant Schema as schema-engine
+    participant Doc as document-session
+    Screen->>Cmd: 編集命令と打たれた文字
+    Cmd->>Edit: EditCommand
+    Edit->>Schema: validate_write with Edit origin
+    Schema-->>Edit: EditVerdict
+    Edit->>Doc: 変更を書き戻す
+    Edit->>Edit: 逆命令を履歴へ積む
+    Edit-->>Cmd: 受理・変換・違反の要約
+    Cmd-->>Screen: 影響範囲と違反の要約
+    Screen->>Screen: 影響範囲の窓の記憶を捨てる
+```
+
+`WriteOrigin::Edit` は**決して拒否しない**（`schema-engine` 要件 6.1）。違反は値を保持したまま報告される。したがってこの流れに「編集の失敗で値が戻る」分岐は存在しない。取り消しは利用者の明示的な指示でのみ起きる。
+
+### 描画成立の検査
+
+```mermaid
+stateDiagram-v2
+    [*] --> 初回描画
+    初回描画 --> 塗って読み戻す
+    塗って読み戻す --> 成立: 画素が一致
+    塗って読み戻す --> 不成立: 画素が不一致または例外
+    不成立 --> 識別できる情報を提示
+    成立 --> フレーム時間の標本
+    フレーム時間の標本 --> 正常
+    フレーム時間の標本 --> 劣化: 中央値が予算を超える
+    劣化 --> 診断へ記録
+```
+
+`app-shell` の要件 10.3 が既に**起動時の描画経路の切り替えと環境変数の判定**を所有する。本機能はその下流で、**グリッド自身が実際に塗れたか**だけを確かめる。WebKit は WebGL のレンダラ文字列を伏せるため、素性を問う手段は使えない（`research.md`）。
+
+## Requirements Traceability
+
+| Requirement | Summary | Components | Interfaces | Flows |
+|-------------|---------|------------|------------|-------|
+| 1.1, 1.2, 1.3, 1.4 | 10 万行の表示と走査、位置の提示、端への直接移動 | WindowCache, RendererPort, GlideAdapter, WindowCodec | `encode_window`, `GridRendererPort.mount` | 窓の取得と先読み |
+| 1.5, 1.6 | 行なし・列なしの提示 | GridScreen, GridSession | `GridOpenResponse.row_count`, `columns` | — |
+| 1.7 | 外部経路の変更を表示へ反映 | WindowCache, GridScreen | `WindowCache.invalidate` | 編集の適用と判定 |
+| 2.1, 2.2, 2.3, 2.4, 2.5, 2.6 | 現在位置・選択・追従・範囲の対象化 | GridScreen, RendererPort | `RendererSpec.onSelectionChange`, `RendererHandle.scrollTo` | — |
+| 3.1, 3.2, 3.8 | 型に応じた入力手段（日時・選択肢・真偽・シート間参照） | EditorRegistry, editors | `CellEditorRegistry.resolve` | — |
+| 3.3, 3.4, 3.5 | 判定への送付、変換の提示、違反値の保持 | EditApply, GridCommands | `EditCommand::SetCells`, `GridEditResponse.coercions` | 編集の適用と判定 |
+| 3.6, 3.7 | 編集の取消、値なしへ戻す | GridScreen, EditApply | `CellEditorProps.cancel` | — |
+| 4.1, 4.2, 4.6 | 違反の区別・理由・解消 | WindowCodec, GridScreen, ViolationBar | 窓の違反札, `GridViolationResponse.reason` | 編集の適用と判定 |
+| 4.3, 4.4, 4.6 | 違反の総数と次の違反への移動、解消の反映 | ViolationIndex, GridSession, ViolationBar | `violation_total`, `find_violation` | 編集の適用と判定 |
+| 4.5 | 入れ子の内側の違反位置 | WindowCodec, NestedInspector | `Violation.path` の写し | — |
+| 5.1, 5.2, 5.3, 5.4, 5.6 | 入れ子の展開・折りたたみ・深さの上限・要素数 | ViewState, GridSession | `ViewState.expansion`, `MAX_EXPANSION_DEPTH` | — |
+| 5.5, 5.7 | 入れ子の詳細表示とその中の編集 | NestedInspector, EditApply | `EditCommand::SetNested` | 編集の適用と判定 |
+| 6.1, 6.2, 6.3, 6.4 | 行の追加・削除・複製と一意違反 | EditApply, document-format の 2 メソッド | `EditCommand::InsertRows/RemoveRows/DuplicateRows` | 編集の適用と判定 |
+| 6.5 | 大量削除の確認 | GridScreen | — | — |
+| 6.6 | 行操作が取り消しの対象 | UndoStack | `UndoStack.push` | — |
+| 7.1, 7.2 | 範囲の複製と外部への受け渡し | PasteCodec, RendererPort | `RendererSpec.onCopy` | — |
+| 7.3, 7.4, 7.5, 7.7 | 貼り付けの判定・行の補充・部分的違反・1 万行 | PasteCodec, EditApply | `EditCommand::PasteRange` | 編集の適用と判定 |
+| 7.6 | 貼り付けが取り消しの 1 操作 | UndoStack | `UndoStack.push` | — |
+| 7.8, 9.9 | メニューとキーボードの双方から実行 | GridScreen, メニュー登録口 | `app-shell` の登録口 | — |
+| 8.1, 8.2 | 列幅と表示上の列順 | DisplayState | `DisplayState.columnWidths/columnOrder` | — |
+| 8.3, 8.4, 8.7 | 並べ替え・絞り込み・隠れた行数 | RowOrder, GridSession | `set_view`, `GridViewResponse` | — |
+| 8.5 | 保存される順序を変更しない | RowOrder | 表示順は `Document` を書き換えない | — |
+| 8.6, 8.9 | 並べ替え・絞り込み中の編集と貼り付け | RowOrder, EditApply | 表示位置ではなく `RowId` で対象を決める | 編集の適用と判定 |
+| 8.8 | 並べ替えの基準列の編集で行が動かない | RowOrder | 順序は明示の指示でのみ再計算する | — |
+| 9.1, 9.2, 9.3, 9.4, 9.5, 9.6 | 取り消しとやり直しの対象・復元・破棄・単位・上限 | UndoStack | `undo`, `redo` | — |
+| 9.7 | 数式とマクロが同じ履歴に加わる | UndoStack | `UndoStack.push` の公開 | — |
+| 9.8 | 取り消し後に対象範囲を見せる | GridScreen, RendererHandle | `scrollTo` | — |
+| 10.1, 10.2, 10.3, 10.4, 10.5, 10.6 | 入力手段の登録簿と既定・重複検出 | EditorRegistry | `CellEditorRegistry` | — |
+| 11.1, 11.2, 11.3, 11.5, 11.6, 11.7 | 応答時間と資源の予算 | WindowCache, WindowCodec, RowOrder | ベンチ `large_grid/*` | 窓の取得と先読み |
+| 11.4 | 1 セルの編集で全件検証しない | EditApply | `validate_columns` に限定して呼ぶ | 編集の適用と判定 |
+| 12.1, 12.4 | 3 OS での走査と編集の成立 | 3 OS 観測の台本 | `scripts/ci/` の段 | — |
+| 12.2, 12.3 | 描画不成立の識別と劣化の記録 | RenderProbe | `probePaint`, `sampleFrameTimes` | 描画成立の検査 |
+
+## Components and Interfaces
+
+| Component | Domain/Layer | Intent | Req Coverage | Key Dependencies | Contracts |
+|-----------|--------------|--------|--------------|------------------|-----------|
+| GridSession | data-grid api | 画面 1 枚ぶんの操作口 | 1, 4, 8, 9 | RowOrder (P0), EditApply (P0), UndoStack (P0) | Service |
+| RowOrder | data-grid view | 並べ替え・絞り込みの結果としての行の順序 | 8 | document-format (P0) | Service, State |
+| EditApply | data-grid edit | 編集命令の適用と判定の依頼 | 3, 5, 6, 7 | schema-engine (P0), document-format (P0) | Service |
+| PasteCodec | data-grid edit | 表形式テキストとセル値の相互変換 | 7 | EditApply (P0) | Service |
+| UndoStack | data-grid history | 取り消し履歴。**拡張点の所有者** | 6, 7, 9 | EditApply (P0) | Service, State |
+| ViolationIndex | data-grid view | 可視行の序数に対する違反の索引。編集で差分更新する | 4 | RowOrder (P0), schema-engine (P0) | Service, State |
+| WindowCodec | data-grid transport | 窓の二進符号化 | 1, 4, 11 | RowOrder (P0) | Batch |
+| GridCommands | src-tauri 適応層 | ドメイン型 ⇄ 境界用の型 | 全体 | data-grid (P0), document-session (P0) | API |
+| WindowCache | frontend | 窓の記憶と先読み | 1, 11 | GridCommands (P0) | State |
+| DisplayState | frontend | 列幅と表示上の列順。窓に影響しない | 8 | — | State |
+| EditorRegistry | frontend | 型 → 入力手段。**拡張点の所有者** | 3, 10 | — | Service |
+| RendererPort | frontend | 描画層の移植口 | 1, 2, 7 | — | Service |
+| GlideAdapter | frontend | 移植口の Glide 実装 | 1, 2, 7 | glide-data-grid (P1) | Service |
+| RenderProbe | frontend | 描画成立の検査 | 12 | — | Service |
+| GridScreen | frontend | 画面本体 | 全体 | 上記すべて (P0) | State |
+| NestedInspector | frontend | 入れ子の詳細表示 | 5 | EditorRegistry (P1) | 要約のみ |
+| ViolationBar | frontend | 違反の総数と移動 | 4 | GridCommands (P1) | 要約のみ |
+
+### data-grid ドメイン
+
+#### GridSession
+
+| Field | Detail |
+|-------|--------|
+| Intent | 画面 1 枚ぶんの操作口。表示状態と履歴を保持する |
+| Requirements | 1.1, 1.3, 1.4, 4.3, 4.4, 8.3, 8.4, 8.7, 9.2, 9.3 |
+
+**Responsibilities & Constraints**
+- シートに対する表示状態（行の順序・違反の索引）と取り消し履歴を所有する
+- **`Document` を所有しない。**呼び出しごとに参照または可変参照を受け取る（所有者は `document-session`）
+- スキーマは開いた時点の `CompiledSchema` を保持する。スキーマが変わったらセッションを作り直す
+
+**Dependencies**
+- Outbound: RowOrder — 行の順序の導出 (P0)
+- Outbound: EditApply — 編集の適用 (P0)
+- Outbound: UndoStack — 履歴 (P0)
+- External: `schema-engine` — 判定と列の情報 (P0)
+
+**Contracts**: Service [x] / API [ ] / Event [ ] / Batch [ ] / State [x]
+
+##### Service Interface
+```rust
+pub struct GridSession { /* view: ViewState, order: RowOrder, history: UndoStack, schema: CompiledSchema */ }
+
+impl GridSession {
+    pub fn open(sheet: SheetId, schema: CompiledSchema) -> Result<Self, GridError>;
+    pub fn columns(&self) -> &[ColumnDescriptor];
+    pub fn visible_row_count(&self) -> usize;
+    pub fn hidden_row_count(&self) -> usize;
+    pub fn violation_total(&self) -> usize;
+
+    pub fn set_view(&mut self, doc: &Document, spec: ViewSpec) -> Result<ViewSummary, GridError>;
+    pub fn encode_window(&self, doc: &Document, span: RowSpan) -> Result<Vec<u8>, GridError>;
+    pub fn apply(&mut self, doc: &mut Document, command: EditCommand) -> Result<EditOutcome, GridError>;
+    pub fn undo(&mut self, doc: &mut Document) -> Result<Option<EditOutcome>, GridError>;
+    pub fn redo(&mut self, doc: &mut Document) -> Result<Option<EditOutcome>, GridError>;
+    pub fn find_violation(&self, from: RowOrdinal, direction: SearchDirection) -> Option<CellAddress>;
+}
+```
+- Preconditions: `schema` は同一シートを `compile` したものであること（列の添字は `Row::values()` に対する位置である）
+- Postconditions: `apply` / `undo` / `redo` は `EditOutcome.affected` に影響を受けた `RowId` を必ず含める
+- Invariants: `set_view` と `encode_window` は `Document` を変更しない
+- Invariants: `violation_total` は `apply` / `undo` / `redo` の直後につねに最新である。**全件検証の再実行ではなく、判定が返した違反との差分で索引を更新する**（要件 11.4 が全件検証を禁じているため）
+
+**Implementation Notes**
+- Integration: `GridCommands` がウィンドウごとに 1 つ保持する。ウィンドウが閉じたら破棄する
+- Validation: `visible_row_count` と `encode_window` の範囲の整合を型で守る（`RowSpan` は可視行の序数で表す）
+- Risks: スキーマ変更時のセッション再作成を忘れると列の添字がずれる。`schema-editor` との継ぎ目として記録する
+
+#### RowOrder
+
+| Field | Detail |
+|-------|--------|
+| Intent | 並べ替えと絞り込みの結果としての行の順序を保持する。**ドキュメントを変更しない** |
+| Requirements | 8.3, 8.4, 8.5, 8.6, 8.7, 8.8, 8.9 |
+
+**Responsibilities & Constraints**
+- `Vec<RowId>`（可視行の順）と、隠された行数だけを持つ
+- **`Document` の行の並びを書き換える経路を持たない。**これが要件 8.5 を構造で満たす根拠である
+- 順序の再計算は `set_view` でのみ起きる。編集では起きない（要件 8.8）
+
+**Contracts**: Service [x] / State [x]
+
+##### Service Interface
+```rust
+pub struct ViewSpec { pub sort: Vec<SortKey>, pub filters: Vec<FilterSpec> }
+pub struct SortKey { pub column: ColumnIndex, pub descending: bool }
+pub enum FilterSpec {
+    Equals { column: ColumnIndex, text: String },
+    Contains { column: ColumnIndex, text: String },
+    IsEmpty { column: ColumnIndex },
+    IsNotEmpty { column: ColumnIndex },
+    HasViolation { column: Option<ColumnIndex> },
+}
+pub struct ViewSummary { pub visible: usize, pub hidden: usize }
+
+impl RowOrder {
+    pub fn recompute(&mut self, doc: &Document, sheet: SheetId, spec: &ViewSpec) -> ViewSummary;
+    pub fn row_at(&self, ordinal: RowOrdinal) -> Option<RowId>;
+    pub fn ordinal_of(&self, row: RowId) -> Option<RowOrdinal>;
+    pub fn span(&self, span: RowSpan) -> &[RowId];
+}
+```
+- Invariants: 同一の `Document` と `ViewSpec` からは常に同一の順序が出る（並べ替えは安定であり、同値の行は `RowId` の順で並ぶ）
+
+**Implementation Notes**
+- Integration: 並べ替えの比較はセルの表示文字列ではなく**値の変種ごとの順序**で行う（数値は数値として比較する）
+- Risks: 10 万行 × 複数の基準列の並べ替えが要件 11 の予算に入るかは計測で確かめる。`benches/large_grid.rs` の対象とする
+
+#### EditApply
+
+| Field | Detail |
+|-------|--------|
+| Intent | 編集命令を適用し、`schema-engine` に判定を依頼する唯一の経路 |
+| Requirements | 3.3, 3.4, 3.5, 3.7, 5.7, 6.1, 6.2, 6.3, 6.4, 7.3, 7.4, 7.5, 11.4 |
+
+**Responsibilities & Constraints**
+- **判定の分岐を持たない。**`validate_write` に `WriteOrigin::Edit` で委ね、返った `EditVerdict` を写すだけである
+- `WriteOrigin::Edit` は決して拒否しない（`schema-engine` 要件 6.1）。したがって「編集が失敗して値が戻る」経路は存在しない
+- 1 セルの編集では `validate_columns` を**当該列に限定して**呼ぶ。全件検証は行わない（要件 11.4）
+- 行の追加は `CompiledSchema::default_row()` を使う（要件 6.1）
+
+**Contracts**: Service [x]
+
+##### Service Interface
+```rust
+pub enum EditCommand {
+    SetCells { cells: Vec<(CellAddress, String)> },
+    SetNested { cell: CellAddress, json: String },
+    InsertRows { at: RowOrdinal, count: usize },
+    RemoveRows { rows: Vec<RowId> },
+    DuplicateRows { rows: Vec<RowId> },
+    PasteRange { anchor: CellAddress, text: String },
+}
+
+pub struct EditOutcome {
+    pub affected: Vec<RowId>,
+    pub coercions: Vec<CoercionNotice>,
+    pub violation_total: usize,
+    pub row_count: usize,
+}
+pub struct CoercionNotice { pub cell: CellAddress, pub before: String, pub after: String }
+```
+- Preconditions: `CellAddress` の列は `CompiledSchema` の範囲内であること
+- Postconditions: 適用後、`UndoStack` に逆命令が 1 つ積まれる
+
+**Implementation Notes**
+- Integration: 打たれた文字は `String` として受け取り、型解釈は `schema-engine` に委ねる。**フロントエンドは値を数値として扱わない**
+- Validation: 一意制約の違反は複製（要件 6.4）と貼り付け（要件 7.5）の双方で「中止せず違反として報告」になる。これは `WriteOrigin::Edit` の性質から自動的に従う
+- Risks: 入れ子の値は `document-format` の `to_json_bytes` / `from_json_bytes` を通す。ここだけ文字列が JSON になる
+
+#### UndoStack（拡張点の所有者）
+
+| Field | Detail |
+|-------|--------|
+| Intent | 取り消し履歴。`formula-engine` と `macro-runtime` が後から同じ履歴に加わる |
+| Requirements | 6.6, 7.6, 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7 |
+
+**Responsibilities & Constraints**
+- 命令と**逆命令の対**を積む。逆命令は適用時に生成する（適用後には作れないため）
+- 履歴は**ドキュメント単位**であり、シートごとではない（要件 9.5）。`macro-runtime` の実行が複数シートに跨るため
+- 上限を持ち、超えたら古い側から捨てる（要件 9.6）
+- **公開する登録口は `push` 1 つ**に絞る。乗る側が履歴の内部構造に触れない
+
+**Contracts**: Service [x] / State [x]
+
+##### Service Interface
+```rust
+pub struct UndoStack { /* entries: VecDeque<UndoEntry>, cursor: usize, limit: usize */ }
+pub struct UndoEntry { pub label: UndoLabel, pub inverse: EditCommand, pub redo: EditCommand }
+pub enum UndoLabel { CellEdit, RowInsert, RowRemove, RowDuplicate, Paste, Recalculation, MacroRun }
+
+impl UndoStack {
+    pub fn new(limit: usize) -> Self;
+    pub fn push(&mut self, entry: UndoEntry);
+    pub fn undo(&mut self) -> Option<&EditCommand>;
+    pub fn redo(&mut self) -> Option<&EditCommand>;
+    pub fn depth(&self) -> usize;
+}
+```
+- Invariants: `push` は `cursor` 以降のやり直し対象を破棄する（要件 9.4）
+
+**Implementation Notes**
+- Integration: `UndoLabel::Recalculation` と `MacroRun` は本機能では生成されない。**後続スペックのために先に場所を空けてある**（拡張点は所有者が形を決める、`structure.md`）
+- Risks: 行の削除の逆命令は取り除いた行の値と `RowId` と位置を保持する必要がある。`document-format::remove_rows` が `Vec<Row>` を返す理由がこれである
+
+#### WindowCodec
+
+| Field | Detail |
+|-------|--------|
+| Intent | 可視範囲の行を、境界を越えられる二進形式へ符号化する |
+| Requirements | 1.1, 1.2, 4.1, 4.5, 11.2, 11.6 |
+
+**Responsibilities & Constraints**
+- **64 ビット整数と ULID を数値として出さない。**セルは表示文字列・変種の札・違反の有無で表す
+- 窓は可視行の序数の区間で指定する。絞り込み後の序数であり、`Document` の物理位置ではない
+
+**Contracts**: Batch [x]
+
+##### Batch / Job Contract
+- Trigger: `grid_rows_window` コマンド（生バイト経路）
+- Input: 要求の頭（シート・開始序数・行数・世代）を含む二進の引数 1 つ
+- Output: 二進の窓。`application/octet-stream` として返る
+- Idempotency & recovery: 同じ世代・同じ区間の要求は常に同じ結果を返す。世代が古い要求は**空の窓**を返し、呼び出し側が再要求する
+
+**Implementation Notes**
+- Integration: 生バイト経路は封筒を運べないため、**失敗は空の窓で表す**（`bulk_echo` が確立した規律と同じ）
+- Risks: 符号化の費用が要件 11.2 の 1 秒に入るかを計測する。`benches/large_grid.rs` の対象とする
+
+### 適応層とフロントエンド
+
+#### GridCommands
+
+| Field | Detail |
+|-------|--------|
+| Intent | ドメイン型と境界用の型の変換を行う唯一の場所 |
+| Requirements | 全体 |
+
+**Contracts**: API [x]
+
+##### API Contract
+| Command | Request | Response | 経路 |
+|---------|---------|----------|------|
+| `grid_open_sheet` | `GridOpenRequest` | `GridOpenResponse` | 封筒 |
+| `grid_set_view` | `GridViewRequest` | `GridViewResponse` | 封筒 |
+| `grid_rows_window` | 二進の引数 1 つ | 二進の窓 | **生バイト** |
+| `grid_apply_edit` | `GridEditRequest` | `GridEditResponse` | 封筒 |
+| `grid_history` | `GridHistoryRequest` | `GridEditResponse` | 封筒 |
+| `grid_find_violation` | `GridViolationRequest` | `GridViolationResponse` | 封筒 |
+
+**Implementation Notes**
+- Integration: コマンド名は `command_names.rs` の定数。権限ブロック 6 つと `app-shell` の集合への所属を同時に足す（片方だけでは**ビルド時に静かに削除される**）
+- Validation: `scripts/check-command-acl.sh` が登録 ⊆ 許可を固定する。`src/ipc/client.ts` の `RawCommandName` に `grid_rows_window` を加える
+- Risks: 境界用の型は `crates/app-shell/src/ipc/grid.rs` に置く（ts-rs の derive が許される唯一の場所）。この型は**他のドメインクレートを参照してはならない**ため、すべて文字列と 32 ビット以下の整数で構成する
+
+#### EditorRegistry（拡張点の所有者）
+
+| Field | Detail |
+|-------|--------|
+| Intent | 型と入力手段の対応表。`custom-types` が登録する |
+| Requirements | 3.1, 3.2, 3.8, 10.1, 10.2, 10.3, 10.4, 10.5, 10.6 |
+
+**Contracts**: Service [x]
+
+##### Service Interface
+```typescript
+export type TypeKindTag =
+  | "Int" | "Float" | "Decimal" | "Text" | "Bool" | "Date" | "DateTime"
+  | "Enum" | "Ref" | "Attachment" | "Object" | "Array" | "Any" | "Custom";
+
+export interface CellEditorProps {
+  readonly initialText: string;
+  readonly constraints: ColumnConstraints;
+  readonly commit: (text: string) => void;
+  readonly cancel: () => void;
+}
+
+export interface CellEditorRegistration {
+  readonly kind: TypeKindTag;
+  readonly customTypeId?: string;
+  readonly component: ComponentType<CellEditorProps>;
+}
+
+export interface CellEditorRegistry {
+  register(registration: CellEditorRegistration): void;
+  resolve(kind: TypeKindTag, customTypeId?: string): ComponentType<CellEditorProps>;
+}
+```
+- Preconditions: `kind` が `"Custom"` のときのみ `customTypeId` を伴う
+- Postconditions: `resolve` は必ず成分を返す。未登録は既定の文字入力へ落ちる（要件 10.4）
+- Invariants: 同一の鍵への重複登録は `register` が投げる（要件 10.6）
+
+**Implementation Notes**
+- Integration: 組込の 10 種は `editors/index.ts` が登録する。**グリッド側に型ごとの分岐を書かない**（要件 10.3、`structure.md`「拡張点は所有者と実装者を分ける」）
+- Risks: `TypeKindTag` は `schema-engine` の `TypeKind::ALL`（14 種）と対応する。片方が増えたときに気づけるよう、生成された境界用の型から導く
+
+#### RendererPort と GlideAdapter
+
+| Field | Detail |
+|-------|--------|
+| Intent | 描画・当たり判定・文字計測・クリップボードの配管だけを担う移植口とその実装 |
+| Requirements | 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4, 7.1, 7.2 |
+
+**Responsibilities & Constraints**
+- 移植口は**描画と入力の受け渡しだけ**を扱う。編集の意味論・判定・履歴を知らない
+- 実装は `@glideapps/glide-data-grid` `6.0.4-alpha24`。**stable 6.0.3 は React 19 を受け付けない**ため版を固定する
+
+**Dependencies**
+- External: `@glideapps/glide-data-grid` — canvas の描画基盤 (P1)
+
+**Contracts**: Service [x]
+
+##### Service Interface
+```typescript
+export interface RenderCell {
+  readonly text: string;
+  readonly variant: TypeKindTag;
+  readonly violated: boolean;
+  readonly loading: boolean;
+}
+
+export interface RendererSpec {
+  readonly columns: readonly RenderColumn[];
+  readonly rowCount: number;
+  readonly getCell: (position: CellPosition) => RenderCell;
+  readonly onSelectionChange: (range: CellRange | null) => void;
+  readonly onActivateEditor: (position: CellPosition) => void;
+  readonly onColumnResize: (column: number, width: number) => void;
+  readonly onColumnMove: (from: number, to: number) => void;
+  readonly onCopy: (range: CellRange) => Promise<string>;
+  readonly onPaste: (anchor: CellPosition, text: string) => Promise<void>;
+}
+
+export interface RendererHandle {
+  readonly scrollTo: (position: CellPosition) => void;
+  readonly invalidate: (span: RowSpan) => void;
+  readonly destroy: () => void;
+}
+
+export interface GridRendererPort {
+  mount(container: HTMLElement, spec: RendererSpec): RendererHandle;
+}
+```
+- Invariants: `getCell` は**同期であり例外を投げない**。未取得の行は `loading: true` を返す
+
+**Implementation Notes**
+- Integration: Glide の `getCellContent` は引きに来る形であり、窓単位の記憶とそのまま噛み合う。並べ替えと絞り込みは Glide が持たないが、本設計ではいずれも Rust 側にあるため欠点にならない
+- Risks: **上流が止まっている**（stable は 2024-02、最終コミットは 2026-01）。MIT なので取り込みは合法であり、移植口が触る面を小さく保つことで退路を確保する。**タスク最初期の実測で毎秒 60 回に届かない場合、同じ移植口の背後に自前 canvas を置く**
+
+#### WindowCache
+
+| Field | Detail |
+|-------|--------|
+| Intent | 窓の記憶と先読み。`getCell` の同期契約を満たす |
+| Requirements | 1.1, 1.4, 1.7, 11.1, 11.2, 11.6 |
+
+**Contracts**: State [x]
+
+##### State Management
+- State model: 序数の区間を鍵とする窓の表と、現在の世代
+- Persistence & consistency: 記憶は画面に閉じる。`EditOutcome.affected` を受けて該当する窓を捨てる（要件 1.7）
+- Concurrency strategy: 同じ区間への要求は 1 本にまとめる。世代が変わった応答は捨てる
+
+**Implementation Notes**
+- Integration: 走査方向を見て前後の窓を先読みする。幅は計測で決める
+- Risks: 先読みが外れると走査が引っかかる。フレーム時間の標本を `RenderProbe` と共用して監視する
+
+#### RenderProbe
+
+| Field | Detail |
+|-------|--------|
+| Intent | グリッド自身が実際に塗れたかを確かめる |
+| Requirements | 12.2, 12.3 |
+
+**Contracts**: Service [x]
+
+##### Service Interface
+```typescript
+export interface RenderProbeResult {
+  readonly painted: boolean;
+  readonly medianFrameMs: number | null;
+}
+export function probePaint(canvas: HTMLCanvasElement): boolean;
+export function sampleFrameTimes(durationMs: number): Promise<number>;
+```
+
+**Implementation Notes**
+- Integration: 既知の図形を塗って 1 画素を読み戻す。これが「DOM はあるが何も塗られない」症状を捕まえる唯一の実用的な手段である（`research.md`）
+- Validation: **WebGL の素性を問う手段は使わない。**WebKit が指紋対策でレンダラ文字列を伏せるため、本製品の Linux と macOS では機能しない
+- Risks: `app-shell` の要件 10.3 が起動時の経路切り替えを既に所有する。**本機能はそこへ踏み込まず**、グリッドの描画結果だけを見る
+
+#### GridScreen / NestedInspector / ViolationBar（要約）
+
+- **GridScreen**: `ScreenProps` だけを受け取り、`SHELL_SCREEN_REGISTRY` に 1 件登録される。**`ScreenBoundary` はイベントハンドラと非同期の失敗を捕まえない**ため、IPC の失敗・キーボード操作の失敗は画面内の状態として扱う。配色は `var(--jxcel-*)` の 10 本のみを参照する。要件 6.5 の確認、要件 9.8 の移動、要件 7.8・9.9 のメニュー登録をここが持つ
+- **NestedInspector**: 入れ子の値の構造を各フィールドの型とともに示し、その中の編集を `EditCommand::SetNested` へ流す（要件 5.5, 5.7）
+- **ViolationBar**: 違反の総数を示し、次の違反へ移動させる（要件 4.3, 4.4）
+
+## Data Models
+
+### 窓の二進形式
+
+自己記述的で、前方から 1 回の走査で復号できる形とする。**数値としての値を一切含まない**。
+
+| 位置 | 内容 |
+|---|---|
+| 頭 | 版・世代・開始序数・行数・列数 |
+| 行ごと | `RowId` の生 16 バイト |
+| セルごと | 変種の札（1 バイト）・違反の有無（1 バイト）・表示文字列の長さ・UTF-8 の本体 |
+
+- `CellValue::Int(i64)` と `Decimal` は**表示文字列**として運ぶ。JS の数値へ変換しない
+- `RowId` は 16 バイトのまま運び、フロントエンドでは不透明な鍵として扱う
+- 入れ子の値は要約文字列（要素数など、要件 5.6）を運び、構造そのものは詳細表示の要求時に JSON として別途取得する
+
+### 表示状態（ドキュメントに保存されない）
+
+表示状態は**窓の中身を変えるか否か**で 2 つに割り、二重所有を作らない。
+
+```rust
+// Rust 側（窓の中身を決めるもの）
+pub struct ViewState {
+    pub spec: ViewSpec,                       // 並べ替えと絞り込み。可視の行集合を決める
+    pub expansion: Vec<ExpansionState>,       // 展開。窓が運ぶ列の数を決める
+}
+pub struct ExpansionState { pub column: ColumnIndex, pub expanded: bool, pub depth: u8 }
+pub const MAX_EXPANSION_DEPTH: u8 = 3;        // 要件 5.4
+```
+
+```typescript
+// フロントエンド側（窓の中身を一切変えないもの）
+export interface DisplayState {
+  readonly columnWidths: ReadonlyMap<number, number>;   // 要件 8.1
+  readonly columnOrder: readonly number[];              // 要件 8.2。描画時の並べ替えのみ
+}
+```
+
+**割り方の根拠**: 並べ替え・絞り込み・展開は**窓が運ぶ行と列を変える**ため Rust 側になければ符号化できない。列幅と表示上の列順は窓の内容を一切変えないため、境界を越える理由がない。この線引きにより、同じ状態を 2 か所が持つ形を避けている。
+
+**`ViewState` からも `DisplayState` からも `Document` へ到達する経路は存在しない。**要件 8.5 はこの構造で満たされる。
+
+### 編集命令と逆命令の対応
+
+| 命令 | 逆命令 | 逆命令が保持するもの |
+|---|---|---|
+| `SetCells` | `SetCells` | 変更前の表示文字列 |
+| `SetNested` | `SetNested` | 変更前の JSON |
+| `InsertRows` | `RemoveRows` | 追加された `RowId` |
+| `RemoveRows` | 復元用の内部命令 | 取り除いた `Row` の値・`RowId`・位置 |
+| `DuplicateRows` | `RemoveRows` | 追加された `RowId` |
+| `PasteRange` | `SetCells` + `RemoveRows` | 変更前の値と、補充された行の `RowId` |
+
+## Error Handling
+
+### Error Strategy
+
+`structure.md` の規律に従い、**「宣言・入力が壊れている」と「値が合わない」を別の型にする**。前者は処理を止め、後者は止めない。
+
+```rust
+pub enum GridError {
+    SchemaUnusable { sheet: SheetId },        // セッションを開けない
+    UnknownRow { row: RowId },
+    ColumnOutOfRange { column: ColumnIndex, count: usize },
+    SpanOutOfRange { span: RowSpan, visible: usize },
+    NestedDecode { cell: CellAddress },
+}
+```
+**値の不適合は `GridError` に含まれない。**違反は `schema-engine` の `Violation` として運ばれ、処理を止めない。
+
+### Error Categories and Responses
+
+| 種別 | 例 | 応答 |
+|---|---|---|
+| 利用者の入力 | 型に合わない値 | **誤りではない。**値を保持し違反として提示する（要件 3.5） |
+| 操作の誤り | 範囲外の窓の要求 | `GridError` を封筒の失敗腕で返す。画面は再要求する |
+| 経路の失敗 | IPC の不達、生バイト経路の空の窓 | 画面内の状態として扱い、読み込み中のまま再試行する。**`ScreenBoundary` は捕まえない** |
+| 描画の不成立 | 何も塗られない | 識別できる情報を提示する（要件 12.2） |
+| 描画の劣化 | フレーム時間の中央値が予算超過 | 診断へ記録する（要件 12.3） |
+
+### Monitoring
+- 描画の劣化と窓の取得失敗は `app-shell` の診断へ記録する。**新しい記録の仕組みを作らない**
+
+## Testing Strategy
+
+### Unit Tests
+- `RowOrder`: 同一の `Document` と `ViewSpec` から常に同一の順序が出ること。同値の行が `RowId` の順に並ぶこと（8.3, 8.5）
+- `UndoStack`: 各命令の逆命令が元の状態を復元すること。とくに `RemoveRows` の往復（6.6, 9.2）
+- `PasteCodec`: 表形式テキストの解釈と、行と列の区切りを含む値の往復（7.2, 7.3）
+- `WindowCodec`: 符号化と復号の往復。`Int` と `Decimal` が文字列のまま保たれること（11.6）
+- `EditApply`: 1 セルの編集で `validate_columns` が当該列のみに呼ばれること。**呼び出し回数を数えて固定する**（11.4）
+
+### Integration Tests
+- 編集 → 判定 → 履歴 → 窓の無効化が 1 つの流れとして成立すること（3.3, 9.1, 1.7）
+- 絞り込み中の編集が、画面上の位置ではなく `RowId` の行へ届くこと（8.6）
+- 絞り込み中の複数行の貼り付けが、表示されている行にのみ及ぶこと（8.9）
+- 複製で一意制約に重複が生じたとき、複製が成立したうえで違反が報告されること（6.4）
+- 並べ替えの基準列を編集しても順序が再計算されないこと（8.8）
+
+### E2E/UI Tests
+- 10 万行のシートを開き、末尾へ移動し、セルを編集し、取り消して戻すまでを実際に起動して観測する（1.4, 3.3, 9.2, 12.1）
+- 1 万行を貼り付け、違反の件数が提示され、1 回の取り消しで戻ること（7.5, 7.6）
+- 違反の総数から次の違反へ移動し、表示範囲外の違反に到達すること（4.3, 4.4）
+- 入れ子の列を展開・折りたたみ、詳細表示から編集できること（5.1, 5.2, 5.5）
+
+### Performance/Load
+- `large_grid/encode_window` — 可視 1 窓の符号化
+- `large_grid/recompute_order` — 10 万行 × 2 基準列の並べ替えと絞り込み
+- `large_grid/paste_10k` — 1 万行の貼り付け（要件 7.7, 11.5）
+- 走査中のフレーム時間の中央値（要件 11.1）— 実画面の観測として `scripts/ci/` に置く
+
+## Performance & Scalability
+
+| 対象 | 予算 | 要件 | 判定の場 |
+|---|---|---|---|
+| 走査中の描画更新 | 毎秒 60 回 | 11.1 | 実画面の観測（3 OS） |
+| 最初の画面 | 1 秒 | 11.2 | 実画面の観測 |
+| 編集の反映 | 100 ミリ秒 | 11.3 | 実画面の観測 |
+| 1 万行の貼り付け | 3 秒 | 11.5 | `large_grid/paste_10k` |
+| 表示のための資源 | 行数に比例しない | 11.6 | 窓の記憶の上限を固定し、10 倍の行数で比較する |
+
+- 予算は**要件値で判定し、CI ランナーの遅さを理由に緩めない**（`verification.md`「ランナーの扱い」）
+- **計測が無い状態で予算ゲートだけ先に結線しない。**結線は計測を入れるタスクが行う（`structure.md`）
+- `schema-engine` の実測（全件 255 ミリ秒 / 1 列 31 ミリ秒）は本機能の予算の**内側で既に使われている**。編集のたびに全件検証を呼ばないこと（要件 11.4）が予算成立の前提である
