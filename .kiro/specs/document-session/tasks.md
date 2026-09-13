@@ -87,7 +87,7 @@
   - _Requirements: 1.4, 3.1_
 
 - [ ] 3. Integration: 適応層と境界
-- [ ] 3.1 境界用の型を定義し、生成物を更新する
+- [x] 3.1 境界用の型を定義し、生成物を更新する
   - ドキュメントの名前・出所・未保存・シートの一覧（識別子は文字列、件数は 32 ビット以下）を境界用の型として定義する
   - 状態（保持していない / 保持している / 読み込めなかった理由）と、保存の結果・新規作成の結果を判別可能な合併型として定義する
   - **位置（`PathBuf`）を境界へ出さない。**名前はファイル名のみとする
@@ -226,3 +226,4 @@
 - **2.3**: 型名は crate 可視の `Sessions`（公開面の `DocumentSessions` は 2.5 が作る）。**同時要求の同一性テストはスピン門（`AtomicUsize` + `AtomicBool`）で揃える** — レビューの `Barrier` 案はこの環境で退行の検出が 8/10 だった（起床遅延で取り逃す）。スピン門は検出 10/10・誤検出 0/10（実測はテストのコメントに残した）。`forget` の「表のロック外で Drop」は正しいが**現行の型では観測できない**（コメントで固定）。**他方のウィンドウの未保存の観測は 2.4 の受入**（`unsaved` を立てる経路が 2.3 に無いため）。
 - **2.4**: `change::edit` は **1 つの Guard の生存範囲で「判定 → 閉包 → 記録」を行う**（`Slot::lock_for_change` で Guard を取り、`Slot::record_edit(&guard, value)` が Guard を型で要求する）。ただし**「同じ Guard であること」は型では強制されない**（Guard を取り直す変異はコンパイルが通り、レビューの変異 B がそれを実証した）— 担保は**コードの形状**であり、その旨を doc に明記した。**`Slot::with_document_mut` は production 未使用**（記録しない貸出口であり、使うと要件 4.1 の抜け道になる）。タスク 2.5 が削除か `#[cfg(test)]` 化を決める。**このツールチェーンに `cargo fmt` は無く、整形は親の `qlty fmt` が担う**。
 - **2.5**: 公開面は `lib.rs` の trait `DocumentSessionsApi`（11 メソッド）と具象 `DocumentSessions`（オブジェクト安全でない旨を doc に明記）。**セッションを作るのは `resolve` / `attach` / `create` の 3 つだけ**であることは、**根の名前の統合テストでは検出できない**（未解決の `Slot` と不在は根から区別できない）— そのため `lib.rs` の内部テストで私有の表を直接観測する（変異 M1/M2/M3 で落ちることを実測）。`with_document_mut`（記録しない可変貸出）は **`#[cfg(test)]` に閉じた**（production の可変経路は `change::edit` ただ 1 つ）。`#[allow(dead_code)]` の seam はすべて除去。
+- **3.1**: 境界の判別可能な合併型は**既存 3 つ（`IpcResult` / `WindowCloseVerdict` / `DocumentPickOutcome`）と同じ内部タグ + PascalCase** に揃えた（`DocumentSessionStatus` は `state` タグで `"Absent"` / `"Open"` / `"Unavailable"`。`DocumentOrigin` だけは既存に合わせて小文字の値を持つ）。**doc に生成物の実際の綴りを書くこと**（「小文字」と誤記するとフロントエンドが `case "absent"` と書いて絞り込みが静かに効かなくなる）。生成物の正例テスト（`bindings_declare_the_document_surface`）を足した — ドリフト検査だけでは「宣言を消して再生成」を取り逃す。
