@@ -17,6 +17,7 @@ import { createRoot } from "react-dom/client";
 import { installCloseVeto } from "./shell/closeVeto";
 import { Layout } from "./shell/Layout";
 import { installRenderHeartbeat } from "./shell/renderHeartbeat";
+import { installSessionClosePrompt } from "./shell/sessionClose";
 import { bootstrapAppearance } from "./shell/theme";
 
 // `src/index.html` のマウント先。欠けたまま起動すると無内容のウィンドウが残るため、
@@ -32,6 +33,13 @@ if (container === null) {
 // 可否を問い合わせ、許可されたときだけ `destroy()` で閉じる。
 // `installCloseVeto` は例外を投げない（登録に失敗した場合はウィンドウは通常どおり閉じる）。
 void installCloseVeto();
+
+// 終了前の問い（要件 6.2〜6.7、タスク 4.2）。差し替え口は拒否の受け取り手を 1 つだけ持ち、
+// **これを入れない限り既定の記録のみが働く**（提示は始まらない）。入れても `closeVeto` の判定経路は
+// 変わらない — 同じ往復であり、拒否の材料の置き場所が増えるだけである（`closeVeto` の
+// モジュール doc「拒否の提示の差し替え口」）。**ハンドラは拒否のたびに引かれる**ので、
+// 上の購読の設置（`installCloseVeto`）との前後は結果を変えない。
+installSessionClosePrompt();
 
 // 初回描画のハートビートの送信側（要件 10.1、10.2。タスク 8.2）は、**起動時の await を
 // すべて終えてから、マウントの直前に 1 回だけ仕掛ける**（下の `mountShell` の最後）。待つ前に

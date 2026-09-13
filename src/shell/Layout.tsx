@@ -137,6 +137,7 @@ import {
   TableSmoke,
 } from "../features/smoke/TableSmoke";
 import { resolveVerificationInitialScreen } from "./verificationScreen";
+import { SessionClosePrompt } from "./sessionClose";
 
 /**
  * 1.4 が置いた初期画面（`InitialScreen`）の識別子。**9.6 以降は既定で表示される画面ではない**
@@ -481,6 +482,17 @@ export function Layout(): ReactElement {
           />
         </span>
       </header>
+
+      {/*
+        終了前の問い（要件 6.2、タスク 4.2）。**シェルのクロームに 1 点だけ載せる** —
+        `ShellRegion` の中には置かない。画面の契約（`ScreenProps` だけを受け、自前の
+        レイアウトを持たない）に触れないためであり、提示はどの画面が表示されていても同じ
+        位置に出る必要があるためである（design.md「SessionClosePrompt」）。
+
+        提示の中身と配色は `./sessionClose` が持ち、本ファイルは置き場所だけを決める。
+        配色は `var(--jxcel-…)`（`./theme`）に従う。
+      */}
+      <SessionClosePrompt />
 
       <ShellRegion
         screen={router.current}
