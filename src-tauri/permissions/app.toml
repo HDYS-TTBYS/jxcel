@@ -87,7 +87,27 @@ identifier = "allow-window-document-state"
 description = "呼び出し元ウィンドウにドキュメントが関連付けられているかを返すコマンド（window_document_state）を許可する。呼び出し元ウィンドウは基盤が注入する引数から取るためフロントエンドはウィンドウを偽装できず、返るのは関連付けの有無だけでパスは境界を越えない（要件 2.1、2.2、4.6）。"
 commands.allow = ["window_document_state"]
 
+[[permission]]
+identifier = "allow-document-state"
+description = "呼び出し元ウィンドウのドキュメントのセッションの状態（名前・出所・未保存・シートの一覧）を返すコマンド（document_state）を許可する。呼び出し元ウィンドウは基盤が注入する引数から取るため偽装できず、名前はファイル名のみで位置は境界を越えない（要件 1.6、1.7、2.1、4.6）。"
+commands.allow = ["document_state"]
+
+[[permission]]
+identifier = "allow-document-save"
+description = "呼び出し元ウィンドウのドキュメントを保存するコマンド（document_save）を許可する。出所を持たない文書の保存先は提示の内側で決まり、選ばれた位置は応答へ含まれない（要件 5.1〜5.4）。"
+commands.allow = ["document_save"]
+
+[[permission]]
+identifier = "allow-document-new"
+description = "呼び出し元ウィンドウに新しいドキュメントを用意するコマンド（document_new）を許可する。未保存の変更があるときは拒否し、その理由を成功腕で返す（要件 7.1〜7.4）。"
+commands.allow = ["document_new"]
+
+[[permission]]
+identifier = "allow-document-discard"
+description = "呼び出し元ウィンドウの未保存の印を落とすコマンド（document_discard）を許可する。保存は行わず、利用者の明示の指示（変更を破棄して閉じる）によってだけ呼ばれる（要件 6.5）。"
+commands.allow = ["document_discard"]
+
 [[set]]
 identifier = "app-shell"
 description = "app-shell が登録する自前コマンドの集合。capability はこの集合名だけを参照する。ファイルシステム系・シェル系の権限はここにも含めない（要件 4.7）。"
-permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file", "allow-render-heartbeat", "allow-diagnostics-log-location", "allow-diagnostics-export", "allow-diagnostics-verbosity-get", "allow-diagnostics-verbosity-set", "allow-window-document-state"]
+permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file", "allow-render-heartbeat", "allow-diagnostics-log-location", "allow-diagnostics-export", "allow-diagnostics-verbosity-get", "allow-diagnostics-verbosity-set", "allow-window-document-state", "allow-document-state", "allow-document-save", "allow-document-new", "allow-document-discard"]

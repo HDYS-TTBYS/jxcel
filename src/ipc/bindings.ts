@@ -22,6 +22,10 @@ export const COMMAND_NAMES = [
   "diagnostics_verbosity_get",
   "diagnostics_verbosity_set",
   "window_document_state",
+  "document_state",
+  "document_save",
+  "document_new",
+  "document_discard",
 ] as const;
 
 /**

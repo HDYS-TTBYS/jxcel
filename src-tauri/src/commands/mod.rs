@@ -116,6 +116,10 @@ command_root! {
     command_names::DIAGNOSTICS_VERBOSITY_GET => diagnostics_cmds::diagnostics_verbosity_get,
     command_names::DIAGNOSTICS_VERBOSITY_SET => diagnostics_cmds::diagnostics_verbosity_set,
     command_names::WINDOW_DOCUMENT_STATE => crate::window::association::window_document_state,
+    command_names::DOCUMENT_STATE => crate::session::commands::document_state,
+    command_names::DOCUMENT_SAVE => crate::session::commands::document_save,
+    command_names::DOCUMENT_NEW => crate::session::commands::document_new,
+    command_names::DOCUMENT_DISCARD => crate::session::commands::document_discard,
 }
 
 #[cfg(test)]

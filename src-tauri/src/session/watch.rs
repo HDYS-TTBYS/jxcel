@@ -166,9 +166,10 @@ impl WindowDestroyWatch {
     }
 
     /// 生成要求（あれば）からセッションを確定させる（`document_state` の入口。要件 1.2）。
-    // 3.4 の `document_state` がこの入口を呼ぶまでの seam（`ports.rs` の契約と同じ扱い）。
-    // 表を直接触らせないために本型に置いており、削除すると 3.4 が購読を伴わない経路を作る。
-    #[allow(dead_code)]
+    ///
+    /// **冪等**である（コアの契約）— 解決済み・覚えた失敗のどちらでも読み込みは起きない。
+    /// `document_state` は「状態が変わったか」をこの入口の前後の写しで判定するので、2 度目の
+    /// 問い合わせではイベントが送られない（`session/commands.rs`）。
     pub fn resolve(
         &self,
         window: &WindowLabel,
@@ -192,8 +193,9 @@ impl WindowDestroyWatch {
     }
 
     /// 行も列も無いシートを 1 つ持つドキュメントを用意する（要件 7.1）。
-    // 3.4 の `document_new` がこの入口を呼ぶまでの seam（`resolve` と同じ扱い）。
-    #[allow(dead_code)]
+    ///
+    /// 未保存の変更があればコアが拒否し、理由つきの失敗を返す（`document_new` が境界の
+    /// `Refused` へ写す。要件 7.3）。
     pub fn create(&self, window: &WindowLabel) -> Result<(), SessionError> {
         if !self.register(window) {
             return Err(SessionError::NoDocument);
@@ -206,12 +208,10 @@ impl WindowDestroyWatch {
     /// 戻り値は「手放したか」。ウィンドウが引けるときは**何もしない**（`false`）— 生存の確認と
     /// 登録を分けると、まだ生きているウィンドウのセッションを落としかねない。
     ///
-    /// 適応層の入口（3.4 の `document_state` など）が、ラベルのウィンドウを引けなかったときに
-    /// 呼ぶ。破棄の通知が失われていても、次の入口で必ず落ちる（design.md の Risks）。
-    // 3.4 のコマンド（状態の問い合わせなど、セッションを作らない入口）がこの経路を呼ぶまでの
-    // seam。`ports.rs` の `#[allow(dead_code)]` 付きの契約と同じ扱いである — **本番の入口が
-    // 現れるまでの未使用**であり、削除すると 3.4 が掃除の経路を持てなくなる。
-    #[allow(dead_code)]
+    /// 適応層の入口（`document_state`）が、ラベルのウィンドウを引けなかったときに呼ぶ。破棄の
+    /// 通知が失われていても、次の入口で必ず落ちる（design.md の Risks）。
+    ///
+    /// **引けるウィンドウには何もしない**ので、`document_state` は無条件に呼べる。
     pub fn forget_unresolvable(&self, window: &WindowLabel) -> bool {
         if self.events.has_window(window) {
             return false;

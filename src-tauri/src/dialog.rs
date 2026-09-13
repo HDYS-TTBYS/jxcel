@@ -65,16 +65,14 @@
 //! のとおりであり、保存の動作でも同じ 3 つの理由（fs プラグインの非 optional 依存・Linux で
 //! 親が無視されること・ポータルの別プロセス）がそのまま効く。
 //!
-//! # 保存先の選択は 3.4 の `document_save` まで呼び出し元が無い（seam）
+//! # 保存先の選択の呼び出し元は `document_save` である
 //!
-//! **本節の項目はすべて `#[allow(dead_code)]` を付けて置いてある。** 保存先の提示の生産側の
-//! 呼び出し元はタスク 3.4 の `document_save`（出所を持たない文書の保存で [`pick_save_location`]
-//! を呼び、`Chosen` ならコアの `save_to` へ渡す）であり、**3.4 はこの節の `allow` をすべて
-//! 外す**こと（`ports.rs` / `session/watch.rs` の seam と同じ扱い）。
-//!
-//! **暫定の呼び出し元を発明しない。** 呼び出し元を 1 つ作るにはコマンドの登録（3.4 の 5 点
-//! セット = 名前・ハンドラ・登録・権限・生成物）が要り、それをここで行うと 3.4 の担当を
-//! 先取りすることになる。本タスクは**提示の口を 1 つ足すだけ**に留め、配線は 3.4 に残す。
+//! 保存先の提示の生産側の呼び出し元は [`document_save`](crate::session::commands::document_save)
+//! であり、出所を持たない文書の保存で [`pick_save_location`] を呼び、`Chosen` ならコアの
+//! `save_to` へ渡す。**呼び出しは `spawn_blocking` のスレッドの内側で完結し、選ばれた位置が
+//! 応答へ写ることはない**（位置は境界を越えない）。3.5 がこの節へ付けていた
+//! `#[allow(dead_code)]` の seam は 3.4 の配線で解消した（`ports.rs` / `session/watch.rs` の
+//! seam と同じ扱い）。
 //!
 //! # 実行モデル（ブロックする選択をイベントループのスレッドで走らせない）
 //!
@@ -138,17 +136,14 @@ use crate::ports::DocumentHostPort;
 const TITLE: &str = "ドキュメントを開く";
 
 /// 保存先の選択の題名。
-#[allow(dead_code)] // 3.4 の `document_save` が `pick_save_location` を呼ぶまでの seam。
 const SAVE_TITLE: &str = "名前を付けて保存";
 
 /// 保存先の選択の承認の操作の表示名（GTK の選択器でのみ使う）。
 #[cfg(target_os = "linux")]
-#[allow(dead_code)] // 3.4 の `document_save` が `pick_save_location` を呼ぶまでの seam。
 const SAVE_ACCEPT_LABEL: &str = "保存";
 
 /// 保存先の選択の取り消しの操作の表示名（GTK の選択器でのみ使う）。
 #[cfg(target_os = "linux")]
-#[allow(dead_code)] // 3.4 の `document_save` が `pick_save_location` を呼ぶまでの seam。
 const SAVE_CANCEL_LABEL: &str = "キャンセル";
 
 /// 出所を持たないドキュメントに与える既定の提案名（design.md「DialogGate」の
@@ -159,7 +154,6 @@ const SAVE_CANCEL_LABEL: &str = "キャンセル";
 /// 型マーカーで判定する）が、**OS と利用者には拡張子が見える**ため、既定にも付ける。
 /// 名前の本体はタスク 3.4 の `document_save` が与える `suggested_name` であり、本定数は
 /// **出所を持たないドキュメントに対する適応層の既定**である。
-#[allow(dead_code)] // 3.4 の `document_save` が作成の既定名として使うまでの seam。
 pub const DEFAULT_SAVE_NAME: &str = "無題.jxcel";
 
 /// 承認の操作の表示名（GTK の選択器でのみ使う）。
@@ -295,7 +289,6 @@ fn save_location_from_pick(result: PickResult) -> SaveLocation {
 /// コマンドの応答（境界の `DocumentSaveResponse`）へは写さない（design.md
 /// 「Boundary Commitments」）。書き出しの相手は同じ関数の内側で完結する。
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // 3.4 の `document_save` が `pick_save_location` を呼ぶまでの seam。
 pub enum SaveLocation {
     /// 保存先が選ばれた。**位置は Rust の側にだけ留まる。**
     Chosen(PathBuf),
@@ -319,7 +312,6 @@ pub enum SaveLocation {
 ///
 /// **取り消しと提示できなかったことを書き分ける。** 3.4 の実画面の観測はこの行で行う
 /// （画面からの保存が取り消されたとき、この行が出て何も書き出されないことを確かめる）。
-#[allow(dead_code)] // 3.4 の `document_save` が `pick_save_location` を呼ぶまでの seam。
 fn describe_save_location(location: &SaveLocation) -> String {
     match location {
         SaveLocation::Chosen(_) => "保存先が選ばれた".to_owned(),
@@ -333,7 +325,7 @@ fn describe_save_location(location: &SaveLocation) -> String {
 /// 提案名を組み立てる。**純粋関数**（GUI 無しで検査できる）。
 ///
 /// 規則は design.md「DialogGate」の 1 行そのものである: **出所から既存のファイル名が得られれば
-/// それ**、無ければ既定の `無題`。呼び出し元（3.4 の `document_save`）はコアの状態
+/// それ**、無ければ既定の `無題`。呼び出し元（`document_save`）はコアの状態
 /// （`app-shell` の `DocumentSummary::name`。出所を持たない新規の文書は空文字）から名前を取って
 /// ここへ渡す。
 ///
@@ -341,10 +333,8 @@ fn describe_save_location(location: &SaveLocation) -> String {
 /// 定めているためである。両者は呼び出し元にとって同じ「使える名前が無い」状態であり、区別して
 /// も提示の結果は変わらない（空文字をそのまま GTK や `rfd` へ渡すと、提案名が空欄になる）。
 ///
-/// **`#[allow(dead_code)]` の理由**: 出所を持つ文書の保存はコアの `save` が位置を知っているため
-/// 保存先を尋ねず、本関数を呼ぶのは**出所を持たない文書の保存**（3.4）だけである。したがって
-/// 3.4 が配線するまで本番の呼び出し元が無い（module doc「保存先の選択」の seam）。
-#[allow(dead_code)] // 3.4 の `document_save` が既定の提案名として使うまでの seam。
+/// 出所を持つ文書の保存はコアの `save` が位置を知っているため保存先を尋ねず、本関数を呼ぶのは
+/// **出所を持たない文書の保存**だけである。
 pub fn suggested_save_name(origin_file_name: Option<&str>) -> String {
     match origin_file_name {
         Some(name) if !name.is_empty() => name.to_owned(),
@@ -358,17 +348,18 @@ pub fn suggested_save_name(origin_file_name: Option<&str>) -> String {
 /// は選択器の入力欄の初期値であり、出所を持たない文書のための提案名である
 /// （[`suggested_save_name`]）。
 ///
-/// **イベントループのスレッドから呼んではならない。** 呼び出し元（3.4 の `document_save`）は
-/// `spawn_blocking` のスレッドで呼ぶ（module doc「実行モデル」）。提示そのものは [`pick_save`]
-/// が行う（プラットフォーム差はそこだけにある）。
+/// **イベントループのスレッドから呼んではならない。** 呼び出し元は
+/// [`document_save`](crate::session::commands::document_save) であり、`spawn_blocking` の
+/// スレッドで呼ぶ（module doc「実行モデル」）。提示そのものは [`pick_save`] が行う
+/// （プラットフォーム差はそこだけにある）。
 ///
 /// **`Cancelled` は正常な結果であり、`Unavailable` だけが失敗である**（[`SaveLocation`]）。
 /// 取り消しのときに書き出しが起きないこと（要件 5.3）は、呼び出し元が `Cancelled` で
 /// **コアの `save_to` を呼ばない**ことで成立する。本関数は何も書き出さない。
 ///
-/// **本関数は位置を応答へ写す経路を持たない。** 返すのは Rust の列挙であり、コマンドの応答の型
-/// へ写すのは呼び出し元である。3.4 は**写してはならない**（module doc「保存先の選択」）。
-#[allow(dead_code)] // 3.4 の `document_save` が呼ぶまでの seam（module doc「保存先の選択」）。
+/// **本関数は位置を応答へ写す経路を持たない。** 返すのは Rust の列挙であり、選ばれた位置を
+/// 読むのは呼び出し元（`save_to` へ渡す）だけである。応答の型（境界の
+/// `DocumentSaveResponse`）は `status` と `outcome` だけを運ぶ。
 pub fn pick_save_location(window: &WebviewWindow, suggested_name: &str) -> SaveLocation {
     let location = pick_save(window, suggested_name);
     log::info!(
@@ -1122,9 +1113,10 @@ mod tests {
     /// **書き出し先は `scratch` の中に置く。** 写像が位置を `Chosen` へ通してしまえば、その位置は
     /// 一時ディレクトリの中であり、`read_dir` が空でなくなる（外の `/tmp` を指すと観測できない）。
     ///
-    /// **本テストが証明しないこと**: 選択器そのものを実画面で取り消す操作は 3.4 のコマンドが
-    /// 入るまで到達できない（module doc「保存先の選択」の seam）。本テストが証明するのは
-    /// 「取り消しの答えを受けた適応層が何もしない」ことである。
+    /// **本テストが証明しないこと**: 選択器そのものを実画面で取り消す操作は、選択器が GTK の
+    /// メインループの中でしか走らないためここでは起こせない（`session/commands.rs` の
+    /// `answer_save` のテストが、提示を差し替えて「取り消しなら書き出さない」を本物のコアで
+    /// 固定する）。本テストが証明するのは「取り消しの答えを受けた適応層が何もしない」ことである。
     #[test]
     fn a_cancelled_save_location_writes_nothing_and_keeps_the_document_unsaved() {
         use app_shell::ipc::WindowLabel;

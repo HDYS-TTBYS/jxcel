@@ -4,8 +4,8 @@
 //! `src-tauri/src/session/mod.rs`。タスク 3.2、破棄の購読はタスク 3.3）。要件: 1.3、1.5、2.2、
 //! 4.6、6.1。
 //!
-//! 本モジュールが置くのは [`install`] の 1 つだけである。**残る非目標**（コマンドの登録 =
-//! 3.4、保存先の選択 = 3.5、メニュー = 3.6）はここに含めない。
+//! 本モジュールが置く起動の結線は [`install`] の 1 つだけである。4 コマンドは
+//! [`commands`] にあり、**残る非目標**（保存先の選択 = 3.5、メニュー = 3.6）はここに含めない。
 //!
 //! # 起動の結線
 //!
@@ -44,11 +44,12 @@
 //!
 //! [`install`] は `Arc<DocumentSessions>`（表）と [`WindowDestroyWatch`]（セッションを作る
 //! 3 つの入口 + 破棄の購読）を 1 つずつ作り、**宿主に渡すのと同じ実体を `app.manage` でも
-//! 置く**。後続のタスク（3.4 の 4 コマンド）が `app.state::<Arc<WindowDestroyWatch>>()` から
+//! 置く**。後続の [`commands`]（4 コマンド）が `app.state::<Arc<WindowDestroyWatch>>()` から
 //! **同じ入口**を取れるようにするためである。別々の実体を作ると、コマンドが宿主とは別の表を
 //! 見て「開いているドキュメント」の真実が 2 つに割れ、**登録済みラベルの集合も 2 つに割れて
 //! 購読が二重に登録される**（`watch.rs` の「ウィンドウ 1 つにつき 1 回」）。
 
+pub mod commands;
 pub mod host;
 pub mod watch;
 
@@ -68,7 +69,7 @@ use crate::session::watch::{TauriWindowEvents, WindowDestroyWatch};
 ///
 /// 1. セッションの表（`Arc<DocumentSessions>`）と、セッションを作る 3 つの入口 + 破棄の購読
 ///    （`Arc<WindowDestroyWatch>`）を 1 実体ずつ作り、**管理状態としても置く**
-///    （`app.manage`。3.4 のコマンドが同じ入口を取れるようにする）
+///    （`app.manage`。3.4 の [`commands`] が同じ入口を取れるようにする）
 /// 2. `app.state::<DocumentHostPort>()` から**現在の宿主を [`DocumentHostPort::host`] で
 ///    取り出す**（設置前の宿主を内側に保つ。モジュール doc「なぜ連鎖なのか」）
 /// 3. セッション → 内側の連鎖（[`SessionDocumentHost`]）を
@@ -93,8 +94,9 @@ pub fn install(app: &AppHandle) {
         Arc::new(TauriWindowEvents::new(app.clone())),
         Arc::clone(&sessions),
     ));
-    // 3.4 のコマンドが `app.state::<Arc<WindowDestroyWatch>>()` で同じ入口を取れるようにする。
-    //    既に置かれている場合（二重の `install`）は `false` が返るだけで、上書きはしない。
+    // 3.4 のコマンド（`commands`）が `app.state::<Arc<WindowDestroyWatch>>()` で同じ入口を
+    //    取れるようにする。既に置かれている場合（二重の `install`）は `false` が返るだけで、
+    //    上書きはしない。
     let _ = app.manage(Arc::clone(&watch));
 
     // 2. 設置前の宿主を内側に保つ（検証用の宿主の拒否と記録を捨てない）。

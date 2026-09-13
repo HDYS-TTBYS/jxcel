@@ -78,6 +78,26 @@ pub const DIAGNOSTICS_VERBOSITY_SET: &str = "diagnostics_verbosity_set";
 /// ドキュメントかは所有者（下流スペック）が持つ（7.7 の `DocumentPickOutcome` と同じ方針）。
 pub const WINDOW_DOCUMENT_STATE: &str = "window_document_state";
 
+/// 呼び出し元ウィンドウのセッションの状態を返す（タスク 3.4。要件 1.6、1.7、2.1）。
+///
+/// **起動時に指定されたドキュメントの読み込みは、この問い合わせが引き金になる**（遅延解決）。
+/// 呼び出し元ウィンドウは基盤が注入する引数から取るため、フロントエンドはウィンドウを偽装できない。
+pub const DOCUMENT_STATE: &str = "document_state";
+
+/// 呼び出し元ウィンドウのドキュメントを保存する（タスク 3.4。要件 5.1〜5.4）。
+///
+/// 出所を持たない文書では保存先の選択を提示し、**選ばれた位置を応答へ含めない**
+/// （位置は境界を越えない）。非同期コマンドであり、保存と提示は `spawn_blocking` に載る。
+pub const DOCUMENT_SAVE: &str = "document_save";
+
+/// 呼び出し元ウィンドウに新しいドキュメントを用意する（タスク 3.4。要件 7.1〜7.4）。
+pub const DOCUMENT_NEW: &str = "document_new";
+
+/// 呼び出し元ウィンドウの未保存の印を落とす（タスク 3.4。要件 6.5）。
+///
+/// **保存しない。** 利用者が「変更を破棄して閉じる」を選んだときの明示の指示である。
+pub const DOCUMENT_DISCARD: &str = "document_discard";
+
 /// フロントエンドから呼び出せるコマンド名の一覧（要件 4.1、4.2）。
 ///
 /// `src-tauri` のハンドラ登録（タスク 7.1）と TypeScript の生成物（タスク 2.2）の**両方**が
@@ -94,4 +114,8 @@ pub const COMMAND_NAMES: &[&str] = &[
     DIAGNOSTICS_VERBOSITY_GET,
     DIAGNOSTICS_VERBOSITY_SET,
     WINDOW_DOCUMENT_STATE,
+    DOCUMENT_STATE,
+    DOCUMENT_SAVE,
+    DOCUMENT_NEW,
+    DOCUMENT_DISCARD,
 ];
