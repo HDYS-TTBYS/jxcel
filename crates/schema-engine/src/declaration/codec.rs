@@ -1733,6 +1733,38 @@ mod tests {
         }
     }
 
+    /// 範囲端点がその種別の値でないとき、**その端点の位置**と理由つきで拒否する（要件 1.7）。
+    ///
+    /// `min` と `max` の**両方**を固定する: キーと端点の対応（`min` ↔ `min` の位置、
+    /// `max` ↔ `max` の位置）は種別に依らない規則であり、片方だけを検査すると、もう片方の
+    /// 取り違えを検出できない。
+    #[test]
+    fn a_range_endpoint_of_the_wrong_type_is_rejected_with_its_own_position() {
+        for (key, position) in [
+            ("min", "columns[0].type.min"),
+            ("max", "columns[0].type.max"),
+        ] {
+            let error = parse_schema(&one_column(
+                &format!(r#"{{"kind":"int","{key}":"abc"}}"#),
+                "",
+            ))
+            .expect_err("整数列の範囲端点が文字列なら拒否される");
+            match error {
+                SchemaError::MalformedDeclaration {
+                    position: found,
+                    reason,
+                } => {
+                    assert_eq!(position, found, "端点の位置が報告に載る（{key}）");
+                    assert!(
+                        reason.contains(key),
+                        "理由に端点のキーが現れる（{key}）: {reason}"
+                    );
+                }
+                other => panic!("MalformedDeclaration のはず: {other:?}"),
+            }
+        }
+    }
+
     /// 既定値はセル値と同一の wire 形で読む（design.md「既定値はセル値と同一の wire 形」）。
     /// 裸の文字列は wire の判別規則で `Decimal` になり、`Text` は脱出口で書く。
     #[test]
