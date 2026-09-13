@@ -70,7 +70,7 @@ pub mod determinism;
 pub mod ndjson;
 
 pub use determinism::{
-    write_cell, write_json, write_ordered_object, PreservedField, PreservedFields,
+    write_cell, write_json, write_ordered_object, KnownFields, PreservedField, PreservedFields,
     PreservingObjectWriter,
 };
 pub use ndjson::{read_ndjson, write_ndjson};

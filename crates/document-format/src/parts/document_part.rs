@@ -137,7 +137,7 @@ use serde_json::value::RawValue;
 use crate::entry_name::EntryName;
 use crate::error::DocumentError;
 use crate::ids::{DocumentId, SheetId};
-use crate::json::{PreservedFields, PreservingObjectWriter};
+use crate::json::{KnownFields, PreservedFields, PreservingObjectWriter};
 
 /// トップレベルの既知キー: ドキュメント識別子（宣言順の 1 番目）。
 const DOCUMENT_ID_KEY: &str = "document_id";
@@ -373,7 +373,7 @@ impl DocumentPart {
     /// 構文・型の失敗（serde）は [`invalid_document`] がコンテナ不正へ写し、
     /// ドメイン検証（識別子の正準形・重複したシート識別子）はここが型付きの文脈で返す。
     fn from_raw(raw: RawDocument) -> Result<Self, DocumentError> {
-        if let Some(key) = raw.duplicate_known {
+        if let Some(key) = raw.known.duplicate() {
             return Err(invalid_document(format!("duplicate field `{key}`")));
         }
         let document_id_text = raw
@@ -389,11 +389,10 @@ impl DocumentPart {
                 sheet_id: sheet_id_text,
                 name,
                 columns,
-                duplicate_known,
-                preserved,
+                known,
             } = raw_sheet;
             // 既知キーの重複は差し戻し位置の基準を壊すため拒否する（トップレベルと同じ規則）。
-            if let Some(key) = duplicate_known {
+            if let Some(key) = known.duplicate() {
                 return Err(invalid_document(format!(
                     "duplicate field `{key}` in a sheet element"
                 )));
@@ -402,14 +401,14 @@ impl DocumentPart {
                 sheet_id: parse_canonical_sheet_id(&sheet_id_text)?,
                 name,
                 columns,
-                preserved,
+                preserved: known.into_preserved(),
             });
         }
 
         Ok(Self {
             document_id: parse_canonical_document_id(&document_id_text)?,
             sheets: Self::canonicalize(sheets)?,
-            preserved: raw.preserved,
+            preserved: raw.known.into_preserved(),
         })
     }
 
@@ -461,9 +460,8 @@ struct RawSheet {
     sheet_id: String,
     name: String,
     columns: Vec<String>,
-    /// 2 回以上現れた既知キー（診断のための記録。件数を 1 対 1 に保つため拒否する）。
-    duplicate_known: Option<&'static str>,
-    preserved: PreservedFields,
+    /// 既知キーの帳簿（重複の記録と、未知フィールドの差し戻し位置）。
+    known: KnownFields,
 }
 
 impl<'de> Deserialize<'de> for RawSheet {
@@ -486,34 +484,16 @@ impl<'de> Visitor<'de> for RawSheetVisitor {
         let mut sheet_id: Option<String> = None;
         let mut name: Option<String> = None;
         let mut columns: Option<Vec<String>> = None;
-        let mut duplicate_known: Option<&'static str> = None;
-        let mut preserved = PreservedFields::new();
+        // 既知キーの読み取りは順序が意味を持つ（重複の記録 → 値 → 差し戻し位置の前進）。
+        // [`KnownFields`] がその順序ごと持つ。
+        let mut known = KnownFields::new();
 
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                SHEET_ID_KEY => {
-                    if sheet_id.is_some() {
-                        duplicate_known = Some(SHEET_ID_KEY);
-                    }
-                    sheet_id = Some(map.next_value()?);
-                    // 書き出し側の `write_known` と同じ順序で件数を進める（必須条件）。
-                    preserved.record_known_field();
-                }
-                NAME_KEY => {
-                    if name.is_some() {
-                        duplicate_known = Some(NAME_KEY);
-                    }
-                    name = Some(map.next_value()?);
-                    preserved.record_known_field();
-                }
-                COLUMNS_KEY => {
-                    if columns.is_some() {
-                        duplicate_known = Some(COLUMNS_KEY);
-                    }
-                    columns = Some(map.next_value()?);
-                    preserved.record_known_field();
-                }
-                _ => preserved.capture(&key, &mut map)?,
+                SHEET_ID_KEY => known.read(&mut sheet_id, SHEET_ID_KEY, &mut map)?,
+                NAME_KEY => known.read(&mut name, NAME_KEY, &mut map)?,
+                COLUMNS_KEY => known.read(&mut columns, COLUMNS_KEY, &mut map)?,
+                _ => known.capture(&key, &mut map)?,
             }
         }
 
@@ -534,8 +514,7 @@ impl<'de> Visitor<'de> for RawSheetVisitor {
             sheet_id,
             name,
             columns,
-            duplicate_known,
-            preserved,
+            known,
         })
     }
 }
@@ -546,9 +525,8 @@ impl<'de> Visitor<'de> for RawSheetVisitor {
 struct RawDocument {
     document_id: Option<String>,
     sheets: Option<Vec<RawSheet>>,
-    /// 2 回以上現れた既知キー（診断のための記録。件数を 1 対 1 に保つため拒否する）。
-    duplicate_known: Option<&'static str>,
-    preserved: PreservedFields,
+    /// 既知キーの帳簿（重複の記録と、未知フィールドの差し戻し位置）。
+    known: KnownFields,
 }
 
 impl<'de> Deserialize<'de> for RawDocument {
@@ -571,36 +549,22 @@ impl<'de> Visitor<'de> for RawDocumentVisitor {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawDocument, A::Error> {
         let mut document_id: Option<String> = None;
         let mut sheets: Option<Vec<RawSheet>> = None;
-        let mut duplicate_known: Option<&'static str> = None;
-        let mut preserved = PreservedFields::new();
+        // 既知キーの読み取りは順序が意味を持つ（重複の記録 → 値 → 差し戻し位置の前進）。
+        // [`KnownFields`] がその順序ごと持つ。
+        let mut known = KnownFields::new();
 
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                DOCUMENT_ID_KEY => {
-                    if document_id.is_some() {
-                        duplicate_known = Some(DOCUMENT_ID_KEY);
-                    }
-                    document_id = Some(map.next_value()?);
-                    // 書き出し側の `write_known` と同じ順序で既知フィールドの件数を
-                    // 進める（未知フィールドの差し戻し位置の基準。タスク 3.2 の必須条件）。
-                    preserved.record_known_field();
-                }
-                SHEETS_KEY => {
-                    if sheets.is_some() {
-                        duplicate_known = Some(SHEETS_KEY);
-                    }
-                    sheets = Some(map.next_value()?);
-                    preserved.record_known_field();
-                }
-                _ => preserved.capture(&key, &mut map)?,
+                DOCUMENT_ID_KEY => known.read(&mut document_id, DOCUMENT_ID_KEY, &mut map)?,
+                SHEETS_KEY => known.read(&mut sheets, SHEETS_KEY, &mut map)?,
+                _ => known.capture(&key, &mut map)?,
             }
         }
 
         Ok(RawDocument {
             document_id,
             sheets,
-            duplicate_known,
-            preserved,
+            known,
         })
     }
 }

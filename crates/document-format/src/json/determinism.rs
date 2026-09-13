@@ -62,7 +62,7 @@ use core::fmt;
 use std::io::{self, Write};
 
 use serde::de::MapAccess;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::error::DocumentError;
@@ -257,16 +257,15 @@ impl PreservedField {
 ///
 /// # 使用例（4.2 / 6.x のバージョン付きパート構造体がどう使うか）
 ///
-/// 読み込み側は既知キーを読むたびに [`PreservedFields::record_known_field`] を呼び、
-/// 未知キーは [`PreservedFields::capture`] に渡す。書き出し側は
-/// [`PreservingObjectWriter`] へ**宣言順**で既知フィールドを書く。
+/// 読み込み側は既知キーを [`KnownFields::read`]、未知キーを [`KnownFields::capture`] に
+/// 渡し、書き出し側は [`PreservingObjectWriter`] へ**宣言順**で既知フィールドを書く。
 ///
 /// ```
 /// use std::fmt;
 ///
 /// use serde::de::{self, MapAccess, Visitor};
 /// use serde::{Deserialize, Deserializer};
-/// use document_format::json::{PreservedFields, PreservingObjectWriter};
+/// use document_format::json::{KnownFields, PreservedFields, PreservingObjectWriter};
 ///
 /// /// バージョン付きパート（既知フィールドの宣言順は `version`, `parts`）。
 /// struct ManifestPart {
@@ -292,24 +291,22 @@ impl PreservedField {
 ///
 ///     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ManifestPart, A::Error> {
 ///         let (mut version, mut parts): (Option<u64>, Option<Vec<String>>) = (None, None);
-///         let mut preserved = PreservedFields::new();
+///         let mut known = KnownFields::new();
 ///         while let Some(key) = map.next_key::<String>()? {
 ///             match key.as_str() {
-///                 "version" => {
-///                     version = Some(map.next_value()?);
-///                     preserved.record_known_field();
-///                 }
-///                 "parts" => {
-///                     parts = Some(map.next_value()?);
-///                     preserved.record_known_field();
-///                 }
-///                 _ => preserved.capture(&key, &mut map)?,
+///                 "version" => known.read(&mut version, "version", &mut map)?,
+///                 "parts" => known.read(&mut parts, "parts", &mut map)?,
+///                 _ => known.capture(&key, &mut map)?,
 ///             }
 ///         }
 ///         let Some(version) = version else {
 ///             return Err(de::Error::custom("manifest part is missing the `version` key"));
 ///         };
-///         Ok(ManifestPart { version, parts: parts.unwrap_or_default(), preserved })
+///         Ok(ManifestPart {
+///             version,
+///             parts: parts.unwrap_or_default(),
+///             preserved: known.into_preserved(),
+///         })
 ///     }
 /// }
 ///
@@ -383,6 +380,97 @@ impl PreservedFields {
             preceding_known_fields: self.known_seen,
         });
         Ok(())
+    }
+}
+
+/// 復号中の**既知**フィールドの帳簿（タスク 3.2 の必須条件を 1 箇所で守る）。
+///
+/// 既知キーを 1 件読むたびに、次の 3 つを**この順序**で行う必要がある:
+///
+/// 1. そのスロットが既に埋まっていれば、重複した既知キーとして記録する
+/// 2. [`MapAccess::next_value`] で値を読む
+/// 3. [`PreservedFields::record_known_field`] で差し戻し位置の基準を進める
+///
+/// 1 を値の読み取りより後に行うと重複を検出できない（直前に自分でスロットを埋めるため）。
+/// 3 を省くと書き出し側の [`PreservingObjectWriter::write_known`] と件数がずれ、後続の
+/// 未知フィールドがすべて先頭側へ差し戻される。**件数が書き出しと 1 対 1 であることが
+/// 差し戻し位置の正しさの条件**であり、その順序まで含めて本型が持つ。
+///
+/// 重複した既知キーはここでは拒否せず記録するだけである。拒否は、そのキー名を文脈に
+/// 載せた誤りを組み立てられる呼び出し元が行う（`document.json` と `manifest.json` は
+/// それぞれ自前のエントリ名で報告する）。
+///
+/// # 「後で報告」と「その場で拒否」の 2 つの方針がある
+///
+/// 記録して後で拒否する方針（`parts` 層の `document.json` / `manifest.json`）を本型が
+/// 担う。理由: 2 つのモジュールは重複を**ファイル固有のエントリ名を添えて**報告するため、
+/// 値の読み取り中に報告先が確定しない（serde のエラーは `de::Error` に閉じるが、
+/// 最終的な型は [`crate::error::DocumentError`] である）。
+///
+/// 一方 `model/schema_part.rs` のエンベロープと型定義の訪問者は、**その場で
+/// `de::Error::custom` で拒否する**（`duplicate `root` key in schema envelope` のように
+/// エンベロープ固有の文面を持つ）。順序の義務は変わらないため `record_known_field` は
+/// 呼ぶが、重複の記録は持たない。**両者は別の作業ではない**（前者は報告を後段へ、
+/// 後者はその場で行う）ので、片方へ寄せる必要は無い。
+///
+/// **復号するオブジェクト 1 つにつき 1 個**を使う（要素ごとに 1 個。[`PreservedFields`]
+/// と同じ単位）。
+#[derive(Debug, Clone, Default)]
+pub struct KnownFields {
+    /// 2 回以上現れた既知キー（重複が複数あれば最後のもの）。
+    duplicate: Option<&'static str>,
+    preserved: PreservedFields,
+}
+
+impl KnownFields {
+    /// 空の帳簿を作る。
+    pub const fn new() -> Self {
+        Self {
+            duplicate: None,
+            preserved: PreservedFields::new(),
+        }
+    }
+
+    /// 既知キー 1 件を読む（重複の記録 → 値の読み取り → 差し戻し位置の前進）。
+    ///
+    /// `slot` はそのキーの読み取り先である。`key` は重複を報告するために運び、呼び出し元の
+    /// キー定数をそのまま渡す（`'static` なのは診断へそのまま載せるため）。
+    pub fn read<'de, T, A>(
+        &mut self,
+        slot: &mut Option<T>,
+        key: &'static str,
+        map: &mut A,
+    ) -> Result<(), A::Error>
+    where
+        T: Deserialize<'de>,
+        A: MapAccess<'de>,
+    {
+        if slot.is_some() {
+            self.duplicate = Some(key);
+        }
+        *slot = Some(map.next_value::<T>()?);
+        self.preserved.record_known_field();
+        Ok(())
+    }
+
+    /// 未知キー 1 件を取り込む（[`PreservedFields::capture`] へ委譲）。
+    pub fn capture<'de, A: MapAccess<'de>>(
+        &mut self,
+        key: &str,
+        map: &mut A,
+    ) -> Result<(), A::Error> {
+        self.preserved.capture(key, map)
+    }
+
+    /// 2 回以上現れた既知キー（無ければ `None`）。呼び出し元が拒否する。
+    pub const fn duplicate(&self) -> Option<&'static str> {
+        self.duplicate
+    }
+
+    /// 保持した未知フィールドの集合を取り出す（書き出し側の
+    /// [`PreservingObjectWriter`] へ渡す）。
+    pub fn into_preserved(self) -> PreservedFields {
+        self.preserved
     }
 }
 

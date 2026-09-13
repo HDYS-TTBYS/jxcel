@@ -117,7 +117,7 @@ use serde_json::value::RawValue;
 use crate::entry_name::{EntryName, MANIFEST_ENTRY};
 use crate::error::DocumentError;
 use crate::ids::Blake3Digest;
-use crate::json::{PreservedFields, PreservingObjectWriter};
+use crate::json::{KnownFields, PreservedFields, PreservingObjectWriter};
 use crate::migration::FormatVersion;
 
 /// トップレベルの既知キー: 形式バージョン（宣言順の 1 番目）。
@@ -354,7 +354,7 @@ impl ManifestPart {
     /// ドメイン検証（エントリ名の許可リスト・ダイジェストの正準形・重複・自己参照）は
     /// ここが型付きの文脈で返す。
     fn from_raw(raw: RawManifest) -> Result<Self, DocumentError> {
-        if let Some(key) = raw.duplicate_known {
+        if let Some(key) = raw.known.duplicate() {
             return Err(invalid_manifest(format!("duplicate field `{key}`")));
         }
         let version = raw
@@ -369,11 +369,10 @@ impl ManifestPart {
             let RawEntry {
                 name: name_text,
                 blake3: digest_text,
-                duplicate_known,
-                preserved,
+                known,
             } = raw_entry;
             // 既知キーの重複は差し戻し位置の基準を壊すため拒否する（トップレベルと同じ規則）。
-            if let Some(key) = duplicate_known {
+            if let Some(key) = known.duplicate() {
                 return Err(invalid_manifest(format!(
                     "duplicate field `{key}` in a part index element"
                 )));
@@ -385,14 +384,14 @@ impl ManifestPart {
             entries.push(ManifestEntry {
                 name,
                 digest,
-                preserved,
+                preserved: known.into_preserved(),
             });
         }
 
         Ok(Self {
             version: version.into(),
             parts: Self::canonicalize(entries)?,
-            preserved: raw.preserved,
+            preserved: raw.known.into_preserved(),
         })
     }
 
@@ -481,9 +480,8 @@ impl Serialize for NameWire {
 struct RawEntry {
     name: String,
     blake3: String,
-    /// 2 回以上現れた既知キー（診断のための記録。件数を 1 対 1 に保つため拒否する）。
-    duplicate_known: Option<&'static str>,
-    preserved: PreservedFields,
+    /// 既知キーの帳簿（重複の記録と、未知フィールドの差し戻し位置）。
+    known: KnownFields,
 }
 
 impl<'de> Deserialize<'de> for RawEntry {
@@ -505,27 +503,15 @@ impl<'de> Visitor<'de> for RawEntryVisitor {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawEntry, A::Error> {
         let mut name: Option<String> = None;
         let mut blake3: Option<String> = None;
-        let mut duplicate_known: Option<&'static str> = None;
-        let mut preserved = PreservedFields::new();
+        // 既知キーの読み取りは順序が意味を持つ（重複の記録 → 値 → 差し戻し位置の前進）。
+        // [`KnownFields`] がその順序ごと持つ。
+        let mut known = KnownFields::new();
 
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                NAME_KEY => {
-                    if name.is_some() {
-                        duplicate_known = Some(NAME_KEY);
-                    }
-                    name = Some(map.next_value()?);
-                    // 書き出し側の `write_known` と同じ順序で件数を進める（必須条件）。
-                    preserved.record_known_field();
-                }
-                DIGEST_KEY => {
-                    if blake3.is_some() {
-                        duplicate_known = Some(DIGEST_KEY);
-                    }
-                    blake3 = Some(map.next_value()?);
-                    preserved.record_known_field();
-                }
-                _ => preserved.capture(&key, &mut map)?,
+                NAME_KEY => known.read(&mut name, NAME_KEY, &mut map)?,
+                DIGEST_KEY => known.read(&mut blake3, DIGEST_KEY, &mut map)?,
+                _ => known.capture(&key, &mut map)?,
             }
         }
 
@@ -539,8 +525,7 @@ impl<'de> Visitor<'de> for RawEntryVisitor {
         Ok(RawEntry {
             name,
             blake3,
-            duplicate_known,
-            preserved,
+            known,
         })
     }
 }
@@ -551,9 +536,8 @@ impl<'de> Visitor<'de> for RawEntryVisitor {
 struct RawManifest {
     version: Option<VersionWire>,
     parts: Option<Vec<RawEntry>>,
-    /// 2 回以上現れた既知キー（診断のための記録。件数を 1 対 1 に保つため拒否する）。
-    duplicate_known: Option<&'static str>,
-    preserved: PreservedFields,
+    /// 既知キーの帳簿（重複の記録と、未知フィールドの差し戻し位置）。
+    known: KnownFields,
 }
 
 impl<'de> Deserialize<'de> for RawManifest {
@@ -576,36 +560,22 @@ impl<'de> Visitor<'de> for RawManifestVisitor {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawManifest, A::Error> {
         let mut version: Option<VersionWire> = None;
         let mut parts: Option<Vec<RawEntry>> = None;
-        let mut duplicate_known: Option<&'static str> = None;
-        let mut preserved = PreservedFields::new();
+        // 既知キーの読み取りは順序が意味を持つ（重複の記録 → 値 → 差し戻し位置の前進）。
+        // [`KnownFields`] がその順序ごと持つ。
+        let mut known = KnownFields::new();
 
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                VERSION_KEY => {
-                    if version.is_some() {
-                        duplicate_known = Some(VERSION_KEY);
-                    }
-                    version = Some(map.next_value()?);
-                    // 書き出し側の `write_known` と同じ順序で既知フィールドの件数を
-                    // 進める（未知フィールドの差し戻し位置の基準。タスク 3.2 の必須条件）。
-                    preserved.record_known_field();
-                }
-                PARTS_KEY => {
-                    if parts.is_some() {
-                        duplicate_known = Some(PARTS_KEY);
-                    }
-                    parts = Some(map.next_value()?);
-                    preserved.record_known_field();
-                }
-                _ => preserved.capture(&key, &mut map)?,
+                VERSION_KEY => known.read(&mut version, VERSION_KEY, &mut map)?,
+                PARTS_KEY => known.read(&mut parts, PARTS_KEY, &mut map)?,
+                _ => known.capture(&key, &mut map)?,
             }
         }
 
         Ok(RawManifest {
             version,
             parts,
-            duplicate_known,
-            preserved,
+            known,
         })
     }
 }
