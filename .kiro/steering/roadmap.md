@@ -34,6 +34,7 @@ JSON をファイル実体とする、データベースとして運用可能な
   - **schema-engine ⇔ custom-types**: 拡張インターフェースの所有権は schema-engine 側。実装は custom-types 側。**schema-engine 側の一括検証経路は結線済み**（拡張型の列を第 1 段から外し、列ごとに 1 回だけ一括判定を呼ぶ。`validate_sheet` と列指定の再検証が同じ経路を通る）。**custom-types 側は `validate_batch` を上書きし、既定実装と同じ結果を返すことをテストで示すこと**。「列ごとに 1 回」は呼び出し回数を数える観測で固定する（`structure.md`「拡張点は所有者と実装者を分ける」）
   - **macro-runtime ⇔ macro-editor-lsp**: ホスト API の .d.ts 生成責任の所在。補完の質はここで決まる
   - **data-grid ⇔ formula-engine ⇔ macro-runtime**: undo / redo スタックを 3 者で共有する。data-grid が最初から共有可能な形で設計すること
+  - **document-session ⇔ data-grid / schema-editor / macro-runtime**: ドキュメントへの変更の適用経路を共有する。所有権は `document-session` 側。**`data-grid` は取り消し履歴を所有するが、変更そのものはこの経路を通す**
   - **form-builder ⇔ form-web-server**: フォームレンダラを共有する。レンダラは Tauri IPC に依存してはならない
   - **app-shell ⇔ macro-editor-lsp**: サイドカー基盤の所有権は app-shell 側。LSP はその利用者
 
@@ -43,13 +44,16 @@ JSON をファイル実体とする、データベースとして運用可能な
 - `document-format` — 実装完了（38 サブタスク）
 - `app-shell` — 実装完了（56 サブタスク）。4 次元の feature 検証（全スイート＋起動の実測 / 要件被覆 / 設計整合と境界 / 横断統合）で一度 **NO-GO** となり、欠けていた検証成果物・出荷物に混入した検証コード・強制検査の欠落・設計の記述のずれを是正して **GO**（2026-09-12）。**ローカルで閉じられない残り（macOS / Windows の実行時、コード署名、3 OS の配布物）は CI の実行で確認する**
 - `schema-engine` — **実装完了（31 サブタスク、2026-09-13）**。設計で外部依存を `jiff` と `regex` の 2 本に絞り、10 進数クレートは**採らない**と決めた（tech.md 参照）。feature 検証は **GO**（全スイート green、要件 11 節 66 基準すべてを実装とテストの双方で確認、依存の鎖の逆向き参照 0、境界違反 0）。実測: 10 万行 × 30 列の全件検証 **255 ms**（予算 1 秒）、一意制約を持つ列 1 本の再検証 **31 ms**。**残るスペックがこの実装から写すべき規約は `structure.md`「ドメインクレートの内部構造」と `verification.md`「証拠の取り方」に記録済み**
-- 他 11 本 — `brief.md` のみ
+- `data-grid` — **次に仕様化する 1 本として選択（2026-09-13）**。`brief.md` を上流 3 本の実装完了後の事実（`schema-engine` の公開面と実測、`ipc-contract.md` の 64 ビット整数禁止と生バイト経路、画面の契約）で更新済み。仕様はこれから
+- `document-session` — **`data-grid` の設計中に発見された欠落として新設（2026-09-13）**。`document-format` に依存するクレートは `schema-engine` だけで、**開いた `Document` をメモリ上で保持する持ち主がどこにも存在しなかった**。`app-shell` の `pick_document_file`（「ドキュメント所有者へ引き渡すだけ」）と `can_close_window` は、実装済みのまま相手を待っている。`brief.md` のみ
+- 他 10 本 — `brief.md` のみ
 
 ## Specs (dependency order)
 - [x] document-format -- zip + JSON のドキュメント形式と File/Sheet/Schema/Row のドキュメントモデル。Dependencies: none
 - [x] app-shell -- Tauri v2 の器、IPC 境界、サイドカー基盤、3 OS ビルドパイプライン。Dependencies: none
 - [x] schema-engine -- ネスト可能な型システム、ANY、検証と型強制、スキーマ移行。Dependencies: document-format
-- [ ] data-grid -- 10 万行の仮想化グリッド、型別セルエディタ、共有 undo スタック。Dependencies: app-shell, schema-engine
+- [ ] document-session -- ウィンドウ単位のドキュメント保持、変更の適用経路、未保存の追跡と保存。Dependencies: document-format, app-shell
+- [ ] data-grid -- 10 万行の仮想化グリッド、型別セルエディタ、共有 undo スタック。Dependencies: app-shell, schema-engine, document-session
 - [ ] schema-editor -- スキーマのツリー編集 UI と変更の影響プレビュー。Dependencies: app-shell, schema-engine
 - [ ] macro-runtime -- deno_core の埋め込み、TS トランスパイル経路、ホスト API、実行の隔離。Dependencies: document-format, schema-engine, app-shell
 - [ ] version-control -- git2-rs による自動バージョン管理と構造的差分。Dependencies: document-format, app-shell
@@ -64,7 +68,8 @@ JSON をファイル実体とする、データベースとして運用可能な
 ## Waves (parallel execution order)
 - **Wave 1**: document-format, app-shell
 - **Wave 2**: schema-engine
-- **Wave 3**: data-grid, schema-editor, macro-runtime, version-control, export-templates, form-builder
+- **Wave 3**: document-session, schema-editor, macro-runtime, version-control, export-templates, form-builder
+- **Wave 3.5**: data-grid（document-session を待つ）
 - **Wave 4**: custom-types, macro-stdlib, macro-editor-lsp, formula-engine, form-web-server
 
 **Wave は目安であり、実際に着手できるかは各スペックの Dependencies が決める**。2026-09-13 時点で
@@ -75,7 +80,7 @@ JSON をファイル実体とする、データベースとして運用可能な
 残り 5 本（`custom-types` / `macro-stdlib` / `macro-editor-lsp` / `formula-engine` / `form-web-server`）は
 いずれも `macro-runtime` か `data-grid` を待つ。
 
-**MVP**: Wave 1 + Wave 2 + data-grid + schema-editor。**Wave 1・2 は実装完了済みなので、残りは `data-grid` と `schema-editor` の 2 本**である。この時点で「開いて・型を定義して・編集して・保存できる型付きスプレッドシート」が成立する。
+**MVP**: Wave 1 + Wave 2 + document-session + data-grid + schema-editor。**Wave 1・2 は実装完了済みなので、残りは `document-session`・`data-grid`・`schema-editor` の 3 本**である。（当初は 2 本としていたが、MVP の文言にある「**開いて**…**保存できる**」を担う持ち主が存在しないことが `data-grid` の設計中に判明したため 1 本増えた。）この時点で「開いて・型を定義して・編集して・保存できる型付きスプレッドシート」が成立する。
 
 ## Prototype-First Risks
 以下は spec の design フェーズを待たず、早期にプロトタイプで成立性を確認すべき項目。いずれも失敗した場合にアーキテクチャ全体を変更しうる。
