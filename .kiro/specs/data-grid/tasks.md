@@ -3,7 +3,7 @@
 > **前提（このスペックの外）**: `document-session` が開いた `Document` をウィンドウ単位で保持していることを要するのは **6.2 / 6.3 / 7.3 / 群 8 の全体 / 9.2 / 9.3** である。それ以外（群 1〜5、6.1、7.1・7.2・7.4・7.5・7.6、9.1）は `document-format` と `schema-engine` だけで完結するため先行できる。`document-session` の design が確定した時点で、6.1 の境界用の型と 6.2・6.3 の適応層を再検証する（design.md の Revalidation Triggers）。
 
 - [ ] 1. Foundation: クレートの足場・上流の拡張・成立性の実測
-- [ ] 1.1 クレートをワークスペースへ追加し、tauri 非依存を検査に載せる
+- [x] 1.1 クレートをワークスペースへ追加し、tauri 非依存を検査に載せる
   - `crates/data-grid/` をライブラリクレートとして作り、ワークスペースの `members` に登録する
   - `document-format` と `schema-engine` への path 依存だけを持つ。`app-shell` へは依存しない
   - `Cargo.toml` の冒頭に依存方針のコメントを置く（`tauri` を推移的にも入れない、依存してよい兄弟は 2 つだけ、境界用の型をここに置かない理由）

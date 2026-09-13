@@ -20,6 +20,7 @@ members = [
     "crates/schema-engine",
     "crates/app-shell",
     "crates/document-session",
+    "crates/data-grid",
     "crates/sidecar-smoke",
     "src-tauri",
 ]

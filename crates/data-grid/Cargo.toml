@@ -1,0 +1,69 @@
+[package]
+name = "data-grid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "jxcel データグリッド: 表示状態・編集命令・取り消し履歴・窓の符号化（Tauri 非依存のドメインクレート）"
+
+# ---------------------------------------------------------------------------
+# 依存方針（design.md「Allowed Dependencies」「Technology Stack」・
+# steering structure.md 準拠）
+#
+# 1. tauri 禁止: この Cargo.toml に tauri を追加してはならない。推移的依存も不可で
+#    あり、`cargo tree -p data-grid` のどこにも tauri（および `tauri-*` / `tauri_*`）が
+#    現れてはならない。本クレートが所有する意味論（並べ替え・絞り込みの導出、編集命令の
+#    適用と `schema-engine` への判定依頼、取り消し履歴、窓の符号化）は、いずれも GUI を
+#    起動せずにテストできなければならない（design.md「Goals」「Architecture Pattern &
+#    Boundary Map」。`DataGrid` は適応層 `GridCommands` を介してのみ画面に届く）。
+#    機械検査は CI の `bash scripts/check-core-deps.sh`（引数なしで `crates/*/Cargo.toml` を
+#    全列挙する形）が行う（tasks.md 1.1）。クレートを足しても段を足す必要はなく、
+#    自動的に対象に入る。
+# 2. 依存してよい兄弟は document-format と schema-engine の 2 つだけ: 本クレートは
+#    `document-format`（行・セル値・識別子のドキュメントモデル）と `schema-engine`
+#    （型カタログ・検証・型強制・違反の報告。**判定の唯一の源**）の上に立つ。
+#    本クレートは判定の分岐を一切持たず、判定を依頼して結果を写すだけである
+#    （design.md「Boundary Commitments」「Out of Boundary」）。
+#    **`app-shell` には依存しない。** 本クレートは画面の登録簿・IPC 境界・コマンド登録の根を
+#    必要としない（design.md「Allowed Dependencies」の制約）。
+# 3. 境界用の型をここに置かない理由: 境界を越える型は `ts-rs` の derive を持ち、
+#    **`crates/app-shell/src/ipc/` の下だけ**が derive を許される唯一の場所である
+#    （design.md「Existing Architecture Analysis」。境界に 64 ビット整数と位置を出さない
+#    規約もそこに属する）。境界の型は他のドメインクレートを参照してはならないため、
+#    本クレートのドメイン型（`CellValue::Int`・行の識別子等）はそのまま越えられない。
+#    したがって境界用の型は `crates/app-shell/src/ipc/grid.rs` に置き、ドメイン型との
+#    相互変換は `src-tauri/src/commands/grid.rs` の適応層だけが組み立てる。
+# 4. ベンチを持つ理由: 窓の符号化・順序の再計算・1 万行の貼り付けには予算があり
+#    （最初の画面 1 秒 / 編集の反映 100 ミリ秒 / 1 万行の貼り付け 3 秒、要件 11.2・11.3・
+#    11.5）、`cargo test` の緑では守れない。実測を criterion のベンチとして置き、
+#    `scripts/check-bench-budget.sh` のゲートで機械判定するため、本クレートはベンチ
+#    ターゲットを持つ（`large_grid/` の下の bench id を同スクリプトが読む）。
+# ---------------------------------------------------------------------------
+[dependencies]
+# 上流のドメインクレート（依存グラフの根）。Document / CellValue / Row / SheetId / RowId を
+# 使う（design.md「Allowed Dependencies」）。行の削除（`remove_rows`）と位置指定の挿入
+# （`insert_row_at`）は本機能の群 1 が上流へ最小限だけ加える（design.md「上流への最小の追加」）。
+document-format = { path = "../document-format" }
+# 値の正否の判断、型強制の規則、違反の報告の唯一の源。編集経路は判定を依頼して結果を写す
+# だけで、独自の判定分岐を持たない（design.md「System Flows > 編集の適用と判定」）。
+schema-engine = { path = "../schema-engine" }
+
+[dev-dependencies]
+# 窓の符号化・順序の再計算・1 万行の貼り付けの予算（要件 11.2, 11.5, 11.6）を計測する
+# ベンチハーネス。`document-format` / `document-session` と同じ版に揃える。
+criterion = "0.8"
+
+[lib]
+name = "data_grid"
+path = "src/lib.rs"
+# libtest 自動ベンチターゲットを無効化し、criterion のフラグが cargo bench に
+# ファンアウトしても壊れないようにする（crates/document-format/Cargo.toml と同じ形）。
+bench = false
+
+# criterion ベンチターゲット（harness 直結）。計測の対象は窓の符号化・並べ替え・絞り込み・
+# 貼り付けであり（tasks.md 1.1 のスキャフォールド。実ベンチは後続のタスクが実装する。
+# 要件 11.2, 11.5, 11.6, 11.7）、`scripts/check-bench-budget.sh` のゲートが `large_grid/` の
+# 下の bench id を読む。
+[[bench]]
+name = "large_grid"
+harness = false
