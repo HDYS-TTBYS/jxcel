@@ -88,6 +88,22 @@
 //! [`Slot::with_document_mut`] は文書を可変で貸すが、**未保存の印と版を変えない**。
 //! 適用の記録（版を 1 進め、未保存の印を立てる）は変更の適用口（タスク 2.4 の `change`）の
 //! 責務である。
+//!
+//! # 保存の 2 経路（要件 5.1, 5.4, 5.5, 5.7, 5.8）
+//!
+//! [`Slot::save`]（出所の位置へ）と [`Slot::save_to`]（選ばれた位置へ書き出し、以後の出所に
+//! する）の 2 つである。どちらも**文書のロックの下で 1 パス**として書き出す: 書き出しの間は
+//! ロックを保持するため、進行中に到着した適用は書き出しの完了を待ち、**書き出した内容と
+//! 保持している内容が食い違わない**（要件 5.5）。書き出す内容と形式は形式の側
+//! （[`DocumentFormatApi::save`]）に委ね、本クレートはファイルを組み立てない（要件 5.7）。
+//!
+//! - 成功したら**ロックを保持したまま**未保存の印を落とす（要件 5.1）。失敗のときは印を保つ
+//!   （要件 5.4）
+//! - **保存は内容を変えないため版は進めない**（モジュール docs「未保存と版」）
+//! - 出所が [`Origin::New`] のときは**書き出さずに** [`SaveReport::NeedsLocation`] を返す
+//!   （保存先の選択は適応層の仕事である。要件 5.2）
+//! - 書き出しの失敗は [`SaveReport::Failed`] が形式の側の理由をそのまま運ぶ
+//!   （[`SessionError`] には書式の誤りを足さない。design.md「Error Handling」の分担）
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -95,7 +111,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
 
 use document_format::{Document, DocumentFormat, DocumentFormatApi, Sheet};
 
-use crate::error::SessionError;
+use crate::error::{SaveReport, SessionError};
 use crate::state::{CloseAnswer, Origin, SessionState, SheetSummary};
 
 /// 新規作成するドキュメントのシート名。
@@ -327,6 +343,80 @@ impl Slot {
         }
         self.unsaved.store(false, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// 出所の位置へ書き出す（要件 5.1, 5.4, 5.5, 5.7）。
+    ///
+    /// **文書のロックの下で 1 パスとして行う**: 書き出しの間ロックを保持するため、進行中に
+    /// 到着した適用は書き出しの完了を待ち、書き出した内容と保持している内容が食い違わない
+    /// （要件 5.5）。書き出す内容と形式は形式の側（[`DocumentFormatApi::save`]）に委ね、
+    /// 本クレートはファイルを組み立てない（要件 5.7）。
+    ///
+    /// 未解決なら [`SessionError::NoDocument`]（要件 1.8。セッションを作るのは適応層の 3 つの
+    /// 入口だけである）。出所が [`Origin::New`] のときは**書き出さずに**
+    /// [`SaveReport::NeedsLocation`] を返す（保存先の選択は適応層の仕事である。要件 5.2）。
+    /// 書き出しに成功したら**ロックを保持したまま**未保存の印を落とし（要件 5.1）、失敗の
+    /// ときは印を保つ（要件 5.4）。**保存は内容を変えないため版は進めない**（モジュール docs
+    /// 「未保存と版」）。
+    pub(crate) fn save(&self) -> Result<SaveReport, SessionError> {
+        let mut inner = self.lock();
+        let location = match &*inner {
+            Inner::Unresolved | Inner::Unavailable { .. } => return Err(SessionError::NoDocument),
+            // 出所が無い: 書き出す位置が決まらないため、選択を要することを結果として返す
+            // （誤りではない。design.md「Error Strategy」の第 3 分類）。
+            Inner::Resolved {
+                origin: Origin::New, ..
+            } => return Ok(SaveReport::NeedsLocation),
+            // 出所がある: その位置へ書き出す（出所は既にこの位置であるため差し替えない）。
+            Inner::Resolved {
+                origin: Origin::File(location),
+                ..
+            } => location.clone(),
+        };
+        self.write_under_lock(&mut inner, &location, false)
+    }
+
+    /// 選ばれた位置へ書き出し、成功したら**以後の出所をその位置にする**（要件 5.2, 5.8）。
+    ///
+    /// 出所を差し替えるため、以後の [`Slot::save`] は同じ位置へ同じ内容を書き出す（要件 5.8）。
+    /// 書き出しの規律（ロックの下の 1 パス・成功で未保存を落とす・版を進めない）は
+    /// [`Slot::save`] と同じであり、失敗したときは出所も未保存も変えない（要件 5.4）。
+    /// 未解決なら [`SessionError::NoDocument`]。
+    pub(crate) fn save_to(&self, location: &Path) -> Result<SaveReport, SessionError> {
+        let mut inner = self.lock();
+        self.write_under_lock(&mut inner, location, true)
+    }
+
+    /// 保持している文書を `location` へ書き出し、記録を更新する（**呼び出し元が文書のロックを
+    /// 保持していること**が前提）。
+    ///
+    /// `adopt` が真なら出所をその位置へ差し替える（[`Slot::save_to`]）。成功なら**同じ臨界
+    /// 区間の内側で**未保存の印を落とし、失敗なら印と出所を保つ。**版はどちらの経路でも進め
+    /// ない**（保存は内容を変えない）。未解決なら [`SessionError::NoDocument`]。
+    fn write_under_lock(
+        &self,
+        inner: &mut Inner,
+        location: &Path,
+        adopt: bool,
+    ) -> Result<SaveReport, SessionError> {
+        let Inner::Resolved { origin, document } = inner else {
+            return Err(SessionError::NoDocument);
+        };
+
+        match DocumentFormat::new().save(document, location) {
+            Ok(()) => {
+                if adopt {
+                    *origin = Origin::File(location.to_path_buf());
+                }
+                // 成功: ロックを保持したまま未保存を落とす（判定と更新を分けない）。
+                self.unsaved.store(false, Ordering::SeqCst);
+                Ok(SaveReport::Saved {
+                    location: location.to_path_buf(),
+                })
+            }
+            // 失敗: 印を保ち、出所も変えない。理由は形式の側のまま運ぶ。
+            Err(source) => Ok(SaveReport::Failed { source }),
+        }
     }
 
     /// 状態の写しを返す（要件 1.6, 1.7, 4.3）。
@@ -942,6 +1032,362 @@ mod tests {
             revision,
             slot.revision.load(Ordering::SeqCst),
             "拒否が版を進めた"
+        );
+    }
+
+    #[test]
+    fn save_without_an_origin_asks_for_a_location_and_writes_nothing() {
+        let scratch = common::Scratch::new("session-save-new");
+        let slot = Slot::new();
+        slot.create().expect("新規作成できる");
+        // 未保存を立てる（変更の適用の代わり。記録は適用口の責務である）。出所が無いため保存は
+        // 何も書き出さない: 印が保たれることで「何も起きていない」ことを確かめる。
+        slot.unsaved.store(true, Ordering::SeqCst);
+
+        let report = slot.save().expect("出所の無い保存は結果として返る");
+        assert!(
+            matches!(report, SaveReport::NeedsLocation),
+            "出所の無い保存が保存先の選択を求めない: {report:?}"
+        );
+        assert!(
+            slot.unsaved.load(Ordering::SeqCst),
+            "保存先の選択を求めただけで未保存の印が落ちた（何も書き出していない）"
+        );
+        assert_eq!(
+            CloseAnswer::Deny,
+            slot.may_close(),
+            "何も書き出していないのに閉じてよいと答えた"
+        );
+        assert!(
+            std::fs::read_dir(scratch.path())
+                .expect("一時ディレクトリを読める")
+                .next()
+                .is_none(),
+            "保存先の選択を求めたのに何か書き出した"
+        );
+        assert!(
+            matches!(slot.state(), SessionState::Open { unsaved: true, .. }),
+            "書き出していないのに状態が変わった"
+        );
+    }
+
+    #[test]
+    fn save_writes_to_the_origin_and_clears_the_unsaved_mark() {
+        let scratch = common::Scratch::new("session-save-origin");
+        let origin = write_sample(&scratch, "sample.jxcel", 4, 3);
+
+        let slot = Slot::new();
+        slot.resolve(Some(&origin)).expect("標本を読み込める");
+        // 変更の適用（タスク 2.4）の代わりに印を直接立てる（未保存の記録は適用口の責務である）。
+        slot.unsaved.store(true, Ordering::SeqCst);
+        let revision = slot.revision.load(Ordering::SeqCst);
+
+        let report = slot.save().expect("出所へ保存できる");
+        assert!(
+            matches!(&report, SaveReport::Saved { location } if location == &origin),
+            "保存が結果に出所の位置を運ばない: {report:?}"
+        );
+        assert!(
+            !slot.unsaved.load(Ordering::SeqCst),
+            "成功しても未保存の印が落ちていない"
+        );
+        assert_eq!(CloseAnswer::Allow, slot.may_close(), "成功の後に閉じられない");
+        assert_eq!(
+            revision,
+            slot.revision.load(Ordering::SeqCst),
+            "保存が版を進めた（保存は内容を変えない）"
+        );
+
+        let SessionState::Open { origin: held, .. } = slot.state() else {
+            panic!("保存の後に保持していない");
+        };
+        assert_eq!(Origin::File(origin), held, "出所の位置が変わった");
+    }
+
+    #[test]
+    fn save_writes_the_same_bytes_as_a_direct_format_write() {
+        let scratch = common::Scratch::new("session-save-bytes");
+        let origin = write_sample(&scratch, "sample.jxcel", 6, 4);
+        let direct = scratch.file("direct.jxcel");
+
+        let slot = Slot::new();
+        slot.resolve(Some(&origin)).expect("標本を読み込める");
+        slot.unsaved.store(true, Ordering::SeqCst);
+        slot.save().expect("出所へ保存できる");
+
+        // 同じ文書（保持している実体）を形式の側へ**直接**書き出す（要件 5.7 の比較の相手）。
+        slot.read(&mut |document| common::api().save(document, &direct))
+            .expect("保持している文書を読める")
+            .expect("形式の側へ直接書き出せる");
+
+        let through_session = std::fs::read(&origin).expect("セッションが保存したファイルを読める");
+        let through_format =
+            std::fs::read(&direct).expect("形式の側へ直接書き出したファイルを読める");
+        assert!(!through_format.is_empty(), "比較したバイト列が空である");
+        assert_eq!(
+            through_format, through_session,
+            "セッションの経路のバイト列が形式の側へ直接書き出したバイト列と一致しない"
+        );
+    }
+
+    #[test]
+    fn save_to_adopts_the_location_for_following_saves() {
+        let scratch = common::Scratch::new("session-save-to");
+        let first = write_sample(&scratch, "first.jxcel", 5, 3);
+        let chosen = scratch.file("chosen.jxcel");
+
+        let slot = Slot::new();
+        slot.resolve(Some(&first)).expect("標本を読み込める");
+        // 未保存を立ててから保存先を指定する: 成功したら印が落ちること（`adopt` の腕でも落ちる
+        // こと）を、この経路でも固定する。
+        slot.unsaved.store(true, Ordering::SeqCst);
+        let revision = slot.revision.load(Ordering::SeqCst);
+
+        let report = slot.save_to(&chosen).expect("選ばれた位置へ保存できる");
+        assert!(
+            matches!(&report, SaveReport::Saved { location } if location == &chosen),
+            "保存が選ばれた位置を運ばない: {report:?}"
+        );
+        assert!(
+            !slot.unsaved.load(Ordering::SeqCst),
+            "save_to の成功で未保存の印が落ちていない"
+        );
+        assert_eq!(
+            CloseAnswer::Allow,
+            slot.may_close(),
+            "save_to の成功の後に閉じられない"
+        );
+
+        let SessionState::Open { name, origin, .. } = slot.state() else {
+            panic!("保存の後に保持していない");
+        };
+        assert_eq!(
+            Origin::File(chosen.clone()),
+            origin,
+            "出所が選ばれた位置でない"
+        );
+        assert_eq!("chosen.jxcel", name, "名前が新しい出所のファイル名でない");
+        assert_eq!(
+            revision,
+            slot.revision.load(Ordering::SeqCst),
+            "保存が版を進めた"
+        );
+
+        // 以後の保存は同じ位置へ書き出す（要件 5.8）。位置の内容を壊してから保存し、書き戻された
+        // ことをバイト列で確かめる。
+        std::fs::write(&chosen, b"broken").expect("選ばれた位置の内容を壊せる");
+        let again = slot.save().expect("出所へ保存できる");
+        assert!(
+            matches!(&again, SaveReport::Saved { location } if location == &chosen),
+            "2 度目の保存が選ばれた位置へ書き出さない: {again:?}"
+        );
+
+        let direct = scratch.file("direct.jxcel");
+        slot.read(&mut |document| common::api().save(document, &direct))
+            .expect("保持している文書を読める")
+            .expect("形式の側へ直接書き出せる");
+        assert_eq!(
+            std::fs::read(&direct).expect("形式の側へ直接書き出したファイルを読める"),
+            std::fs::read(&chosen).expect("2 度目に書き出したファイルを読める"),
+            "2 度目の保存が同じ内容を書き出していない"
+        );
+    }
+
+    #[test]
+    fn failed_save_keeps_the_unsaved_mark_and_the_origin() {
+        let scratch = common::Scratch::new("session-save-failure");
+        let origin = write_sample(&scratch, "sample.jxcel", 3, 2);
+        let missing = scratch.file("missing").join("deep").join("out.jxcel");
+
+        let slot = Slot::new();
+        slot.resolve(Some(&origin)).expect("標本を読み込める");
+        slot.unsaved.store(true, Ordering::SeqCst);
+        let revision = slot.revision.load(Ordering::SeqCst);
+        let before = slot.state();
+
+        let report = slot.save_to(&missing).expect("書き出しの失敗は結果として返る");
+        assert!(
+            matches!(report, SaveReport::Failed { .. }),
+            "書き出せない位置への保存が失敗を報告しない: {report:?}"
+        );
+        assert!(
+            slot.unsaved.load(Ordering::SeqCst),
+            "失敗が未保存の印を落とした"
+        );
+        assert_eq!(CloseAnswer::Deny, slot.may_close(), "失敗の後に閉じてよいと答えた");
+        assert_eq!(before, slot.state(), "失敗が状態（出所）を変えた");
+        assert_eq!(
+            revision,
+            slot.revision.load(Ordering::SeqCst),
+            "失敗が版を進めた"
+        );
+        assert!(!missing.exists(), "失敗したのにファイルが現れた");
+
+        // 出所の位置そのものが書けなくなった場合（ディレクトリごと消えた）も同じである。
+        let gone = common::Scratch::new("session-save-origin-gone");
+        let vanished = write_sample(&gone, "sample.jxcel", 2, 2);
+        let lost = Slot::new();
+        lost.resolve(Some(&vanished)).expect("標本を読み込める");
+        lost.unsaved.store(true, Ordering::SeqCst);
+        std::fs::remove_dir_all(gone.path()).expect("一時ディレクトリごと消せる");
+
+        let report = lost.save().expect("書き出しの失敗は結果として返る");
+        assert!(
+            matches!(report, SaveReport::Failed { .. }),
+            "出所が消えたときの保存が失敗を報告しない: {report:?}"
+        );
+        assert!(
+            lost.unsaved.load(Ordering::SeqCst),
+            "出所が消えたときの失敗が未保存の印を落とした"
+        );
+    }
+
+    #[test]
+    fn unresolved_slot_rejects_both_save_routes() {
+        let scratch = common::Scratch::new("session-save-absent");
+        let location = scratch.file("nowhere.jxcel");
+        let slot = Slot::new();
+
+        assert!(
+            matches!(slot.save(), Err(SessionError::NoDocument)),
+            "未解決のセッションの保存が失敗しない"
+        );
+        assert!(
+            matches!(slot.save_to(&location), Err(SessionError::NoDocument)),
+            "未解決のセッションの保存先指定が失敗しない"
+        );
+        assert_eq!(SessionState::Absent, slot.state(), "拒否が状態を変えた");
+        assert!(!location.exists(), "拒否したのにファイルが現れた");
+    }
+
+    #[test]
+    fn unavailable_slot_rejects_both_save_routes() {
+        let scratch = common::Scratch::new("session-save-unavailable");
+        let missing = scratch.file("missing.jxcel");
+        let location = scratch.file("nowhere.jxcel");
+
+        let slot = Slot::new();
+        slot.resolve(Some(&missing))
+            .expect_err("存在しない位置は読み込めない");
+        assert!(
+            matches!(slot.state(), SessionState::Unavailable { .. }),
+            "読み込みの失敗を覚えていない"
+        );
+
+        assert!(
+            matches!(slot.save(), Err(SessionError::NoDocument)),
+            "読み込めなかったセッションの保存が失敗しない"
+        );
+        assert!(
+            matches!(slot.save_to(&location), Err(SessionError::NoDocument)),
+            "読み込めなかったセッションの保存先指定が失敗しない"
+        );
+        assert!(!location.exists(), "拒否したのにファイルが現れた");
+    }
+
+    #[test]
+    fn save_waits_for_an_apply_in_progress_and_writes_after_it() {
+        /// デッドロック検出のための待ち時間である（**性能の閾値ではない**）。ここで見ているのは
+        /// 「保存が文書のロックを待つか」であり、所要時間を速度の証拠に使うものではない。
+        /// 時間の閾値はこのテストの外に置かない。
+        const DEADLOCK_WAIT: Duration = Duration::from_secs(10);
+
+        let scratch = common::Scratch::new("session-save-waits");
+        let origin = write_sample(&scratch, "sample.jxcel", 4, 3);
+
+        let slot = Arc::new(Slot::new());
+        slot.resolve(Some(&origin)).expect("標本を読み込める");
+        slot.unsaved.store(true, Ordering::SeqCst);
+
+        // 保持側: 文書のロックを握り、解放の指示を待つ（時間切れなら降りる。永久にブロック
+        // させない）。
+        let (held_tx, held_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let holder = {
+            let slot = Arc::clone(&slot);
+            thread::spawn(move || {
+                slot.with_document_mut(&mut |_document| {
+                    held_tx.send(()).expect("観測側が待っている");
+                    release_rx
+                        .recv_timeout(DEADLOCK_WAIT * 2)
+                        .expect("待ち時間内に解放される");
+                })
+                .expect("文書を可変で借りられる");
+            })
+        };
+        held_rx
+            .recv_timeout(DEADLOCK_WAIT)
+            .expect("待ち時間内にロックが保持される");
+
+        // 保持している間に書き出しが起きないことを観測できるよう、位置の内容を壊しておく。
+        std::fs::write(&origin, b"not-a-document").expect("位置の内容を壊せる");
+
+        // 保存は**別のスレッドで**走らせる。ロックを待たずに書き出す実装なら、解放の前に結果が
+        // 届き、下の待ちが成功してテストが落ちる。
+        let (saved_tx, saved_rx) = mpsc::channel::<Result<SaveReport, SessionError>>();
+        let saver = {
+            let slot = Arc::clone(&slot);
+            thread::spawn(move || {
+                saved_tx.send(slot.save()).expect("観測側が待っている");
+            })
+        };
+
+        assert!(
+            saved_rx.recv_timeout(DEADLOCK_WAIT).is_err(),
+            "保存が文書のロックを待たずに書き出した（デッドロック検出の時間切れの前に返った）"
+        );
+        assert_eq!(
+            b"not-a-document".to_vec(),
+            std::fs::read(&origin).expect("位置を読める"),
+            "文書のロックを保持している間に書き出した"
+        );
+
+        release_tx.send(()).expect("解放を指示できる");
+        holder.join().expect("保持側のスレッドが終わる");
+
+        let outcome = saved_rx
+            .recv_timeout(DEADLOCK_WAIT)
+            .expect("解放後に保存が完了する");
+        assert!(
+            matches!(outcome, Ok(SaveReport::Saved { .. })),
+            "解放後の保存が成功しない: {outcome:?}"
+        );
+        assert_ne!(
+            b"not-a-document".to_vec(),
+            std::fs::read(&origin).expect("位置を読める"),
+            "解放後も書き出していない"
+        );
+        assert!(
+            !slot.unsaved.load(Ordering::SeqCst),
+            "保存の成功で未保存の印が落ちていない"
+        );
+        saver.join().expect("保存側のスレッドが終わる");
+    }
+
+    #[test]
+    fn save_does_not_advance_the_revision() {
+        let scratch = common::Scratch::new("session-save-revision");
+        let origin = write_sample(&scratch, "sample.jxcel", 4, 2);
+        let chosen = scratch.file("chosen.jxcel");
+
+        let slot = Slot::new();
+        slot.resolve(Some(&origin)).expect("標本を読み込める");
+        slot.unsaved.store(true, Ordering::SeqCst);
+        let revision = slot.revision.load(Ordering::SeqCst);
+
+        slot.save().expect("出所へ保存できる");
+        assert_eq!(
+            revision,
+            slot.revision.load(Ordering::SeqCst),
+            "出所への保存が版を進めた"
+        );
+
+        slot.unsaved.store(true, Ordering::SeqCst);
+        slot.save_to(&chosen).expect("選ばれた位置へ保存できる");
+        assert_eq!(
+            revision,
+            slot.revision.load(Ordering::SeqCst),
+            "保存先を指定した保存が版を進めた"
         );
     }
 }
