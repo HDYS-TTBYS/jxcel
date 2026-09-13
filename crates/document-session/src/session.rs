@@ -89,6 +89,11 @@
 //! 適用の記録（版を 1 進め、未保存の印を立てる）は変更の適用口（タスク 2.4 の `change`）の
 //! 責務である。
 //!
+//! そのため `session` は、ロックを**保持したまま** `Inner` を貸す [`Slot::lock_for_change`] と、
+//! ロック保持中の記録 [`Slot::record_edit`] を与える。`with_document_mut` は Guard を返さない
+//! （関数を抜けると解放する）ため、記録を閉包と同じ臨界区間に入れられない。判定（文書を保持して
+//! いるか）・閉包の実行・記録を分けないために、Guard を呼び出し元へ貸す口が要る。
+//!
 //! # 保存の 2 経路（要件 5.1, 5.4, 5.5, 5.7, 5.8）
 //!
 //! [`Slot::save`]（出所の位置へ）と [`Slot::save_to`]（選ばれた位置へ書き出し、以後の出所に
@@ -112,7 +117,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
 use document_format::{Document, DocumentFormat, DocumentFormatApi, Sheet};
 
 use crate::error::{SaveReport, SessionError};
-use crate::state::{CloseAnswer, Origin, SessionState, SheetSummary};
+use crate::state::{CloseAnswer, Edited, Origin, SessionState, SheetSummary};
 
 /// 新規作成するドキュメントのシート名。
 ///
@@ -126,8 +131,7 @@ const NEW_SHEET_NAME: &str = "シート1";
 /// 未保存と変更の版は**ロックの外**の原子値である（[`Slot::may_close`] が待たずに答えるため。
 /// モジュール docs「ロックの規律」）。
 ///
-/// 本クレートの表（タスク 2.3）・変更の適用口（タスク 2.4）・引き渡しの配線（タスク 3.2）が
-/// 使うまでの seam である。
+/// 本クレートの公開面（タスク 2.5）・引き渡しの配線（タスク 3.2）が使うまでの seam である。
 #[allow(dead_code)] // 上記の seam（`src-tauri/src/ports.rs` と同じ扱い）。
 pub(crate) struct Slot {
     /// 出所と文書（解決済みのときだけ文書を持つ）。読み取り・変更・状態はこのロックを取る。
@@ -143,7 +147,7 @@ pub(crate) struct Slot {
 /// セッションの内部状態。
 ///
 /// `Resolved` だけが文書を持ち、読み取り・変更・保存・破棄の印を受け付ける。
-#[allow(dead_code)] // `Slot` と同じ seam（表 = 2.3 / 変更の適用 = 2.4 / 引き渡しの配線 = 3.2）。
+#[allow(dead_code)] // `Slot` と同じ seam（公開面 = 2.5 / 引き渡しの配線 = 3.2）。
 pub(crate) enum Inner {
     /// まだ解決していない（生成要求の位置を読むのは呼び出し元の責任である）。
     Unresolved,
@@ -167,7 +171,7 @@ pub(crate) enum Inner {
     },
 }
 
-#[allow(dead_code)] // `Slot` と同じ seam（表 = 2.3 / 変更の適用 = 2.4 / 引き渡しの配線 = 3.2）。
+#[allow(dead_code)] // `Slot` と同じ seam（公開面 = 2.5 / 引き渡しの配線 = 3.2）。
 impl Slot {
     /// 未解決のセッションを作る。文書はまだ無く、未保存でもない。
     pub(crate) fn new() -> Self {
@@ -289,11 +293,16 @@ impl Slot {
         }
     }
 
-    /// 保持している文書を可変で借りる（タスク 2.4 の変更の適用口が使う）。
+    /// 保持している文書を可変で借りる（**記録しない**借用の口である）。
     ///
-    /// **未保存の印と版はここでは変えない**（記録はタスク 2.4 の責務。モジュール docs
-    /// 「書き込むが、記録しない」）。未解決なら [`SessionError::NoDocument`]。閉包の内側から
+    /// **未保存の印と版はここでは変えない**（モジュール docs「書き込むが、記録しない」）。
+    /// 記録まで含む変更の適用は `change::edit` が [`Slot::lock_for_change`] /
+    /// [`Slot::record_edit`] で行う。未解決なら [`SessionError::NoDocument`]。閉包の内側から
     /// セッションを呼び返してはならない（モジュール docs「再入禁止」）。
+    ///
+    /// **production の経路は本関数を使わない**（現状はテストが「ロックを保持したまま、記録せずに
+    /// 書き換える」操作として使う）。残すか `#[cfg(test)]` へ閉じるかは公開面（タスク 2.5）が
+    /// 決める。
     pub(crate) fn with_document_mut<R>(
         &self,
         f: &mut dyn FnMut(&mut Document) -> R,
@@ -302,6 +311,44 @@ impl Slot {
         match &mut *inner {
             Inner::Resolved { document, .. } => Ok(f(document)),
             Inner::Unresolved | Inner::Unavailable { .. } => Err(SessionError::NoDocument),
+        }
+    }
+
+    /// 変更の適用のために文書のロックを**保持したまま**内部状態を貸す（タスク 2.4 の `change` が
+    /// 使う。crate 可視）。
+    ///
+    /// 返した Guard を保持している間、同じセッションの他の操作（読み取り・状態の取得・保存・
+    /// 差し替え）はこのロックを待つ。したがって呼び出し元は、**Guard を持ったまま**閉包を実行し、
+    /// 同じ Guard を [`Slot::record_edit`] へ渡して記録すること。これにより判定（文書を保持して
+    /// いるか）・閉包の実行・記録が 1 つの臨界区間に入る（design.md「Slot」の不変条件
+    /// 「未保存と版の更新は文書のロックを保持したまま行う」）。
+    ///
+    /// この入口が要るのは、[`Slot::with_document_mut`] が**記録しない**契約だからである
+    /// （モジュール docs「書き込むが、記録しない」）。記録まで含む口を `session` に置くと
+    /// 「変更の適用」の意味論（変更の語彙を持たないこと・閉包の失敗でも記録する保守側への
+    /// 倒し方）が状態機械へ混ざるため、状態機械は**貸す口**だけを与え、意味論は `change` が持つ。
+    pub(crate) fn lock_for_change(&self) -> MutexGuard<'_, Inner> {
+        self.lock()
+    }
+
+    /// 変更の適用を記録する（**その時点で**文書のロックを保持していることが前提。タスク 2.4 の
+    /// `change` が使う。crate 可視）。
+    ///
+    /// 未保存の印を立て、**版を 1 進める**（モジュール docs「未保存と版」。1 回の閉包が 1 回の
+    /// 適用である）。閉包が失敗を返していても、閉包が文書を変えたかを判定できないため保守側に
+    /// 倒して記録する（design.md「ChangeApply」）。
+    ///
+    /// `_lock` が要求するのは「**呼び出しの時点で**いずれかの Guard を保持している」ことだけで
+    /// あり、**同じ臨界区間の内側で起きること自体は型では強制されない**（`&MutexGuard` は
+    /// `slot.record_edit(&slot.lock_for_change(), value)` のような取り直しも通す）。記録が閉包と
+    /// 同じ 1 つの Guard の生存範囲に入ることは [`crate::change::edit`] のコードの形状が担保する。
+    pub(crate) fn record_edit<R>(&self, _lock: &MutexGuard<'_, Inner>, value: R) -> Edited<R> {
+        self.unsaved.store(true, Ordering::SeqCst);
+        let revision = self.revision.fetch_add(1, Ordering::SeqCst) + 1;
+        Edited {
+            value,
+            revision,
+            unsaved: true,
         }
     }
 
