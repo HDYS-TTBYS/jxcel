@@ -110,6 +110,15 @@
 //! **既定のビルドでは常に許可する既定実装だけが入る** — 拒否を返す委譲先は非既定の
 //! `verification-triggers` feature の下にのみ存在し、拒否の実測にだけ使う。
 //!
+//! タスク 5.2 が加えたのは**セッション経路の検証専用の引き金**である（要件 8.2、8.3。
+//! `JXCEL_VERIFICATION_SESSION=open,edit,<行数>,save`）。実体は
+//! `src-tauri/src/session/verification.rs` にあり、本ファイルは [`handle_run_event`] の
+//! `RunEvent::Ready` で `session::verification::arm` を呼ぶだけである（既存の
+//! `arm_verification_exit_trigger` の隣）。これは 3 OS の段が**画面を操作せずに**
+//! 「読み込み → 1 回の一括の適用 → 保存 → 閉じてよいかの答え」を観測するための入口であり、
+//! 記録は 5.3 の検査器（`scripts/check-document-session.sh`）が数える。**既定のビルドには
+//! 環境変数の読み取りも記録の文字列も入らない**（`verification.md` の規約）。
+//!
 //! タスク 8.1 が加えたのは**補助プロセスの実行ファイルの解決（プラットフォーム別）と、その
 //! 出力の診断連携**である（要件 5.1、5.2、5.3、5.5、5.9）。実体は
 //! `src-tauri/src/sidecar_host.rs` にあり、本ファイルは 3 箇所でそれを使う:
@@ -2158,7 +2167,15 @@ fn handle_run_event(app: &AppHandle, event: RunEvent) {
         RunEvent::Ready => {
             open_startup_window(app);
             #[cfg(feature = "verification-triggers")]
-            arm_verification_exit_trigger(app);
+            {
+                arm_verification_exit_trigger(app);
+                // セッション経路の引き金（tasks.md 5.2。要件 8.2、8.3）。**終了の引き金より
+                // 後に置く** — こちらはウィンドウの生成を待つため、先に置いても順序は変わらない
+                // が、走行中のプロセスを終了させる判断は検査器の側にあり（時間切れ）、
+                // 2 つの引き金が同じ `RunEvent::Ready` から起動されることを 1 箇所で読める
+                // ようにする。
+                session::verification::arm(app);
+            }
         }
         // 通常終了でプロセスが終わる直前の最後の同期点（要件 5.6。タスク 5.6）。
         RunEvent::Exit => shutdown_sidecars(app),

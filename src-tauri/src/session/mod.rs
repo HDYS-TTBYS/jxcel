@@ -6,7 +6,9 @@
 //!
 //! 本モジュールが置く起動の結線は [`install`] の 1 つだけである。4 コマンドは [`commands`] に
 //! あり、メニューの 2 項目（「新規」「保存」）は [`menu`] にあり、保存先の選択は `crate::dialog`
-//! が担う（3.5）。
+//! が担う（3.5）。**検証専用の引き金**（タスク 5.2）は `verification-triggers` feature の下に
+//! だけ存在する `verification` にあり、`lifecycle::handle_run_event` の `RunEvent::Ready` が
+//! 起動引数のドキュメントへ 1 回の走行（読み込み → 一括の適用 → 保存）を行わせる。
 //!
 //! # 起動の結線
 //!
@@ -55,6 +57,12 @@ pub mod commands;
 pub mod host;
 pub mod menu;
 pub mod watch;
+
+// 検証専用の引き金（tasks.md 5.2。要件 8.2、8.3）。**`verification-triggers` feature の下に
+// だけ存在する**（既定のビルドには識別子すら残らない。`.kiro/steering/verification.md`）。
+// 起動引数のドキュメントを読み込み → 1 回の一括の適用 → 保存 → 閉じてよいかの答えを記録する。
+#[cfg(feature = "verification-triggers")]
+pub mod verification;
 
 use std::sync::Arc;
 

@@ -127,9 +127,13 @@ document-format = { path = "../crates/document-format" }
 # `force_creation_failure`）。あわせて `JXCEL_VERIFICATION_INITIAL_SCREEN` が働き、
 # **ウィンドウが最初に表示する画面**をフロントエンドの識別子で選べる（3 OS の描画確認 10.4 が
 # 実用画面ではない最小画面 `smoke-table` / `smoke-editor` を直接開くための経路。
-# `window/mod.rs` の `initial_screen_script`）。**配布物（release）に検証専用の環境変数の
-# 読み取りを入れない**ため、既定では無効にしてある（tasks.md 5.4 の申し送り。7.4 が
-# 「終了」メニュー項目を配線したことに伴う片付け）。
+# `window/mod.rs` の `initial_screen_script`）。
+#
+# 本スペック（`document-session`）が足したのは `JXCEL_VERIFICATION_SESSION` であり、
+# 起動引数のドキュメントへ「読み込み → 1 回の一括の適用 → 保存 → 閉じてよいかの答え」を
+# 1 回行わせ、その事実を 1 行ずつ記録する（`session/verification.rs`。要件 8.2、8.3）。
+# **配布物（release）に検証専用の環境変数の読み取りを入れない**ため、既定では無効にしてある
+# （tasks.md 5.4 の申し送り。7.4 が「終了」メニュー項目を配線したことに伴う片付け）。
 #
 # 検証時は明示的に有効にする:
 #   cargo test  -p jxcel --features verification-triggers

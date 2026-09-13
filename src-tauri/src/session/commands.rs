@@ -332,7 +332,13 @@ fn refusal_reason(label: &WindowLabel, error: &SessionError) -> String {
 /// **`Absent` へ落ちる変化だけは送らない。** それは消えたウィンドウの掃除
 /// （[`WindowDestroyWatch::forget_unresolvable`] と、購読を登録できないウィンドウの後始末）で
 /// あり、**送り先のウィンドウが既に無い** — 送っても `emit` が失敗するだけである。
-fn answer_state(
+///
+/// **検証専用の引き金（`session::verification`）もこの本体を呼ぶ**（メニュー面は呼ばない —
+/// あちらが共有するのは [`answer_new`] / [`answer_save`] である）。引き金がこれを呼ぶのは、
+/// **読み込みの経路そのもの**（解決 + 状態の写し + 通知の要否）を写さずに通すためである —
+/// 写すと「起動時の位置は最初のアクセスで 1 度だけ読む」という要件 1.2 の契約が 2 箇所に分かれる
+/// （`session/verification.rs` の module doc）。
+pub(crate) fn answer_state(
     watch: &WindowDestroyWatch,
     label: &WindowLabel,
     requested: Option<&Path>,
