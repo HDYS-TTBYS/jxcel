@@ -3,31 +3,35 @@
 #
 # 根拠（.kiro/specs/document-format/design.md「Performance Tests」・
 # requirements 8.1 / 8.2・tasks.md 8.9 / .kiro/specs/schema-engine/design.md
-# 「Performance」・requirements 10.1 / 10.3・tasks.md 9.2）:
+# 「Performance」・requirements 10.1 / 10.3・tasks.md 9.2 /
+# .kiro/specs/document-session/design.md「Benchmarks（予算のゲート）」・
+# requirements 3.5 / 5.6 / 8.1・tasks.md 5.1）:
 #   10 万行 × 30 列のドキュメントを **開く 3 秒以内**、**保存 2 秒以内**で処理する。
 #   加えて、10 万行 × 30 列のシートの**全件検証を 1 秒以内**に完了する（要件 10.1, 10.3。
-#   開く 3 秒の内側で走るため、その予算を圧迫しない上限）。
-#   `.github/workflows/bench.yml` の `cargo bench -p document-format -p schema-engine` が
-#   残す criterion の計測値（`target/criterion/**/new/estimates.json`）を読み、平均（mean）の
-#   点推定値が予算を超えていれば非 0 で終了し、CI を失敗させる。これにより予算超過を
-#   機能追加と同時に検出する。
+#   開く 3 秒の内側で走るため、その予算を圧迫しない上限）。さらに、10 万行 × 30 列の
+#   **すべてのセルを置き換える一括の適用を 1 秒以内**に完了する（要件 3.5。セッションの
+#   経路の予算であり、開く 3 秒の内側で走る）。
+#   `.github/workflows/bench.yml` の
+#   `cargo bench -p document-format -p schema-engine -p document-session` が残す criterion の
+#   計測値（`target/criterion/**/new/estimates.json`）を読み、平均（mean）の点推定値が予算を
+#   超えていれば非 0 で終了し、CI を失敗させる。これにより予算超過を機能追加と同時に検出する。
 #
 # 単位: criterion の `estimates.json` の値はナノ秒（ns）である（criterion の既定単位）。
 #   予算は 3 秒 = 3_000_000_000 ns / 2 秒 = 2_000_000_000 ns / 1 秒 = 1_000_000_000 ns
-#   （シートの全件検証）。
+#   （シートの全件検証・一括の適用）。
 #
 # 計測環境（要件 8.3）: 予算判定は CI の GitHub-hosted ランナー（ubuntu-latest /
 #   macos-latest / windows-latest）で計測した release の値に対して行う。private
 #   リポジトリのランナーは 2 vCPU（macOS は 3 コア M1）で要件 8.3 の「4 コア以上」より
 #   弱いが、閾値は要件値のまま使う（弱い環境で通れば要件の環境でも通るとみなす
 #   保守的な代理。bench.yml 冒頭の「計測環境」）。ローカルでも同じコマンドで同じ判定を
-#   再現できる（`cargo bench -p document-format --bench large_document` と
-#   `cargo bench -p schema-engine --bench large_sheet` の後に本スクリプト）。
+#   再現できる（`cargo bench -p document-format -p schema-engine -p document-session` の後に
+#   本スクリプト）。
 #
 # POSIX sh 互換: `bash scripts/check-bench-budget.sh` が Linux / macOS /
 # Windows (Git Bash) のいずれでも動作すること（3 OS マトリクス共用）。
 #
-# 使い方: sh scripts/check-bench-budget.sh [criterion ディレクトリ] [開く予算 ns] [保存予算 ns] [検証予算 ns]
+# 使い方: sh scripts/check-bench-budget.sh [criterion ディレクトリ] [開く予算 ns] [保存予算 ns] [検証予算 ns] [一括の適用の予算 ns]
 #   予算の引数は既定（要件値）を上書きする。CI は引数なしで呼ぶ
 #   （予算判定の閾値を CI から差し替えない）。
 # 終了コード: 0 = 全予算内 / 1 = 予算超過 / 2 = 計測値が無い・解釈できない
@@ -36,6 +40,8 @@ set -eu
 OPEN_BUDGET="${2:-3000000000}"
 SAVE_BUDGET="${3:-2000000000}"
 VALIDATE_BUDGET="${4:-1000000000}"
+# 一括の適用（全セルの置き換え。要件 3.5、tasks.md 5.1）の予算。既定は要件値の 1 秒。
+BULK_BUDGET="${5:-1000000000}"
 CRITERION="${1:-target/criterion}"
 
 # criterion の mean.point_estimate（ナノ秒, 浮動小数）を取り出す。
@@ -111,6 +117,14 @@ check_budget "open (10万行×30列)" "large_document/open_100k_rows_x_30_column
 check_budget "save (10万行×30列)" "large_document/save_100k_rows_x_30_columns" "$SAVE_BUDGET" ||
   record_status $?
 check_budget "validate (10万行×30列)" "large_sheet/validate_100k_rows_x_30_columns" "$VALIDATE_BUDGET" ||
+  record_status $?
+check_budget "apply (10万行×30列)" "large_session/apply_bulk_edit_100k_rows_x_30_columns" "$BULK_BUDGET" ||
+  record_status $?
+# セッションの経路の読み込みと保存も判定する（要件 5.6, 8.1。形式の側の計測とは別の経路で
+# あり、bench id を `large_session/` の下に持つ）。
+check_budget "open+hold (10万行×30列)" "large_session/open_and_hold_100k_rows_x_30_columns" "$OPEN_BUDGET" ||
+  record_status $?
+check_budget "save (10万行×30列, セッション経路)" "large_session/save_100k_rows_x_30_columns" "$SAVE_BUDGET" ||
   record_status $?
 
 exit "$status"

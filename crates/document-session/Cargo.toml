@@ -55,9 +55,9 @@ path = "src/lib.rs"
 # ファンアウトしても壊れないようにする（crates/document-format/Cargo.toml と同じ形）。
 bench = false
 
-# criterion ベンチターゲット（harness 直結）。計測の対象（tasks.md 5.1）は後続タスクが
-# 埋める。ここではハーネスの結線だけを置き、宣言とファイルの欠落で
-# `cargo bench --no-run` が落ちないようにする。
+# criterion ベンチターゲット（harness 直結）。計測の対象は 10 万行 × 30 列の読み込みと
+# 保持・保存・一括の適用であり（tasks.md 5.1 が `benches/large_session.rs` に実装済み。
+# 要件 3.5, 5.6, 8.1）、`scripts/check-bench-budget.sh` のゲートが同じ bench id を読む。
 [[bench]]
 name = "large_session"
 harness = false
