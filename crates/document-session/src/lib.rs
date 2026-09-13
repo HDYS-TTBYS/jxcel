@@ -37,5 +37,22 @@
 //!
 //! # 現状
 //!
-//! 本ファイルはタスク 1.1 の足場であり、`mod` 宣言は置かない（未実装のモジュールを
-//! 宣言するとコンパイルが通らない）。各層は後続タスク（2.x・3.x）が追加する。
+//! タスク 1.3 が鎖の最左の 2 層（`error` / `state`）を定義した。`error` は
+//! [`SessionError`]（保持していない・別の操作が進行中・未保存のため差し替えできない・
+//! 読み込みに失敗した）と [`SaveReport`]（保存した / 保存先が要る / 取り消した / 失敗した）、
+//! `state` は [`SessionState`] / [`Origin`] / [`SheetSummary`] / [`CloseAnswer`] / [`Edited`] を
+//! 定義する。いずれも表示用の文言を持たない（文言は適応層が組み立てる）。この 2 層は
+//! **本クレートの他のどの層にも依存しない**（`std` と `document-format`、`thiserror` だけを
+//! 使う）。残る `session` / `change` / `table` / `api` は後続タスク（2.x・3.x）が足す。
+//!
+//! フィーチャーフラグは使わない（型の定義であり、OFF の構成に意味が無い）。
+
+pub mod error;
+pub mod state;
+
+// 下流（`src-tauri` の適応層と、その先の他クレート）は**根の名前だけを使う**
+// （design.md「Architecture Integration」の「公開面は根の再輸出に集める」）。下位モジュールは
+// `pub mod` のまま公開されるが、利用側が `document_session::error::...` のような層のパスを
+// 直接綴ると、層の構成を変えたときに下流が壊れる。根に並べた名前を唯一の入口とする。
+pub use error::{SaveReport, SessionError};
+pub use state::{CloseAnswer, Edited, Origin, SessionState, SheetSummary};

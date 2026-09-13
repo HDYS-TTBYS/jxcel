@@ -493,6 +493,9 @@ pub enum SessionState {
 
 pub struct Edited<R> { pub value: R, pub revision: u64, pub unsaved: bool }
 
+/// シート 1 枚の要約（識別子は上流の型のまま。文字列化は境界型の担当）。
+pub struct SheetSummary { pub id: SheetId, pub name: String, pub columns: usize, pub rows: usize }
+
 pub enum CloseAnswer { Allow, Deny }
 ```
 - `SessionError` / `SaveReport` / `SessionState` はいずれも**表示用の文言を持たない**（文言は適応層が組み立てる）。`Unavailable { reason }` の理由だけは、形式の側の誤りを利用者へ伝えるために適応層が写した文字列である

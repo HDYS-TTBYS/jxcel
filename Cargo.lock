@@ -1041,6 +1041,7 @@ dependencies = [
  "app-shell",
  "criterion",
  "document-format",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
