@@ -161,6 +161,7 @@ use crate::commands;
 use crate::dialog;
 use crate::menu;
 use crate::ports::DocumentHostPort;
+use crate::session;
 use crate::sidecar_host::{self, SidecarHost};
 use crate::window::{self, WindowRegistry, WindowRequest};
 
@@ -461,6 +462,14 @@ pub fn run() -> Result<(), StartupError> {
     //   パスを読まない**（`src-tauri/src/dialog.rs` の module doc）。9.6 の画面は同じ実装を
     //   コマンド（`pick_document_file`）から通る。
     dialog::install(app.handle());
+
+    // 手順 4.3 の続き: ドキュメント所有者の宿主の設置（要件 1.3・2.2・4.6・6.1。タスク 3.2）。
+    //   セッションの表を 1 実体作り（管理状態にも置く）、**現在の宿主を取り出してから**その
+    //   内側に保つ連鎖（`SessionDocumentHost`）を委譲点へ入れる。設置前の宿主を捨てないのは、
+    //   `verification-triggers` の検証用宿主（名指しの拒否の実測と、引き渡しの記録）を
+    //   壊さないためである。以後 `can_close_window` と「開く」の引き渡しは、セッションを先に
+    //   見てから内側へ委ねる（`src-tauri/src/session/mod.rs` の module doc）。
+    session::install(app.handle());
 
     // 手順 4.3 の続き: 診断の導線の登録（要件 8.1、8.6、8.7。タスク 9.5）。**7.4 と同じ登録口**
     //   へ「診断」の部分メニューの 3 項目（保存場所の表示・書き出し・詳細度の変更）を足す。

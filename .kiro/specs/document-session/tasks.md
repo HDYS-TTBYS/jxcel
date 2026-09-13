@@ -98,7 +98,7 @@
   - `cargo run -p app-shell --bin generate-bindings` のあと `cargo test -p app-shell --test bindings_drift` と `npm run typecheck` が通る
   - _Requirements: 1.6, 1.7, 7.1_
 
-- [ ] 3.2 ドキュメント所有者の宿主を連鎖で設置する
+- [x] 3.2 ドキュメント所有者の宿主を連鎖で設置する
   - `DocumentHost` を実装し、**設置前の宿主を内側に持つ**。`may_close` は未保存なら拒否、そうでなければ内側へ委ねる。`attach` は**コアの引き渡しの入口**（未保存なら拒否し、失敗しても既存の文書を変えない）を通してから内側へも渡す
   - 未解決のウィンドウの `may_close` では**解決を試みない**（読み込みは秒単位かかり、まだ何も変更されていない）
   - 設置は現在の宿主を取り出してから行う。**これにより `verification-triggers` の検証用宿主（拒否の実測と引き渡しの記録）が保存される**
@@ -227,3 +227,4 @@
 - **2.4**: `change::edit` は **1 つの Guard の生存範囲で「判定 → 閉包 → 記録」を行う**（`Slot::lock_for_change` で Guard を取り、`Slot::record_edit(&guard, value)` が Guard を型で要求する）。ただし**「同じ Guard であること」は型では強制されない**（Guard を取り直す変異はコンパイルが通り、レビューの変異 B がそれを実証した）— 担保は**コードの形状**であり、その旨を doc に明記した。**`Slot::with_document_mut` は production 未使用**（記録しない貸出口であり、使うと要件 4.1 の抜け道になる）。タスク 2.5 が削除か `#[cfg(test)]` 化を決める。**このツールチェーンに `cargo fmt` は無く、整形は親の `qlty fmt` が担う**。
 - **2.5**: 公開面は `lib.rs` の trait `DocumentSessionsApi`（11 メソッド）と具象 `DocumentSessions`（オブジェクト安全でない旨を doc に明記）。**セッションを作るのは `resolve` / `attach` / `create` の 3 つだけ**であることは、**根の名前の統合テストでは検出できない**（未解決の `Slot` と不在は根から区別できない）— そのため `lib.rs` の内部テストで私有の表を直接観測する（変異 M1/M2/M3 で落ちることを実測）。`with_document_mut`（記録しない可変貸出）は **`#[cfg(test)]` に閉じた**（production の可変経路は `change::edit` ただ 1 つ）。`#[allow(dead_code)]` の seam はすべて除去。
 - **3.1**: 境界の判別可能な合併型は**既存 3 つ（`IpcResult` / `WindowCloseVerdict` / `DocumentPickOutcome`）と同じ内部タグ + PascalCase** に揃えた（`DocumentSessionStatus` は `state` タグで `"Absent"` / `"Open"` / `"Unavailable"`。`DocumentOrigin` だけは既存に合わせて小文字の値を持つ）。**doc に生成物の実際の綴りを書くこと**（「小文字」と誤記するとフロントエンドが `case "absent"` と書いて絞り込みが静かに効かなくなる）。生成物の正例テスト（`bindings_declare_the_document_surface`）を足した — ドリフト検査だけでは「宣言を消して再生成」を取り逃す。
+- **3.2**: `src-tauri` は **`document-format` を `[dev-dependencies]` のみ**に持つ（テストで本物の文書を作るため。**通常依存には足さない** — 配布物の依存グラフを増やさない）。宿主の連鎖は `install` の中で `port.host()` → `port.install(...)` の順に取り出す。**実装者は報告前に落ちたが、`cargo test -p jxcel` は 111 passed（`verification-triggers` 付きで 123 passed）で作業自体は完了していた**（親が証拠を補ってレビューへ回した）。

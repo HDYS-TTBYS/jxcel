@@ -48,6 +48,15 @@ tauri = { version = "2.11.3", features = [] }
 # 設定ストア・診断の保存先の解決（要件 7.2、8.1）でこれを呼ぶ。逆方向の依存は持たない。
 app-shell = { path = "../crates/app-shell" }
 
+# Tauri 非依存のコア（design.md「Allowed Dependencies」: `src-tauri/` は `crates/` のドメイン
+# クレートにのみ依存し、業務ロジックを持たない）。**本クレート自身は文書を保持しない** —
+# 保持・読み込み・未保存の追跡は `document-session` が所有し、ここはその公開面
+# （`DocumentSessions`）を `Arc` で 1 実体だけ持ち、境界（コマンド・宿主の連鎖）へ写す。
+# 依存方針は `crates/document-session/Cargo.toml` と design.md が定める（本クレートから
+# `document-format` への**通常依存は足さない** — 形式を直接使うのはテストだけであり、
+# 下の `[dev-dependencies]` にだけ置く）。
+document-session = { path = "../crates/document-session" }
+
 # 設定値の形の直列化（タスク 6.3）。`window.geometry` は design.md「Logical Data Model」が
 # **オブジェクト**と定めているため、位置とサイズの 4 フィールドを持つ構造体を derive で
 # そのまま載せる（`SettingsStore::get/set` は `serde` の型を要求する）。**新しいクレートでは
@@ -101,6 +110,13 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsA
 # `tauri_build::build()` の実体。ウィンドウ設定の検証・capability スキーマの生成・
 # ACL マニフェストの生成・`externalBin` の複製を担う（BuildPipeline）。
 tauri-build = { version = "2.6.3", features = [] }
+
+[dev-dependencies]
+# **テストだけが使う**（配布物の依存グラフへ足さない）。`session/host.rs` の連鎖のテストが、
+# 引き渡しの成功を観測するために**本物の文書**（一時ディレクトリの `.jxcel`）を作る。
+# 本番の経路が形式を直接使うことは無い — 形式を扱うのは `document-session` の内側だけである
+# （`cargo tree -p jxcel` に現れないことを受入で示す）。
+document-format = { path = "../crates/document-format" }
 
 [features]
 # **検証専用の引き金を有効にする（既定では無効）。**

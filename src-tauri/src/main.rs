@@ -24,6 +24,7 @@ mod dialog;
 mod lifecycle;
 mod menu;
 mod ports;
+mod session;
 mod sidecar_host;
 mod watchdog;
 mod window;
