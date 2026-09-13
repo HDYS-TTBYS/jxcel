@@ -124,7 +124,7 @@
   - 登録名と権限の一致の検査が 4 つすべてについて通り、保持していないウィンドウへの状態の問い合わせが「保持していない」を返す
   - _Requirements: 1.6, 1.7, 2.4, 5.1, 5.3, 7.1, 7.4_
 
-- [ ] 3.5 保存先の選択を提示する
+- [x] 3.5 保存先の選択を提示する
   - 親ウィンドウを必ず指定した保存用の選択を 1 つ足す（Linux は `gtk` の保存動作、Windows / macOS は `rfd` の保存）。既定の提案名を与える
   - 取り消しと「提示できなかった」を区別して返す（取り消しは正常な結果である）
   - **位置はコマンドの応答に含めない。**提示は保存コマンドの内側で完結させる
@@ -229,3 +229,4 @@
 - **3.1**: 境界の判別可能な合併型は**既存 3 つ（`IpcResult` / `WindowCloseVerdict` / `DocumentPickOutcome`）と同じ内部タグ + PascalCase** に揃えた（`DocumentSessionStatus` は `state` タグで `"Absent"` / `"Open"` / `"Unavailable"`。`DocumentOrigin` だけは既存に合わせて小文字の値を持つ）。**doc に生成物の実際の綴りを書くこと**（「小文字」と誤記するとフロントエンドが `case "absent"` と書いて絞り込みが静かに効かなくなる）。生成物の正例テスト（`bindings_declare_the_document_surface`）を足した — ドリフト検査だけでは「宣言を消して再生成」を取り逃す。
 - **3.2**: `src-tauri` は **`document-format` を `[dev-dependencies]` のみ**に持つ（テストで本物の文書を作るため。**通常依存には足さない** — 配布物の依存グラフを増やさない）。宿主の連鎖は `install` の中で `port.host()` → `port.install(...)` の順に取り出す。**実装者は報告前に落ちたが、`cargo test -p jxcel` は 111 passed（`verification-triggers` 付きで 123 passed）で作業自体は完了していた**（親が証拠を補ってレビューへ回した）。
 - **3.3**: セッションを作る 3 つの入口は**適応層の `WindowDestroyWatch`**（`session/watch.rs`）に閉じた。**コマンド（3.4）と宿主の連鎖（3.2）はどちらもこの入口を通る** — 宿主が表を直接触ると購読を伴わないセッションが生まれ、要件 1.5 が破れる（`host.rs` は `attach` を入口経由に切り替えた）。**管理状態へ置くのは `Arc<WindowDestroyWatch>` であり `Arc<DocumentSessions>` ではない**（登録済みラベルの集合が 2 つに割れると購読が二重になる）。破棄の購読は `WebviewWindow::on_window_event` を**テストから駆動できない**（`tauri::test` の `MockWindowDispatcher::on_window_event` は渡された閉包を保持しない。`mock_runtime.rs:711`）ため、`WindowDestroyEvents` の縫い目 1 つに閉じ、本番は `TauriWindowEvents` が担う（`window/geometry.rs` の `GeometryRead` と同じ形）。`resolve` / `create` / `forget_unresolvable` には 3.4 が呼び出し元になるまでの `#[allow(dead_code)]` の縫い目を付けた（**3.4 の完了時に外すこと**）。レビューの指摘（非阻害）: 登録済みラベルの検査と挿入は原子的でないため、同じラベルへの同時の初回入口が 2 つの購読を作りうる（IPC 駆動の入口では影響しないが design の「ウィンドウ 1 つにつき 1 回」より弱い）。
+- **3.5**: 保存先の選択は `dialog.rs` の既存の「開く」の経路の隣に置き、**GTK の選択器の組み立てを `ChooserPlan`**（題名・動作・承認/取り消しの表示名・提案名）に括って開く側と保存側で共有した（メインスレッドへの依頼と「親が具現化されていなければ提示しない」規則も共有する）。**`PickResult` → `SaveLocation` の写像は `save_location_from_pick` という純関数 1 つに閉じる**（Linux と Windows/macOS の両方の腕がここを通る）— 最初の実装は各腕に `match` を写しており、**レビューが「取り消しを位置へ倒す」変異でテストが 1 つも落ちないことを示して REJECTED になった**（要件 5.3 の核心が無防備だった）。**テストが定数を直接書いて分岐を畳ませると、そのテストは何も拘束しない**（`let location = SaveLocation::Cancelled;` は `assert!(!wrote)` を `false == false` にする）。提案名は `DEFAULT_SAVE_NAME = "無題.jxcel"` を既定とし、`suggested_save_name` が出所のファイル名か既定を選ぶ。**`ChooserPlan` のテストは「提示へ渡る値」までしか保証しない**（`set_current_name` / `FileChooserNative::new` の呼び出し地点は GUI の中でしか走らない）— doc にそう明記すること（実画面の観測が担う）。実画面の観測には 3.4 まで呼び出し元が無いため、`JXCEL_OBSERVE_SAVE` で括った一時のメニュー項目を使い、**観測後に削除して残骸が無いことを確かめた**（`grep` で確認済み）。

@@ -45,6 +45,37 @@
 //! ウィンドウのラベルが見つからない場合（メニュー経路）と、GTK のウィンドウが既に破棄されて
 //! いる場合（Linux）の 2 か所で判定する。
 //!
+//! # 保存先の選択（要件 5.2、5.3）
+//!
+//! [`pick_save_location`] は「保存」の判断のうち**利用者に保存先を尋ねる**部分だけを持つ。何を
+//! いつ書き出すかを決めるのはコア（`document-session`）と 3.4 の `document_save` であり、
+//! 本関数は尋ねて位置を返すだけである。
+//!
+//! **3 つの答えを区別する。** `Chosen`（選ばれた）/ `Cancelled`（取り消した）/
+//! `Unavailable`（提示できなかった）。**取り消しは正常な結果であり、失敗ではない** — 保存の
+//! 指示は「何も書き出さず、未保存のまま保つ」という正しい答えへ進む（要件 5.3）。提示できなかった
+//! ことだけが失敗である（3.4 が利用者へ理由を伝えるかどうかを決める）。
+//!
+//! **位置はコマンドの応答に含めない。** 本関数は選ばれた位置を Rust の呼び出し元へ返すだけであり、
+//! 応答の型（境界の `DocumentSaveResponse`）は `status` と `outcome` だけを運ぶ。3.4 の
+//! `document_save` は**位置を応答へ写してはならない** — 境界の約束（design.md
+//! 「Boundary Commitments」の「位置を境界へ出さない」）を破る唯一の経路になる。
+//!
+//! **`tauri-plugin-dialog` はここでも使わない。** 依存の判断は module doc「依存の選択」
+//! のとおりであり、保存の動作でも同じ 3 つの理由（fs プラグインの非 optional 依存・Linux で
+//! 親が無視されること・ポータルの別プロセス）がそのまま効く。
+//!
+//! # 保存先の選択は 3.4 の `document_save` まで呼び出し元が無い（seam）
+//!
+//! **本節の項目はすべて `#[allow(dead_code)]` を付けて置いてある。** 保存先の提示の生産側の
+//! 呼び出し元はタスク 3.4 の `document_save`（出所を持たない文書の保存で [`pick_save_location`]
+//! を呼び、`Chosen` ならコアの `save_to` へ渡す）であり、**3.4 はこの節の `allow` をすべて
+//! 外す**こと（`ports.rs` / `session/watch.rs` の seam と同じ扱い）。
+//!
+//! **暫定の呼び出し元を発明しない。** 呼び出し元を 1 つ作るにはコマンドの登録（3.4 の 5 点
+//! セット = 名前・ハンドラ・登録・権限・生成物）が要り、それをここで行うと 3.4 の担当を
+//! 先取りすることになる。本タスクは**提示の口を 1 つ足すだけ**に留め、配線は 3.4 に残す。
+//!
 //! # 実行モデル（ブロックする選択をイベントループのスレッドで走らせない）
 //!
 //! **コマンドは `async fn` として宣言する。** Tauri の非同期コマンドは非同期ランタイムの
@@ -105,6 +136,31 @@ use crate::ports::DocumentHostPort;
 
 /// 選択手段の題名。
 const TITLE: &str = "ドキュメントを開く";
+
+/// 保存先の選択の題名。
+#[allow(dead_code)] // 3.4 の `document_save` が `pick_save_location` を呼ぶまでの seam。
+const SAVE_TITLE: &str = "名前を付けて保存";
+
+/// 保存先の選択の承認の操作の表示名（GTK の選択器でのみ使う）。
+#[cfg(target_os = "linux")]
+#[allow(dead_code)] // 3.4 の `document_save` が `pick_save_location` を呼ぶまでの seam。
+const SAVE_ACCEPT_LABEL: &str = "保存";
+
+/// 保存先の選択の取り消しの操作の表示名（GTK の選択器でのみ使う）。
+#[cfg(target_os = "linux")]
+#[allow(dead_code)] // 3.4 の `document_save` が `pick_save_location` を呼ぶまでの seam。
+const SAVE_CANCEL_LABEL: &str = "キャンセル";
+
+/// 出所を持たないドキュメントに与える既定の提案名（design.md「DialogGate」の
+/// 「提案名は『無題』または既存のファイル名」）。
+///
+/// **拡張子まで含めた完全なファイル名である。** 利用者がそのまま承認すれば、この名前の
+/// ファイルが作られる。形式の側（`document-format`）は拡張子を要求しない（`open` は中身の
+/// 型マーカーで判定する）が、**OS と利用者には拡張子が見える**ため、既定にも付ける。
+/// 名前の本体はタスク 3.4 の `document_save` が与える `suggested_name` であり、本定数は
+/// **出所を持たないドキュメントに対する適応層の既定**である。
+#[allow(dead_code)] // 3.4 の `document_save` が作成の既定名として使うまでの seam。
+pub const DEFAULT_SAVE_NAME: &str = "無題.jxcel";
 
 /// 承認の操作の表示名（GTK の選択器でのみ使う）。
 #[cfg(target_os = "linux")]
@@ -198,6 +254,132 @@ fn describe(hand_off: &HandOff) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// 保存先の選択（要件 5.2、5.3。呼び出し元は 3.4 の `document_save`）
+// ---------------------------------------------------------------------------
+
+/// 選択手段の答えを保存先の答えへ写す。**純粋関数**（GUI 無しで検査できる）。
+///
+/// **これが「取り消しを誤りにしない」写像そのものである。** [`PickResult::Cancelled`] だけが
+/// [`SaveLocation::Cancelled`] になり、[`PickResult::Unavailable`] は
+/// [`SaveLocation::Unavailable`] のまま運ばれる。この 2 つを混ぜると、利用者が取り消しただけの
+/// ときに失敗が報告される（要件 5.3 が禁じること）。**3 つの腕の対応はこの 1 か所だけに書く** —
+/// プラットフォームごとの `pick_save` が別々に写すと、片方だけが取り消しを誤りへ倒しうる。
+///
+/// **両方のプラットフォームがこの関数を通る**（Linux は `gtk` の答えを、Windows / macOS は
+/// `rfd` の答えを写す）。**Linux 以外では [`PickResult::Unavailable`] を構築しない** — `rfd` の
+/// `save_file` は「取り消し」と「提示できなかった」を区別せず、どちらも `None` を返すためである
+/// （その判断は [`pick_save`](pick_save) の Windows / macOS 版の doc にある）。したがって
+/// **[`PickResult::Unavailable`] をこの写像へ渡すのは Linux だけである**が、写像そのものは
+/// プラットフォームに依らない（`cfg` を付けない）— 「取り消しは取り消しのまま」という規則は
+/// どの OS でも同じであり、片方のビルドでしか検査できない規則を作らないためである。
+fn save_location_from_pick(result: PickResult) -> SaveLocation {
+    match result {
+        PickResult::Cancelled => SaveLocation::Cancelled,
+        PickResult::Picked(path) => SaveLocation::Chosen(path),
+        PickResult::Unavailable(message) => SaveLocation::Unavailable(message),
+    }
+}
+
+/// 保存先の選択の結果（design.md「DialogGate（保存先の選択）」）。
+///
+/// **`Cancelled` は誤りではない。** 利用者が取り消したという正常な結果であり、保存の指示は
+/// 「何も書き出さず、未保存のまま保つ」へ進む（要件 5.3）。設計の対応表（design.md「Error
+/// Handling」）では `SaveReport::Cancelled` → `DocumentSaveOutcome::Cancelled` → 封筒の成功腕
+/// であり、**この 3 段のどれにも誤りは現れない**。取り消しを `Unavailable` に混ぜると、利用者が
+/// 取り消しただけのときに失敗が報告される（既存の [`PickResult`] と同じ判断）。
+///
+/// **`Unavailable` だけが失敗である。** 提示できなかった理由を運び、3.4 の `document_save` が
+/// 利用者へ伝えるかどうかを決める。
+///
+/// **位置は外へ出さない。** `Chosen` が運ぶ `PathBuf` は本関数の Rust の呼び出し元だけが読み、
+/// コマンドの応答（境界の `DocumentSaveResponse`）へは写さない（design.md
+/// 「Boundary Commitments」）。書き出しの相手は同じ関数の内側で完結する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // 3.4 の `document_save` が `pick_save_location` を呼ぶまでの seam。
+pub enum SaveLocation {
+    /// 保存先が選ばれた。**位置は Rust の側にだけ留まる。**
+    Chosen(PathBuf),
+    /// 利用者が取り消した。**何も書き出さず、未保存を保つ**（要件 5.3）。
+    ///
+    /// 提示できなかったこと（[`SaveLocation::Unavailable`]）と混ぜてはならない。
+    Cancelled,
+    /// 選択手段を提示できなかった（理由を運ぶ）。**これだけが失敗である。**
+    ///
+    /// **Linux でのみ生じる。** GTK のウィンドウはメインスレッドでしか触れないため、提示は
+    /// メインスレッドへ依頼する。その依頼に失敗した場合と、親ウィンドウが既に失われている場合が
+    /// ここに来る。**Windows / macOS の `rfd` は「提示できなかった」と「取り消し」を区別して
+    /// 返さない**（`save_file` はどちらも `None` である）ため、この腕は既定のビルドのこの 2 つ
+    /// では構築されない — [`PickResult::Unavailable`] と同じ扱いである。
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Unavailable(String),
+}
+
+/// 記録に出す 1 行。**位置そのものは書かない**（本番の記録にパスを残さない。module doc
+/// 「本機能はパスを読まない」の規律は保存先でも同じ）。
+///
+/// **取り消しと提示できなかったことを書き分ける。** 3.4 の実画面の観測はこの行で行う
+/// （画面からの保存が取り消されたとき、この行が出て何も書き出されないことを確かめる）。
+#[allow(dead_code)] // 3.4 の `document_save` が `pick_save_location` を呼ぶまでの seam。
+fn describe_save_location(location: &SaveLocation) -> String {
+    match location {
+        SaveLocation::Chosen(_) => "保存先が選ばれた".to_owned(),
+        SaveLocation::Cancelled => "利用者が保存先の選択を取り消した".to_owned(),
+        SaveLocation::Unavailable(message) => {
+            format!("保存先の選択を提示できなかった（{message}）")
+        }
+    }
+}
+
+/// 提案名を組み立てる。**純粋関数**（GUI 無しで検査できる）。
+///
+/// 規則は design.md「DialogGate」の 1 行そのものである: **出所から既存のファイル名が得られれば
+/// それ**、無ければ既定の `無題`。呼び出し元（3.4 の `document_save`）はコアの状態
+/// （`app-shell` の `DocumentSummary::name`。出所を持たない新規の文書は空文字）から名前を取って
+/// ここへ渡す。
+///
+/// **`None` と空文字を同じ扱いにする**のは、境界の写像が「出所を持たない新規の文書は空文字」と
+/// 定めているためである。両者は呼び出し元にとって同じ「使える名前が無い」状態であり、区別して
+/// も提示の結果は変わらない（空文字をそのまま GTK や `rfd` へ渡すと、提案名が空欄になる）。
+///
+/// **`#[allow(dead_code)]` の理由**: 出所を持つ文書の保存はコアの `save` が位置を知っているため
+/// 保存先を尋ねず、本関数を呼ぶのは**出所を持たない文書の保存**（3.4）だけである。したがって
+/// 3.4 が配線するまで本番の呼び出し元が無い（module doc「保存先の選択」の seam）。
+#[allow(dead_code)] // 3.4 の `document_save` が既定の提案名として使うまでの seam。
+pub fn suggested_save_name(origin_file_name: Option<&str>) -> String {
+    match origin_file_name {
+        Some(name) if !name.is_empty() => name.to_owned(),
+        _ => DEFAULT_SAVE_NAME.to_owned(),
+    }
+}
+
+/// 保存先の選択を提示し、選ばれた位置を返す。**ブロックする。**
+///
+/// 引数の `window` が**親**である（module doc「親ウィンドウは必ず指定する」）。`suggested_name`
+/// は選択器の入力欄の初期値であり、出所を持たない文書のための提案名である
+/// （[`suggested_save_name`]）。
+///
+/// **イベントループのスレッドから呼んではならない。** 呼び出し元（3.4 の `document_save`）は
+/// `spawn_blocking` のスレッドで呼ぶ（module doc「実行モデル」）。提示そのものは [`pick_save`]
+/// が行う（プラットフォーム差はそこだけにある）。
+///
+/// **`Cancelled` は正常な結果であり、`Unavailable` だけが失敗である**（[`SaveLocation`]）。
+/// 取り消しのときに書き出しが起きないこと（要件 5.3）は、呼び出し元が `Cancelled` で
+/// **コアの `save_to` を呼ばない**ことで成立する。本関数は何も書き出さない。
+///
+/// **本関数は位置を応答へ写す経路を持たない。** 返すのは Rust の列挙であり、コマンドの応答の型
+/// へ写すのは呼び出し元である。3.4 は**写してはならない**（module doc「保存先の選択」）。
+#[allow(dead_code)] // 3.4 の `document_save` が呼ぶまでの seam（module doc「保存先の選択」）。
+pub fn pick_save_location(window: &WebviewWindow, suggested_name: &str) -> SaveLocation {
+    let location = pick_save(window, suggested_name);
+    log::info!(
+        "保存先の選択: 対象ウィンドウ = {} / 結果 = {}",
+        window.label(),
+        describe_save_location(&location)
+    );
+    location
+}
+
+// ---------------------------------------------------------------------------
 // 提示と引き渡し（唯一の実装）
 // ---------------------------------------------------------------------------
 
@@ -258,11 +440,87 @@ fn hand_off(app: &AppHandle, window: &WebviewWindow, path: &Path) -> HandOff {
     }
 }
 
+/// GTK のネイティブ選択器に与える設定（「開く」と「保存」の差のすべて）。
+///
+/// **この値を組み立てる部分は純粋であり、GUI 無しで検査できる**（[`show_chooser`] は値で GTK を
+/// 呼ぶだけである）。差は題名・動作・承認と取り消しの表示名・入力欄の初期値の 5 つであり、
+/// **「保存」で `FileChooserAction::Save` と提案名を使うこと**が要件 5.2 の Linux 側の実体である。
+///
+/// [`ChooserPlan::open`] と [`ChooserPlan::save`] の 2 つの入口は、`TITLE` / `ACCEPT_LABEL` /
+/// `CANCEL_LABEL`（開く）と `SAVE_*`（保存）を混同しないためにある — 題名だけ保存で動作が開く、
+/// という食い違いを型の側で作れなくする。
+///
+/// **提案名を借用ではなく所有で持つ。** 提示は `AppHandle::run_on_main_thread` へ**クロージャを
+/// 移して**依頼するため、その中身は `'static` でなければならない（借用のままだとコンパイルが
+/// 通らない）。保存の 1 回につき 1 つの文字列を作るだけで、待ち時間は選択器の表示が占める。
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+struct ChooserPlan {
+    /// 選択器の題名。
+    title: &'static str,
+    /// 選択器の動作（開く / 保存）。
+    action: gtk::FileChooserAction,
+    /// 承認の操作の表示名。
+    accept: &'static str,
+    /// 取り消しの操作の表示名。
+    cancel: &'static str,
+    /// 入力欄へ入れる初期値（`set_current_name` へ渡す値）。
+    ///
+    /// **保存のときだけ `Some`** である。開く動作で名前を入れると「開く対象のファイル名を
+    /// 入力欄に入れる」ことになり、選択の意味が変わる。
+    current_name: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+impl ChooserPlan {
+    /// 既存のファイルを開く設定（要件 2.4）。
+    fn open() -> Self {
+        Self {
+            title: TITLE,
+            action: gtk::FileChooserAction::Open,
+            accept: ACCEPT_LABEL,
+            cancel: CANCEL_LABEL,
+            current_name: None,
+        }
+    }
+
+    /// 保存先を選ぶ設定（要件 5.2）。**提案名を入力欄の初期値に持つ。**
+    fn save(suggested_name: String) -> Self {
+        Self {
+            title: SAVE_TITLE,
+            action: gtk::FileChooserAction::Save,
+            accept: SAVE_ACCEPT_LABEL,
+            cancel: SAVE_CANCEL_LABEL,
+            current_name: Some(suggested_name),
+        }
+    }
+}
+
 /// 選択手段を提示し、その完了を待つ。**ブロックする。**
 ///
 /// 引数の `window` が**親**である（module doc「親ウィンドウは必ず指定する」）。
 #[cfg(target_os = "linux")]
 fn pick(window: &WebviewWindow) -> PickResult {
+    pick_with_plan(window, ChooserPlan::open())
+}
+
+/// 保存先を選び、選ばれた位置を待つ（要件 5.2）。**ブロックする。**
+///
+/// 呼び出し元は 3.4 の `document_save` であり、`spawn_blocking` のスレッドで呼ぶ。
+#[cfg(target_os = "linux")]
+fn pick_save(window: &WebviewWindow, suggested_name: &str) -> SaveLocation {
+    // 提案名を 1 つだけ所有の文字列にする（メインスレッドへ移すクロージャが `'static` を要する
+    // ため。`ChooserPlan` の doc を参照）。
+    let plan = ChooserPlan::save(suggested_name.to_owned());
+    // 写像はプラットフォーム共通の純粋関数 1 か所だけである（[`save_location_from_pick`]）。
+    save_location_from_pick(pick_with_plan(window, plan))
+}
+
+/// メインスレッドへ依頼して選択器を提示し、応答を待つ。**ブロックする。**
+///
+/// `plan` が「開く」と「保存」の差である（GTK の側の差は [`show_chooser`] が解釈する）。
+#[cfg(target_os = "linux")]
+fn pick_with_plan(window: &WebviewWindow, plan: ChooserPlan) -> PickResult {
     use std::sync::mpsc;
 
     // GTK はメインスレッドでしか触れない（`WebviewWindow::gtk_window` も同じ）。したがって
@@ -271,7 +529,7 @@ fn pick(window: &WebviewWindow) -> PickResult {
     let (sender, receiver) = mpsc::channel();
     let target = window.clone();
     if let Err(error) = window.app_handle().run_on_main_thread(move || {
-        show_chooser(&target, sender);
+        show_chooser(&target, plan, sender);
     }) {
         return PickResult::Unavailable(format!(
             "メインスレッドへファイル選択の提示を依頼できなかった: {error}"
@@ -289,8 +547,12 @@ fn pick(window: &WebviewWindow) -> PickResult {
 /// フロントエンドの payload からは取れない。親が既に失われている場合（GTK のウィンドウを
 /// 取得できない、または既に破棄されて実体を失っている）は**親無しで提示せず**、失敗として
 /// 報告する — 親無しのダイアログは誤ったウィンドウに乗りうるので、提示しない方が正しい。
+///
+/// `plan` が「開く」と「保存」の差のすべてである（題名・動作・表示名・入力欄の初期値）。
+/// **選択器の組み立てと応答の処理は 1 本に保つ** — 2 つの動作で別々に書くと、参照の保持・親の
+/// 破棄の扱い・`filename()` の解釈という壊れやすい部分が二重になる。
 #[cfg(target_os = "linux")]
-fn show_chooser(window: &WebviewWindow, sender: Sender<PickResult>) {
+fn show_chooser(window: &WebviewWindow, plan: ChooserPlan, sender: Sender<PickResult>) {
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -316,13 +578,20 @@ fn show_chooser(window: &WebviewWindow, sender: Sender<PickResult>) {
     // `FileChooserNative` は GTK の標準の選択器である（ポータルが使える環境では GTK 自身が
     // ポータルへ委譲し、そのときも親の指定が引き継がれる）。第 2 引数が親である。
     let chooser = gtk::FileChooserNative::new(
-        Some(TITLE),
+        Some(plan.title),
         Some(&parent),
-        gtk::FileChooserAction::Open,
-        Some(ACCEPT_LABEL),
-        Some(CANCEL_LABEL),
+        plan.action,
+        Some(plan.accept),
+        Some(plan.cancel),
     );
     chooser.set_modal(true);
+
+    // **保存のときだけ提案名を入力欄の初期値にする。** `set_current_name` は「まだ存在しない
+    // ファイルの名前」を入力欄へ入れる GTK の口であり、保存の動作でだけ意味を持つ（開く動作で
+    // 呼ぶと、開く対象のファイル名を入力欄へ入れることになり、選択の意味が変わる）。
+    if let Some(name) = plan.current_name.as_deref() {
+        chooser.set_current_name(name);
+    }
 
     // **選択器への強い参照を、応答が来るまで保持する。** `g_object` の参照をここで落とすと
     // 表示中のネイティブ選択器が破棄され、GTK の内部状態を壊す（実測: 表示直後にプロセスが
@@ -375,6 +644,34 @@ fn pick(window: &WebviewWindow) -> PickResult {
         Some(path) => PickResult::Picked(path),
         None => PickResult::Cancelled,
     }
+}
+
+/// 保存先を選び、選ばれた位置を待つ（Windows / macOS。要件 5.2）。**ブロックする。**
+///
+/// 引数の `window` が**親**である（[`pick`] と同じ理由）。
+/// `set_file_name` が入力欄の初期値に提案名を入れる（Linux の `set_current_name` に対応する）。
+///
+/// **`None` は取り消しとして扱う。** `rfd` の `save_file` は「利用者が取り消した」と
+/// 「提示できなかった」を区別して返さない（どちらも `None` である）。**この 2 つを区別できない
+/// こと自体が、この 2 つのプラットフォームの契約である** — 取り消しを `Unavailable` に倒すと
+/// 利用者が取り消しただけのときに失敗が報告され（要件 5.3 が禁じる）、逆に倒すと提示できなかった
+/// ことが黙る。**要件 5.3（取り消しは正常な結果）が満たされる側を選ぶ。**
+/// [`PickResult::Unavailable`] が同じ理由で既定のビルドでは構築されないのと同じ判断である。
+///
+/// 写像はこの腕でも[`save_location_from_pick`] を通す（取り消しを誤りにしない規則を 2 か所に
+/// 書かない）。`rfd` の `None` が [`PickResult::Cancelled`] に落ちるのはそのためである。
+#[cfg(not(target_os = "linux"))]
+fn pick_save(window: &WebviewWindow, suggested_name: &str) -> SaveLocation {
+    let chosen = rfd::FileDialog::new()
+        .set_title(SAVE_TITLE)
+        .set_parent(window)
+        .set_file_name(suggested_name)
+        .save_file();
+    let picked = match chosen {
+        Some(path) => PickResult::Picked(path),
+        None => PickResult::Cancelled,
+    };
+    save_location_from_pick(picked)
 }
 
 // ---------------------------------------------------------------------------
@@ -492,10 +789,42 @@ mod tests {
     use app_shell::ipc::{DocumentPickOutcome, IpcError};
 
     use super::{
-        document_menu_path, open_document_spec, to_boundary, HandOff, OPEN_ACCELERATOR_SPELLING,
-        OPEN_ITEM_ID, OPEN_LABEL, OWNER,
+        describe_save_location, document_menu_path, open_document_spec, save_location_from_pick,
+        suggested_save_name, to_boundary, HandOff, PickResult, SaveLocation, DEFAULT_SAVE_NAME,
+        OPEN_ACCELERATOR_SPELLING, OPEN_ITEM_ID, OPEN_LABEL, OWNER,
     };
     use crate::menu::{MenuNode, MenuPath, MenuRegistry};
+
+    /// 一時ディレクトリ（`session/host.rs` のテストと同じ形。保存先が無い文書の保存で
+    /// **何も書き出されない**ことをディレクトリの空さで見るために使う）。
+    struct Scratch {
+        path: std::path::PathBuf,
+    }
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("時計は 1970 以降である")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "jxcel-dialog-{tag}-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("一時ディレクトリを作れる");
+            Self { path }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 
     /// 取り消しと委譲先の拒否は**封筒の成功側**に載る（通信の失敗と区別できる）。
     #[test]
@@ -612,6 +941,260 @@ mod tests {
         );
         // 登録元は組み込みの「終了」と同じ名前空間である（項目の識別子はアプリ全体で一意）。
         assert_eq!(open.owner().as_str(), OWNER);
+    }
+
+    // -----------------------------------------------------------------------
+    // 保存先の選択（要件 5.2、5.3。呼び出し元は 3.4 の `document_save`）
+    // -----------------------------------------------------------------------
+
+    /// **取り消しは正常な結果であり、失敗ではない**（要件 5.3）。
+    ///
+    /// 3 つの答えは互いに区別でき（等値比較で混ざらない）、`Cancelled` は `Unavailable` とも
+    /// `Chosen` とも等しくない。**取り消しが誤りとして表現される経路が無いこと**をここで固定する
+    /// — `DocumentSaveOutcome::Cancelled`（封筒の成功腕）へ写すのは 3.4 であり、その写像が
+    /// 取り消しを失敗の腕へ落とすなら、利用者が取り消しただけのときに失敗が報告される。
+    #[test]
+    fn cancellation_is_a_normal_answer_distinct_from_unavailability() {
+        let chosen = SaveLocation::Chosen(std::path::PathBuf::from("/tmp/無題.jxcel"));
+        let cancelled = SaveLocation::Cancelled;
+        let unavailable = SaveLocation::Unavailable("親ウィンドウを取得できなかった".to_owned());
+
+        // 3 つの答えが互いに異なる（`SaveLocation` の等値が判別子として使える）。
+        assert_ne!(cancelled, chosen);
+        assert_ne!(cancelled, unavailable);
+        assert_ne!(chosen, unavailable);
+        assert_eq!(cancelled, SaveLocation::Cancelled, "取り消しは取り消しである");
+
+        // 取り消しの記録の行は「提示できなかった」の行と異なる（実画面の観測が取り違えない）。
+        assert_ne!(
+            describe_save_location(&cancelled),
+            describe_save_location(&unavailable),
+            "取り消しと提示できなかったことが記録で同じ行になる"
+        );
+        assert_ne!(
+            describe_save_location(&cancelled),
+            describe_save_location(&chosen)
+        );
+
+        // **取り消しの行は失敗を意味する語を持たない**（利用者が取り消しただけである）。
+        let line = describe_save_location(&cancelled);
+        assert!(
+            line.contains("取り消"),
+            "取り消しの行が取り消しと読めない: {line}"
+        );
+        assert!(
+            !line.contains("できなかった"),
+            "取り消しが「できなかった」と記録される: {line}"
+        );
+    }
+
+    /// **提案名が選択器へ渡る値になる。** [`super::ChooserPlan`] を組み立て、その
+    /// `current_name` と `action` を読む。
+    ///
+    /// **GUI は開かない。** 選択器を組み立てる部分（[`super::ChooserPlan`]）は値であり、
+    /// それを読むだけで「呼び出し元が与えた提案名が入力欄の初期値になる」ことが確かめられる。
+    ///
+    /// **本テストが拘束するのは `ChooserPlan` までである。** `set_current_name` /
+    /// `FileChooserNative::new` の**呼び出し地点そのものは拘束しない** — それらは実機の
+    /// ウィンドウを要する `show_chooser` の中にあり、このテストはそれを呼ばない。したがって
+    /// 「保存の設定を組み立てたのに開く動作で提示する」という食い違いは、`ChooserPlan` を
+    /// 経由しない限り本テストでは捕まらない（`show_chooser` が `plan.action` と
+    /// `plan.current_name` をそのまま使うことは、`show_chooser` の 1 本の実装とレビューで
+    /// 抑える）。**実際に OS の選択器が描く文字は実画面の観測**（design.md「E2E / 3 OS の
+    /// 観測」）**で確かめるほかない。**
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_suggested_name_reaches_the_save_chooser() {
+        let plan = super::ChooserPlan::save("棚卸し.jxcel".to_owned());
+        assert_eq!(
+            plan.current_name.as_deref(),
+            Some("棚卸し.jxcel"),
+            "呼び出し元の提案名が入力欄の初期値に入らない"
+        );
+        assert_eq!(
+            plan.action,
+            gtk::FileChooserAction::Save,
+            "保存の設定が保存の動作でない（開く動作では提案名を入れても意味が無い）"
+        );
+
+        // **開く動作は提案名を持たない**（開く対象のファイル名を入力欄へ入れる意味は無い）。
+        let open = super::ChooserPlan::open();
+        assert_eq!(open.current_name, None);
+        assert_eq!(open.action, gtk::FileChooserAction::Open);
+
+        // 題名・表示名も動作ごとに取り違えない。
+        assert_ne!(plan.title, open.title);
+        assert_ne!(plan.accept, open.accept);
+    }
+
+    /// 出所を持たない文書の既定の提案名が定義され、境界の写像（新規は空文字）と同じ意味を
+    /// 持つ（design.md「DialogGate」の「提案名は『無題』または既存のファイル名」）。
+    ///
+    /// **空文字をそのまま選択器へ渡さない**ことが本関数の役目である（空の入力欄は利用者に
+    /// 何も示さない）。出所がある文書は保存先を尋ねない（コアの `save` が位置を知っている）ので、
+    /// 本関数が使われるのは出所を持たない場合だけである（3.4）。
+    #[test]
+    fn the_default_suggested_name_stands_for_a_document_without_an_origin() {
+        assert_eq!(
+            suggested_save_name(None),
+            DEFAULT_SAVE_NAME.to_owned(),
+            "出所が無い文書に既定の提案名を与えない"
+        );
+        assert_eq!(
+            suggested_save_name(Some("")),
+            DEFAULT_SAVE_NAME.to_owned(),
+            "空文字（境界の写像の「新規」）に既定の提案名を与えない"
+        );
+        assert_eq!(
+            suggested_save_name(Some("既存.jxcel")),
+            "既存.jxcel".to_owned(),
+            "出所がある文書のファイル名をそのまま使わない"
+        );
+        // 既定の名前は空でなく、拡張子まで含む完全なファイル名である。
+        assert!(!DEFAULT_SAVE_NAME.is_empty());
+        assert!(
+            DEFAULT_SAVE_NAME.ends_with(".jxcel"),
+            "既定の提案名が形式の拡張子で終わらない: {DEFAULT_SAVE_NAME}"
+        );
+        assert!(
+            !DEFAULT_SAVE_NAME.starts_with('.'),
+            "既定の提案名が隠しファイルになる: {DEFAULT_SAVE_NAME}"
+        );
+    }
+
+    /// 選択手段の答えから保存先の答えへの写像が、**取り消しを誤りへ倒さない**こと
+    /// （要件 5.3）。これが 3.4 の `document_save` の判断の土台である。
+    ///
+    /// 3 つの腕を**それぞれ別の値で**検査する:
+    ///
+    /// - `Picked(p)` → `Chosen(p)`。**位置が保たれる**（`p` を書き換えると落ちる）。
+    /// - `Cancelled` → `Cancelled`。**`Chosen` でも `Unavailable` でもない**
+    ///   （取り消しを位置や失敗へ倒す変異で落ちる）。
+    /// - `Unavailable(m)` → `Unavailable(m)`。**理由が保たれる。**
+    ///
+    /// **`assert_ne!` を並べるのは、取り消しの腕が「たまたま通る」ことを許さないためである。**
+    /// `Chosen` を返す変異は `assert_eq!(cancelled, SaveLocation::Cancelled)` だけでも落ちるが、
+    /// 3 つの答えが互いに異なることを明示しておくと、後で腕が増えたときに「どれか 1 つ」で
+    /// 通るテストにならない。
+    #[test]
+    fn the_pick_mapping_keeps_cancellation_cancelled() {
+        let chosen_path = std::path::PathBuf::from("/tmp/選ばれた.jxcel");
+
+        let picked = save_location_from_pick(PickResult::Picked(chosen_path.clone()));
+        let cancelled = save_location_from_pick(PickResult::Cancelled);
+        let unavailable =
+            save_location_from_pick(PickResult::Unavailable("親ウィンドウを取得できなかった".to_owned()));
+
+        // 位置は保たれる（別の位置へ写す変異で落ちる）。
+        assert_eq!(picked, SaveLocation::Chosen(chosen_path));
+        // 取り消しは取り消しのままである（位置や失敗へ倒す変異で落ちる）。
+        assert_eq!(cancelled, SaveLocation::Cancelled);
+        // 提示できなかったことは理由ごと運ばれる。
+        assert_eq!(
+            unavailable,
+            SaveLocation::Unavailable("親ウィンドウを取得できなかった".to_owned())
+        );
+        // 3 つの答えは互いに異なる（写像が腕を混ぜていない）。
+        assert_ne!(picked, cancelled);
+        assert_ne!(cancelled, unavailable);
+        assert_ne!(picked, unavailable);
+        // **取り消しが正常な結果であることは、`SaveLocation` の外側でも保たれる** —
+        // 3.4 が写す先（コア）は取り消しを誤り型に持たない。
+    }
+
+    /// **取り消しのときに書き出しが起きず、未保存が保たれる**（要件 5.3）ことを、
+    /// 提示の答えの写像・コアの保存の経路・実ファイルの 3 つを**つないで**確かめる。
+    ///
+    /// 3.4 の `document_save` は「出所が無い → [`super::pick_save_location`] → `Chosen` なら
+    /// コアの `save_to`、それ以外は何もしない」という形になる（design.md「保存（出所がある場合と
+    /// 無い場合）」の流れ図そのもの）。**その形を、選択器の答え（[`PickResult::Cancelled`]）から
+    /// 始めてここで実物で走らせる。**
+    ///
+    /// **`Cancelled` を直書きしない。** 答えは**選択手段の答え**として与え、[`save_location_from_pick`]
+    /// で保存先へ写してから分岐させる。これにより次の 3 つの変異がいずれも本テストを落とす:
+    ///
+    /// 1. 写像が `Cancelled` を `Chosen` へ倒す → `save_to` が呼ばれ、`scratch` の中にファイルが
+    ///    でき、`save` の応答も `Saved` になる。
+    /// 2. 分岐が `Chosen` 以外でも書き出す → `read_dir` がファイルを見つける。
+    /// 3. 書き出しが未保存を落とす → `save_to` が成功して（`Chosen` のときだけ通る腕で）印が
+    ///    落ちるので、**この変異は「書き出しが起きた」こととして 1 と同じ経路で観測される**。
+    ///
+    /// **書き出し先は `scratch` の中に置く。** 写像が位置を `Chosen` へ通してしまえば、その位置は
+    /// 一時ディレクトリの中であり、`read_dir` が空でなくなる（外の `/tmp` を指すと観測できない）。
+    ///
+    /// **本テストが証明しないこと**: 選択器そのものを実画面で取り消す操作は 3.4 のコマンドが
+    /// 入るまで到達できない（module doc「保存先の選択」の seam）。本テストが証明するのは
+    /// 「取り消しの答えを受けた適応層が何もしない」ことである。
+    #[test]
+    fn a_cancelled_save_location_writes_nothing_and_keeps_the_document_unsaved() {
+        use app_shell::ipc::WindowLabel;
+        use document_session::{CloseAnswer, DocumentSessionsApi, SaveReport, SessionState};
+
+        let scratch = Scratch::new("dialog-save-cancelled");
+        let window = WindowLabel::new("empty-1");
+        let sessions = document_session::DocumentSessions::new();
+
+        // 出所を持たない文書（要件 7.1、7.2）。保存先を持たないため、保存は選択を要する。
+        sessions.create(&window).expect("新規作成できる");
+        // 変更を 1 回適用して未保存を立てる（適用の口は本機能ではない。未保存と版の記録は
+        // コアの `edit` が行い、その契約は `document-session` のテストが固定している）。
+        let edited = sessions
+            .edit(&window, &mut |document| {
+                document.add_sheet("棚卸し");
+            })
+            .expect("変更を適用できる");
+        assert!(edited.unsaved, "適用のあと未保存にならない");
+        assert!(edited.revision >= 1, "適用の版が進んでいない");
+
+        // **選択器が取り消しを返した**ところから始める。3.4 が受け取る形と同じ経路を通す。
+        let location = save_location_from_pick(PickResult::Cancelled);
+        // 書き出し先は `scratch` の中に置く（`Chosen` へ倒す変異がここで観測できるようにする）。
+        let destination = scratch.path().join("無題.jxcel");
+        let wrote = match location {
+            SaveLocation::Chosen(_path) => {
+                // `Chosen` が来たときだけ書き出す（3.4 の判断）。**行き先は `scratch` の中**で
+                // あり、外の `PathBuf` をそのまま使うと観測がディレクトリの外へ逃げる。
+                sessions
+                    .save_to(&window, &destination)
+                    .expect("書き出しは失敗を結果として返す");
+                true
+            }
+            SaveLocation::Cancelled | SaveLocation::Unavailable(_) => false,
+        };
+        assert!(!wrote, "取り消しが書き出しへ進んだ");
+
+        // **何も書き出されていない。** 写像が取り消しを `Chosen` へ倒すか、分岐が取り消しでも
+        // 書き出せば、このディレクトリにファイルが現れる（`read_dir` が空でなくなる）。
+        assert!(
+            std::fs::read_dir(scratch.path())
+                .expect("一時ディレクトリを読める")
+                .next()
+                .is_none(),
+            "取り消しなのに書き出した: {:?}",
+            std::fs::read_dir(scratch.path())
+                .expect("一時ディレクトリを読める")
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect::<Vec<_>>()
+        );
+        assert!(!destination.exists(), "書き出し先が作られた");
+        // 未保存が保たれ、閉じてよくないままである（要件 5.3、4.5、4.6）。
+        assert!(
+            matches!(
+                sessions.state(&window),
+                SessionState::Open { unsaved: true, .. }
+            ),
+            "取り消しが未保存を落とした"
+        );
+        assert_eq!(
+            CloseAnswer::Deny,
+            sessions.may_close(&window),
+            "取り消しのあとに閉じてよいと答えた"
+        );
+        // 出所も変わっていない（次の保存も同じく選択を要する。要件 5.3 の「未保存のまま」）。
+        assert!(
+            matches!(sessions.save(&window), Ok(SaveReport::NeedsLocation)),
+            "取り消しのあとの保存が出所を持った"
+        );
     }
 
     /// 存在しないパスを渡しても**本機能は何も読まない**（既定の委譲点の契約をここからも固定する）。
