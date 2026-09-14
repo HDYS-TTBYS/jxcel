@@ -52,8 +52,8 @@
   - 存在する: `add_sheet` / `remove_sheet` / `rename_sheet` / `set_sheet_columns` / `set_root_schema` / `add_row` / `reorder_rows` / `set_row_values` / `add_attachment`
   - **存在しない**: 行の削除、位置を指定した挿入、セル単位の設定、変更通知、未保存の追跡
   - 書き込みの粒度は**行まるごと**（`set_row_values` が `Vec<CellValue>` を置き換える）。1 セルの編集は行を読んで写して書き戻す形になるが、列数は 30 程度なので費用は無視できる
-  - `CellValue` / `Row` / `Violation` は `Serialize` を持たず、`Row` は `Clone` すら持たない
-- **Implications**: 行の削除と挿入の 2 つだけを `document-format` に足す。それ以外は既存の公開面で足りる
+  - `Row` は `Serialize` も `Clone` も持たず、`Violation`（`crates/schema-engine`）も `Serialize` を持たない。`CellValue` は `Serialize` / `Deserialize` を持つ（`crates/document-format/src/value.rs`）。それでも境界を越えられないのは 64 ビット整数（`CellValue::Int`）と識別子を出せず、ts-rs の derive が `crates/app-shell/src/ipc/` の下だけに許されるためであり、直列化できないからではない
+- **Implications**: `document-format` に足すのは行の削除・位置指定の挿入・取り除いた行の差し戻しの 3 つだけである（design.md「上流への最小の追加」）。それ以外は既存の公開面で足りる
 
 ## Architecture Pattern Evaluation
 
@@ -86,9 +86,9 @@
 - **Rationale**: `formula-engine` と `macro-runtime` はいずれも Rust 側で動く。履歴をフロントエンドに置くと、後から乗る 2 者が境界を越えて履歴を操作することになり、拡張点として成立しない
 - **Trade-offs**: 取り消しのたびに境界を 1 往復する。1 操作あたり 1 回なので要件 11.3 の 100 ミリ秒に収まる
 
-### Decision: 上流の欠落は 2 メソッドの追加に閉じる
+### Decision: 上流の欠落は 3 メソッドの追加に閉じる
 - **Context**: 行の削除と位置指定の挿入が `document-format` に無い
-- **Selected Approach**: `remove_rows(sheet, &[RowId]) -> Result<Vec<Row>, _>` と `insert_row_at(sheet, index) -> Result<RowId, _>` を追加する。`remove_rows` が取り除いた行を返すのは、取り消しに値と識別子の両方が要るためである（`Row` は `Clone` を持たない）
+- **Selected Approach**: `remove_rows(sheet, &[RowId]) -> Result<Vec<Row>, _>` と `insert_row_at(sheet, index) -> Result<RowId, _>` に加え、取り除いた行をそのまま差し戻す `insert_rows_at(sheet, index, Vec<Row>) -> Result<(), _>` を追加する。`remove_rows` が取り除いた行を返すのは、取り消しに値と識別子の両方が要るためである（`Row` は `Clone` を持たず、既存行の識別子・値を書き換える口も無い。空の行しか作れない `insert_row_at` では取り消しを満たせない。詳細は design.md「上流への最小の追加」）
 - **Rationale**: 一括で受けるのは、範囲削除が 1 操作であり、行ごとに呼ぶと並びの作り直しが繰り返されるため。決定的出力の契約には触れない
 - **Trade-offs**: 実装済みのクレートへ手を入れる。影響は行の集合と並びに閉じており、往復の契約は変わらない
 

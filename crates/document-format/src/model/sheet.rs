@@ -69,7 +69,7 @@ use crate::json::PreservedFields;
 use crate::value::CellValue;
 
 use super::schema_part::SchemaPart;
-use super::{CellWriteError, ReorderError, UnknownRow};
+use super::{CellWriteError, ReorderError, RowInsertionError, RowRemovalError, UnknownRow};
 
 /// シート内の行。列順の [`CellValue`] を保持する(design「Domain Model」の
 /// `Row ||--o{ CellValue : holds`)。
@@ -340,8 +340,9 @@ impl Sheet {
     /// 10 万行でも移動はポインタ級の移動だけで、値の clone は発生しない)。
     pub(crate) fn reorder_rows(&mut self, order: &[RowId]) -> Result<(), ReorderError> {
         // 検証フェーズ(失敗時は self を一切変更しない)。
-        // 行 id の一意性は構築経路の不変条件(IdFactory の厳密昇順発行、重複注入 API なし)
-        // なので、既知集合は集合として作れる。
+        // 行 id の一意性はモデルの不変条件である(発行は `IdFactory` の厳密昇順発行のみで、
+        // 識別子を受け取る唯一の挿入経路 `Sheet::insert_rows_at` が文書内の現存集合と
+        // バッチ内の重複を検査して守る)ため、既知集合は集合として作れる。
         let known: HashSet<RowId> = self.rows.iter().map(Row::id).collect();
         let mut seen: HashSet<RowId> = HashSet::with_capacity(order.len());
         for &id in order {
@@ -370,6 +371,139 @@ impl Sheet {
             .iter()
             .map(|id| pool.remove(id).expect("order は検証済みの順列"))
             .collect();
+        Ok(())
+    }
+
+    /// 複数の行を**1 回の呼び出しで**取り除き、取り除いた行を返す
+    /// (`Document::remove_rows` が呼ぶ。data-grid 要件 6.1, 6.2)。
+    ///
+    /// `rows` は取り除く行の識別子である。**同じ識別子の重複は畳む**(同じ行を 2 度消すのは
+    /// 同じ 1 回の削除であり、誤りではない)。返る [`Row`] は**取り除いた行そのもの**で、
+    /// その順序は要求引数の並びではなく**シートの順序**である(同じ行集合の要求は、引数の
+    /// 並びに依らず常に同じ結果になる)。行は所有権ごと返るため値も識別子も複製しない
+    /// ([`Row`] は `Clone` を持たない。取り消しが値と識別子の双方を要するため、この形で
+    /// 返す = data-grid 要件 6.6 / 9.2)。
+    ///
+    /// **事前検査を通過するまで self を変更しない**: このシートに属さない識別子が 1 つでも
+    /// あれば [`RowRemovalError::UnknownRow`] を返し、1 行も取り除かない(部分適用なし。
+    /// 未知のシートは呼び出し元 [`super::Document`] が判別する)。
+    ///
+    /// 実装は [`Sheet::set_cells`] と同じ 2 段である: まず行識別子の集合を作って要求の
+    /// 実在を 1 パスで検査し(失敗時は self を一切変更しない)、次に所有権を移して
+    /// 1 パスで振り分ける。合計 O(行数 + 削除数) であり、**行ごとに削除を繰り返す形には
+    /// しない**: その形は 1 行ごとに並びの作り直し(残りの行の詰め直し)が走るため、
+    /// 範囲削除が O(行数 × 削除数) になる(10 万行の範囲削除が data-grid 要件 6.2 の対象である)。
+    /// 値の `clone` は生じない(移すのは [`Row`] の所有権だけである)。
+    pub(crate) fn remove_rows(&mut self, rows: &[RowId]) -> Result<Vec<Row>, RowRemovalError> {
+        // 要求を集合へ畳む(重複した識別子は同じ 1 回の削除である)。
+        let wanted: HashSet<RowId> = rows.iter().copied().collect();
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+        // 事前検査フェーズ(失敗時は self を一切変更しない)。
+        // 行識別子の一意性はモデルの不変条件である(発行は `IdFactory` の厳密昇順発行のみで、
+        // 識別子を受け取る唯一の挿入経路 `Sheet::insert_rows_at` が守る)ため、所属の判定は
+        // 集合で行える(`set_cells` の索引と同じ役割)。
+        let known: HashSet<RowId> = self.rows.iter().map(Row::id).collect();
+        if !wanted.is_subset(&known) {
+            // 未知の識別子のうち最小のものを報告する(要求引数の並びに依らず決定的診断)。
+            let row = *wanted
+                .difference(&known)
+                .min()
+                .expect("未知の識別子が 1 つ以上ある");
+            return Err(RowRemovalError::UnknownRow { row });
+        }
+        // ここを通ったら要求された識別子はすべて実在する。以降に失敗経路は無い。
+        // シートの順に走査して振り分けるため、`removed` はシート順・`kept` は元の相対順に
+        // なる(clone は発生しない)。
+        let mut kept: Vec<Row> = Vec::with_capacity(self.rows.len() - wanted.len());
+        let mut removed: Vec<Row> = Vec::with_capacity(wanted.len());
+        for row in std::mem::take(&mut self.rows) {
+            if wanted.contains(&row.id) {
+                removed.push(row);
+            } else {
+                kept.push(row);
+            }
+        }
+        self.rows = kept;
+        Ok(removed)
+    }
+
+    /// 複数の行を**1 回の呼び出しで**位置 `index` へ差し込む
+    /// (`Document::insert_rows_at` が呼ぶ。data-grid 要件 6.1, 6.6, 9.2)。
+    ///
+    /// `index` は**挿入前の行順**に対する添字であり、`index == 行数` は末尾への追加である
+    /// ([`super::Document::add_row`] と同じ位置に入る)。`index > 行数` は
+    /// [`RowInsertionError::IndexOutOfRange`] として拒む。
+    ///
+    /// 差し込む行の順序・識別子・値は**与えられたまま**であり、作り直さない(所有権ごと
+    /// move するため `clone` は生じない)。**事前検査を通過するまで self を変更しない**:
+    /// 渡された行の識別子が文書内に既にあれば [`RowInsertionError::DuplicateRow`]、位置が
+    /// 範囲外なら `IndexOutOfRange` を返し、1 行も差し込まない(部分適用なし)。
+    ///
+    /// **一意性の検査は文書単位である**: `document_rows` は文書内の**全シート**の行識別子で
+    /// あり、呼び出し元 [`super::Document::insert_rows_at`] が 1 回だけ作って渡す。行識別子の
+    /// 一意性は**文書単位**の不変条件であり(design「Domain Model」の不変条件)、シート局所の
+    /// 集合では強制できない: 文書内の**別のシートに現存する**識別子をこのシートへ差し込むと、
+    /// 同じ識別子が文書内に 2 つ存在する状態が作れてしまう。文書全体の集合はこのシートの行を
+    /// 含むため、シート局所の集合を別に作る必要はない(1 回の検査で両方を覆う)。
+    /// 渡された行の間の識別子の重複も同じ変種で拒む。この検査は
+    /// [`Sheet::reorder_rows`] が依存する一意性を守るためでもある。
+    ///
+    /// 空の `rows` は何もしない(位置が妥当なら成功する)。
+    pub(crate) fn insert_rows_at(
+        &mut self,
+        index: usize,
+        rows: Vec<Row>,
+        document_rows: &HashSet<RowId>,
+    ) -> Result<(), RowInsertionError> {
+        self.validate_insertion_index(index)?;
+        // 事前検査フェーズ(失敗時は self を一切変更しない)。
+        let mut incoming: HashSet<RowId> = HashSet::with_capacity(rows.len());
+        for row in &rows {
+            let id = row.id;
+            if document_rows.contains(&id) || !incoming.insert(id) {
+                return Err(RowInsertionError::DuplicateRow { row: id });
+            }
+        }
+        // ここを通ったら失敗経路は無い。所有権を移して差し込む(1 回の移動で位置を空ける。
+        // 行ごとの [`Vec::insert`] は残りの行を毎回ずらす)。
+        self.rows.splice(index..index, rows);
+        Ok(())
+    }
+
+    /// 空の行を位置 `index` へ差し込み、渡された識別子をそのまま返す
+    /// (`Document::insert_row_at` が呼ぶ。data-grid 要件 6.1)。
+    ///
+    /// `index` は挿入前の行順に対する添字であり、`index == 行数` は末尾への追加である。
+    /// 識別子は呼び出し元 [`super::Document`] が所有する
+    /// [`IdFactory`](crate::ids::IdFactory) から発行済みのものを受け取る(発行の責務は
+    /// 集約ルートにある)。**文書内で識別子を発行するのはその 1 者だけ**なので、発行直後の
+    /// 識別子は文書のどのシートにも無く、一意性は構築で保証される(ここで集合を引く検査は
+    /// 要らない。引いても常に空振りになる冗長な探索である)。失敗経路は位置が範囲外の
+    /// 場合だけであり、そのとき 1 行も差し込まない。
+    pub(crate) fn insert_row_at(
+        &mut self,
+        index: usize,
+        id: RowId,
+    ) -> Result<RowId, RowInsertionError> {
+        self.validate_insertion_index(index)?;
+        // 空の行を差し込む。既存の行は 1 つも動かさず、相対順序も識別子も変わらない。
+        self.rows.insert(index, Row::new(id));
+        Ok(id)
+    }
+
+    /// 挿入位置の事前検査(挿入前の行順に対する添字)。
+    ///
+    /// `index == 行数` は末尾への追加として妥当であり、`index > 行数` だけを
+    /// [`RowInsertionError::IndexOutOfRange`] として拒む(行数は挿入前のもの = `rows` の
+    /// 現在の長さを診断に載せる)。
+    #[inline]
+    fn validate_insertion_index(&self, index: usize) -> Result<(), RowInsertionError> {
+        let rows = self.rows.len();
+        if index > rows {
+            return Err(RowInsertionError::IndexOutOfRange { index, rows });
+        }
         Ok(())
     }
 }

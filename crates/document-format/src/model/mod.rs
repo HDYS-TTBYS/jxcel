@@ -46,10 +46,29 @@
 //!
 //! # 一意性不変条件の強制地点
 //!
-//! 「文書内で `SheetId` / `RowId` はそれぞれ一意」は**構築経路による構造保証**である:
+//! 「文書内で `SheetId` / `RowId` はそれぞれ一意」は**構築経路による構造保証**が主である:
 //! 識別子は [`Document`] が所有する [`IdFactory`] からの発行のみで得られ(厳密昇順)、
-//! 重複注入の API 口は存在しない(他文書で発行した識別子は対象文書に挿入する経路が
-//! 無いため入り込めない)。読み込み時の重複検出・報告(要件 4.3 の `DuplicateId`)は
+//! **文書内で識別子を発行するのはその 1 者だけ**であり、種別ごとの一意性はそこから従う。
+//! ただし**識別子を受け取って挿入する経路が 1 つだけ存在する**:
+//! [`Document::insert_rows_at`] である。この経路は識別子を発行せず、外から来た [`Row`] を
+//! そのまま受け取る。渡される識別子は [`Document::remove_rows`] が返した行に限らない:
+//! [`crate::parts::RowsCodec::decode`] と [`crate::parts::SheetRows::into_rows`] が公開面に
+//! あるため、**`sheets/<ulid>.jsonl` のバイト列から復号した任意の識別子**も外から持ち込める
+//! (どのシートのものでもよく、他文書で発行した識別子でもよい)。したがってこの経路は
+//! 構築による保証が及ばず、**文書内の全シートの行識別子の集合に対して検査**する:
+//! 現存する識別子と重複する要求は [`RowInsertionError::DuplicateRow`] として拒む
+//! (検査は挿入の前に 1 パスで行い、失敗時は 1 行も挿入しない)。この検査により、
+//! **文書内で同じ行識別子が 2 箇所に存在する状態は作れない**。
+//!
+//! 検査は「現存する識別子の集合」との比較であるため、**取り除かれて文書から消えた識別子**
+//! は再び持ち込める(取り除いた行を元のシートへ戻す取り消しがこれであり、入れた時点で
+//! 文書内に同じ識別子は 1 つしか無い)。これは不変条件に反しない: 一意性が禁じるのは
+//! **同じ文書内で同時に 2 箇所に現れること**だけである。
+//!
+//! [`Document::insert_row_at`] は空の行を作り、識別子は発行元から受け取るため、
+//! 一意性は発行の単一性による構造保証のままであり、集合を引く検査を持たない
+//! (引いても常に空振りになる)。
+//! 読み込み時の重複検出・報告(要件 4.3 の `DuplicateId`)は
 //! 読み込み経路 `StructuralValidator` の役割で、本モデルの責務ではない。
 //! 添付の識別子は content-addressed(内容の BLAKE3)なので、同一バイト列の再登録は
 //! 同一エントリへの冪等な登録であり、重複した識別子を作る経路が無い。
@@ -58,9 +77,10 @@
 //!
 //! design エラー表の 10 変種([`DocumentError`](crate::error::DocumentError))は I/O・
 //! 形式破損の診断である。モデル操作の失敗(実在しないシート・行の指定、順列でない並び替え
-//! 要求)は表のどの変種にも対応しないため、`DocumentError` に増やさず本モジュールの
-//! 最小ローカル型 [`UnknownSheet`] / [`UnknownRow`] / [`ReorderError`] /
-//! [`CellWriteError`] とする
+//! 要求、位置指定の挿入の範囲外)は表のどの変種にも対応しないため、`DocumentError` に
+//! 増やさず本モジュールの最小ローカル型 [`UnknownSheet`] / [`UnknownRow`] /
+//! [`ReorderError`] / [`CellWriteError`] / [`RowRemovalError`] / [`RowInsertionError`]
+//! とする
 //! ([`IdParseError`](crate::ids::IdParseError) と同じ
 //! 「表に無いものはローカルに暫く置く」パターン)。panic にしないので呼び出し元が
 //! 実行時エラーとして扱える。
@@ -100,6 +120,8 @@
 mod attachment;
 mod schema_part;
 mod sheet;
+
+use std::collections::HashSet;
 
 use thiserror::Error;
 
@@ -143,10 +165,14 @@ pub enum ReorderError {
     },
 }
 
-/// 実在しないシートの指定([`Document::add_row`] / [`Document::rename_sheet`])。
+/// 実在しないシートの指定([`Document::add_row`] / [`Document::rename_sheet`] /
+/// [`Document::set_sheet_columns`] / [`Document::set_root_schema`])。
 ///
 /// [`ReorderError::UnknownSheet`] と同じ意味(未知シート)で、シート指定の操作は
-/// どの経路でも panic ではなくこの型で報告される。
+/// どの経路でも panic ではなくこの型で報告される。行を対象にする操作
+/// ([`Document::remove_rows`] / [`Document::insert_row_at`] / [`Document::insert_rows_at`])
+/// は呼び出し元が 1 つの `Result` に統合できるよう、それぞれの誤り型の `UnknownSheet`
+/// 変種で報告する(表に無いものをローカルに置く規律は同じ)。
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error("no such sheet in document: {sheet}")]
 pub struct UnknownSheet {
@@ -196,6 +222,68 @@ pub enum CellWriteError {
         column: usize,
         /// 対象シートが持つ列の数(範囲の上界)。
         columns: usize,
+    },
+}
+
+/// [`Document::remove_rows`] の失敗。
+///
+/// [`UnknownRow`] / [`CellWriteError`] と同じ規律のモデル局所の誤り型である: 判別可能な
+/// 変種がそれぞれ文脈(どのシート・どの行)だけを持ち、表示用の文言を持たない(文言は
+/// 呼び出し元が組み立てる)。design エラー表(I/O・形式診断の 10 変種)に対応変種が無い
+/// ため `DocumentError` には含めない。
+///
+/// 2 変種は[`Document::remove_rows`]の事前検査(1 パス)が判別する: シート自体が未知・
+/// 対象シートに属さない行。削除要求に同じ識別子が複数回現れることは誤りではない
+/// (同じ行を 2 度消すのは同じ 1 回の削除であり、畳まれる)。
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum RowRemovalError {
+    /// 指定シート自体が文書に存在しない。
+    #[error("no such sheet in document: {sheet}")]
+    UnknownSheet {
+        /// 指定されたシート識別子。
+        sheet: SheetId,
+    },
+    /// 指定行が対象シートに属さない(他シートの行・他文書の行)。
+    #[error("no row {row} in sheet")]
+    UnknownRow {
+        /// 指定されたが存在しなかった行識別子。
+        row: RowId,
+    },
+}
+
+/// [`Document::insert_row_at`] / [`Document::insert_rows_at`] の失敗。
+///
+/// [`RowRemovalError`] と同じ規律のモデル局所の誤り型である: 判別可能な変種がそれぞれ
+/// 文脈(どのシート・どの位置・どの行)だけを持ち、表示用の文言を持たない(文言は
+/// 呼び出し元が組み立てる)。design エラー表(I/O・形式診断の 10 変種)に対応変種が無い
+/// ため `DocumentError` には含めない。
+///
+/// 3 変種は挿入の事前検査(1 パス)が判別する: シート自体が未知・挿入位置が挿入前の
+/// 行数を超える・差し込む行の識別子が**文書内のいずれかのシート**に既にある
+/// (識別子の一意性は**文書単位**の不変条件であり、[`Document::reorder_rows`] がこれに
+/// 依存している。シート局所の集合では強制できないため、検査は文書全体に対して行う)。
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum RowInsertionError {
+    /// 指定シート自体が文書に存在しない。
+    #[error("no such sheet in document: {sheet}")]
+    UnknownSheet {
+        /// 指定されたシート識別子。
+        sheet: SheetId,
+    },
+    /// 挿入位置が挿入前の行数を超えている(`index == 行数` は末尾への追加として妥当)。
+    #[error("row index {index} is out of range: sheet has {rows} rows")]
+    IndexOutOfRange {
+        /// 指定された挿入位置(挿入前の行順に対する添字)。
+        index: usize,
+        /// 挿入前の対象シートの行数(範囲の上界)。
+        rows: usize,
+    },
+    /// 差し込む行の識別子が**文書内のいずれかのシート**に現存する
+    /// (または同じ呼び出しの中で重複している)。
+    #[error("row {row} already exists in sheet")]
+    DuplicateRow {
+        /// 重複した行識別子。
+        row: RowId,
     },
 }
 
@@ -527,6 +615,105 @@ impl Document {
             .ok_or(CellWriteError::UnknownSheet { sheet })?
             .set_cells(cells)
     }
+
+    /// 指定シートから複数の行を**1 回の呼び出しで**取り除き、**取り除いた行を返す**
+    /// (data-grid 要件 6.1, 6.2)。
+    ///
+    /// 取り除いた行を所有権ごと返すのは、行の削除の取り消しが**値と識別子の双方**を要する
+    /// ためである([`Row`] は `Clone` を持たず、空の行を挿入する [`Document::insert_row_at`]
+    /// では識別子も値も戻せない)。返された行は [`Document::insert_rows_at`] にそのまま
+    /// 渡すことで、識別子・値・位置を元へ戻せる(data-grid 要件 6.6 / 9.2)。
+    ///
+    /// 返る順序は要求引数の並びではなく**シートの順序**である(同じ行集合の要求は、引数の
+    /// 並びに依らず常に同じ結果になる)。`rows` に同じ識別子が複数回現れることは誤りでは
+    /// なく、1 回の削除に畳まれる。
+    ///
+    /// 一括で受けるのは、範囲削除が 1 操作であり、行ごとに呼ぶと並びの作り直しが繰り返される
+    /// ためである(実装は行数に対する 1 パス。`set_cells` と同じ規律)。未知のシート
+    /// ([`RowRemovalError::UnknownSheet`])・対象シートに属さない行
+    /// ([`RowRemovalError::UnknownRow`]) は判別可能な変種として返し、**1 つでも不正なら
+    /// 1 行も取り除かない**(部分適用なし)。**決定的な出力と往復の契約には触れない**:
+    /// 変わるのは行の集合と並びだけである。
+    pub fn remove_rows(
+        &mut self,
+        sheet: SheetId,
+        rows: &[RowId],
+    ) -> Result<Vec<Row>, RowRemovalError> {
+        self.sheets
+            .iter_mut()
+            .find(|s| s.id() == sheet)
+            .ok_or(RowRemovalError::UnknownSheet { sheet })?
+            .remove_rows(rows)
+    }
+
+    /// 指定シートの位置 `index` に空の行を挿入し、発行した識別子を返す(data-grid 要件 6.1)。
+    ///
+    /// `index` は**挿入前の行順**に対する添字であり、`index == 行数` は末尾への追加である
+    /// ([`Document::add_row`] と同じ位置に入る)。挿入した行は値を持たない(値が与えられて
+    /// いない列へのスキーマの既定値の適用は編集経路 = データグリッド側のタスク 3.2 の
+    /// 責務であり、本モデルは列の型を知らない)。
+    ///
+    /// 識別子は [`Document::add_row`] と同じく所有する [`IdFactory`] から発行する: 先に
+    /// 発行してから対象シートを選ぶため、シートが存在しない場合、発行済みの識別子は破棄
+    /// される(発行者の状態が進むだけで、文書に痕跡は残らない。位置が範囲外の場合も同じ)。
+    /// 未知のシート([`RowInsertionError::UnknownSheet`])・行数を超える位置
+    /// ([`RowInsertionError::IndexOutOfRange`]) は判別可能な変種として返し、**失敗したときは
+    /// 1 行も挿入しない**(部分適用なし)。
+    pub fn insert_row_at(
+        &mut self,
+        sheet: SheetId,
+        index: usize,
+    ) -> Result<RowId, RowInsertionError> {
+        let id = self.ids.new_row_id();
+        self.sheets
+            .iter_mut()
+            .find(|s| s.id() == sheet)
+            .ok_or(RowInsertionError::UnknownSheet { sheet })?
+            .insert_row_at(index, id)
+    }
+
+    /// 指定シートの位置 `index` に、与えられた行を**識別子も値も作り直さずに**差し込む
+    /// (data-grid 要件 6.1, 6.6, 9.2)。
+    ///
+    /// これは [`Document::remove_rows`] の逆を行う入口である: 取り除いた [`Row`] をそのまま
+    /// 渡すことで、識別子・値・位置が元に戻る(空の行を挿入する [`Document::insert_row_at`]
+    /// では、発行済みの識別子と値を戻せない)。行の複製(data-grid 要件 6.3)がこの口を使う場合は、
+    /// 値を作り直す必要があるため複製側の責務となる(本モデルは行の複製 API を持たない)。
+    ///
+    /// `index` は**挿入前の行順**に対する添字であり、`index == 行数` は末尾への追加である。
+    /// 渡された行の順序は保たれる。未知のシート
+    /// ([`RowInsertionError::UnknownSheet`])・行数を超える位置
+    /// ([`RowInsertionError::IndexOutOfRange`])・**文書内のいずれかのシートに既にある
+    /// 識別子**([`RowInsertionError::DuplicateRow`])は判別可能な変種として返し、
+    /// **1 つでも不正なら 1 行も差し込まない**(部分適用なし)。
+    ///
+    /// 一意性の検査は**文書単位**である: 行識別子の一意性は文書内で成立する不変条件であり
+    /// (design「Domain Model」)、シート局所の集合では強制できない。したがって全シートの
+    /// 行識別子の集合を**1 回だけ**作って渡す(O(文書の行数))。1 操作あたり 1 回の費用で
+    /// あり、data-grid 要件 7.7 / 11.5 の予算は操作単位であるため許容される(貼り付けは 1 操作であり、
+    /// 行ごとにこの集合を作らない)。この検査が禁じるのは「**文書内に現存する識別子を
+    /// 差し込む**」ことであり、取り除かれて文書から消えた識別子を別のシートへ入れることは
+    /// 禁じない(入れた時点で文書内に同じ識別子は 1 つしか無いため不変条件に反しない)。
+    pub fn insert_rows_at(
+        &mut self,
+        sheet: SheetId,
+        index: usize,
+        rows: Vec<Row>,
+    ) -> Result<(), RowInsertionError> {
+        // 文書内の全シートの行識別子(1 回だけ作る)。対象シートの行も含むため、シート局所の
+        // 集合を別に作る必要はない。可変借用を取る前に読む(借用の重複を避ける)。
+        let document_rows: HashSet<RowId> = self
+            .sheets
+            .iter()
+            .flat_map(|sheet| sheet.rows())
+            .map(Row::id)
+            .collect();
+        self.sheets
+            .iter_mut()
+            .find(|s| s.id() == sheet)
+            .ok_or(RowInsertionError::UnknownSheet { sheet })?
+            .insert_rows_at(index, rows, &document_rows)
+    }
 }
 
 impl Default for Document {
@@ -538,7 +725,10 @@ impl Default for Document {
 
 #[cfg(test)]
 mod tests {
-    use super::{Document, ReorderError, Row, SchemaPart, Sheet, UnknownRow, UnknownSheet};
+    use super::{
+        Document, ReorderError, Row, RowInsertionError, RowRemovalError, SchemaPart, Sheet,
+        UnknownRow, UnknownSheet,
+    };
     use crate::ids::{AttachmentId, RowId, SheetId};
     use crate::value::{CellValue, NestedValue};
 
@@ -720,8 +910,64 @@ mod tests {
             Err(ReorderError::UnknownSheet { sheet: stranger }),
             doc.reorder_rows(stranger, &[])
         );
+        // `remove_rows` は `Vec<Row>` を返し、`Row` は `PartialEq` を持たないため、
+        // `Err(..)` との比較ではなく誤り値そのものを比較する。
+        assert_eq!(
+            RowRemovalError::UnknownSheet { sheet: stranger },
+            doc.remove_rows(stranger, &[])
+                .expect_err("未知のシートは失敗する")
+        );
+        assert_eq!(
+            Err(RowInsertionError::UnknownSheet { sheet: stranger }),
+            doc.insert_row_at(stranger, 0)
+        );
+        assert_eq!(
+            Err(RowInsertionError::UnknownSheet { sheet: stranger }),
+            doc.insert_rows_at(stranger, 0, Vec::new())
+        );
         assert!(doc.remove_sheet(stranger).is_none());
         assert!(doc.sheet_by_id(stranger).is_none());
+    }
+
+    #[test]
+    fn insert_rows_at_rejects_a_row_id_already_in_the_document() {
+        // 行識別子の一意性は**文書単位**の不変条件であり、`reorder_rows` がこれに依存して
+        // いる。既存の識別子を持つ行は差し込めない。`insert_rows_at` は要求が不正なら
+        // 1 行も差し込まない。
+        //
+        // ここで固定するのは「文書内に現存する識別子」の枝である。**バッチ内の重複**の枝は
+        // `tests/row_removal.rs` の `insert_rows_at_rejects_duplicate_identifiers_inside_one_batch`
+        // が公開面だけで固定する(`decode` は 1 エントリの中の重複しか拒まないため、2 回の
+        // 復号結果を 1 つの要求へまとめれば、文書内に現存しない識別子の重複を作れる)。
+        // 同じ `Row::new` の識別子を 2 つ並べただけでは文書内に現存する枝が先に発火して
+        // バッチ内の枝を通らないため、ここでは並べない。
+        let mut doc = Document::new();
+        let sheet = doc.add_sheet("dup");
+        let rows: Vec<RowId> = (0..2).map(|_| doc.add_row(sheet).unwrap()).collect();
+
+        assert_eq!(
+            Err(RowInsertionError::DuplicateRow { row: rows[1] }),
+            doc.insert_rows_at(sheet, 0, vec![Row::new(rows[1])])
+        );
+        // **他シートに属する識別子**も文書全体の検査で拒む(シート局所の集合では
+        // 強制できない。ここが文書単位の検査の要る所以である)。
+        let other = doc.add_sheet("他シート");
+        assert_eq!(
+            Err(RowInsertionError::DuplicateRow { row: rows[0] }),
+            doc.insert_rows_at(other, 0, vec![Row::new(rows[0])])
+        );
+        let observed: Vec<RowId> = doc
+            .sheet_by_id(sheet)
+            .unwrap()
+            .rows()
+            .iter()
+            .map(Row::id)
+            .collect();
+        assert_eq!(rows, observed, "失敗後も行集合・並びは無変更(部分適用なし)");
+        assert!(
+            doc.sheet_by_id(other).unwrap().rows().is_empty(),
+            "差し込み先のシートにも 1 行も入らない"
+        );
     }
 
     #[test]
