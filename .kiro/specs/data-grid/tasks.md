@@ -61,7 +61,7 @@
   - 同一のドキュメントと同一の指定から常に同一の順序が出ることをテストで示す
   - _Requirements: 8.3, 8.5, 8.8_
 
-- [ ] 2.2 絞り込みの行集合を導出し、隠れた行数を数える
+- [x] 2.2 絞り込みの行集合を導出し、隠れた行数を数える
   - 一致・部分一致・値なし・値あり・違反あり、の絞り込みを列ごとに指定できるようにする
   - 複数の絞り込みは積として扱う
   - 可視行数と隠れた行数の双方を返す
@@ -337,3 +337,16 @@
   - 描画を成立させない条件で起動したとき、画面が不成立を示し診断に記録が残る
   - _Requirements: 11.1, 11.2, 11.3, 12.2, 12.3_
   - _Depends: 7.6_
+
+## Implementation Notes
+
+- **環境（2026-09-14 に判明）**: このマシンの `~/.local/bin/pkg-config` は `/tmp/tsroot/root` を指す古いシムであり、`/tmp` の掃除でそれが消えたため、**GTK の sys クレート（`src-tauri` 経由）を含むビルドが失敗する**。動く sysroot はリポジトリ直下の `.devsys/root` である。ワークスペース全体を走らせるときは次を前置する（`cargo test -p data-grid` は GTK を要さないため不要なことが多い）:
+  ```
+  export LD_LIBRARY_PATH=/home/hdys/jxcel/.devsys/root/usr/lib/x86_64-linux-gnu
+  export PATH="/home/hdys/jxcel/.devsys/root/usr/bin:$PATH"
+  export PKG_CONFIG_PATH="/home/hdys/jxcel/.devsys/root/usr/lib/x86_64-linux-gnu/pkgconfig:/home/hdys/jxcel/.devsys/root/usr/share/pkgconfig"
+  export PKG_CONFIG_SYSROOT_DIR=/home/hdys/jxcel/.devsys/root
+  ```
+  **`~/.local/bin/pkg-config` と `.cargo/config.toml` は書き換えない**（ローカルのドリフトであり、本スペックの成果物ではない）。
+- **テストは前提を自分で表明すること（2.1 のレビューで実測）**: 標本の列 0 は一意制約列であり**同じ値を持たない**（同値が 1 件も無い）。同値・決着を観測するテストは列 0 を使ってはならない（列 1/3/4 などは同値を持つ。列 4 は 2 値に集中する）。**「この標本には同値がある」「この行は違反である」といった前提を、テスト自身が表明してから依拠する。** 前提を確かめない検査は、対象を間違えても緑になる（`verification.md` の負の対照と同じ理由）。
+- **標本の生の値と生の文書順は比較に使えない**: 識別子（ULID）は実行ごとに変わり、**標本の文書順は `RowId` の昇順と一致する**。決着（`RowId` の順）を観測するテストは、`reorder_rows` で文書順を**逆にしてから**比べること（そのままでは「同値だから」と「元からその順だから」を区別できない）。

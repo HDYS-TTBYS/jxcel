@@ -49,7 +49,8 @@ use document_format::{
     AttachmentId, CellValue, Document, IdFactory, NestedValue, RowId, SheetId,
 };
 
-/// 表示の指定を短く書く（基準列と、降順かどうかの対の並び）。
+/// 表示の指定を短く書く（基準列と、降順かどうかの対の並び）。絞り込みは指定しない
+/// （絞り込みの検査は `tests/filter_order.rs` が持つ）。
 fn spec(keys: &[(usize, bool)]) -> ViewSpec {
     ViewSpec {
         sort: keys
@@ -59,6 +60,7 @@ fn spec(keys: &[(usize, bool)]) -> ViewSpec {
                 descending,
             })
             .collect(),
+        filters: Vec::new(),
     }
 }
 
@@ -628,7 +630,7 @@ fn repeated_derivations_from_the_same_input_are_identical() {
     assert_eq!(left_summary, right_summary, "要約が一致しない");
     assert_eq!(visible_of(&left), visible_of(&right), "順序が一致しない");
 
-    // 可視行はシートの行数と一致し、本タスクには絞り込みが無いため隠れた行は 0 である。
+    // 絞り込みを指定していないため、可視行はシートの行数と一致し、隠れた行は 0 である。
     assert_eq!(sample.rows(), left_summary.visible);
     assert_eq!(0, left_summary.hidden);
     assert_eq!(sample.rows(), left.len());
@@ -770,10 +772,13 @@ fn an_empty_order_has_no_rows_and_no_lookups() {
 fn a_view_spec_without_keys_is_a_valid_derivation() {
     // 表示の指定は並べ替えの基準列を持たない形も取れる（絞り込みだけを指定する 2.2 の前提）。
     let (document, sheet, ids) = build(vec![vec![int(2)], vec![int(1)]], 1);
-    let spec = ViewSpec { sort: Vec::new() };
+    let spec = ViewSpec {
+        sort: Vec::new(),
+        filters: Vec::new(),
+    };
     assert_eq!(ids, visible(&document, sheet, &spec), "文書の行順のまま");
     assert!(spec.sort.is_empty());
-    // 隠れた行は無い（本タスクに絞り込みは無い）。
+    // 絞り込みを指定していないため隠れた行は無い。
     let mut order = RowOrder::default();
     let summary = order.recompute(&document, sheet, &spec);
     assert_eq!(0, summary.hidden);
@@ -879,6 +884,6 @@ fn the_shared_sample_sorts_by_the_values_of_a_column() {
         "文書の行順を変えても同じ順序が出ない（決着が RowId に依っていない）"
     );
 
-    // 隠れた行は無い（絞り込みは 2.2）。
+    // 絞り込みを指定していないため隠れた行は無い。
     assert_eq!(0, order.hidden());
 }

@@ -51,7 +51,16 @@
 //! 並ぶ。**順序の導出は `&Document` しか受け取らない**（要件 8.5 を型の上で示す形。
 //! `view` のモジュール docs 参照）。
 //!
-//! 残りの層（`view` の絞り込みと違反の索引は群 2 の 2.2・2.3・2.4、`edit` は群 3、
+//! タスク 2.2 が [`view`] 層へ絞り込みを足した（[`FilterSpec`] の 5 変種と
+//! [`ViewSpec::filters`]、可視行数と隠された行数を返す [`ViewSummary`]）。複数の絞り込みは
+//! **積**であり、並べ替えは**絞り込んだ集合に対して**定まる。表示文字列の写し
+//! （[`DisplayText`] / [`display_text`]）は本層が 1 つだけ持ち（**タスク 5.1 の
+//! `WindowCodec` はこれを再利用する**）、違反ありの絞り込みは据え付けられた
+//! [`ViolationPresence`] だけを読む（**判定も索引も持たない**。索引を作って据え付けるのは
+//! 2.4 と 5.2 である。`view` のモジュール docs「違反ありの絞り込みは据え付けられた情報だけを
+//! 見る」）。
+//!
+//! 残りの層（`view` の入れ子の展開と違反の索引は群 2 の 2.3・2.4、`edit` は群 3、
 //! `history` は群 4、`transport` / `api` は群 5）は設計の File Structure Plan に挙げられた
 //! 順に後続のタスクが足す。**実体の無いモジュールを先に宣言しない**（錆びた宣言は、層の鎖が
 //! 実際に守られているかを検査できなくする）。
@@ -67,5 +76,7 @@ pub use error::GridError;
 // モジュール doc を参照）。同じ型がここからも見えるようにする。
 pub use types::{CellAddress, CellPosition, CellRange, ColumnIndex, NestedPath, NestedPathSegment};
 pub use types::{RowOrdinal, RowSpan, SearchDirection};
-// `view` 層の状態と指定。絞り込み（`FilterSpec` と `ViewSpec::filters`）は 2.2 が足す。
-pub use view::{RowOrder, SortKey, ViewSpec, ViewSummary};
+// `view` 層の状態と指定: 表示の指定（並べ替えと絞り込み）、行の順序、要約、違反の有無の
+// 据え付け、そして表示文字列の写し（5.1 が写しを作らずに使う唯一の源）。
+pub use view::ViolationPresence;
+pub use view::{display_text, DisplayText, FilterSpec, RowOrder, SortKey, ViewSpec, ViewSummary};
