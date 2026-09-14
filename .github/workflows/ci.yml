@@ -892,6 +892,54 @@ jobs:
         run: pwsh -NoProfile -File scripts/ci/windows/verify-bulk-transfer.ps1
 
       # ---------------------------------------------------------------------
+      # 10 万行 × 30 列の走査の実測（**tasks.md 1.6** / 要件 11.1, 12.1, 12.2）
+      #
+      # 1.6 は判断点である: 使い捨ての画面（`smoke-glide-probe`）で 10 万行を走査し、
+      # **フレーム時間の中央値**を測る。毎秒 60 回（中央値 16.67 ms 以下）に届かなければ、
+      # 7.2 の実装を移植口の背後で自前 canvas へ切り替える判断を `research.md` に記録する。
+      #
+      # ## 3 OS の既存マトリクスに段を足すだけである（新しい系統を作らない）
+      #
+      # 実体は `scripts/ci/{linux,macos,windows}/verify-render-traversal.*` である。
+      # `verification.md`「既存の 3 OS マトリクスに段を足す。プラットフォーム別に独立した検証
+      # 系統やジョブを新設しない」に従う。
+      #
+      # ## Linux だけが数値を出す（1.6 の明文）
+      #
+      # 「**Linux の結果を判断の拘束条件とする。**最も危険な環境であり、ここが通らなければ
+      # 他の 2 つを測る意味がない。Windows と macOS の数値は 9.2 の観測で確かめる」。
+      # 計測の行は**アクセシビリティの木**（AT-SPI。`busctl` で読む）から取るため、
+      # **AT-SPI を持つのは Linux のランナーだけである**（macOS の WKWebView と Windows の
+      # WebView2 は別のアクセシビリティ API を使う）。したがって Linux の段は 4 条件
+      # （回避の環境変数の有無それぞれ。研究の順序で累積）を実測し、macOS / Windows の段は
+      # **走査の画面が描画されること**だけを確かめて数値を 9.2 へ送る。
+      #
+      # ## この段は一時的である（9.2 が取り除く）
+      #
+      # 恒久の 3 OS の観測は **9.2**（走査と編集の成立）と **9.3**（走査の劣化の検出と診断への
+      # 記録）が担う。**9.2 / 9.3 が入った時点でこの 3 段は取り除く** — それまでは
+      # `research.md` の追記（1.6 の成果）の裏付けとして走らせる。
+      # ---------------------------------------------------------------------
+
+      # 実体は `scripts/ci/linux/verify-render-traversal.sh`（理由・証拠が何を覆うかはその冒頭）。
+      - name: Measure 100k-row traversal frame times (Linux / Xvfb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/ci/linux/verify-render-traversal.sh
+
+      # 実体は `scripts/ci/macos/verify-render-traversal.sh`（理由・証拠が何を覆うかはその冒頭）。
+      - name: Measure 100k-row traversal frame times (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash scripts/ci/macos/verify-render-traversal.sh
+
+      # 実体は `scripts/ci/windows/verify-render-traversal.ps1`（理由・証拠が何を覆うかはその冒頭）。
+      - name: Measure 100k-row traversal frame times (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/ci/windows/verify-render-traversal.ps1
+
+      # ---------------------------------------------------------------------
       # 配布物の検証（tasks.md 10.2 / 要件 6.4, 6.5, 6.6）
       #
       # 生成した配布物から補助プロセスの実行ファイルを取り出し、起動できることを確かめ、

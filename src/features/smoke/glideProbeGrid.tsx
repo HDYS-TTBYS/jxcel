@@ -46,6 +46,19 @@ import {
 } from "react";
 
 import { APPEARANCE_VARS } from "../../shell/theme";
+import {
+  MAX_FRAME_SAMPLES,
+  MIN_FRAMES_FOR_MEDIAN,
+  ROWS_PER_FRAME,
+  countDistinctColors,
+  medianOf,
+  percentileOf,
+  probePaint,
+  readTimerResolutionMs,
+  readWebkitVersion,
+  sampleTraversal,
+  type GlideProbeMeasurement,
+} from "./glideProbeMeasure";
 
 /**
  * 実測した広がり（DOM から読む値）。**呼び出し元が `data-probe-*` として出す**ので、
@@ -64,7 +77,9 @@ export interface GlideProbeExtent {
   readonly lastVisibleRow: number;
 }
 
-/** 標本の面が受け取るもの。**数は画面側が決める**（この面は形だけを知る）。 */
+/**
+ * 標本の面が受け取るもの。**数は画面側が決める**（この面は形だけを知る）。
+ */
 export interface GlideProbeGridProps {
   readonly rows: number;
   readonly columns: number;
@@ -72,7 +87,16 @@ export interface GlideProbeGridProps {
   readonly headerHeight: number;
   readonly heightPx: number;
   readonly onExtent: (extent: GlideProbeExtent) => void;
+  /** 走査の計測の結果（1.6）。**1 回だけ**届く（マウント後に自動で 1 回走らせる）。 */
+  readonly onMeasured: (measurement: GlideProbeMeasurement) => void;
 }
+
+/**
+ * 走査の計測の結果（tasks.md 1.6 / 要件 11.1、12.2）。**定義の正本は
+ * [`glideProbeMeasure`](./glideProbeMeasure.ts)** である（計測を行う側が型を持つ。
+ * ここは面の境界として再輸出するだけである）。
+ */
+export type { GlideProbeMeasurement } from "./glideProbeMeasure";
 
 /** グリッドを入れる枠の見た目。**ここが横にはみ出さないようにする**（縦はグリッドが持つ）。 */
 const FRAME_STYLE = {
@@ -137,6 +161,7 @@ export function GlideProbeGrid({
   headerHeight,
   heightPx,
   onExtent,
+  onMeasured,
 }: GlideProbeGridProps): ReactElement {
   const gridRef = useRef<DataEditorRef | null>(null);
   const frameRef = useRef<HTMLDivElement | null>(null);
@@ -144,6 +169,9 @@ export function GlideProbeGrid({
     first: 0,
     last: 0,
   });
+  // 計測は**1 回だけ**走らせる（描き直しのたびに走らせると、走査が繰り返されて結果が
+  // 上書きされる。しかも 2 回目以降は既に末尾に居るので走査にならない）。
+  const measuredRef = useRef(false);
   // 実測値を描き直しの入力にするのは**この面の外**である（呼び出し元が `data-probe-*` へ
   // 出す）。ここでは「読んで報告する」だけなので、報告を再描画のきっかけにしない。
   const report = useCallback(() => {
@@ -173,6 +201,99 @@ export function GlideProbeGrid({
       cancelAnimationFrame(first);
     };
   }, [report]);
+
+  // 走査の計測（tasks.md 1.6）。**面の寸法が確定した後**に 1 回だけ走らせる（寸法が 0 の
+  // うちに走査すると、仮想化が何も描かずフレーム時間が「速く」出る）。計測は走査・塗りの
+  // 読み戻し・canvas の色数の 3 つを行い、結果を 1 回だけ報告する。
+  useEffect(() => {
+    if (measuredRef.current) {
+      return;
+    }
+    measuredRef.current = true;
+    let cancelled = false;
+
+    const run = async (): Promise<void> => {
+      // 面が寸法を測るまで待つ（拡大の報告を 2 フレーム待つ既存の処理と同じ理由）。
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            resolve();
+          });
+        });
+      });
+      if (cancelled) {
+        return;
+      }
+
+      const samples = await sampleTraversal({
+        rowsPerFrame: ROWS_PER_FRAME,
+        maxSamples: MAX_FRAME_SAMPLES,
+        rows,
+        readLastVisibleRow: () => visibleRef.current.last,
+        advance: (row) => {
+          gridRef.current?.scrollTo(0, row, "vertical");
+        },
+      });
+      if (cancelled) {
+        return;
+      }
+
+      // 走査の直後の状態で塗りの読み戻しと canvas の色数を取る（**走査の後**にするのは、
+      // 描画が実際に進んだ面を見るためである）。
+      const paint = probePaint();
+      const canvas = frameRef.current?.querySelector("canvas");
+      const gridColors =
+        canvas instanceof HTMLCanvasElement ? countDistinctColors(canvas) : 0;
+
+      const median = medianOf(samples.frameTimes);
+      // **測定不能を「速い」と読ませない。** 標本が足りない・中央値が無い・走査が末尾へ
+      // 届いていない・グリッドに何も塗られていない、のいずれかなら `unmeasurable` にして
+      // 理由を残す（数を捏造しない）。
+      const reasons: string[] = [];
+      if (median === null) {
+        reasons.push("フレームの標本が 1 本も取れなかった（requestAnimationFrame が発火していない）");
+      } else if (samples.frameTimes.length < MIN_FRAMES_FOR_MEDIAN) {
+        reasons.push(
+          `フレームの標本が足りない（${String(samples.frameTimes.length)} < ${String(MIN_FRAMES_FOR_MEDIAN)}）`,
+        );
+      }
+      if (samples.lastVisibleRow < rows - 1) {
+        reasons.push(
+          `走査が末尾へ届かなかった（最後に見えた行 = ${String(samples.lastVisibleRow)} / 期待 ${String(rows - 1)}）`,
+        );
+      }
+      if (!paint.ok) {
+        reasons.push(`塗りの読み戻しが失敗した（${paint.pixel}）`);
+      }
+      if (gridColors < 2) {
+        reasons.push(
+          `標本の面の canvas が一様である（色数 ${String(gridColors)}。DOM はあるが何も塗られていない）`,
+        );
+      }
+
+      onMeasured({
+        status: reasons.length === 0 ? "measured" : "unmeasurable",
+        reason: reasons.join(" / "),
+        frames: samples.frameTimes.length,
+        medianMs: median,
+        lastVisibleRow: samples.lastVisibleRow,
+        rows,
+        columns,
+        paintOk: paint.ok,
+        paintPixel: paint.pixel,
+        gridColors,
+        webkit: readWebkitVersion(),
+        tickMs: readTimerResolutionMs(),
+        p90Ms: percentileOf(samples.frameTimes, 0.9),
+        maxMs: percentileOf(samples.frameTimes, 1),
+      });
+    };
+
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [columns, onMeasured, rows]);
 
   /** 可視範囲の変化を受ける。**描画が進んだことの証拠**（行の範囲）をそのまま報告する。 */
   const onVisibleRegionChanged = useCallback(

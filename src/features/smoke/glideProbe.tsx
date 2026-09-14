@@ -77,7 +77,11 @@ import {
 import { APPEARANCE_VARS } from "../../shell/theme";
 // **型だけの import である**（`verbatimModuleSyntax` により `import type` が要る）。型は
 // バンドル時に消えるので、ライブラリ側の面への依存をここへ作らない。
-import type { GlideProbeExtent, GlideProbeGridProps } from "./glideProbeGrid";
+import type {
+  GlideProbeExtent,
+  GlideProbeGridProps,
+  GlideProbeMeasurement,
+} from "./glideProbeGrid";
 
 /**
  * 画面の識別子。`src/shell/Layout.tsx` のレジストリと、検証専用の初期画面の指定
@@ -182,6 +186,43 @@ function describeExtent(extent: GlideProbeExtent | null): string {
 }
 
 /**
+ * 走査の計測の結果を**1 行の `[検証]` 行**にする（tasks.md 1.6）。**入力に対して純粋**で
+ * あり、描画の判断には使わない。
+ *
+ * この行が**計測の一次証拠**である。アプリの診断記録（`TargetKind::Folder`）へは
+ * **フロントエンドから書けない**（実測: wry は console を stdout へ流さず、
+ * `tauri-plugin-log` に `TargetKind::Webview` は無い。`document.title` もネイティブの題名へ
+ * 伝わらない — `on_document_title_changed` を誰も配線していない）。したがってこの行を
+ * **アクセシビリティの木から読める名前にする**（下の `aria-label`）。`verification.md` は
+ * 「UI の中身はアクセシビリティの木を読むのが最も強い」と定めており、既存の
+ * `scripts/check-menu-shortcut.sh` が `busctl` で同じ読みを行っている。
+ *
+ * 形は `キー=値` の羅列である（`画面=empty-window` など既存の記録行と同じ流儀）。
+ * **測定不能のときも同じキーを出す** — `状態=unmeasurable` と `理由=` が付き、中央値は
+ * `なし` になる（**数を捏造しない**）。
+ */
+function describeMeasurement(measurement: GlideProbeMeasurement | null): string {
+  if (measurement === null) {
+    return `[検証] グリッドの走査: 状態=未測定 理由=計測がまだ終わっていない`;
+  }
+  const median =
+    measurement.medianMs === null ? "なし" : measurement.medianMs.toFixed(2);
+  const p90 = measurement.p90Ms === null ? "なし" : measurement.p90Ms.toFixed(2);
+  const max = measurement.maxMs === null ? "なし" : measurement.maxMs.toFixed(2);
+  return (
+    `[検証] グリッドの走査: 状態=${measurement.status}` +
+    ` 中央値ms=${median} フレーム数=${String(measurement.frames)}` +
+    ` p90ms=${p90} 最大ms=${max}` +
+    ` 到達行=${String(measurement.lastVisibleRow)}` +
+    ` 行数=${String(measurement.rows)} 列数=${String(measurement.columns)}` +
+    ` 塗り=${measurement.paintOk ? "ok" : "ng"} 画素=${measurement.paintPixel}` +
+    ` 色数=${String(measurement.gridColors)} webkit=${measurement.webkit}` +
+    ` 時計刻みms=${measurement.tickMs.toFixed(2)}` +
+    ` 理由=${measurement.reason}`
+  );
+}
+
+/**
  * 検証専用のグリッド確認画面。**`ScreenProps` 以外の props を受け取らない**（画面の契約。
  * `src/shell/Layout.tsx`）。`screenId` と `navigate` はこの画面では使わない（画面を切り替える
  * 導線を持たない）。
@@ -191,6 +232,9 @@ export function GlideProbe(): ReactElement {
     null,
   );
   const [extent, setExtent] = useState<GlideProbeExtent | null>(null);
+  const [measurement, setMeasurement] = useState<GlideProbeMeasurement | null>(
+    null,
+  );
 
   // ライブラリ側の面を 1 回だけ読む。**マウント後に読むのは、動的 import を最初の描画の
   // 経路から外すためである**（レジストリの登録と初期画面の解決は同期のままにする。
@@ -219,6 +263,10 @@ export function GlideProbe(): ReactElement {
 
   const onExtent = useCallback((measured: GlideProbeExtent) => {
     setExtent(measured);
+  }, []);
+
+  const onMeasured = useCallback((measured: GlideProbeMeasurement) => {
+    setMeasurement(measured);
   }, []);
 
   // **大文字の別名へ移す**（小文字のまま JSX で使うと、HTML の要素名として解釈される）。
@@ -269,8 +317,24 @@ export function GlideProbe(): ReactElement {
           headerHeight={GLIDE_PROBE_HEADER_HEIGHT}
           heightPx={GRID_HEIGHT_PX}
           onExtent={onExtent}
+          onMeasured={onMeasured}
         />
       )}
+      {/*
+        走査の計測の行（tasks.md 1.6）。**表示だけでなくアクセシビリティの名前としても出す**
+        のが要点である — フロントエンドからアプリの診断記録へは書けない（実測:
+        `describeMeasurement` の doc）ので、この行を読めるのは外部の検査器だけである。
+        `aria-label` は AT-SPI の名前に出る（実測: `busctl` で読めた）ので、3 OS の段の
+        実体（`scripts/ci/` 配下の検証台本）がこの 1 行を読んで判定する。
+        **表示は同じ文字列のままにする**（読み手と画面が食い違わないようにする）。
+      */}
+      <p
+        data-testid="jxcel-smoke-glide-probe-measurement"
+        aria-label={describeMeasurement(measurement)}
+        style={STATUS_STYLE}
+      >
+        {describeMeasurement(measurement)}
+      </p>
       <p data-testid="jxcel-smoke-glide-probe-status" style={STATUS_STYLE}>
         {describeExtent(extent)}
       </p>
