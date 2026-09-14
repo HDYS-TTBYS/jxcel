@@ -77,10 +77,19 @@
 //! 組み立てて [`RowOrder`] へ据え付ける経路（[`ViolationIndex::install`]）が 2.2 の
 //! 「違反あり」の絞り込みへ渡す（依存は `ViolationIndex → RowOrder` の一方向である）。
 //!
-//! 残りの層（`edit` は群 3、`history` は群 4、`transport` / `api` は群 5）は設計の
-//! File Structure Plan に挙げられた順に後続のタスクが足す。**実体の無いモジュールを先に
-//! 宣言しない**（錆びた宣言は、層の鎖が実際に守られているかを検査できなくする）。
+//! タスク 3.1 が [`edit`] 層の入口を足した（[`EditApply`] と [`EditCommand`]）。
+//! **打たれた文字を受け取り、型システムの書き込み判定を編集経路として呼ぶ唯一の経路**で
+//! あり、判定が返した値・変換・違反をそのまま写す（本層は判定の分岐を持たない。要件 3.3,
+//! 3.4, 3.5）。1 セルの編集では再検証を**当該列に限定して**呼び、シート全件の検証を
+//! 呼ばない（要件 11.4。観測は `EditSchemaQuery` の縫い目で呼び出しの形を数えて行う）。
+//! 本タスクが持つ命令は `SetCells` だけであり、行の追加・削除・複製（3.2）、入れ子の編集
+//! （3.3）、貼り付け（3.4）は変種を足して進む。
+//!
+//! 残りの層（`history` は群 4、`transport` / `api` は群 5）は設計の File Structure Plan に
+//! 挙げられた順に後続のタスクが足す。**実体の無いモジュールを先に宣言しない**（錆びた宣言は、
+//! 層の鎖が実際に守られているかを検査できなくする）。
 
+pub mod edit;
 pub mod error;
 pub mod types;
 pub mod view;
@@ -106,3 +115,11 @@ pub use view::{
 // 位置の保持、鍵の張り直し、2.2 への据え付け。`GridSession::violation_total` /
 // `find_violation`（タスク 5.2）がこの層を読む。
 pub use view::{CellViolations, ColumnViolations, RowViolations, ViolationIndex};
+// `edit` 層の適用（タスク 3.1）: 編集命令とその結果、変換の記録、そして `schema-engine` へ
+// 問い合わせる縫い目。縫い目を根へ出すのは、要件 11.4 の**観測が本番の実装を包んで**
+// 呼び出しの形（回数・渡った値・列の集合）を数えるためであり、包む対象が公開されていないと
+// 「本番が呼んでいない模擬」しか数えられない（`structure.md`「一括メソッドを置くだけでは
+// 足りない」）。本番の具象（`SchemaEngineQuery`）も同じ理由で公開する。
+pub use edit::{
+    CoercionNotice, EditApply, EditCommand, EditOutcome, EditSchemaQuery, SchemaEngineQuery,
+};

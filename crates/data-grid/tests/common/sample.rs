@@ -244,6 +244,27 @@ impl Sample {
         &self.document
     }
 
+    /// 標本を、編集の適用に要る部品へ分解する（タスク 3.1 が足した）。
+    ///
+    /// 編集は文書を**変更する**ため、`&Document` しか返さない [`Sample::document`] のままでは
+    /// 適用できない。所有権ごと渡すことで、消費側は文書を書き換えつつ、標本が申告する行の
+    /// 並び・列名・シート識別子を使える（`SetCells` は行を増減しないため、行識別子の申告は
+    /// 適用の後も有効である）。宣言と計画が要る場合は**分解の前に**
+    /// [`Sample::compiled`] / [`Sample::schema_part`] で取り出す。
+    ///
+    /// **この標本に対する [`Sample::document`] 系の申告（行の並び・違反の位置）は、分解の
+    /// 後は消費側の編集に依る** — 標本自身は文書を持たないため、編集の後の状態について何も
+    /// 申告しない。期待値を編集の前後で比べる検査は、適用の前に読み取った値を使う。
+    pub fn into_edit_parts(self) -> SampleEditParts {
+        SampleEditParts {
+            document: self.document,
+            sheet: self.sheet,
+            reference: self.reference,
+            row_ids: self.row_ids,
+            columns: self.columns,
+        }
+    }
+
     /// 30 列を持つデータシートの識別子。
     pub fn sheet(&self) -> SheetId {
         self.sheet
@@ -345,6 +366,23 @@ impl Sample {
     pub fn expected_violations(&self) -> usize {
         self.injected_violations() + self.unique_violations()
     }
+}
+
+/// [`Sample::into_edit_parts`] が返す部品（タスク 3.1）。
+///
+/// 編集の適用（`EditApply::apply`）は文書の可変参照を要するため、標本を**所有権ごと**
+/// 分解する。分解の後に残る申告は、編集が行を増減しない限り（`SetCells`）有効である。
+pub struct SampleEditParts {
+    /// 標本の文書（データシートと参照先シート）。
+    pub document: Document,
+    /// 30 列を持つデータシートの識別子。
+    pub sheet: SheetId,
+    /// 参照先シートの識別子。
+    pub reference: SheetId,
+    /// 行識別子（編集の前の行順）。
+    pub row_ids: Vec<RowId>,
+    /// 列名（宣言の並びそのもの）。
+    pub columns: Vec<String>,
 }
 
 /// 指定した行数・列数・違反の割合・種で標本を組み立てる（tasks.md 1.4。要件 1.1, 11.7）。
