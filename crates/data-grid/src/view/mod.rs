@@ -307,6 +307,124 @@
 //! 持たない。design.md の Service Interface）。シートの妥当性を先に確かめるのは呼び出し側
 //! （`GridSession::set_view`。要件 8.3）の責務である。
 //!
+//! # 入れ子の展開から列の構成を導出する（要件 5.1, 5.2, 5.3, 5.4, 5.6）
+//!
+//! 入れ子の型を持つ列は、利用者の指示で**内側のフィールドを列として並べる**（要件 5.1）し、
+//! 折りたためば**元の 1 列**へ戻る（要件 5.2）。その結果が窓の列数を決めるため、この状態は
+//! 表示に閉じた列幅・列順（フロントエンドの `DisplayState`）ではなく**本クレート側**にある
+//! （design.md「表示状態」の割り方の根拠）。本モジュールが持つのは指定と状態
+//! （[`ViewState`] / [`ExpansionState`]）と、そこから導かれる**平坦な列の並び**
+//! （[`ColumnLayout`]）である。
+//!
+//! ## 構成の要素（[`LayoutColumn`]）
+//!
+//! 構成は**入れ子の木ではなく平坦な並び**であり、要素は次の 6 つを持つ。窓は列をこの並びの
+//! 順に運び、1 列につき 1 つの葉の値（または要約）を載せる。
+//!
+//! | 欄 | 何を指すか |
+//! |---|---|
+//! | [`LayoutColumn::column`] | **最上位の列**の添字（内側の位置も同じ最上位の列を指す） |
+//! | [`LayoutColumn::path`] | 内側の位置（[`NestedPath`]。空 = セル直下） |
+//! | [`LayoutColumn::name`] | 表示名（位置に沿ったフィールド名を `.` で連結したもの） |
+//! | [`LayoutColumn::kind`] | 葉の型の札（8.5・7.4 が入力手段を選ぶのに使う。使用不能な列は `None`） |
+//! | [`LayoutColumn::element_count`] | 同一の型の並びの要素数（要件 5.6。下記） |
+//! | [`LayoutColumn::expandability`] | 展開の可否と、上限に達したことの印（要件 5.4。下記） |
+//!
+//! **内側の位置は [`NestedPath`] を再利用する**（`types` 層。本クレートが 2 つ目の経路の型を
+//! 持つと、違反の位置（要件 4.5）と展開の位置が別の型として並び、同じ場所を指していることを
+//! 型が言えなくなる）。本モジュールが位置を組み立てるのは上流の `ValuePath` の変換
+//! （[`NestedPath`] の `From<&ValuePath>`）を通してであり、**独自の経路の解析器を持たない**。
+//!
+//! **表示名の区切りは `.` である**（`届け先.郵便番号`）。地域に依る書式（桁区切り・数量詞）は
+//! 使わない — 並べ替えが地域の並び替え規則を使わないのと同じ理由であり、表示名が環境で
+//! 変わると、同じ宣言から同じ構成が出るという不変条件が崩れる。**空の位置の表示名は列名
+//! そのもの**であり、折りたたんだ列と 1 段も展開していない列で名前が食い違わない。
+//!
+//! ## 折りたたみは 1 件、展開は内側のフィールドを宣言順に（要件 5.1, 5.2）
+//!
+//! - 折りたたんだ入れ子の列は**ちょうど 1 件**を構成へ出し、その位置は空
+//!   （[`LayoutColumn::path`] が [`NestedPath::root`]）である
+//! - 展開した入れ子の列は、**内側のフィールドを宣言順に**（[`ColumnValidator::Object`] の
+//!   `fields` の宣言順。並べ替えない）1 件ずつ出し、親の列そのものは出さない。したがって
+//!   1 列が `n` フィールドへ開くと構成は `n - 1` 件伸び、折りたたむと元の件数へ戻る
+//! - **要素数の並び（配列）は展開しない**。`items` の型が同一である複数の列を並べると、
+//!   同じ名前の列が要素の数だけ現れることになり、表として読めないためである。配列は
+//!   **1 件のまま**で、要素数を [`LayoutColumn::element_count`] に載せる（要件 5.6）
+//! - フィールドを 1 つも持たないオブジェクトを展開しても**列は消えない**（1 件のまま残る）。
+//!   消すと列数が減り、以降の列の添字がずれて、窓の列と行の値の対応が静かに壊れる
+//!
+//! ## 段数の上限と、詳細表示へ委ねる印（要件 5.4）
+//!
+//! - `depth` は**内側へ降りる段数**である（1 = 内側のフィールドまで、2 = そのまた内側まで）
+//! - 段数の上限は [`MAX_EXPANSION_DEPTH`]（= 3。design.md の正典）である。要求された段数は
+//!   上限で頭打ちにし（[`ExpansionState::expanded_to`] が正規化し、導出も再度頭打ちにする）、
+//!   **上限より深い位置は決して列として現れない**
+//! - 折りたたみは [`ExpansionState::expanded`] が `false` のことであり、そのとき `depth` は
+//!   読まない。展開の指定で段数 0 を渡した場合は**1 段**として扱う（展開を指定した以上、
+//!   少なくとも内側の 1 段は見せる。展開するかどうかを決めるのは `expanded` であり、`depth`
+//!   はその深さだけを決める）
+//! - 上限に達した位置（内側を持ち、その位置の段数が上限に一致するもの）は
+//!   [`Expandability::Capped`] を立てる。**これは観測できる印**であり、8.5 はこれを見て
+//!   「詳細の表示へ誘導する」を出す。印が「要求された段数で止まっただけ」と区別される
+//!   ことが要点である — 要求で止まった位置は [`Expandability::Available`] であり、
+//!   利用者が段数を増やせば降りられる
+//! - 内側を持たない位置（入れ子でない型・使用不能な列・フィールドを持たないオブジェクト・
+//!   配列）は [`Expandability::Leaf`] である
+//!
+//! ## 構成が発散しない（タスク 2.3 の明示的な検査）
+//!
+//! 降下は**上限だけで止まる**。訪問済みの型を覚える集合のような状態を持たない — それに頼ると、
+//! 再帰する宣言のときに「たまたま同じ型へ戻った」場合だけが止まり、宣言の形によって止まり方が
+//! 変わる。止まる根拠は 2 つあり、どちらも宣言の形に依らない:
+//!
+//! 1. **検証器は有限の値である。** 入れ子は [`ColumnValidator::Object`] の `fields` と
+//!    [`ColumnValidator::Array`] の `items` に**値として内包される**ため、その木は必ず有限で
+//!    ある（値の再帰する定義は有限の検証器へ落とせず、`schema-engine` がその列を使用不能に
+//!    する）。したがって「降りる先」自体が有限個しかない
+//! 2. **段数の上限が降下を定数で切る。** 上限は宣言に依らない定数であるため、実際に列として
+//!    現れるのは「宣言の中の、上限段以内の位置」だけである。宣言がいくら深くても、構成の
+//!    件数はその定数段の中の位置の数で頭打ちになる
+//!
+//! 再帰する型定義（`Tree` の子が `Tree` である、など）は 1 の側で落ちる — `schema-engine` が
+//! **その列だけ使用不能**にし（[`CompiledSchema::validator`] が `None` を返す）、本モジュールは
+//! 使用不能な列を**展開せず** 1 件だけ出すため、そもそも降りる先が無い（要件 11.7 の縮退が
+//! 上限の外側の防波堤にもなっている）。
+//!
+//! ## 同一の型の並びの要素数（要件 5.6 の読み方）
+//!
+//! [`LayoutColumn::element_count`] が表すのは**列に宣言された要素数**（`minItems` / `maxItems`）
+//! であり、**行ごとに観測した要素数ではない**。要件 5.6 の「同一の型の並びを持つ列について、
+//! その要素数を提示する」は、列（＝窓が運ぶ 1 列）に「この並びは何個の要素を取るか」を載せる
+//! ことを求めており、行の値そのもの（各セルの実際の要素数）は 5.1 の窓の符号化が
+//! [`DisplayText`] の要約として別途運ぶ（design.md「Data Models / 窓の二進形式」の
+//! 「入れ子の値は要約文字列（要素数など、要件 5.6）を運ぶ」）。両者を混ぜると、本層が行の
+//! 値に依存することになり、構成が行の集合に依って変わってしまう（同じスキーマと同じ展開の
+//! 指定から同じ構成が出るという不変条件が壊れる）。
+//!
+//! したがって要素数の能力は [`ElementCount`] として、`minItems` / `maxItems` をそのまま運ぶ。
+//! 上下限が一致する宣言（`3..=3`）は要素数が 1 つに定まるので [`ElementCount::exact`] が
+//! その値を返し、片側だけの宣言（`1..=8`、`minItems` のみ）は定まらないので `None` を返す。
+//! 宣言が無い配列（`items` だけの `array`）も**要素数の能力は持つ**（上下限が開いているだけ
+//! であり、並びであることは変わらない）。
+//!
+//! ## 決定性（design.md の Invariants）
+//!
+//! 構成は **(コンパイル済みスキーマ, 展開状態) の純関数**である（[`derive_layout`]）。同じ
+//! 入力からは常に同じ構成が出る。`HashMap` は使わない（展開の指定は列の添字を鍵とする
+//! [`BTreeMap`] に読み、反復の順が値から決まる）。**展開の指定の並びの順にも依らない** —
+//! 同じ列の指定が複数あるときは**後ろの指定が前を上書きする**（1 つの列について最後に
+//! 述べられた指定が効く）。[`ViewState::set_expansion`] は列の昇順へ正規化して持つが、
+//! 導出は並びに依らない（手で組んだ [`ViewState::expansion`] でも同じ結果になる）。
+//!
+//! ## 展開の状態は順序の再計算で失われない（要件 5.3）
+//!
+//! [`ViewState`] が展開の状態を持ち、[`RowOrder`] は順序だけを持つ。**順序の再計算は
+//! [`ViewState::recompute_order`] が `&self` で行う** — `&mut self` を取れば展開状態を
+//! 触る経路が生まれ、`RowOrder` 側に持たせれば順序の導出が展開を巻き込む。`&self` という
+//! 形は「この経路は展開状態を変更し得ない」ことを型の上で示す（2.1 が `&Document` で
+//! 「ドキュメントを書き換えない」ことを示したのと同じ形である。`ViewState` を可変で借りる
+//! ことなく順序を求められるため、呼び出し側は展開状態への共有借用を持ったまま再計算できる）。
+//!
 //! # 本層が持たないもの
 //!
 //! - **基準列の値の編集で行が動かないこと**（要件 8.8）。順序と絞り込みの再計算はこの入口の
@@ -315,9 +433,12 @@
 //!   に置く。本モジュールは違反を**判定せず**、据え付けられた [`ViolationPresence`] を
 //!   絞り込みの条件として読むだけである（モジュール docs「違反ありの絞り込みは据え付けられた
 //!   情報だけを見る」）
-//! - **入れ子の展開から導かれる列の構成**（要件 5.1 等）。2.3 が `ViewState` として足す。
-//!   展開された入れ子の内側の列は絞り込みの対象にならない（[`FilterSpec`] の列の添字は
-//!   `Row::values()` に対する位置であり、展開された列ではない）
+//! - **入れ子の値の詳細表示の中身**（要件 5.5, 5.7）。構成は上限に達した位置に印
+//!   （[`Expandability::Capped`]）を立てるところまでであり、8.5 がその印から詳細表示へ誘導し、
+//!   構造そのものは別途取りに行く
+//! - **展開された列の絞り込み・並べ替え**。展開された入れ子の内側の列は絞り込みと並べ替えの
+//!   対象にならない（[`FilterSpec`] / [`SortKey`] の列の添字は `Row::values()` に対する位置で
+//!   あり、展開された列ではない。モジュール docs「入れ子の展開から列の構成を導出する」）
 //! - **表示文字列の境界の符号化**。5.1 の `WindowCodec` は [`DisplayText`] / [`display_text`]
 //!   を**再利用する**（写しを作らない。モジュール docs「表示文字列の写しは本層が 1 つだけ持つ」）
 //! - 誤り型。順序と絞り込みの導出は失敗しない（`GridError` を返す経路を持たない）
@@ -328,9 +449,11 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use document_format::{CellValue, Document, NestedValue, Row, RowId, SheetId};
+use schema_engine::compile::plan::ColumnValidator;
 use schema_engine::types::decimal;
+use schema_engine::{CompiledSchema, TypeKind, ValuePath};
 
-use crate::types::{ColumnIndex, RowOrdinal, RowSpan};
+use crate::types::{ColumnIndex, NestedPath, RowOrdinal, RowSpan};
 
 /// 並べ替えの基準列 1 本: 列の添字と、降順かどうか。
 ///
@@ -491,6 +614,350 @@ impl ViolationPresence {
         self.rows
             .get(&row)
             .is_some_and(|columns| columns.contains(&column))
+    }
+}
+
+/// 列を展開する段数の上限（要件 5.4。design.md「表示状態」の正典）。
+///
+/// **内側へ降りる段数**の上限であり、`1` は「内側のフィールドまで」、`i` は「そのまた内側
+/// まで `i` 段」を意味する。上限を設ける理由は、宣言が入れ子をいくら深く持っていても
+/// **列の構成が発散しない**ことを保証するためである（タスク 2.3 の明示的な検査）。上限より
+/// 深い位置は列として現れず、その位置に [`Expandability::Capped`] を立てて詳細表示へ委ねる。
+///
+/// 値そのものは design.md が与えた判断であり（`pub const MAX_EXPANSION_DEPTH: u8 = 3;`）、
+/// 本クレートはこの値を変えない。`u8` であるため、段数の型（[`ExpansionState::depth`]）も
+/// `u8` である。
+pub const MAX_EXPANSION_DEPTH: u8 = 3;
+
+/// 入れ子の列 1 本の展開の状態: どの列を、展開しているか、何段まで降りるか。
+///
+/// design.md の Service Interface が固定する 3 つの欄そのものである。**列ごとに 1 つ**持ち、
+/// [`ViewState::expansion`] がその集合を並びで持つ（同じ列の指定が複数あれば**後ろが勝つ**。
+/// モジュール docs「決定性」）。
+///
+/// [`ExpansionState::column`] は**最上位の列**の添字である（内側のフィールドは展開の対象に
+/// 指定できない。展開の指定は列に対して行われ、内側へは段数で降りる）。
+///
+/// [`ExpansionState::depth`] は**内側へ降りる段数**であり、折りたたみ（
+/// [`ExpansionState::expanded`] が `false`）のときは読まない。展開のときの `0` は
+/// **1 段**として扱う（[`ExpansionState::expanded_to`] と [`derive_layout`] の双方が正規化
+/// する。展開を指定した以上、少なくとも内側の 1 段は見せる — 展開するかどうかを決めるのは
+/// `expanded` であり、`depth` はその深さだけを決める）。上限 [`MAX_EXPANSION_DEPTH`] を
+/// 超える段数も同じ正規化で頭打ちになる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExpansionState {
+    /// 展開の対象となる**最上位の列**の添字（0 起点。`Row::values()` に対する位置）。
+    pub column: ColumnIndex,
+    /// この列を展開しているか（`false` は折りたたみ。そのとき `depth` は読まない）。
+    pub expanded: bool,
+    /// 内側へ降りる段数（折りたたみのときは読まない。展開のときの `0` は 1 段として扱う）。
+    pub depth: u8,
+}
+
+impl ExpansionState {
+    /// 列 `column` を段数 `depth` まで展開する指定を作る。
+    ///
+    /// `depth` は [`MAX_EXPANSION_DEPTH`] で頭打ちにし、`0` は **1 段**として扱う
+    /// （型の docs の規則。導出も同じ正規化を行うため、この正規化を通らない経路 — 欄を
+    /// 直接書いた [`ViewState::expansion`] — でも結果は同じである）。
+    #[inline]
+    #[must_use]
+    pub fn expanded_to(column: ColumnIndex, depth: u8) -> Self {
+        Self {
+            column,
+            expanded: true,
+            depth: normalize_depth(depth),
+        }
+    }
+
+    /// 列 `column` を折りたたむ指定を作る（`depth` は読まれないため 0 を置く）。
+    ///
+    /// **折りたたみの指定は「指定が無い」とは違う** — 折りたたみは明示の状態であり、
+    /// [`ViewState::expansion`] に残る（要件 5.3。順序の再計算で失われない）。
+    #[inline]
+    #[must_use]
+    pub fn collapsed(column: ColumnIndex) -> Self {
+        Self {
+            column,
+            expanded: false,
+            depth: 0,
+        }
+    }
+
+    /// 実際に降りる段数（`0` を 1 段へ、[`MAX_EXPANSION_DEPTH`] を超える値を上限へ正規化する）。
+    ///
+    /// 折りたたみのときは 0 を返す（降りない）。
+    #[inline]
+    #[must_use]
+    pub fn effective_depth(&self) -> u8 {
+        match self.expanded {
+            true => normalize_depth(self.depth),
+            false => 0,
+        }
+    }
+}
+
+/// 段数を「1..=[`MAX_EXPANSION_DEPTH`]」へ正規化する（展開のときの規則）。
+///
+/// `0` は 1 段（展開を指定した以上、少なくとも内側の 1 段は見せる）、上限を超える値は上限。
+/// **この 1 箇所が正規化の唯一の源**であり、[`ExpansionState::expanded_to`] と
+/// [`derive_layout`] の双方がここを通る。
+#[inline]
+const fn normalize_depth(depth: u8) -> u8 {
+    match depth {
+        0 => 1,
+        // `u8` の比較であり、`MAX_EXPANSION_DEPTH` は 3 である（変換は起きない）。
+        other if other > MAX_EXPANSION_DEPTH => MAX_EXPANSION_DEPTH,
+        other => other,
+    }
+}
+
+/// 構成の 1 列を展開できるか（要件 5.4 の印）。
+///
+/// 3 変種の理由は、利用者に見せることが 3 通りあるためである:
+///
+/// | 変種 | 何を意味するか | 8.5 の振る舞い |
+/// |---|---|---|
+/// | [`Expandability::Available`] | 内側を持ち、上限にも達していない | 展開・折りたたみを出す |
+/// | [`Expandability::Capped`] | 内側を持つが、段数の上限に達した | **詳細の表示へ誘導する** |
+/// | [`Expandability::Leaf`] | 内側を持たない（入れ子でない型・使用不能な列・配列・空のオブジェクト） | 展開を出さない |
+///
+/// 「上限に達した」と「利用者が指定した段数で止まった」を**区別する**ことが要点である —
+/// 前者はそれ以上降りられないが、後者は段数を増やせば降りられる。区別を潰すと、展開の
+/// 指定が上限の手前で止まっている列にも「詳細表示へ」が出てしまう。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Expandability {
+    /// 内側を持ち、段数の上限に達していない（展開できる）。
+    Available,
+    /// 内側を持つが、段数の上限に達している（詳細の表示へ委ねる。要件 5.4）。
+    Capped,
+    /// 内側を持たない（展開の対象ではない）。
+    Leaf,
+}
+
+/// 同一の型の並び（配列）の要素数の能力: 要素の型と、宣言された要素数の上下限。
+///
+/// 要件 5.6 の「同一の型の並びを持つ列について、その要素数を提示する」がこれである。
+/// **列に宣言された要素数**であり、行ごとに観測した要素数ではない（モジュール docs
+/// 「同一の型の並びの要素数（要件 5.6 の読み方）」）。行の実際の要素数は窓の符号化（5.1）が
+/// [`DisplayText`] の要約として運ぶ。
+///
+/// `min` / `max` は宣言をそのまま写す（`None` は**開いた端点**であり、宣言が無いことと
+/// 上下限が 0 であることは違う）。上下限が一致する宣言は [`ElementCount::exact`] が
+/// 要素数を 1 つに定める。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ElementCount {
+    /// 要素の型の札（配列の `items` の種別。8.5 が内側の詳細を出すときに使う）。
+    pub items: TypeKind,
+    /// 要素数の下限（`minItems`）。未宣言は `None`（開いた下限）。
+    pub min: Option<usize>,
+    /// 要素数の上限（`maxItems`）。未宣言は `None`（開いた上限）。
+    pub max: Option<usize>,
+}
+
+impl ElementCount {
+    /// 上下限が一致するときの要素数（`3..=3` なら `Some(3)`）。定まらなければ `None`。
+    ///
+    /// 片側だけの宣言（`1..=8`、`minItems` のみ）は 1 つに定まらないため `None` である。
+    /// 上下限が 0 の並び（`0..=0`）は空の並びであり、`Some(0)` を返す（`None` と混ざらない）。
+    #[inline]
+    #[must_use]
+    pub const fn exact(&self) -> Option<usize> {
+        match (self.min, self.max) {
+            (Some(min), Some(max)) if min == max => Some(min),
+            _ => None,
+        }
+    }
+}
+
+/// 構成の 1 列: 窓が運ぶ列そのものであり、どの値が載るかを指す。
+///
+/// 構成は入れ子の木ではなく**平坦な並び**である（モジュール docs「構成の要素」）。
+/// [`LayoutColumn::column`] が最上位の列、[`LayoutColumn::path`] がその内側の位置であり、
+/// 両者が「この列はどのセルのどの部分か」を一意に決める。折りたたんだ列は位置が空であり、
+/// 展開された列は位置が 1 段以上である。
+///
+/// 表示名（[`LayoutColumn::name`]）は位置に沿ったフィールド名を `.` で連結したものである
+/// （区切りの規則と理由はモジュール docs「構成の要素」）。**列の同一性は
+/// （[`LayoutColumn::column`], [`LayoutColumn::path`]）の対であり、名前ではない** — 表示名は
+/// 人が読むためのものであり、送る先を決めるのは位置である。名前が重複しうるのは、フィールド名
+/// 自身が区切りを含む宣言（`a` の内側の `b` と、`"a.b"` という名前のフィールド）を書いた場合
+/// だけであり、そのときも位置は別を指す（表示名の規則は区切りを 1 つに定めるだけで、名前の
+/// 中身を解釈しない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutColumn {
+    /// 最上位の列の添字（0 起点。内側の位置も同じ最上位の列を指す）。
+    pub column: ColumnIndex,
+    /// 内側の位置（空 = セル直下）。`types` 層の [`NestedPath`] を再利用する。
+    pub path: NestedPath,
+    /// 表示名（位置に沿ったフィールド名を `.` で連結したもの。空の位置では列名そのもの）。
+    pub name: String,
+    /// 葉の型の札（8.5・7.4 が入力手段を選ぶのに使う）。使用不能な列は `None`。
+    pub kind: Option<TypeKind>,
+    /// 同一の型の並びの要素数の能力（要件 5.6）。配列でなければ `None`。
+    pub element_count: Option<ElementCount>,
+    /// 展開の可否と、上限に達したことの印（要件 5.4）。
+    pub expandability: Expandability,
+}
+
+impl LayoutColumn {
+    /// この列を展開できるか（内側を持ち、段数の上限に達していない）。
+    #[inline]
+    #[must_use]
+    pub const fn is_expandable(&self) -> bool {
+        matches!(self.expandability, Expandability::Available)
+    }
+
+    /// この列が**詳細の表示へ委ねられている**か（要件 5.4 の印）。
+    ///
+    /// 8.5 はこの印を見て「詳細の表示へ誘導する」を出す。上限に達していない入れ子
+    /// （[`Expandability::Available`]）は段数を増やせば降りられるため、ここでは真にならない。
+    #[inline]
+    #[must_use]
+    pub const fn requires_detail(&self) -> bool {
+        matches!(self.expandability, Expandability::Capped)
+    }
+}
+
+/// 展開の状態から導いた**列の構成**: 窓が運ぶ列の並び（要件 5.1, 5.2, 5.4, 5.6）。
+///
+/// 要素は**左から右への表示順**であり、入れ子の木ではない。列の数（[`ColumnLayout::len`]）が
+/// **窓が運ぶ列の数**そのものである（design.md「表示状態」の「展開。窓が運ぶ列の数を決める」）。
+///
+/// 本型は [`derive_layout`] が作る値であり、状態を持たない（同じ入力からは常に同じ値が出る）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ColumnLayout {
+    /// 構成の列（左から右への表示順）。列ごとにちょうど 1 件（折りたたみ・空のオブジェクト・
+    /// 配列・使用不能な列は 1 件、展開したオブジェクトは内側のフィールドの数だけ並ぶ）。
+    columns: Vec<LayoutColumn>,
+}
+
+impl ColumnLayout {
+    /// 構成の列（左から右への表示順）。
+    #[inline]
+    pub fn columns(&self) -> &[LayoutColumn] {
+        &self.columns
+    }
+
+    /// 窓が運ぶ列の数。
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.columns.len()
+    }
+
+    /// 列が 1 つも無いか（列を 1 本も宣言していないシート。要件 1.6）。
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+
+    /// `index` 番目の列（構成の中での位置）。外なら `None`。
+    ///
+    /// **最上位の列の添字ではない** — 構成の中の位置である（折りたたみでは両者が一致するが、
+    /// 展開した列の後ろではずれる）。最上位の列で引きたい呼び出し側は [`ColumnLayout::columns`]
+    /// を [`LayoutColumn::column`] で走査する。
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<&LayoutColumn> {
+        self.columns.get(index)
+    }
+}
+
+/// 表示の指定と、入れ子の展開の状態（design.md「表示状態」の Rust 側）。
+///
+/// 2 つの欄が design.md の正典そのものである:
+///
+/// - [`ViewState::spec`] — 並べ替えと絞り込み。**可視の行集合**を決める（2.1・2.2）
+/// - [`ViewState::expansion`] — 展開。**窓が運ぶ列の数**を決める（本モジュール）
+///
+/// どちらも窓の内容を変えるため、フロントエンドの `DisplayState`（列幅と表示上の列順）と
+/// 違って本クレート側にある（design.md「表示状態」の割り方の根拠）。**本型から `Document` へ
+/// 到達する経路は存在しない**（要件 8.5。列の構成は行の値に依らない）。
+///
+/// # 順序の再計算と展開の所有（要件 5.3）
+///
+/// [`RowOrder`] は順序だけを持ち、展開は本型が持つ。[`ViewState::recompute_order`] は
+/// **`&self`** を取るため、この経路が展開の状態を変更し得ないことが型の上に現れている
+/// （モジュール docs「展開の状態は順序の再計算で失われない」）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ViewState {
+    /// 並べ替えと絞り込み（可視の行集合を決める）。
+    pub spec: ViewSpec,
+    /// 展開の状態（**列ごとに 1 つ**。同じ列の指定が複数あれば後ろが勝つ）。
+    ///
+    /// 並びは [`ViewState::set_expansion`] が列の昇順へ正規化するが、[`derive_layout`] は
+    /// 並びに依らない（決定性の規則はモジュール docs「決定性」）。
+    pub expansion: Vec<ExpansionState>,
+}
+
+impl ViewState {
+    /// 展開の指定が 1 つも無い状態（すべての列が折りたたまれた状態）。
+    #[inline]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 列 `column` の展開の指定を置く。
+    ///
+    /// **同じ列の既存の指定を置き換える**（同じ列の指定が 2 つ並ぶと、どちらが効くかが
+    /// 導出側の走査順に依ることになる。ここで 1 本に畳んでおく）。並びは列の添字の昇順に
+    /// 保つため、[`ViewState::expansion`] の比較が指定の順に依らない。
+    pub fn set_expansion(&mut self, state: ExpansionState) {
+        match self
+            .expansion
+            .binary_search_by_key(&state.column, |entry| entry.column)
+        {
+            Ok(found) => self.expansion[found] = state,
+            Err(at) => self.expansion.insert(at, state),
+        }
+    }
+
+    /// 列 `column` の展開の指定を取り除く（指定が無い = 折りたたみとして扱われる）。
+    ///
+    /// 折りたたみを指定したい場合は [`ExpansionState::collapsed`] を置く（状態として残り、
+    /// 順序の再計算でも失われない。要件 5.3）。
+    pub fn clear_expansion(&mut self, column: ColumnIndex) {
+        if let Ok(found) = self
+            .expansion
+            .binary_search_by_key(&column, |entry| entry.column)
+        {
+            self.expansion.remove(found);
+        }
+    }
+
+    /// 列 `column` の展開の指定（無ければ `None` = 折りたたみとして扱われる）。
+    #[inline]
+    pub fn expansion_of(&self, column: ColumnIndex) -> Option<&ExpansionState> {
+        self.expansion
+            .binary_search_by_key(&column, |entry| entry.column)
+            .ok()
+            .map(|found| &self.expansion[found])
+    }
+
+    /// 保持している展開の状態から列の構成を導出する（[`derive_layout`] の薄い入口）。
+    ///
+    /// **`&self` である** — 導出は状態を変えない（何度呼んでも同じ結果になる）。
+    #[inline]
+    #[must_use]
+    pub fn layout(&self, schema: &CompiledSchema) -> ColumnLayout {
+        derive_layout(schema, &self.expansion)
+    }
+
+    /// 順序を再計算する（[`RowOrder::recompute`] を [`ViewState::spec`] で呼ぶ）。
+    ///
+    /// **`&self` を取る**（`&mut self` ではない）ため、この経路は展開の状態
+    /// （[`ViewState::expansion`]）を変更し得ない — 要件 5.3 の「展開の状態を列ごとに保持し、
+    /// 順序の再計算で失われないようにする」が型の上に現れている形である。呼び出し側は
+    /// 展開状態への共有借用を持ったまま再計算できる。
+    ///
+    /// `spec` を渡し直す形にしないのは、[`ViewState`] が既に持っているためである
+    /// （別の指定で並べ替えたい呼び出し側は [`ViewState::spec`] を書き換えてから呼ぶ）。
+    pub fn recompute_order(
+        &self,
+        order: &mut RowOrder,
+        doc: &Document,
+        sheet: SheetId,
+    ) -> ViewSummary {
+        order.recompute(doc, sheet, &self.spec)
     }
 }
 
@@ -754,6 +1221,191 @@ impl RowOrder {
     #[inline]
     pub fn hidden(&self) -> usize {
         self.hidden
+    }
+}
+
+/// 展開の状態から列の構成を導出する（要件 5.1, 5.2, 5.4, 5.6）。
+///
+/// **（コンパイル済みスキーマ, 展開の状態）の純関数**である。行の値も `Document` も読まず、
+/// `HashMap` も使わない（展開の指定を列の添字で引く表は [`BTreeMap`] であり、反復の順が値から
+/// 決まる）。したがって同じ入力からは常に同じ構成が出る（モジュール docs「決定性」）。
+///
+/// # 規則
+///
+/// 列を宣言順に 1 本ずつ見て、次の規則で構成へ積む（規則の全体はモジュール docs
+/// 「入れ子の展開から列の構成を導出する」が正典である）:
+///
+/// - 折りたたんだ列（[`ExpansionState::expanded`] が `false`、または指定が無い）は
+///   **ちょうど 1 件**を積む（位置は空。要件 5.1, 5.2）
+/// - 展開した列が入れ子のオブジェクトなら、**内側のフィールドを宣言順に**積む（親の列その
+///   ものは積まない）。各フィールドは同じ規則を再帰する（残り 1 段減らす）
+/// - 同じ列に複数の指定があるときは**後ろの指定が勝つ**（1 つの列について最後に述べられた
+///   指定が効く）。指定の並びの順には依らない
+/// - 段数は上限で頭打ちにし（正規化の規則は [`ExpansionState::expanded_to`] と同じ）、
+///   上限に達した位置はそれ以上降りずに [`Expandability::Capped`] を立てる（要件 5.4）
+/// - 配列（`items` を持つ型）は展開せず、要素数を載せる（要件 5.6）。使用不能な列
+///   （[`CompiledSchema::validator`] が `None`）も展開しない（要件 11.7）
+/// - 列を 1 本も宣言していないシートは**空の構成**になる（要件 1.6 が表を描かない側で扱う）
+pub fn derive_layout(schema: &CompiledSchema, expansion: &[ExpansionState]) -> ColumnLayout {
+    // 列ごとの段数（0 = 折りたたみ）。後ろの指定が前を上書きする（上書きの規則はモジュール
+    // docs「決定性」）。`BTreeMap` なので反復の順が値から決まる。
+    let mut depths: BTreeMap<ColumnIndex, u8> = BTreeMap::new();
+    for state in expansion {
+        depths.insert(state.column, state.effective_depth());
+    }
+
+    let mut columns = Vec::with_capacity(schema.columns().len());
+    // 内側へ降りるたびに 1 段積み、戻るときに畳む（上流の違反報告が経路を組むのと同じ形。
+    // 列ごとに組み直さないため、`ValuePath` を 1 本だけ用意して使い回す）。
+    let mut path = ValuePath::root();
+    for (index, name) in schema.columns().iter().enumerate() {
+        let column = ColumnIndex::new(index);
+        let remaining = depths.get(&column).copied().unwrap_or(0);
+        push_column(
+            &mut columns,
+            column,
+            name,
+            schema.validator(column),
+            &mut path,
+            remaining,
+        );
+    }
+
+    ColumnLayout { columns }
+}
+
+/// 1 つの位置の列（またはその内側）を構成へ積む（[`derive_layout`] の再帰の下請け）。
+///
+/// `remaining` は**この位置からさらに降りられる段数**である。0 なら降りず、その位置の列を
+/// そのまま積む（折りたたみの列、上限に達した位置、内側を持たない型はすべてここへ来る）。
+/// 内側を持ち `remaining > 0` のオブジェクトだけがフィールドへ降りる（**親の列そのものは
+/// 積まない** — 展開した列は内側のフィールドに置き換わる。要件 5.1）。
+///
+/// `name` は既に組み上がった表示名である（降りるたびに `.` とフィールド名を足す。区切りの
+/// 規則と理由はモジュール docs「構成の要素」）。
+fn push_column(
+    out: &mut Vec<LayoutColumn>,
+    column: ColumnIndex,
+    name: &str,
+    validator: Option<&ColumnValidator>,
+    path: &mut ValuePath,
+    remaining: u8,
+) {
+    // 内側を持ち、まだ降りられるオブジェクト: 内側のフィールドを宣言順に並べる。
+    // **配列（`Array`）はここへ来ない** — 要素の型が同一の列を並べても表として読めないため、
+    // 配列は 1 件のままにして要素数を載せる（要件 5.6。モジュール docs）。
+    if let (Some(ColumnValidator::Object { fields }), true) = (validator, remaining > 0) {
+        if !fields.is_empty() {
+            let mut inner = String::with_capacity(name.len() + 16);
+            for field in fields.iter() {
+                // 表示名を組み立て直す（`format!` を段ごとに呼ばない。降下の深さは高々 3 段で
+                // あるが、フィールド数は列の数だけありうる）。
+                inner.clear();
+                inner.push_str(name);
+                inner.push_str(FIELD_SEPARATOR);
+                inner.push_str(field.name());
+                path.push_field(field.name());
+                push_column(
+                    out,
+                    column,
+                    &inner,
+                    Some(field.validator()),
+                    path,
+                    remaining - 1,
+                );
+                path.pop();
+            }
+            return;
+        }
+        // フィールドを持たないオブジェクトは、展開を指定されても**列が消えない**（1 件のまま
+        // 残る）。消すと列数が減り、以降の列の添字がずれる（モジュール docs）。
+    }
+
+    out.push(LayoutColumn {
+        column,
+        path: NestedPath::from(&*path),
+        name: name.to_owned(),
+        kind: kind_of(validator),
+        element_count: element_count(validator),
+        expandability: expandability(validator, path.len()),
+    });
+}
+
+/// 表示名の区切り（モジュール docs「構成の要素」が唯一の源）。
+const FIELD_SEPARATOR: &str = ".";
+
+/// その位置の型の札（使用不能な列は `None`）。
+///
+/// 8.5（詳細表示）と 7.4（入力手段の登録簿）がこの札で入力手段を選ぶ。**本クレートが判定を
+/// 持たない**のと同じく、ここは `schema-engine` の検証器の変種を種別の札へ写すだけである
+/// （新しい変種が `ColumnValidator` に足されれば、この `match` が網羅でなくなりコンパイルが
+/// 止まる — 札を写し忘れて素通りすることはない）。
+///
+/// 入れ子の内側の位置もここを通るため、**8.5 は内側のフィールドの型で入力手段を選べる**
+/// （`届け先.郵便番号` は `Text` であり、テキストの入力手段が開く）。
+fn kind_of(validator: Option<&ColumnValidator>) -> Option<TypeKind> {
+    validator.map(|validator| match validator {
+        ColumnValidator::Int { .. } => TypeKind::Int,
+        ColumnValidator::Float { .. } => TypeKind::Float,
+        ColumnValidator::Decimal { .. } => TypeKind::Decimal,
+        ColumnValidator::Text { .. } => TypeKind::Text,
+        ColumnValidator::Bool => TypeKind::Bool,
+        ColumnValidator::Date { .. } => TypeKind::Date,
+        ColumnValidator::DateTime { .. } => TypeKind::DateTime,
+        ColumnValidator::Enum { .. } => TypeKind::Enum,
+        ColumnValidator::Ref { .. } => TypeKind::Ref,
+        ColumnValidator::Attachment => TypeKind::Attachment,
+        ColumnValidator::Object { .. } => TypeKind::Object,
+        ColumnValidator::Array { .. } => TypeKind::Array,
+        ColumnValidator::Any => TypeKind::Any,
+        ColumnValidator::Custom { .. } => TypeKind::Custom,
+    })
+}
+
+/// その位置の型が同一の並び（配列）なら、要素数の能力を導出する（要件 5.6）。
+///
+/// **宣言された要素数**（`minItems` / `maxItems`）をそのまま運ぶ。行ごとに観測した要素数では
+/// ない（読み方の根拠はモジュール docs「同一の型の並びの要素数（要件 5.6 の読み方）」）。
+/// 宣言が無い配列も上下限が開いた能力を持つ（並びであることは変わらない）。
+fn element_count(validator: Option<&ColumnValidator>) -> Option<ElementCount> {
+    match validator {
+        Some(ColumnValidator::Array {
+            items,
+            min_items,
+            max_items,
+        }) => Some(ElementCount {
+            items: kind_of(Some(items))?,
+            min: *min_items,
+            max: *max_items,
+        }),
+        _ => None,
+    }
+}
+
+/// その位置の展開の可否（要件 5.4 の印）。
+///
+/// 規則は位置の段数（`depth`。空の位置は 0）だけで決まる:
+///
+/// - 内側を持つオブジェクト（フィールドが 1 つ以上ある）で `depth` が上限未満なら
+///   [`Expandability::Available`] — 利用者が段数を増やせば降りられる
+/// - 同じ条件で `depth` が上限に達していれば [`Expandability::Capped`] — **詳細の表示へ
+///   委ねる印**である（それ以上降りられない）
+/// - 内側を持たない型（入れ子でない型・配列・使用不能な列・フィールドを持たないオブジェクト）
+///   は [`Expandability::Leaf`]
+///
+/// **利用者が指定した段数はここに入らない**ことに注意 — 浅い段数で止まっている位置は
+/// 「降りられる」のであり、印は付かない（段数を増やせば降りられる位置に「詳細表示へ」を
+/// 出すと、利用者を不要な画面へ誘導する）。
+fn expandability(validator: Option<&ColumnValidator>, depth: usize) -> Expandability {
+    match validator {
+        Some(ColumnValidator::Object { fields }) if !fields.is_empty() => {
+            if depth >= usize::from(MAX_EXPANSION_DEPTH) {
+                Expandability::Capped
+            } else {
+                Expandability::Available
+            }
+        }
+        _ => Expandability::Leaf,
     }
 }
 

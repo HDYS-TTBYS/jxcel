@@ -60,7 +60,14 @@
 //! 2.4 と 5.2 である。`view` のモジュール docs「違反ありの絞り込みは据え付けられた情報だけを
 //! 見る」）。
 //!
-//! 残りの層（`view` の入れ子の展開と違反の索引は群 2 の 2.3・2.4、`edit` は群 3、
+//! タスク 2.3 が [`view`] 層へ入れ子の展開を足した（[`ViewState`] / [`ExpansionState`]、
+//! [`MAX_EXPANSION_DEPTH`]、そこから導かれる平坦な列の構成 [`ColumnLayout`]）。展開は
+//! **窓が運ぶ列の数を変える**ためフロントエンドではなく本クレート側にあり、段数の上限が
+//! 構成の発散を止める（上限に達した位置は [`Expandability::Capped`] で詳細表示へ委ねる。
+//! 要件 5.1, 5.2, 5.3, 5.4, 5.6）。順序の再計算は [`ViewState::recompute_order`] が `&self`
+//! で行うため、展開の状態を失う経路が型の上に無い。
+//!
+//! 残りの層（`view` の違反の索引は群 2 の 2.4、`edit` は群 3、
 //! `history` は群 4、`transport` / `api` は群 5）は設計の File Structure Plan に挙げられた
 //! 順に後続のタスクが足す。**実体の無いモジュールを先に宣言しない**（錆びた宣言は、層の鎖が
 //! 実際に守られているかを検査できなくする）。
@@ -80,3 +87,9 @@ pub use types::{RowOrdinal, RowSpan, SearchDirection};
 // 据え付け、そして表示文字列の写し（5.1 が写しを作らずに使う唯一の源）。
 pub use view::ViolationPresence;
 pub use view::{display_text, DisplayText, FilterSpec, RowOrder, SortKey, ViewSpec, ViewSummary};
+// `view` 層の入れ子の展開: 列ごとの展開の状態、段数の上限、そこから導かれる平坦な列の構成、
+// 要素数の能力、詳細表示へ委ねる印。
+pub use view::{
+    derive_layout, ColumnLayout, ElementCount, Expandability, ExpansionState, LayoutColumn,
+    ViewState, MAX_EXPANSION_DEPTH,
+};
