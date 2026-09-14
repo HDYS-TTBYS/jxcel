@@ -1,5 +1,5 @@
-//! 編集命令の定義と適用: [`EditApply`]（data-grid のタスク 3.1, 3.2。要件 3.3, 3.4, 3.5, 3.7,
-//! 6.1, 6.2, 6.3, 6.4, 11.4）。
+//! 編集命令の定義と適用: [`EditApply`]（data-grid のタスク 3.1, 3.2, 3.3。要件 3.3, 3.4, 3.5,
+//! 3.7, 5.5, 5.7, 6.1, 6.2, 6.3, 6.4, 11.4）。
 //!
 //! # 層の鎖
 //!
@@ -244,11 +244,94 @@
 //!
 //! # 群 3 の残りのタスクへの拡張
 //!
-//! [`EditCommand`] は `SetCells`（3.1）と行の構造を変える 3 つ（3.2）を持つ。3.3
-//! （`SetNested`）と 3.4（`PasteRange`）は**変種を足す**ことで進み、本モジュールの構造
+//! [`EditCommand`] は `SetCells`（3.1）と行の構造を変える 3 つ（3.2）を持ち、3.3 が
+//! `SetNested` を足した。3.4（`PasteRange`）は**変種を足す**ことで進み、本モジュールの構造
 //! （事前検査 → 判定 → 1 回の書き込み → 再検証 → 写し）を作り直さない。行を増減する命令は
 //! `row_count` が変わり、`affected` に増減した行が加わる。`SetNested` は打たれた文字が
 //! JSON になるが、判定を呼ぶ形は変わらない（design.md「EditApply」の Implementation Notes）。
+//!
+//! # 入れ子の値の編集（要件 5.5, 5.7）
+//!
+//! [`EditCommand::SetNested`] は、入れ子のセルを**構造を保った表現**として受け取り、
+//! 構造を保ったまま書き戻す。表現の形も、表現とセル値の相互変換も**上流が持っている**:
+//! `document-format` の [`to_json_bytes`](document_format::to_json_bytes) /
+//! [`from_json_bytes`] がセル値の JSON 表現の唯一の源であり
+//! （同クレートの行データの符号化もこの 2 つを通る）、**本層は解析器を 1 つも持たない**。
+//! 本層がやるのは `from_json_bytes` に渡すことと、返った [`CellValue`] を判定へ渡すことだけ
+//! である。とくに、キー順を保つ
+//! [`NestedValue::Object`](document_format::NestedValue::Object) の並び、
+//! `Text` / `Decimal` / 添付の
+//! 判別（同クレートの規則 1・2 の脱出口）は**すべて上流の 1 箇所**が決めるため、本層が
+//! 表現を組み立て直す経路は存在しない。
+//!
+//! ## 解釈できない入力は処理を止める（要件 5.5 の「構造表現として解釈できない入力」）
+//!
+//! `from_json_bytes` が失敗した入力（JSON として不正・`i64` の範囲外の整数リテラル・
+//! 非有限になる数値リテラルなど）は [`GridError::NestedDecode`] として返す。これは
+//! **値の不適合とは別の型**である（`error` 層「宣言の誤りと値の不適合を混ぜない」）:
+//! 解釈できない入力はセル値として存在しません、つまり「入力が壊れている」であり、編集経路が
+//! 決して拒否しない「値が型に適合しない」とは性格が違う。したがって**縫い目を 1 回も呼ばず、
+//! 1 つのセルも書かない**（判定を呼べる値が無い）。
+//!
+//! ## 解釈できた値が入れ子でない場合の取り決め
+//!
+//! `from_json_bytes` は**任意の** JSON 値を [`CellValue`] へ戻す（`CellValue::Nested` は
+//! オブジェクトと配列の腕にすぎない）。したがって `"42"` や `"null"` も解釈は成功する。
+//! 本層の取り決めは「**解釈できた値はそのまま通常の書き込み経路へ渡す**」である — 入れ子で
+//! なければならないと本層が判定しない。理由は 2 つある。第 1 に、受理の判定は `schema-engine`
+//! の規則表だけが行う（本層が「入れ子の列だから入れ子でなければならない」という分岐を書けば、
+//! 列の型を見ることになり規則の二重化になる）。第 2 に、値は破棄されない規律（要件 3.5）が
+//! そのまま効く — 入れ子の列へ `Int(42)` を書けば**型の不一致として報告され、値は
+//! ドキュメントに残る**（`Int(42)` を選ぶか `Nested` を要求するかを決めるのは
+//! `schema-engine` の宣言の側である）。同じ入力が `int` の列では適合する。この取り決めは
+//! `tests/edit_nested.rs` の `json_that_is_not_nested_is_decided_by_the_type_system` が固定する。
+//!
+//! ## 入れ子の内側の違反の位置はどこで観測できるか（要件 4.5、編集経路は 5.5 / 5.7）
+//!
+//! 要件 4.5 は「入れ子のどの位置が違反しているかを特定できる形で提示する」ことを求める
+//! （提示そのものは 8.5 が担う）。編集経路の 5.5 / 5.7 は、その位置が**失われない**ことを
+//! 本層に求める。
+//! **位置は本層の [`EditOutcome`] には載らない** — design.md「EditApply」の Service Interface
+//! が定めるのは `violation_total`（総数）と `coercions` だけであり、本層が再検証の報告から
+//! 読むのも総数だけである（モジュール docs「違反の総数の源」）。3.1 も同じ形であり、
+//! 入れ子だけを特別扱いしない。
+//!
+//! 位置を運ぶのは `schema-engine` の [`Violation::path`](schema_engine::Violation) である。
+//! 本層は判定へ渡す値を平坦化しない（[`CellValue::Nested`] の木をそのまま渡す）ため、
+//! 判定と再検証の違反は**内側の位置を保ったまま**生成される。その位置は本クレートの
+//! `types` 層の [`NestedPath`](crate::types::NestedPath) が写し（`From<&ValuePath>` が唯一の入口）、
+//! 2.4 の違反の索引がそれを載せる。
+//!
+//! したがって観測の経路は 2 つある。**表示の側は 2.4 の索引**（`CellViolations::paths`）であり、
+//! `tests/violation_index.rs` が入れ子の位置を固定している。**適用の側は、編集した列に
+//! 限定した [`SheetReport`]**（`violations()[..].path()`）であり、`tests/edit_nested.rs` の
+//! `a_violation_inside_an_array_reports_the_element_position` と
+//! `a_violation_inside_an_object_reports_the_field_position` が、編集で生じた違反の位置を
+//! [`NestedPath`](crate::types::NestedPath) の段（配列の添字とフィールド名）として突き合わせる。5.2 の `GridSession` は
+//! 判定が返した違反から索引を更新するため（design.md の Invariants）、適用の直後から画面まで
+//! 位置が落ちる箇所は無い。
+//!
+//! ## 1 セルの編集であること（要件 11.4）
+//!
+//! 入れ子の編集は**入れ子の列の 1 セルを書く命令**であり、3.1 の `SetCells` とまったく同じ
+//! 呼び出しの形をとる（判定 1 回・編集した列に限定した再検証 1 回・全件検証 0 回）。入れ子の
+//! 木が大きいことは費用の形を変えない — 判定も再検証も**1 つのセル値**として木を扱い、
+//! 木の内側を本層が歩く経路は 1 つも無い（歩くのは `schema-engine` の検証器である）。
+//! `tests/edit_nested.rs` の `a_nested_edit_is_a_single_cell_edit_for_the_call_shape` が
+//! 記録の全体を 1 つの表明で固定する。
+//!
+//! ## 4.1 の逆命令が要る「変更前の JSON」
+//!
+//! design.md「編集命令と逆命令の対応」は `SetNested` の逆命令を `SetNested`（変更前の JSON）と
+//! する。**本層は履歴を積まない**（`UndoStack` は 4.1）ため、変更前の JSON を本層は返さない。
+//! ただし 4.1 が要るものは**適用の前に既存の口から取り出せる**: セルの値は
+//! `&Document` から読め（`Sheet::rows()[..].values()`）、JSON 表現への変換は
+//! [`to_json_bytes`](document_format::to_json_bytes) が公開面にある。したがって 4.1 は
+//! 適用の前に対象セルの値（とその表現）を読んでおけばよく、**本層の seam も `EditOutcome` の
+//! 形も変えずに済む**（3.1 の `SetCells` が「変更前の表示文字列」を同じ形で取り出せるのと
+//! 同じ規律である）。往復が値と表現の双方で可逆であることは
+//! `editing_one_inner_field_leaves_every_other_field_and_the_rest_of_the_document_unchanged`
+//! が固定する。
 //!
 //! # 履歴（4.x）が逆命令を組み立てるのに要るもの
 //!
@@ -269,7 +352,8 @@
 use std::collections::{HashMap, HashSet};
 
 use document_format::{
-    CellValue, CellWriteError, Document, RowId, RowInsertionError, RowRemovalError, Sheet, SheetId,
+    from_json_bytes, CellValue, CellWriteError, Document, RowId, RowInsertionError, RowRemovalError,
+    Sheet, SheetId,
 };
 use schema_engine::{
     validate_columns, validate_sheet, validate_write, Coercion, ColumnIndex, CompiledSchema,
@@ -280,17 +364,20 @@ use crate::error::GridError;
 use crate::types::{CellAddress, RowOrdinal, RowSpan};
 use crate::view::display_text;
 
-/// 編集命令（design.md「EditApply」の Service Interface。要件 3.3, 6.1, 6.2, 6.3）。
+/// 編集命令（design.md「EditApply」の Service Interface。要件 3.3, 5.5, 6.1, 6.2, 6.3）。
 ///
-/// 本タスクが持つのは `SetCells`（3.1）と、行の構造を変える 3 つ（3.2）である。
-/// `SetNested`（3.3）と `PasteRange`（3.4）は後続のタスクが**変種として足す** — 既存の
-/// 変種の形（セルの位置と打たれた文字の対、行の識別子の並び、挿入位置と件数）を変えないため、
-/// 適用の経路（事前検査 → 判定 → 書き込み → 再検証）も作り直しにならない。
+/// 本タスクが持つのは `SetCells`（3.1）と、行の構造を変える 3 つ（3.2）、入れ子の値を
+/// 構造表現で書く `SetNested`（3.3）である。`PasteRange`（3.4）は後続のタスクが**変種として
+/// 足す** — 既存の変種の形（セルの位置と打たれた文字の対、セルの位置と構造表現の対、行の
+/// 識別子の並び、挿入位置と件数）を変えないため、適用の経路（事前検査 → 判定 → 書き込み →
+/// 再検証）も作り直しにならない。
 ///
 /// `SetCells` の値は**打たれた文字**として運ぶ。数値・真偽・日付として解釈するのは
 /// `schema-engine` であり、本層もフロントエンドも値を型として扱わない（design.md 同節の
-/// Implementation Notes）。**行の構造を変える 3 つは値を運ばない** — 挿入する行の値は宣言が
-/// 供給し、複製する行の値はドキュメントから写す（モジュール docs「行の構造を変える命令」）。
+/// Implementation Notes）。`SetNested` だけは文字列が**セル値の構造表現（JSON）**になる —
+/// それでも判定を呼ぶ形は変わらない（モジュール docs「入れ子の値の編集」）。**行の構造を
+/// 変える 3 つは値を運ばない** — 挿入する行の値は宣言が供給し、複製する行の値は
+/// ドキュメントから写す（モジュール docs「行の構造を変える命令」）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditCommand {
     /// 指定したセルへ打たれた文字を書く。
@@ -302,6 +389,26 @@ pub enum EditCommand {
         /// 書くセルと、そこへ打たれた文字。
         cells: Vec<(CellAddress, String)>,
     },
+    /// 入れ子のセルへ、**構造を保った表現**（`document-format` の JSON 表現）を書く
+    /// （要件 5.5, 5.7）。
+    ///
+    /// `json` の解釈は上流の `document_format::from_json_bytes` に委ねる
+    /// （本層は解析器を持たない）。解釈できない入力は
+    /// [`GridError::NestedDecode`] として返り、**縫い目も呼ばず、1 つのセルも書かない**
+    /// （モジュール docs「解釈できない入力は処理を止める」）。解釈できた値は**そのまま
+    /// 判定へ渡す** — 入れ子であること自体は本層が要求しない（同「解釈できた値が入れ子で
+    /// ない場合の取り決め」）。
+    ///
+    /// 入れ子の値を編集する呼び出し側は、**編集の前の値を同じ表現で読んでおく**こと —
+    /// design.md「編集命令と逆命令の対応」の `SetNested` の逆命令が保持する「変更前の JSON」
+    /// であり、4.1 の履歴は適用の後には作れない（同「4.1 の逆命令が要る「変更前の JSON」」）。
+    SetNested {
+        /// 書くセル（行の識別子と列の添字）。`SetCells` と同じく**物理のセル**である。
+        cell: CellAddress,
+        /// そのセルへ書く値の**構造表現**。
+        json: String,
+    },
+
     /// 指定した**文書の位置**へ、値を持たない行を `count` 行足し、**宣言の既定値**を書く
     /// （要件 6.1）。
     ///
@@ -516,7 +623,8 @@ impl EditApply {
     ///
     /// 失敗するのは**宣言・宛先が壊れている**場合だけである
     /// （[`GridError::SchemaUnusable`] / [`GridError::UnknownRow`] /
-    /// [`GridError::ColumnOutOfRange`] / [`GridError::SpanOutOfRange`]）。値が型に適合しない
+    /// [`GridError::ColumnOutOfRange`] / [`GridError::SpanOutOfRange`] /
+    /// [`GridError::NestedDecode`]）。値が型に適合しない
     /// ことは失敗ではない — 値はドキュメントに残り、違反として報告される（要件 3.5）。
     ///
     /// 失敗したときは**1 つのセルも書かず、1 行も増減しない**（事前検査を書き込みの前に
@@ -530,6 +638,7 @@ impl EditApply {
     ) -> Result<EditOutcome, GridError> {
         match command {
             EditCommand::SetCells { cells } => self.set_cells(doc, cells),
+            EditCommand::SetNested { cell, json } => self.set_nested(doc, cell, json),
             EditCommand::InsertRows { at, count } => self.insert_rows(doc, at, count),
             EditCommand::RemoveRows { rows } => self.remove_rows(doc, rows),
             EditCommand::DuplicateRows { rows } => self.duplicate_rows(doc, rows),
@@ -785,7 +894,7 @@ impl EditApply {
                     None => {
                         seen.insert(address.row(), rows.len());
                         affected.push(address.row());
-                        rows.push(RowEdit::new(
+                        rows.push(RowEdit::from_text(
                             address.row(),
                             sheet.rows()[position].values().to_vec(),
                             column,
@@ -799,6 +908,75 @@ impl EditApply {
         // 判定（型システム）。編集の対象になった行ごとに、その行の値を（当該の列を打たれた
         // 文字へ置き換えて）渡し、返った値と変換の記録をそのまま写す。列の型を見て受理を
         // 決める分岐はここに無い。
+        self.write_judged_rows(doc, affected, rows)
+    }
+
+    /// `SetNested` の適用（[`EditApply::apply`] の本体。要件 5.5, 5.7）。
+    ///
+    /// 入れ子のセルを**構造を保った表現**として受け取り、構造を保ったまま書き戻す。表現の
+    /// 解釈は上流の [`from_json_bytes`] が唯一の源であり、**本層は解析器を持たない**
+    /// （モジュール docs「入れ子の値の編集」）。
+    ///
+    /// 検査の順は `SetCells` と同じ 2 段である — セッションの前提
+    /// （[`EditApply::usable_columns`]）は命令の中身に依らないため先に検査し、そのあと
+    /// **表現の解釈 → 宛先（列の範囲と行の存在）**の順に検査する。表現の解釈を先に置くのは、
+    /// それが**ドキュメントを 1 度も読まない**操作だからである — 壊れた入力はシートの走査を
+    /// 起こさずに止まる（順序はどちらでも「部分適用が無く縫い目を呼ばない」を満たすため、
+    /// **本層の決定**としてここに書き、`tests/edit_nested.rs` が固定する）。**どの誤りでも
+    /// 縫い目を 1 回も呼ばず、1 つのセルも書かない。**
+    ///
+    /// 解釈できた値が入れ子であるかは本層が判定しない — そのまま 1 セルの書き込みとして
+    /// 判定へ渡す（同「解釈できた値が入れ子でない場合の取り決め」）。したがって判定を呼ぶ形は
+    /// 1 セルの編集そのものである（要件 11.4）。
+    fn set_nested(
+        &mut self,
+        doc: &mut Document,
+        cell: CellAddress,
+        json: String,
+    ) -> Result<EditOutcome, GridError> {
+        let columns = self.usable_columns(doc)?;
+        // 解釈できない入力は**値の不適合ではなく入力の破損**である。`CellValue` が 1 つも
+        // 得られないため判定を呼ぶ値が無く、処理を止める（`error` 層の 2 分法。
+        // モジュール docs「解釈できない入力は処理を止める」）。
+        let value = from_json_bytes(json.as_bytes()).map_err(|_| GridError::NestedDecode { cell })?;
+
+        // 事前検査（読み）。`SetCells` と同じく**書き込みの前に**宛先を検査するため、1 つでも
+        // 不正なら判定も呼ばず、1 つのセルも書かない。
+        let column = cell.column();
+        if column.index() >= columns {
+            return Err(GridError::ColumnOutOfRange {
+                column,
+                count: columns,
+            });
+        }
+        let values = {
+            let sheet = self.target_sheet(doc)?;
+            let Some(row) = sheet.rows().iter().find(|found| found.id() == cell.row()) else {
+                return Err(GridError::UnknownRow { row: cell.row() });
+            };
+            row.values().to_vec()
+        };
+
+        self.write_judged_rows(
+            doc,
+            vec![cell.row()],
+            vec![RowEdit::from_value(cell.row(), values, column, value)],
+        )
+    }
+
+    /// 判定へかける編集の一覧を受け取り、**判定 → 1 回の書き込み → 編集した列に限定した
+    /// 再検証**を行って結果を組み立てる（`SetCells` と `SetNested` が共有する後半）。
+    ///
+    /// 判定の呼び出しは**編集の対象になった行ごとに 1 回**であり、渡すのはその行の 1 行分の
+    /// 値である（上流の `validate_write` の契約）。返った値と変換の記録はそのまま写し、
+    /// 列の型を見て受理を決める分岐はここに無い。違反が内側の位置を持つ場合もそのまま
+    /// 報告へ載る（本層は値を平坦化しない。モジュール docs「入れ子の内側の違反の位置」）。
+    fn write_judged_rows(
+        &mut self,
+        doc: &mut Document,
+        affected: Vec<RowId>,
+        rows: Vec<RowEdit>,
+    ) -> Result<EditOutcome, GridError> {
         let mut writes: Vec<(RowId, usize, CellValue)> = Vec::new();
         let mut coercions: Vec<CoercionNotice> = Vec::new();
         for row in rows {
@@ -850,7 +1028,7 @@ impl EditApply {
             affected,
             coercions,
             violation_total: report.total_violations(),
-            // `SetCells` は行を増減しないため、適用の前後で同じ数になる。適用の後の行数を
+            // セルを書く命令は行を増減しないため、適用の前後で同じ数になる。適用の後の行数を
             // 改めて読む（行数を変える命令（3.2）がこの経路をそのまま使えるようにする）。
             row_count: self.target_sheet(doc)?.rows().len(),
         })
@@ -899,25 +1077,39 @@ fn edited_value(text: &str) -> CellValue {
 /// 上流の判定は 1 行分の値を受け取るため、編集を**行ごとにまとめてから**判定する。行ごとに
 /// まとめると、同じ行の複数のセルを編集しても判定は 1 回で済み、かつ**同じセルが 2 度現れた
 /// 命令**を後ろのものを残す 1 つの編集へ畳める（モジュール docs「同じセルを 2 度書く命令」）。
+///
+/// 編集は**セル値**として載せる。`SetCells` は打たれた文字を [`edited_value`] で値へ写して
+/// から載せ、`SetNested` は上流の解釈が返した値をそのまま載せる — この 2 経路の違いは
+/// **値を作るところだけ**であり、判定を呼ぶ形も書き込みの形も変わらない。
 struct RowEdit {
     /// 対象の行。
     row: RowId,
     /// 行の**適用前**の値（列の添字で並ぶ）。
     values: Vec<CellValue>,
-    /// 書くセル（列の添字）と、そこへ打たれた文字（命令に現れた順）。
-    edits: Vec<(ColumnIndex, String)>,
+    /// 書くセル（列の添字）と、そこへ書く値（命令に現れた順）。
+    edits: Vec<(ColumnIndex, CellValue)>,
 }
 
 impl RowEdit {
-    /// 行の値を読み取り、1 つ目の編集を載せて作る。
-    fn new(row: RowId, mut values: Vec<CellValue>, column: ColumnIndex, text: String) -> Self {
+    /// 打たれた文字の編集を 1 つ載せて作る（`SetCells`）。
+    fn from_text(row: RowId, values: Vec<CellValue>, column: ColumnIndex, text: String) -> Self {
+        Self::from_value(row, values, column, edited_value(&text))
+    }
+
+    /// 判定へ渡すセル値の編集を 1 つ載せて作る（`SetNested` が解釈した値は既にセル値である）。
+    fn from_value(
+        row: RowId,
+        mut values: Vec<CellValue>,
+        column: ColumnIndex,
+        value: CellValue,
+    ) -> Self {
         // 行が値を持たない列への書き込みは、値なしを挟んで位置を合わせる（`validate_write` は
         // 値の添字を列の添字として読む。値なしの列は上流でも値なしとして扱われる）。
         values.resize(values.len().max(column.index() + 1), CellValue::Null);
         Self {
             row,
             values,
-            edits: vec![(column, text)],
+            edits: vec![(column, value)],
         }
     }
 
@@ -926,6 +1118,11 @@ impl RowEdit {
     /// 同じセルが既に載っている場合は**後ろのものを残す**（上流の一括経路の last-wins と
     /// 同じ規則。モジュール docs「同じセルを 2 度書く命令」）。
     fn edit(&mut self, column: ColumnIndex, text: String) {
+        self.put(column, edited_value(&text));
+    }
+
+    /// 指定した列の値を編集として載せる（同じ列が既にあれば置き換える）。
+    fn put(&mut self, column: ColumnIndex, value: CellValue) {
         self.values
             .resize(self.values.len().max(column.index() + 1), CellValue::Null);
         match self
@@ -933,16 +1130,16 @@ impl RowEdit {
             .iter_mut()
             .find(|(existing, _)| *existing == column)
         {
-            Some(found) => found.1 = text,
-            None => self.edits.push((column, text)),
+            Some(found) => found.1 = value,
+            None => self.edits.push((column, value)),
         }
     }
 
-    /// 判定へ渡す 1 行分の値（打たれた文字を当該の列へ置いたもの）。
+    /// 判定へ渡す 1 行分の値（編集した列の値を置き換えたもの）。
     fn edited_values(&self) -> Vec<CellValue> {
         let mut values = self.values.clone();
-        for (column, text) in &self.edits {
-            values[column.index()] = edited_value(text);
+        for (column, value) in &self.edits {
+            values[column.index()] = value.clone();
         }
         values
     }

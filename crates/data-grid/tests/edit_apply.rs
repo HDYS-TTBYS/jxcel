@@ -1146,3 +1146,52 @@ fn the_default_path_agrees_with_an_explicit_schema_engine_query() {
     );
     assert_eq!(1, structures[0].1, "適合しない値は違反として数えられる");
 }
+
+/// 同じセルを 2 度書き、**後ろが空の文字列**のときも後ろが残る（値なしへ戻る）。
+///
+/// 3.1 の last-wins の検査（`a_repeated_cell_keeps_the_last_text_and_judges_only_that_value`）は
+/// 後ろが空でない文字列の場合だけを見ている。空の文字列は [`edited_value`] によって値なしへ
+/// 写るため、**畳む経路が 2 度目の変換を落としていない**ことは別に固定する必要がある
+/// （落としていれば、打たれた `""` が値なしにならず空文字のまま書かれる）。
+#[test]
+fn a_repeated_cell_whose_last_text_is_empty_writes_the_absence_of_a_value() {
+    let mut fixture = Fixture::clean(64, 13);
+    let sheet = fixture.sheet();
+    let row = fixture.row(0);
+    let column = 1;
+    // 前提: この列は必須であり、値なしが違反として数えられる（値なしが書かれたことの観測）。
+    assert!(
+        fixture.plan.required(ColumnIndex::new(column)),
+        "標本の列 1 は必須"
+    );
+    let (mut apply, calls) = counting(sheet, fixture.plan.clone());
+
+    let outcome = apply
+        .apply(
+            fixture.document_mut(),
+            EditCommand::SetCells {
+                cells: vec![
+                    (CellAddress::new(row, ColumnIndex::new(column)), "7".to_owned()),
+                    (CellAddress::new(row, ColumnIndex::new(column)), String::new()),
+                ],
+            },
+        )
+        .expect("空の文字列で終わる命令も成功する");
+
+    assert_eq!(
+        CellValue::Null,
+        fixture.value_at(row, column),
+        "後ろの空の文字列が値なしとして書かれる"
+    );
+    assert_eq!(1, outcome.violation_total, "必須の列の値なしは違反");
+    assert_eq!(vec![row], outcome.affected, "行は 1 回だけ報告される");
+    // 判定へ渡る値も**実際に書かれる値**（値なし）である。
+    assert_eq!(
+        vec![
+            QueryCall::JudgeWrite(fixture.row_with(row, column, CellValue::Null)),
+            QueryCall::RevalidateColumns(vec![ColumnIndex::new(column)]),
+        ],
+        recorded(&calls),
+        "判定は 1 回、実際に書かれる値（値なし）に対して行われる"
+    );
+}
