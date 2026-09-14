@@ -1,5 +1,5 @@
-//! 編集命令の定義と適用: [`EditApply`]（data-grid のタスク 3.1。要件 3.3, 3.4, 3.5, 3.7,
-//! 11.4）。
+//! 編集命令の定義と適用: [`EditApply`]（data-grid のタスク 3.1, 3.2。要件 3.3, 3.4, 3.5, 3.7,
+//! 6.1, 6.2, 6.3, 6.4, 11.4）。
 //!
 //! # 層の鎖
 //!
@@ -94,6 +94,115 @@
 //! **実際に書かれる値**そのものである — 重複を畳んでから判定するため、「判定した値」と
 //! 「書いた値」が食い違う経路は無い。
 //!
+//! # 行の構造を変える命令（要件 6.1, 6.2, 6.3, 6.4）
+//!
+//! [`EditCommand::InsertRows`] / [`EditCommand::RemoveRows`] /
+//! [`EditCommand::DuplicateRows`] は行の集合を変える。**値の判定を要さない**という点で
+//! `SetCells` と性格が異なる（下の「行の構造を変える命令の再検証」）。
+//!
+//! ## 挿入位置は**文書の位置**であり、可視の序数ではない（要件 8.6 の帰結）
+//!
+//! `at` は [`RowOrdinal`] として運ぶが、**本層はそれを文書の行順に対する位置として読む**
+//! （上流の [`Document::insert_row_at`] が同じ空間の添字を取る）。可視の序数ではない。
+//!
+//! 理由は 3 つある。第 1 に、挿入される行はまだ存在しないため**行の識別子で指せない** —
+//! 編集の宛先（要件 8.6）を識別子で表す規律が、この命令だけは適用できない。第 2 に、
+//! 可視の序数が指すのは**導出された表示の並び**であり、それを与える `RowOrder` は
+//! `view` 層が `&Document` から導く（要件 8.5。順序の導出はドキュメントを変更しない）。
+//! 本層は適用の間 `&mut Document` を握るため、序数を解く手段を持たない — 持てば表示の
+//! 都合（並べ替え・絞り込み）がドキュメントへ書き込む位置を決めることになり、
+//! design.md「表示状態（ドキュメントに保存されない）」に反する。第 3 に、文書の位置は
+//! **まさにこれから変えようとしている構造そのもの**の座標であり、同じ命令を 2 度適用しても
+//! 同じ場所を指す（可視の序数は並べ替えの再計算で動く）。
+//!
+//! したがって**画面の位置に挿入したい呼び出し側が写す** — `RowOrder::row_at` で可視の
+//! 序数から行そのものを得て、その行の文書の位置を渡す。この分担は 3.4 の貼り付けの
+//! 錨（[`CellAddress`] が行の識別子を運ぶ）と同じ規律である: 表示の座標を物理の座標へ
+//! 写すのは表示を持っている側の仕事であり、本層は物理の座標しか受け取らない
+//! （`tests/edit_rows.rs` の
+//! `an_insert_position_is_a_document_position_and_the_caller_translates_the_visible_ordinal`
+//! が、2 つの空間が食い違う並べ替えの下で両方の渡し方を固定する）。
+//!
+//! ## 既定値の適用（要件 6.1）
+//!
+//! 上流の [`Document::insert_row_at`] は**値を持たない行**を作る（モデルは列の型を知らない）。
+//! 既定値の源は宣言ただ 1 つ（[`CompiledSchema::default_row`]）であり、本層は
+//! **それをそのまま書く** — 値を発明する分岐を持たず、既定値が値なしである列（宣言が既定値を
+//! 持たない列）には値なしが入る。書くのは [`Document::set_row_values`] の 1 回であり、
+//! 列ごとの書き込みに分けない（行 1 行分の値の置換は上流の 1 口である）。
+//!
+//! ## 複製は末尾へ足し、値をそのまま写す（要件 6.3）
+//!
+//! 複製は**末尾**（その時点の行数の位置）へ足す。元の行の**すぐ後ろではない** — 元の行の
+//! 後ろへ差し込むと、複製した行が「選択された行と同じ値を持つ行」であることに加えて
+//! 既存の行の位置まで動かし、`affected` が指す行の意味（増えた行そのもの）が曖昧になる。
+//! 末尾へ足せば、**元の行は 1 つも動かない**。
+//!
+//! 値は**元の行の値の並びをそのまま写す**（[`Document::set_row_values`] に行の値の写しを渡す）。
+//! 列数に満たない行も列数まで埋めない — 値を持たない列は上流でも値なしとして扱われ、
+//! 埋めれば元の行と複製の値の並びが食い違い、保存（行データの符号化）の門で列数の不一致と
+//! して現れる（`tests/edit_rows.rs` の `duplicating_a_short_row_copies_exactly_the_values_it_has`）。
+//! 判定を通さないのも同じ理由である（通せば変換で値が変わりうる。要件 6.3 は「同じ値を持つ
+//! 行」を求める）。**適合しない値もそのまま複製される** — 本層は違反を持つ行を特別扱いしない。
+//!
+//! 同じ行が要求に 2 度現れる場合は 1 回へ畳み、要求の並びではなく**シート順**に複製する
+//! （上流の [`Document::remove_rows`] が取り除いた行をシート順で返すのと同じ規律:
+//! 同じ行集合の要求は、引数の並びに依らず常に同じ結果になる）。
+//!
+//! ## 削除は 1 回の操作である（要件 6.2）
+//!
+//! 選択されたすべての行は [`Document::remove_rows`] の**1 回の呼び出し**で取り除く
+//! （行ごとに呼ぶと、1 行ごとに並びの作り直しが走り、10 万行の範囲削除が要件 11 の予算を
+//! 割る）。上流は事前検査を 1 パスで行い、**1 つでも不正なら 1 行も取り除かない**ため、
+//! 「妥当な行を先に取り除いてから失敗する」経路が存在しない。`affected` は取り除かれた行を
+//! **シート順**に持つ（要求の並びに依らない）。
+//!
+//! # 行の構造を変える命令の再検証（要件 11.4 との関係）
+//!
+//! 行の構造を変える命令は、**すべての列を指定した再検証を 1 回だけ**呼び、
+//! [`EditSchemaQuery::judge_write`] と [`EditSchemaQuery::validate_sheet`] は**呼ばない**。
+//!
+//! **判定を呼ばない理由**は、この経路へ届く値が**打たれた文字ではない**ことである。
+//! 挿入する行の値は宣言が供給し（[`CompiledSchema::default_row`]、適合はコンパイル時に
+//! 検査済み）、複製する行の値はドキュメントに既にある値である。判定（`validate_write`）は
+//! 打たれた文字を型へ変換する門であり、通せば値が変わりうる — 複製に通せば「同じ値を持つ行」
+//! （要件 6.3）が崩れる。
+//!
+//! **列を絞らない理由**は、行の集合が変わると**すべての列**の違反が変わりうるためである。
+//! 挿入した行はあらゆる列で値なし／既定値になり、削除した行を参照していた他の行の違反が
+//! 消える。とくに一意性と参照の実在は**行を跨ぐ**性質であり、複製で生まれ、削除で解消する
+//! （`CompiledSchema::unique_columns` を列の型ごとの走査からは導けない）。絞れば静かに
+//! 過少報告になる列が生まれる。
+//!
+//! 要件 11.4 が禁じるのは**1 セルの編集についての全件検証**である（`validate_sheet` は
+//! 10 万行 × 30 列で 255 ミリ秒（上流の実測）が編集のたびに掛かり、要件 11.3 の 100 ミリ秒に
+//! 入らない）。行の構造を変える命令は**その 1 セルの編集ではない** — 1 回の命令で行の集合が
+//! 変わり、応答の予算は操作単位（要件 11.5 の貼り付けが 1 万行で 3 秒であるのと同じ扱い）で
+//! ある。したがって**全列を明示して 1 回**呼ぶ（`validate_sheet` を呼ぶのではない: 全列の
+//! 指定は「どの列を見たか」を呼び出しの形に残す。数える側はこれを見る）。
+//!
+//! # 誤りの経路と部分適用の不在
+//!
+//! 行の操作の誤りは 3 つであり、いずれも**事前検査**（変更の前）が判別する:
+//!
+//! | 誤り | 返る変種 |
+//! |---|---|
+//! | 要求された行が対象シートに属さない | [`GridError::UnknownRow`] |
+//! | 挿入位置が行数を超える | [`GridError::SpanOutOfRange`]（`span` は要求された位置と件数、`visible` は適用前の行数） |
+//! | 計画が列を持たない・対象シートと食い違う | [`GridError::SchemaUnusable`] |
+//!
+//! どちらの経路でも**1 行も増減せず、縫い目も 1 回も呼ばれない**（再検証は構造を変えた後に
+//! しか呼ばれない）。`at == 行数` は末尾への追加として妥当であり、`at > 行数` だけを拒む
+//! （上流の [`Document::insert_row_at`] と同じ境界）。
+//!
+//! # 空の命令
+//!
+//! 行 0 件の削除・複製と件数 0 の追加は**成功し、何も変えず、縫い目を 1 回も呼ばない**
+//! （3.1 の「空の `SetCells` は何も変えない」と同じ規則。状態を変えない命令を履歴に積むと、
+//! 取り消しが何も戻さない操作になる）。件数 0 の追加は**位置を見ない**（何も挿入しないため、
+//! 位置の妥当性も問わない）。ただし**セッションの前提は空の命令でも検査する**（列 0 本の
+//! シートでは空の命令も [`GridError::SchemaUnusable`] になる）— 前提は命令の中身に依らない。
+//!
 //! # 変換の記録は表示文字列で運ぶ（要件 3.4）
 //!
 //! [`CoercionNotice`] の `before` / `after` は [`String`] である。境界（6.1）は
@@ -135,35 +244,53 @@
 //!
 //! # 群 3 の残りのタスクへの拡張
 //!
-//! [`EditCommand`] は `SetCells` だけを持つ。3.2（`InsertRows` / `RemoveRows` /
-//! `DuplicateRows`）、3.3（`SetNested`）、3.4（`PasteRange`）は**変種を足す**ことで進み、
-//! 本モジュールの構造（事前検査 → 判定 → 1 回の書き込み → 列を限定した再検証 → 写し）を
-//! 作り直さない。行を増減する命令は `row_count` が変わり、`affected` に増減した行が加わる。
-//! `SetNested` は打たれた文字が JSON になるが、判定を呼ぶ形は変わらない
-//! （design.md「EditApply」の Implementation Notes）。
+//! [`EditCommand`] は `SetCells`（3.1）と行の構造を変える 3 つ（3.2）を持つ。3.3
+//! （`SetNested`）と 3.4（`PasteRange`）は**変種を足す**ことで進み、本モジュールの構造
+//! （事前検査 → 判定 → 1 回の書き込み → 再検証 → 写し）を作り直さない。行を増減する命令は
+//! `row_count` が変わり、`affected` に増減した行が加わる。`SetNested` は打たれた文字が
+//! JSON になるが、判定を呼ぶ形は変わらない（design.md「EditApply」の Implementation Notes）。
+//!
+//! # 履歴（4.x）が逆命令を組み立てるのに要るもの
+//!
+//! design.md「編集命令と逆命令の対応」は `InsertRows` / `DuplicateRows` の逆命令を
+//! `RemoveRows`（追加された `RowId` を保持する）とし、`RemoveRows` の逆命令を「復元用の
+//! 内部命令」（取り除いた `Row` の値・`RowId`・位置を保持する）とする。
+//!
+//! 本層は履歴を積まないが、**その材料を `EditOutcome` から取り出せる形にしてある**:
+//! 追加された行の識別子は `affected` そのものであり、取り除かれた行の識別子も `affected` で
+//! ある。取り除かれた**値**は本層に残らない（[`Row`](document_format::Row) は `Clone` を
+//! 持たず、[`Document::remove_rows`] が返した行は本層の外へ出せない）ため、4.1 は
+//! **適用の前に**対象の行の値を読んでおく（その読み口は `&Document` から既にある）か、
+//! 本層へ返させるときに `affected` を広げる（3.1 の seam の形は変えない）。
+//!
+//! 位置まで要るのは `RemoveRows` の逆命令だけであり、位置は**適用前の文書の位置**である
+//! （適用後には行が消えているため、後からは導けない）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use document_format::{CellValue, CellWriteError, Document, RowId, Sheet, SheetId};
+use document_format::{
+    CellValue, CellWriteError, Document, RowId, RowInsertionError, RowRemovalError, Sheet, SheetId,
+};
 use schema_engine::{
     validate_columns, validate_sheet, validate_write, Coercion, ColumnIndex, CompiledSchema,
     EditVerdict, SheetReport, ValidationOptions, WriteOrigin, WriteVerdict,
 };
 
 use crate::error::GridError;
-use crate::types::CellAddress;
+use crate::types::{CellAddress, RowOrdinal, RowSpan};
 use crate::view::display_text;
 
-/// 編集命令（design.md「EditApply」の Service Interface。要件 3.3）。
+/// 編集命令（design.md「EditApply」の Service Interface。要件 3.3, 6.1, 6.2, 6.3）。
 ///
-/// **本タスクが持つのは `SetCells` だけである。** `SetNested`（3.3）、`InsertRows` /
-/// `RemoveRows` / `DuplicateRows`（3.2）、`PasteRange`（3.4）は後続のタスクが**変種として
-/// 足す** — 既存の変種の形（セルの位置と打たれた文字の対）を変えないため、適用の経路
-/// （事前検査 → 判定 → 書き込み → 再検証）も作り直しにならない。
+/// 本タスクが持つのは `SetCells`（3.1）と、行の構造を変える 3 つ（3.2）である。
+/// `SetNested`（3.3）と `PasteRange`（3.4）は後続のタスクが**変種として足す** — 既存の
+/// 変種の形（セルの位置と打たれた文字の対、行の識別子の並び、挿入位置と件数）を変えないため、
+/// 適用の経路（事前検査 → 判定 → 書き込み → 再検証）も作り直しにならない。
 ///
-/// 値は**打たれた文字**として運ぶ。数値・真偽・日付として解釈するのは `schema-engine`
-/// であり、本層もフロントエンドも値を型として扱わない（design.md 同節の Implementation
-/// Notes）。
+/// `SetCells` の値は**打たれた文字**として運ぶ。数値・真偽・日付として解釈するのは
+/// `schema-engine` であり、本層もフロントエンドも値を型として扱わない（design.md 同節の
+/// Implementation Notes）。**行の構造を変える 3 つは値を運ばない** — 挿入する行の値は宣言が
+/// 供給し、複製する行の値はドキュメントから写す（モジュール docs「行の構造を変える命令」）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditCommand {
     /// 指定したセルへ打たれた文字を書く。
@@ -175,9 +302,42 @@ pub enum EditCommand {
         /// 書くセルと、そこへ打たれた文字。
         cells: Vec<(CellAddress, String)>,
     },
+    /// 指定した**文書の位置**へ、値を持たない行を `count` 行足し、**宣言の既定値**を書く
+    /// （要件 6.1）。
+    ///
+    /// `at` は**可視の序数ではなく、文書の行順に対する位置**である（`at == 行数` は末尾への
+    /// 追加。モジュール docs「挿入位置は文書の位置であり、可視の序数ではない」）。画面の位置に
+    /// 挿入したい呼び出し側は `RowOrder` で行そのものへ写してからその行の文書の位置を渡す。
+    /// 追加された行の値は [`CompiledSchema::default_row`] そのものであり、**値を運ばない**
+    /// （打たれた文字ではないため判定を通さない）。
+    InsertRows {
+        /// 挿入する**文書の位置**（適用前の行順に対する添字。行数までの値が妥当）。
+        at: RowOrdinal,
+        /// 挿入する行数。`0` は何も変えない。
+        count: usize,
+    },
+    /// 選択された複数の行を**1 回の操作**として取り除く（要件 6.2）。
+    ///
+    /// 同じ行が 2 度現れる要求は 1 回へ畳む。`affected` は取り除かれた行を**シート順**に持つ
+    /// （要求の並びに依らない）。対象シートに属さない行が 1 つでもあれば
+    /// [`GridError::UnknownRow`] を返し、**1 行も取り除かない**。
+    RemoveRows {
+        /// 取り除く行。空なら何も変えない。
+        rows: Vec<RowId>,
+    },
+    /// 選択された行と**同じ値を持つ行**を末尾へ足す（要件 6.3, 6.4）。
+    ///
+    /// 値は元の行の値の並びをそのまま写す（列数に満たない行も埋めない。モジュール docs
+    /// 「複製は末尾へ足し、値をそのまま写す」）。同じ行が 2 度現れる要求は 1 回へ畳む。
+    /// 一意制約に重複が生じても**中止しない** — 行は増え、重複は再検証の報告に現れる
+    /// （要件 6.4）。
+    DuplicateRows {
+        /// 複製する元の行。空なら何も変えない。
+        rows: Vec<RowId>,
+    },
 }
 
-/// 編集を適用した結果（design.md「EditApply」の Service Interface。要件 3.4）。
+/// 編集を適用した結果（design.md「EditApply」の Service Interface。要件 3.4, 6.2）。
 ///
 /// **判定が返したものを写しただけ**であり、本層が足す解釈は無い。`affected` と `row_count` は
 /// 画面側が窓の記憶を捨てる（要件 1.7）ためと、行数の変化を提示する（要件 6.2）ための要約で
@@ -186,13 +346,22 @@ pub enum EditCommand {
 pub struct EditOutcome {
     /// 影響を受けた行の識別子（重複を畳み、命令に現れた順）。
     ///
-    /// `SetCells` では**編集したセルの行**である（行の増減は無い）。design.md の
+    /// `SetCells` では**編集したセルの行**である（行の増減は無い）。行の構造を変える命令では
+    /// **増減した行そのもの**である（`InsertRows` は挿入された行を文書の順に、`RemoveRows` は
+    /// 取り除かれた行をシート順に、`DuplicateRows` は複製をシート順に）。design.md の
     /// Postconditions は `apply` がこれを必ず含むことを求める。
+    ///
+    /// design.md「編集命令と逆命令の対応」が `InsertRows` / `DuplicateRows` の逆命令
+    /// （`RemoveRows`）へ渡す「追加された `RowId`」はこの欄である。
     pub affected: Vec<RowId>,
     /// 型強制によって値が変換されたセル（要件 3.4）。変換が起きなければ空である。
+    ///
+    /// 行の構造を変える命令では**つねに空**である — この経路へ届く値は打たれた文字ではなく、
+    /// 判定を通さないため変換も起きない（モジュール docs「行の構造を変える命令の再検証」）。
     pub coercions: Vec<CoercionNotice>,
     /// 違反の総数（本タスクでは**再検証した列に閉じた総数**。モジュール docs
-    /// 「違反の総数の源」）。
+    /// 「違反の総数の源」）。行の構造を変える命令は**すべての列**を再検証するため、適用後の
+    /// シートの違反の総数と一致する（同「行の構造を変える命令の再検証」）。
     pub violation_total: usize,
     /// 適用の**後**のシートの行数。`SetCells` は行を増減しないため、適用の前後で変わらない
     /// （行を増減する命令（3.2）がこの欄に変化を載せる）。
@@ -343,15 +512,17 @@ impl EditApply {
     }
 
     /// 編集命令を適用し、判定が返した値・変換・違反をそのまま写した結果を返す
-    /// （design.md「EditApply」の Service Interface。要件 3.3, 3.4, 3.5）。
+    /// （design.md「EditApply」の Service Interface。要件 3.3, 3.4, 3.5, 6.1, 6.2, 6.3, 6.4）。
     ///
     /// 失敗するのは**宣言・宛先が壊れている**場合だけである
     /// （[`GridError::SchemaUnusable`] / [`GridError::UnknownRow`] /
-    /// [`GridError::ColumnOutOfRange`]）。値が型に適合しないことは失敗ではない — 値は
-    /// ドキュメントに残り、違反として報告される（要件 3.5）。
+    /// [`GridError::ColumnOutOfRange`] / [`GridError::SpanOutOfRange`]）。値が型に適合しない
+    /// ことは失敗ではない — 値はドキュメントに残り、違反として報告される（要件 3.5）。
     ///
-    /// 失敗したときは**1 つのセルも書かない**（事前検査を書き込みの前に済ませる。モジュール
-    /// docs「ドキュメントへの書き込みは 1 回であり、部分適用が無い」）。
+    /// 失敗したときは**1 つのセルも書かず、1 行も増減しない**（事前検査を書き込みの前に
+    /// 済ませる。モジュール docs「ドキュメントへの書き込みは 1 回であり、部分適用が無い」
+    /// 「行の構造を変える命令」）。**縫い目も 1 回も呼ばれない** — 再検証は構造を変えた後に
+    /// しか呼ばれない。
     pub fn apply(
         &mut self,
         doc: &mut Document,
@@ -359,7 +530,206 @@ impl EditApply {
     ) -> Result<EditOutcome, GridError> {
         match command {
             EditCommand::SetCells { cells } => self.set_cells(doc, cells),
+            EditCommand::InsertRows { at, count } => self.insert_rows(doc, at, count),
+            EditCommand::RemoveRows { rows } => self.remove_rows(doc, rows),
+            EditCommand::DuplicateRows { rows } => self.duplicate_rows(doc, rows),
         }
+    }
+
+    /// セッションの前提を検査し、**この適用で使える列数**を返す（命令の中身に依らない）。
+    ///
+    /// 空の命令もこの検査を通る（前提は命令の中身に依らない。モジュール docs「空の命令」）。
+    ///
+    /// # セッションの前提
+    ///
+    /// 1. 計画が列を 1 本も持たない場合、書き込む宛先が存在しない。要件 1.6 は列 0 本の
+    ///    シートを正当とする（表を描かない）ため、これは「編集できないスキーマ」であって
+    ///    壊れた宣言ではない。
+    /// 2. 計画の列数と対象シートの列数が食い違う場合、列の添字がドキュメントの列名と
+    ///    対応しない（design.md の事前条件「`schema` は同じ `sheet` から `compile` した
+    ///    ものであること」が破れている）。
+    fn usable_columns(&self, doc: &Document) -> Result<usize, GridError> {
+        let columns = self.schema.column_count();
+        if columns == 0 {
+            return Err(GridError::SchemaUnusable { sheet: self.sheet });
+        }
+        self.target_sheet(doc)?;
+        Ok(columns)
+    }
+
+    /// 何も変えなかった適用の結果（空の命令）。
+    ///
+    /// `affected` は空、`coercions` は空、`violation_total` は 0、`row_count` は**適用後の**
+    /// 行数（変わっていない）。**縫い目を 1 回も呼ばない** — 状態を変えない命令の違反の総数は
+    /// 変わりようがなく、引き直せば要件 11.4 の費用を理由もなく払う
+    /// （モジュール docs「空の命令」）。
+    fn unchanged(&self, doc: &Document) -> Result<EditOutcome, GridError> {
+        Ok(EditOutcome {
+            affected: Vec::new(),
+            coercions: Vec::new(),
+            violation_total: 0,
+            row_count: self.target_sheet(doc)?.rows().len(),
+        })
+    }
+
+    /// 行の構造を変えた適用の結果: **すべての列**を 1 回だけ再検証し、増減した行と適用後の
+    /// 行数を載せる（モジュール docs「行の構造を変える命令の再検証」）。
+    ///
+    /// 変換の記録は空である（この経路へ届く値は打たれた文字ではないため判定を通らない）。
+    fn changed_rows(&self, doc: &Document, affected: Vec<RowId>) -> Result<EditOutcome, GridError> {
+        Ok(EditOutcome {
+            affected,
+            coercions: Vec::new(),
+            violation_total: self.revalidate_every_column(doc),
+            row_count: self.target_sheet(doc)?.rows().len(),
+        })
+    }
+
+    /// すべての列を指定した再検証を**1 回**呼び、その総数を返す。
+    ///
+    /// 列の集合は計画の列の添字を昇順に並べたものである（上流は列の並びを正規化するため
+    /// 結果に影響しないが、数える側が「全列を指定した」ことを読める形にする）。
+    /// [`EditSchemaQuery::validate_sheet`] を呼ばない理由はモジュール docs
+    /// 「行の構造を変える命令の再検証」にある（全列の**指定**が呼び出しの形に残る）。
+    fn revalidate_every_column(&self, doc: &Document) -> usize {
+        let columns: Vec<ColumnIndex> = (0..self.schema.column_count())
+            .map(ColumnIndex::new)
+            .collect();
+        self.query
+            .revalidate_columns(
+                doc,
+                self.sheet,
+                &self.schema,
+                &columns,
+                &ValidationOptions::capped(0),
+            )
+            .total_violations()
+    }
+
+    /// `InsertRows` の適用（[`EditApply::apply`] の本体。要件 6.1）。
+    ///
+    /// 空の命令（`count == 0`）は**位置を見ない** — 何も挿入しないため、位置の妥当性も
+    /// 問わない（モジュール docs「空の命令」）。
+    fn insert_rows(
+        &mut self,
+        doc: &mut Document,
+        at: RowOrdinal,
+        count: usize,
+    ) -> Result<EditOutcome, GridError> {
+        self.usable_columns(doc)?;
+        if count == 0 {
+            return self.unchanged(doc);
+        }
+        // 挿入位置の事前検査（`at == 行数` は末尾への追加として妥当）。
+        let rows_before = self.target_sheet(doc)?.rows().len();
+        if at.get() > rows_before {
+            return Err(GridError::SpanOutOfRange {
+                span: RowSpan::new(at, count),
+                visible: rows_before,
+            });
+        }
+
+        // 既定値の源は計画ただ 1 つ（宣言）。**行ごとに写す**（`defaults` を 1 つ作って
+        // clone するだけであり、列ごとに値を組み立て直さない）。
+        let defaults = self.schema.default_row();
+        let mut inserted: Vec<RowId> = Vec::with_capacity(count);
+        for offset in 0..count {
+            // 位置は挿入のたびに 1 つずつ後ろへずれる（`at + offset` は挿入前の行順に対する
+            // 位置であり、直前までの挿入で空けた分だけ後ろにある）。
+            let index = at.get() + offset;
+            let row = doc
+                .insert_row_at(self.sheet, index)
+                .map_err(|error| row_insertion_error(error, at, count))?;
+            // 上流の挿入は**値を持たない行**を作る（モデルは列の型を知らない）。既定値を
+            // 書くのは本層である（モジュール docs「既定値の適用」）。
+            doc.set_row_values(self.sheet, row, defaults.clone())
+                .map_err(|error| GridError::UnknownRow { row: error.row })?;
+            inserted.push(row);
+        }
+
+        self.changed_rows(doc, inserted)
+    }
+
+    /// `RemoveRows` の適用（[`EditApply::apply`] の本体。要件 6.2）。
+    fn remove_rows(
+        &mut self,
+        doc: &mut Document,
+        rows: Vec<RowId>,
+    ) -> Result<EditOutcome, GridError> {
+        self.usable_columns(doc)?;
+        if rows.is_empty() {
+            return self.unchanged(doc);
+        }
+        // **1 回の呼び出し**で取り除く（上流が 1 パスで事前検査し、1 つでも不正なら 1 行も
+        // 取り除かない。モジュール docs「削除は 1 回の操作である」）。返る行は**シート順**で
+        // あり、`affected` はその識別子である（要求の並びに依らない。取り除かれた**値**は
+        // 4.1 の逆命令が要る — モジュール docs「履歴（4.x）が逆命令を組み立てるのに要るもの」）。
+        let removed = doc
+            .remove_rows(self.sheet, &rows)
+            .map_err(row_removal_error)?;
+        let affected: Vec<RowId> = removed.iter().map(|row| row.id()).collect();
+
+        self.changed_rows(doc, affected)
+    }
+
+    /// `DuplicateRows` の適用（[`EditApply::apply`] の本体。要件 6.3, 6.4）。
+    ///
+    /// 元の行の値を**そのまま写して**末尾へ足す。判定を通さないため、一意制約に重複が生じても
+    /// 中止しない — 行は増え、重複は再検証の報告に現れる（要件 6.4）。
+    fn duplicate_rows(
+        &mut self,
+        doc: &mut Document,
+        rows: Vec<RowId>,
+    ) -> Result<EditOutcome, GridError> {
+        self.usable_columns(doc)?;
+        if rows.is_empty() {
+            return self.unchanged(doc);
+        }
+
+        // 事前検査（読み）: 要求された行を**文書の位置**へ写し、同じ行の 2 度の要求を畳んで
+        // **シート順**に並べ、複製する値を読む。**1 つでも未知なら 1 行も足さない**
+        // （モジュール docs「誤りの経路と部分適用の不在」）。
+        let sources: Vec<Vec<CellValue>> = {
+            let sheet = self.target_sheet(doc)?;
+            let positions: HashMap<RowId, usize> = sheet
+                .rows()
+                .iter()
+                .enumerate()
+                .map(|(position, row)| (row.id(), position))
+                .collect();
+            let mut wanted: Vec<usize> = Vec::with_capacity(rows.len());
+            let mut seen: HashSet<RowId> = HashSet::with_capacity(rows.len());
+            for row in rows {
+                let Some(position) = positions.get(&row).copied() else {
+                    return Err(GridError::UnknownRow { row });
+                };
+                if seen.insert(row) {
+                    wanted.push(position);
+                }
+            }
+            wanted.sort_unstable();
+            // 行の値の並びを**そのまま**写す（列数に満たない行も埋めない。モジュール docs
+            // 「複製は末尾へ足し、値をそのまま写す」）。
+            wanted
+                .into_iter()
+                .map(|position| sheet.rows()[position].values().to_vec())
+                .collect()
+        };
+
+        let mut copies: Vec<RowId> = Vec::with_capacity(sources.len());
+        // 末尾へ足す（`at == 行数`）。元の行は 1 つも動かず、`index` は足すたびに伸びる。
+        let mut index = self.target_sheet(doc)?.rows().len();
+        for values in sources {
+            let copy = doc
+                .insert_row_at(self.sheet, index)
+                .map_err(|error| row_insertion_error(error, RowOrdinal::new(index), 1))?;
+            doc.set_row_values(self.sheet, copy, values)
+                .map_err(|error| GridError::UnknownRow { row: error.row })?;
+            copies.push(copy);
+            index += 1;
+        }
+
+        self.changed_rows(doc, copies)
     }
 
     /// `SetCells` の適用（[`EditApply::apply`] の本体）。
@@ -368,28 +738,13 @@ impl EditApply {
         doc: &mut Document,
         cells: Vec<(CellAddress, String)>,
     ) -> Result<EditOutcome, GridError> {
-        // セッションの前提を先に検査する（命令の中身に依らない）。
-        //
-        // 1. 計画が列を 1 本も持たない場合、セルの宛先が存在しない。要件 1.6 は列 0 本の
-        //    シートを正当とする（表を描かない）ため、これは「編集できないスキーマ」で
-        //    あって壊れた宣言ではない。
-        // 2. 計画の列数と対象シートの列数が食い違う場合、列の添字がドキュメントの列名と
-        //    対応しない（design.md の事前条件「`schema` は同じ `sheet` から `compile` した
-        //    ものであること」が破れている）。
-        let columns = self.schema.column_count();
-        if columns == 0 {
-            return Err(GridError::SchemaUnusable { sheet: self.sheet });
-        }
+        // セッションの前提を先に検査する（命令の中身に依らない。2 つの前提の理由は
+        // `usable_columns` の docs「セッションの前提」）。
+        let columns = self.usable_columns(doc)?;
         // 空の命令は何も変えない（判定も再検証も呼ばない。モジュール docs「履歴（4.x）との
         // 境目」）。ただしセッションの前提は空の命令でも検査する（前提は命令に依らない）。
         if cells.is_empty() {
-            let row_count = self.target_sheet(doc)?.rows().len();
-            return Ok(EditOutcome {
-                affected: Vec::new(),
-                coercions: Vec::new(),
-                violation_total: 0,
-                row_count,
-            });
+            return self.unchanged(doc);
         }
 
         // 事前検査（読み）。行の位置の索引を 1 度だけ作り、列の範囲と行の存在を確かめながら、
@@ -607,5 +962,48 @@ fn write_error(error: CellWriteError) -> GridError {
             column: ColumnIndex::new(column),
             count: columns,
         },
+    }
+}
+
+/// `document-format` の行の挿入の誤りを本クレートの誤り型へ写す。
+///
+/// 行の挿入の失敗は 3 つであり、本層の経路では 1 つしか起こりえない:
+///
+/// - **挿入位置が範囲外**（[`RowInsertionError::IndexOutOfRange`]）— 本層の事前検査
+///   （`at > 行数`）が同じ判定を先に通しているため、ここへ来るのは事前検査の後に
+///   ドキュメントが変わった場合だけである。それでも写しを置くのは、上流の誤りを捨てる
+///   （握り潰す）経路を作らないためである。診断に載せる位置と件数は**呼び出し元が要求した
+///   もの**（`at` / `count`）である — 画面へ返すのは利用者が指定した位置であり、
+///   複数行の挿入では上流が見る添字（1 行ずつ後ろへずれる）と一致しない。
+/// - **識別子が既にある**（[`RowInsertionError::DuplicateRow`]）— [`Document::insert_row_at`]
+///   は識別子を発行元から受け取るため、この腕は起こりえない（上流の docs「発行直後の
+///   識別子は文書のどのシートにも無く、一意性は構築で保証される」）。
+/// - **シートが無い**（[`RowInsertionError::UnknownSheet`]）— [`EditApply::target_sheet`] が
+///   先に同じ判定を通している。
+///
+/// 起こりえない 2 つを黙って捨てないのは、上流の写像が変わったときに**静かに挿入を続ける**
+/// より、止まるほうが回復可能だからである（`SchemaEngineQuery::judge_write` の
+/// `unreachable!` と同じ規律）。
+fn row_insertion_error(error: RowInsertionError, at: RowOrdinal, count: usize) -> GridError {
+    match error {
+        RowInsertionError::IndexOutOfRange { rows, .. } => GridError::SpanOutOfRange {
+            span: RowSpan::new(at, count),
+            visible: rows,
+        },
+        RowInsertionError::UnknownSheet { sheet } => GridError::SchemaUnusable { sheet },
+        RowInsertionError::DuplicateRow { row } => {
+            unreachable!("insert_row_at は識別子を発行するため、重複した識別子は起こりえない: {row}")
+        }
+    }
+}
+
+/// `document-format` の行の削除の誤りを本クレートの誤り型へ写す。
+///
+/// 2 変種とも本層の事前検査（対象シートの存在と、要求された行の所属）が先に判別する。
+/// それでも写しを置く理由は [`write_error`] と同じである（上流の誤りを捨てる経路を作らない）。
+fn row_removal_error(error: RowRemovalError) -> GridError {
+    match error {
+        RowRemovalError::UnknownSheet { sheet } => GridError::SchemaUnusable { sheet },
+        RowRemovalError::UnknownRow { row } => GridError::UnknownRow { row },
     }
 }
