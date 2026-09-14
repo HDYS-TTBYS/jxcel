@@ -67,10 +67,19 @@
 //! 要件 5.1, 5.2, 5.3, 5.4, 5.6）。順序の再計算は [`ViewState::recompute_order`] が `&self`
 //! で行うため、展開の状態を失う経路が型の上に無い。
 //!
-//! 残りの層（`view` の違反の索引は群 2 の 2.4、`edit` は群 3、
-//! `history` は群 4、`transport` / `api` は群 5）は設計の File Structure Plan に挙げられた
-//! 順に後続のタスクが足す。**実体の無いモジュールを先に宣言しない**（錆びた宣言は、層の鎖が
-//! 実際に守られているかを検査できなくする）。
+//! タスク 2.4 が [`view`] 層へ**可視行の序数に対する違反の索引**を足した
+//! （[`ViolationIndex`]。design.md の File Structure Plan の `view/violations.rs`）。検証の
+//! 結果（`SheetReport`）と、いまの表示の順序（[`RowOrder`]）から組み立て、**シートに存在する
+//! 違反の総数**（要件 4.3）と**指定した位置から最も近い違反セル**（要件 4.4）を答える。
+//! 索引は**可視行の序数**を鍵とし、描画の窓を読まないため表示範囲の外の違反にも到達する。
+//! 入れ子の違反は**内側の位置**（[`NestedPath`]）を保ったまま載り（要件 4.5）、順序や絞り込みが
+//! 変わったときは [`ViolationIndex::rekey`] が鍵を張り直す。同層の [`ViolationPresence`] を
+//! 組み立てて [`RowOrder`] へ据え付ける経路（[`ViolationIndex::install`]）が 2.2 の
+//! 「違反あり」の絞り込みへ渡す（依存は `ViolationIndex → RowOrder` の一方向である）。
+//!
+//! 残りの層（`edit` は群 3、`history` は群 4、`transport` / `api` は群 5）は設計の
+//! File Structure Plan に挙げられた順に後続のタスクが足す。**実体の無いモジュールを先に
+//! 宣言しない**（錆びた宣言は、層の鎖が実際に守られているかを検査できなくする）。
 
 pub mod error;
 pub mod types;
@@ -93,3 +102,7 @@ pub use view::{
     derive_layout, ColumnLayout, ElementCount, Expandability, ExpansionState, LayoutColumn,
     ViewState, MAX_EXPANSION_DEPTH,
 };
+// `view` 層の違反の索引（タスク 2.4）: 可視行の序数を鍵とする索引、その総数と探索、内側の
+// 位置の保持、鍵の張り直し、2.2 への据え付け。`GridSession::violation_total` /
+// `find_violation`（タスク 5.2）がこの層を読む。
+pub use view::{CellViolations, ColumnViolations, RowViolations, ViolationIndex};
