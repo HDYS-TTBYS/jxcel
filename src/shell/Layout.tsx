@@ -138,6 +138,7 @@ import {
   TABLE_SMOKE_SCREEN_ID,
   TableSmoke,
 } from "../features/smoke/TableSmoke";
+import { GLIDE_PROBE_SCREEN_ID, GlideProbe } from "../features/smoke/glideProbe";
 import { resolveVerificationInitialScreen } from "./verificationScreen";
 import { SessionClosePrompt } from "./sessionClose";
 
@@ -232,6 +233,22 @@ export const SHELL_SCREEN_REGISTRY: ShellScreenRegistry = {
       component: EditorSmoke,
     },
   ],
+};
+
+/**
+ * 検証専用: 標本を描く**使い捨ての画面**（`src/features/smoke/glideProbe.tsx`。tasks.md 1.5、
+ * 要件 12.1）。
+ *
+ * **`SHELL_SCREEN_REGISTRY` へは直接足さない。**9.7 のスモーク画面は 10.4 の方式 A（配布物と
+ * 検証用の形が**同じ**コードで描く）のために配布物の登録簿にも要るが、こちらは逆であり、
+ * **グリッドライブラリを配布物のバンドルへ 1 バイトも入れない**ことが要件である。したがって
+ * 本定義は `Layout` の `__JXCEL_VERIFICATION__` の分岐の中だけで参照し、既定のビルド（`false`）
+ * では定数畳み込みで参照ごと消える（`scripts/check-shipping-bundle.sh` が機械検査する）。
+ */
+const GLIDE_PROBE_SCREEN_DEFINITION: ScreenDefinition = {
+  id: GLIDE_PROBE_SCREEN_ID,
+  title: "描画確認: グリッド（10 万行）",
+  component: GlideProbe,
 };
 
 /** 外観を選ぶ操作の 1 項目。 */
@@ -412,13 +429,26 @@ export function Layout(): ReactElement {
   // 検証用の形でも、指定が無ければ `null` を返すので、この解決は登録簿の内容を変えない —
   // 既定の初期画面は 9.6 の空ウィンドウの画面のままである。マウント時に 1 回だけ読む（値は
   // 文書の他のスクリプトより前に走る初期化スクリプトが載せるので、この時点で確定している）。
+  // **検証専用の画面の登録（tasks.md 1.5）もこの分岐の中だけで行う。**`SHELL_SCREEN_REGISTRY`
+  // へ直接足さないのは、足すと**グリッドライブラリが配布物のバンドルへ入る**ためである
+  // （9.7 のスモーク画面は配布物にも要るので直接足してある。`scripts/check-shipping-bundle.sh`
+  // が「`smoke-table` / `smoke-editor` は在ること」「検証専用の識別子は無いこと」の両方を検査する）。
   const registry = useMemo<ShellScreenRegistry>(() => {
+    const base: ShellScreenRegistry = __JXCEL_VERIFICATION__
+      ? {
+          ...SHELL_SCREEN_REGISTRY,
+          screens: [
+            ...SHELL_SCREEN_REGISTRY.screens,
+            GLIDE_PROBE_SCREEN_DEFINITION,
+          ],
+        }
+      : SHELL_SCREEN_REGISTRY;
     const verification = __JXCEL_VERIFICATION__
-      ? resolveVerificationInitialScreen(SHELL_SCREEN_REGISTRY)
+      ? resolveVerificationInitialScreen(base)
       : null;
     return verification === null
-      ? SHELL_SCREEN_REGISTRY
-      : { ...SHELL_SCREEN_REGISTRY, initial: verification };
+      ? base
+      : { ...base, initial: verification };
   }, []);
   const router = useShellRouter(registry);
   const appearance = useAppearance();
