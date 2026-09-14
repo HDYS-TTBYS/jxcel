@@ -40,12 +40,24 @@
 //!
 //! # 現状
 //!
-//! タスク 1.1 がクレートの足場を作った。ワークスペースの `members` に登録され、
+//! タスク 1.1 がクレートの足場を作り、タスク 1.3 が鎖の最も左の 2 層
+//! （[`error`] と [`types`]）を足した。ワークスペースの `members` に登録され、
 //! `document-format` と `schema-engine` への path 依存だけを持ち、`tauri` 非依存の検査
 //! （`scripts/check-core-deps.sh`）の対象に入り、criterion のベンチターゲット
 //! （`benches/large_grid.rs`。実ベンチは後続のタスクが実装する）を宣言している。
 //!
-//! **層はまだ 1 つも存在しない。** 各層は設計の File Structure Plan に挙げられた順に
-//! 後続のタスクが足す（`error` / `types` はタスク 1.3、`view` は群 2、`edit` は群 3、
-//! `history` は群 4、`transport` / `api` は群 5）。**実体の無いモジュールを先に宣言しない**
+//! **存在するのは `error` と `types` の 2 層だけである。**残りの層（`view` は群 2、
+//! `edit` は群 3、`history` は群 4、`transport` / `api` は群 5）は設計の File Structure Plan
+//! に挙げられた順に後続のタスクが足す。**実体の無いモジュールを先に宣言しない**
 //! （錆びた宣言は、層の鎖が実際に守られているかを検査できなくする）。
+
+pub mod error;
+pub mod types;
+
+// 公開面は根の再輸出に集める（`structure.md`「ドメインクレートの内部構造」。下流は根の
+// 名前だけを使う）。`types` 層と `error` 層の名前をここへ並べる。
+pub use error::GridError;
+// 列の添字は上流 `schema-engine` の型そのものである（定義し直さない理由は `types` の
+// モジュール doc を参照）。同じ型がここからも見えるようにする。
+pub use types::{CellAddress, CellPosition, CellRange, ColumnIndex, NestedPath, NestedPathSegment};
+pub use types::{RowOrdinal, RowSpan, SearchDirection};
