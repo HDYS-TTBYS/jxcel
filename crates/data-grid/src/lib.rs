@@ -46,18 +46,26 @@
 //! （`scripts/check-core-deps.sh`）の対象に入り、criterion のベンチターゲット
 //! （`benches/large_grid.rs`。実ベンチは後続のタスクが実装する）を宣言している。
 //!
-//! **存在するのは `error` と `types` の 2 層だけである。**残りの層（`view` は群 2、
-//! `edit` は群 3、`history` は群 4、`transport` / `api` は群 5）は設計の File Structure Plan
-//! に挙げられた順に後続のタスクが足す。**実体の無いモジュールを先に宣言しない**
-//! （錆びた宣言は、層の鎖が実際に守られているかを検査できなくする）。
+//! タスク 2.1 が [`view`] 層の入口（[`RowOrder`] と [`ViewSpec`]）を足した。並べ替えの
+//! 比較は値の変種ごとの順序で行い、同値の行は [`RowId`](document_format::RowId) の順に
+//! 並ぶ。**順序の導出は `&Document` しか受け取らない**（要件 8.5 を型の上で示す形。
+//! `view` のモジュール docs 参照）。
+//!
+//! 残りの層（`view` の絞り込みと違反の索引は群 2 の 2.2・2.3・2.4、`edit` は群 3、
+//! `history` は群 4、`transport` / `api` は群 5）は設計の File Structure Plan に挙げられた
+//! 順に後続のタスクが足す。**実体の無いモジュールを先に宣言しない**（錆びた宣言は、層の鎖が
+//! 実際に守られているかを検査できなくする）。
 
 pub mod error;
 pub mod types;
+pub mod view;
 
 // 公開面は根の再輸出に集める（`structure.md`「ドメインクレートの内部構造」。下流は根の
-// 名前だけを使う）。`types` 層と `error` 層の名前をここへ並べる。
+// 名前だけを使う）。`error` / `types` / `view` の各層の名前をここへ並べる。
 pub use error::GridError;
 // 列の添字は上流 `schema-engine` の型そのものである（定義し直さない理由は `types` の
 // モジュール doc を参照）。同じ型がここからも見えるようにする。
 pub use types::{CellAddress, CellPosition, CellRange, ColumnIndex, NestedPath, NestedPathSegment};
 pub use types::{RowOrdinal, RowSpan, SearchDirection};
+// `view` 層の状態と指定。絞り込み（`FilterSpec` と `ViewSpec::filters`）は 2.2 が足す。
+pub use view::{RowOrder, SortKey, ViewSpec, ViewSummary};
