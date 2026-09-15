@@ -147,13 +147,25 @@
 //! 含めて固定する）、取り消し・やり直しは履歴へ積まれない（積むと「取り消しの取り消し」に
 //! なる）。結果は [`EditOutcome`] であり、**影響を受けた行**を運ぶ。
 //!
-//! 残りの層（`transport` / `api` は群 5）は設計の File Structure Plan に
-//! 挙げられた順に後続のタスクが足す。**実体の無いモジュールを先に宣言しない**（錆びた宣言は、
-//! 層の鎖が実際に守られているかを検査できなくする）。
-
+//! タスク 5.1 が [`transport`] 層の**窓の二進符号化**を足した（design.md の `WindowCodec`。
+//! 要件 1.1, 1.2, 4.5, 11.2, 11.6）。窓は**行の識別子を生の 16 バイトのまま**運び、セルは
+//! **表示文字列・変種の札・違反の札**で表す — **64 ビット整数と 10 進数を数値として出さない**
+//! （design.md「Data Models / 窓の二進形式」）。入れ子のセルは**要約（要素数）だけ**を運び、
+//! 構造そのものは運ばない（内側のどの位置が違反しているかは**札**として運ぶ。要件 4.5）。
+//! 表示文字列の規則は `view` 層の [`DisplayText`] / [`display_text`] が唯一の源であり、
+//! 本層は**写しを作らない**（利用者が画面で見た文字列と、窓が運ぶ文字列が食い違わない）。
+//! 版（[`WINDOW_FORMAT_VERSION`]）と世代（[`Generation`]）を頭に持ち、同じ世代・同じ区間の
+//! 要求は常に同じバイト列になり、**世代が一致しない要求は空の窓**（[`EMPTY_WINDOW`]）になる。
+//! 符号化は [`Document`](document_format::Document) を**一切受け取らない**ため、10 万行を
+//! 走査する経路が型の上に存在しない（要件 11.2 の費用は呼び出しの形で示す）。
+//!
+//! 残りの層（`api` は群 5）は設計の File Structure Plan に挙げられた順に後続のタスクが足す。
+//! **実体の無いモジュールを先に宣言しない**（錆びた宣言は、層の鎖が実際に守られているかを
+//! 検査できなくする）。
 pub mod edit;
 pub mod error;
 pub mod history;
+pub mod transport;
 pub mod types;
 pub mod view;
 
@@ -200,3 +212,14 @@ pub use edit::{HistoryCommand, HistoryPair, RestoredRow};
 // `macro-runtime` が同じ 1 つの登録口（`UndoStack::push`）で乗り、5.2 の `GridSession` が
 // ドキュメントと一緒に保持する。
 pub use history::{UndoEntry, UndoLabel, UndoRedo, UndoStack};
+// `transport` 層の窓の二進符号化（タスク 5.1）: 可視範囲の行を境界の向こうへ運ぶ形。窓は
+// **行の識別子を生のまま**運び、セルは**表示文字列・変種の札・違反の札**で表す —
+// 64 ビット整数と 10 進数は**数値として出さない**（design.md「Data Models / 窓の二進形式」）。
+// 表示文字列の規則は `view` 層の 1 つを再利用し（写しを作らない）、入れ子のセルは
+// 要約（要素数）だけを運ぶ。6.3 の生バイト経路が `encode` を呼び、7.3 の窓の記憶が
+// `decode_window` を呼ぶ。
+pub use transport::{
+    decode_window, variant_tag, DecodedCell, DecodedRow, DecodedWindow, Generation,
+    VariantTag, WindowCodec, WindowDecodeError, WindowRequest, WindowRowSource, EMPTY_WINDOW,
+    HEADER_LEN, ROW_KEY_LEN, WINDOW_FORMAT_VERSION,
+};
