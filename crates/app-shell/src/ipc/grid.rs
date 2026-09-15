@@ -1,0 +1,549 @@
+//! グリッドの境界の型（タスク 6.1。要件 1.1、1.5、1.6、3.2）。
+//!
+//! `design.md`「GridCommands」の Risks が定める境界の型を、そのまま置く場所である。
+//! **文字列と 32 ビット以下の整数と真偽だけで構成し、他のドメインクレートの型を参照しない。**
+//! 境界の型は `crates/app-shell/src/ipc/` の下にだけ置き、`ts-rs` の derive を付けてよいのは
+//! 本モジュールを含む `crate::ipc` の内側だけである（`design.md`「IpcContract」の不変条件）。
+//! ドメインの型を境界へそのまま出せない理由は `design.md`「Data Contracts & Integration」の
+//! 表にある — `Row` は `Serialize` を持たず、`Violation` も持たず、`CellValue` は 64 ビット
+//! 整数（`Int`）と識別子を出す。したがって**写しをここに定義し、写すのは `src-tauri` の
+//! 適応層（6.2 / 6.3）の仕事とする**。
+//!
+//! とくに守る規約は 5 つある。
+//!
+//! 1. **`i64` / `u64` を境界へ出さない。** 列の添字・行数・件数・要素数は [`u32`] で運ぶ。
+//!    JavaScript の `number` は IEEE 754 の倍精度であり、32 ビット以下の整数は正確に表せるが、
+//!    64 ビット整数はそうではない（[`super::WindowLabel`] の doc を参照）。行の識別子は
+//!    文字列で運ぶ。
+//! 2. **値は打たれた文字として運ぶ。** セルの値を型付きの値として境界へ出さない。
+//!    6 つの編集命令のうち値を運ぶのは `SetCells`（打たれた文字）・`SetNested`（構造表現の
+//!    JSON）・`PasteRange`（表形式テキスト）だけで、いずれも文字列である。窓の二進形式も
+//!    「数値としての値を一切含まない」（`design.md`「窓の二進形式」）ため、境界に値の列挙は
+//!    要らない。**`document-format` の `CellValue` を写した型はここに置かない。**
+//! 3. **型の種別の札は 1 つだけである。** [`TypeKindTag`] が唯一の札であり、描画側と入力手段の
+//!    登録簿は双方ともこの生成された札を取り込む（7.1 / 7.4）。
+//! 4. **列の情報は `view` 層の `LayoutColumn` を過不足なく写す。** 内側の位置は平坦な段の並び
+//!    として運び、フィールド名と配列の位置を区別する（要件 4.5）。
+//! 5. **空の 2 つの状態を形の上で区別できるようにする。** 列が 1 本も無いこと（要件 1.6）と、
+//!    列はあるが行が無いこと（要件 1.5）は別であり、区別するのは**列の数**である
+//!    （[`GridSheetSummary`]）。
+//!
+//! **本モジュールが持たないもの**: 封筒を運ぶ 5 つのコマンドの要求と応答の型
+//! （`GridOpenRequest` / `GridOpenResponse` / `GridViewRequest` / `GridViewResponse` /
+//! `GridEditRequest` / `GridEditResponse` / `GridHistoryRequest` / `GridViolationRequest` /
+//! `GridViolationResponse`）と、生バイト経路（`grid_rows_window`）の引数の型である。
+//! 前者は 6.2 / 6.3 が組み立て、**その荷として本モジュールの型を使う**。後者は二進の窓を
+//! 要求するための型であり、封筒を運べない経路のものである（`design.md`「WindowCodec」）。
+
+use serde::{Deserialize, Serialize};
+
+/// セルの型の種別を表す札（タスク 6.1。要件 3.1、3.2、3.8、10.1〜10.4）。
+///
+/// **境界を越える唯一の型の札であり、フロントエンドはこれを取り込む。** 描画側
+/// （`design.md`「RendererPort」の `RenderCell.variant`）と入力手段の登録簿（同
+/// 「EditorRegistry」の `CellEditorRegistration.kind`）は、双方ともこの生成された札を参照し、
+/// **独自に札を定義しない** — 写しを 2 つ持つと、片方だけが増えたときに気づけない
+/// （`design.md`「EditorRegistry」の Risks）。
+///
+/// 綴りは設計の合併型（同節の `TypeKindTag`）そのままであり、**小文字へ落とさない**。
+/// `schema-engine` の `TypeKind` の変種名と 1 対 1 に対応していることが、`src-tauri`
+/// （唯一 `schema-engine` と `app-shell` の双方を見られるクレート）で対応を検査できる前提で
+/// あるため、`#[serde(rename_all = ...)]` を付けない。
+///
+/// [`TypeKindTag::ALL`] が閉じた集合の唯一の源であり、並びは `TypeKind::ALL` と同じ順である。
+/// **その一致の検査は `src-tauri` に置く** — 本クレートは他のドメインクレートに依存しては
+/// ならない（`crates/app-shell/Cargo.toml` の依存方針）ため、ここから `TypeKind` を参照して
+/// 数え合わせることはできない。6.2 / 6.3 の適応層が `TypeKindTag::ALL` と `TypeKind::ALL` を
+/// 突き合わせ、**片方だけに変種が増えたときに落ちる検査**を置く。
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ts_rs::TS,
+)]
+pub enum TypeKindTag {
+    /// 64 ビット整数。
+    Int,
+    /// 倍精度小数。
+    Float,
+    /// 10 進数。
+    Decimal,
+    /// 文字列。
+    Text,
+    /// 真偽。
+    Bool,
+    /// 日付。
+    Date,
+    /// 日時。
+    DateTime,
+    /// 列挙（選択肢を持つ型。要件 3.2）。
+    Enum,
+    /// シート間参照（要件 3.8）。
+    Ref,
+    /// 添付参照。
+    Attachment,
+    /// 名前つきフィールドの集合。
+    Object,
+    /// 同一型の並び。
+    Array,
+    /// 任意の値。
+    Any,
+    /// 拡張型（変種の範囲は実装が決める。10.6 の登録簿が扱う）。
+    Custom,
+}
+
+impl TypeKindTag {
+    /// 設計表に挙がるすべての種別。**閉じた集合の唯一の源である。**
+    ///
+    /// 並びは `schema-engine` の `TypeKind::ALL` と同じ（14 種）。すべての種別がちょうど 1 回
+    /// 現れることと、生成物の合併型が同じ 14 個を同じ綴りで並べることは
+    /// `crate::ipc` の検査（`tests::type_kind_tag_matches_the_design_union`）が固定する
+    /// （取りこぼしを実行時に検出するため）。
+    pub const ALL: [TypeKindTag; 14] = [
+        TypeKindTag::Int,
+        TypeKindTag::Float,
+        TypeKindTag::Decimal,
+        TypeKindTag::Text,
+        TypeKindTag::Bool,
+        TypeKindTag::Date,
+        TypeKindTag::DateTime,
+        TypeKindTag::Enum,
+        TypeKindTag::Ref,
+        TypeKindTag::Attachment,
+        TypeKindTag::Object,
+        TypeKindTag::Array,
+        TypeKindTag::Any,
+        TypeKindTag::Custom,
+    ];
+}
+
+/// 入れ子の内側の位置の 1 段（タスク 6.1。要件 4.5、5.5）。
+///
+/// `types` 層の `NestedPathSegment` を写したもので、**フィールド名と配列の位置を区別する**。
+/// 区別を潰すと、要件 4.5 が求める「入れ子のどの位置が違反しているか」を表示するときに
+/// `a.b` と `a[1]` を書き分けられない。
+///
+/// 段の並び（[`ColumnDescriptor::path`] / [`GridViolationLocation::path`]）は、**空なら
+/// セル直下**を指す（ドメインの `NestedPath` と同じ規約）。配列の位置は `u32` である
+/// （`usize` を境界へ出さない）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(tag = "segment")]
+pub enum GridPathSegment {
+    /// オブジェクトのフィールド名。
+    Field {
+        /// フィールド名。
+        name: String,
+    },
+    /// 配列の 0 起点の要素位置。
+    Index {
+        /// 要素の位置。
+        position: u32,
+    },
+}
+
+/// 列を展開できるか、詳細の表示へ委ねるかの札（タスク 6.1。要件 5.1、5.2、5.4）。
+///
+/// `view` 層の `Expandability` を写した**閉じた種類の列挙**である（小文字へ落とすのは
+/// [`super::DocumentOrigin`] と同じ扱いである）。**3 値であることが要点であり、2 つの真偽へ
+/// 潰さない** — 「内側を持たない」と「段数の上限に達した」は別の事実であり、潰すと展開の指定が
+/// 上限の手前で止まっている列にも「詳細の表示へ」が出る（ドメインの `Expandability` の docs）。
+///
+/// 消費側が要る 2 つの事実（展開できるか・詳細の表示へ委ねるか）は
+/// [`ColumnDescriptor::is_expandable`] と [`ColumnDescriptor::requires_detail`] がこの札から
+/// 導く — ドメインの `LayoutColumn` の同名のメソッドと同じ判断であり、写しを二重に持たない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+pub enum ColumnExpandability {
+    /// 内側を持ち、段数の上限に達していない（展開できる）。
+    Available,
+    /// 内側を持つが、段数の上限に達している（**詳細の表示へ委ねる**。要件 5.4）。
+    Capped,
+    /// 内側を持たない（展開の対象ではない）。
+    Leaf,
+}
+
+/// 同一の型の並び（配列）の要素数の能力（タスク 6.1。要件 5.6）。
+///
+/// `view` 層の `ElementCount` を写したもので、要素の型の札と、**列に宣言された**要素数の
+/// 上下限を持つ。**`None` は開いた端点**であり、宣言が無いことと上下限が 0 であることは違う
+/// （ドメインの `ElementCount` の docs。`0..=0` は空の並びであり、宣言の無い並びではない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct ColumnElementCount {
+    /// 要素の型の札（配列の `items` の種別）。
+    pub items: TypeKindTag,
+    /// 要素数の下限（`minItems`）。未宣言は `None`（開いた下限）。
+    pub min: Option<u32>,
+    /// 要素数の上限（`maxItems`）。未宣言は `None`（開いた上限）。
+    pub max: Option<u32>,
+}
+
+/// 構成の 1 列: 窓が運ぶ列そのものであり、どの値が載るかを指す（タスク 6.1。要件 1.1、1.2、
+/// 3.1、5.1、5.4、5.6）。
+///
+/// `view` 層の `LayoutColumn` を写したものであり、6.1 の消費側（描画側と入力手段の登録簿）が
+/// 必要とするものを全部運ぶ — 列の添字・内側の位置・表示名・葉の型の札・要素数の能力・
+/// 展開の可否である。`design.md`「GridSession」の Implementation Notes が「6.1 はここから
+/// 境界型へ写す」と定めているのはこの型である。
+///
+/// **列の同一性は（[`ColumnDescriptor::column`], [`ColumnDescriptor::path`]）の対であり、
+/// 名前ではない** — 表示名は人が読むためのものであり、送る先を決めるのは位置である
+/// （ドメインの `LayoutColumn` の docs）。折りたたんだ列は位置が空であり、展開された列は
+/// 位置が 1 段以上である。
+///
+/// `kind` が `None` であるのは、その列が**使用できない**（宣言が壊れている）場合である。
+/// このとき入力手段の登録簿は既定の入力へ落ちる（10.4）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct ColumnDescriptor {
+    /// 最上位の列の添字（0 起点。内側の位置も同じ最上位の列を指す）。
+    pub column: u32,
+    /// 内側の位置（空 = セル直下）。
+    pub path: Vec<GridPathSegment>,
+    /// 表示名（位置に沿ったフィールド名を `.` で連結したもの）。
+    pub name: String,
+    /// 葉の型の札（3.2 と 7.4 が入力手段を選ぶのに使う）。使用不能な列は `None`。
+    pub kind: Option<TypeKindTag>,
+    /// 同一の型の並びの要素数の能力（要件 5.6）。配列でなければ `None`。
+    pub element_count: Option<ColumnElementCount>,
+    /// 展開の可否と、上限に達したことの印（要件 5.4）。
+    pub expandability: ColumnExpandability,
+}
+
+impl ColumnDescriptor {
+    /// この列を展開できるか（内側を持ち、段数の上限に達していない。要件 5.1）。
+    ///
+    /// ドメインの `LayoutColumn::is_expandable` と同じ判断である。
+    #[inline]
+    #[must_use]
+    pub const fn is_expandable(&self) -> bool {
+        matches!(self.expandability, ColumnExpandability::Available)
+    }
+
+    /// この列が**詳細の表示へ委ねられている**か（要件 5.4 の印）。
+    ///
+    /// 画面はこの印を見て「詳細の表示へ誘導する」を出す。上限に達していない入れ子は段数を
+    /// 増やせば降りられるため、ここでは真にならない（ドメインの
+    /// `LayoutColumn::requires_detail` と同じ判断）。
+    #[inline]
+    #[must_use]
+    pub const fn requires_detail(&self) -> bool {
+        matches!(self.expandability, ColumnExpandability::Capped)
+    }
+}
+
+/// シートの要約: 窓が運ぶ列の構成と、シートの行数（タスク 6.1。要件 1.1、1.5、1.6）。
+///
+/// **これは封筒ではない。** `status` も呼び出し元ウィンドウの文脈も持たない、応答の内側の荷で
+/// ある（`design.md`「GridCommands」の `grid_open_sheet` の応答は 6.2 が組み立て、その荷として
+/// 本型を使う）。
+///
+/// # 2 つの空の状態（要件 1.5、1.6）
+///
+/// **列の数が 2 つを区別する。** 行数は両者を区別しない（列が 1 本も宣言されていないシートも、
+/// 列はあるが行が 1 件も無いシートも、行数は 0 件でありうる）ため、**列の並びと行数を同じ型に
+/// 載せる**ことが要件である。
+///
+/// | 状態 | 形 | 画面の振る舞い |
+/// |---|---|---|
+/// | 列が 1 本も宣言されていない（要件 1.6） | `columns` が空 | 表を描かず、スキーマが定義されていないことを示す |
+/// | 列はあるが行が 1 件も無い（要件 1.5） | `columns` が非空かつ `row_count == 0` | 列の構成を提示したうえで、行が無いことを示す |
+/// | 通常 | `columns` が非空かつ `row_count > 0` | 表を描く |
+///
+/// 2 つの状態の判定は [`GridSheetSummary::has_no_columns`] /
+/// [`GridSheetSummary::has_columns_but_no_rows`] が行う。**画面が自前で書かない**のは、
+/// 「列の数で区別する」という規則を 1 箇所に閉じるためである。
+///
+/// # 行数は「シートの行数」であり、可視行数ではない
+///
+/// 絞り込みで可視の行が 0 件になった状態（要件 8.7）を要件 1.5 と混同してはならない —
+/// 前者は**行が在って隠れている**のであり、後者は**行が無い**。可視行数と隠された行数は表示の
+/// 指定の結果であり、6.2 の `GridViewResponse` が別に運ぶ（本型は表示の指定を知らない）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridSheetSummary {
+    /// 窓が運ぶ列の構成（左から右への表示順。入れ子の展開を含む）。
+    pub columns: Vec<ColumnDescriptor>,
+    /// シートの行数（絞り込みの結果ではない。要件 1.5）。
+    pub row_count: u32,
+}
+
+impl GridSheetSummary {
+    /// 列が 1 本も宣言されていないか（要件 1.6）。真なら表を描かず、スキーマが定義されて
+    /// いないことを示す。
+    ///
+    /// **行数の 0 と混同しない。** 行が無いだけなら列の構成は提示できる（要件 1.5）。
+    #[inline]
+    #[must_use]
+    pub fn has_no_columns(&self) -> bool {
+        self.columns.is_empty()
+    }
+
+    /// 列は宣言されているが、行が 1 件も無いか（要件 1.5）。列の構成は提示できる。
+    ///
+    /// [`GridSheetSummary::has_no_columns`] が真のときは偽である（列が無ければ表を描かない）。
+    #[inline]
+    #[must_use]
+    pub fn has_columns_but_no_rows(&self) -> bool {
+        !self.columns.is_empty() && self.row_count == 0
+    }
+}
+
+/// 並べ替えの基準列 1 本（タスク 6.1。要件 8.3）。
+///
+/// `view` 層の `SortKey` を写したものである。列の添字は `Row::values()` に対する位置であり、
+/// シートの列名の並びと同じ添字である。`descending` は**その基準列の比較だけ**を反転する
+/// （同値の行の決着は反転しない。ドメインの `SortKey` の docs）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridSortKey {
+    /// 基準となる列の添字（0 起点。要件 8.3）。
+    pub column: u32,
+    /// この基準列を降順で並べるか。
+    pub descending: bool,
+}
+
+/// 絞り込みの条件 1 本（タスク 6.1。要件 8.4）。
+///
+/// `view` 層の `FilterSpec` を写したもので、**設計が固定する 5 条件**（一致・部分一致・値なし・
+/// 値あり・違反あり）を過不足なく持つ。複数与えられた場合は**積**として働く
+/// （[`GridViewSpec::filters`]）。
+///
+/// **`HasViolation` は画面が要求できる。** 「違反あり」で絞り込む導線（要件 8.4）はこの条件
+/// だけで成立し、列を問わない指定（`column: None`）と列を指定した要求を**別の要求として
+/// 区別する**。
+///
+/// `Equals` / `Contains` が比較するのは**値ではなく表示文字列**である（ドメインの
+/// `FilterSpec` の docs）。境界は値を型付きで運ばないため、比較の対象は文字列で足りる。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(tag = "filter")]
+pub enum GridFilterSpec {
+    /// 列の表示文字列が `text` と完全に一致する行を選ぶ。
+    Equals {
+        /// 対象の列の添字（0 起点）。
+        column: u32,
+        /// 一致させる表示文字列（そのまま比較する）。
+        text: String,
+    },
+    /// 列の表示文字列が `text` を含む行を選ぶ。
+    Contains {
+        /// 対象の列の添字（0 起点）。
+        column: u32,
+        /// 含まれることを求める表示文字列（空文字は全行に一致する）。
+        text: String,
+    },
+    /// 列の表示文字列が空である行を選ぶ（値なし）。
+    IsEmpty {
+        /// 対象の列の添字（0 起点）。
+        column: u32,
+    },
+    /// 列の表示文字列が空でない行を選ぶ（値あり）。
+    IsNotEmpty {
+        /// 対象の列の添字（0 起点）。
+        column: u32,
+    },
+    /// 違反を持つ行を選ぶ。
+    HasViolation {
+        /// 対象の列。`None` は**列を問わない**（その行に違反が 1 つでもあれば選ぶ）。
+        column: Option<u32>,
+    },
+}
+
+/// 入れ子の展開の状態 1 列ぶん（タスク 6.1。要件 5.1、5.2、5.3、5.4）。
+///
+/// `view` 層の `ExpansionState` を写したものである。展開は**表示状態の一部**であり
+/// （要件 5.3）、走査や並べ替えでは失われない。`depth` は表示する段数であり、上限
+/// （`design.md`「表示状態」の `MAX_EXPANSION_DEPTH`）に達した列は
+/// [`ColumnExpandability::Capped`] として現れる（要件 5.4）。
+///
+/// 段数は `u8` である — ドメインと同じ幅にしておき、上限を越える指定が境界で復元に失敗する
+/// ようにする（`u32` に広げると、通ってから拒否する経路ができる）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridExpansionState {
+    /// 対象の列の添字（0 起点）。
+    pub column: u32,
+    /// 展開しているか（偽は折りたたみの指定である。要件 5.2）。
+    pub expanded: bool,
+    /// 表示する入れ子の段数（要件 5.4）。
+    pub depth: u8,
+}
+
+/// 表示の指定: 行の並びと列の構成をどう導出するか（タスク 6.1。要件 5.3、8.3、8.4）。
+///
+/// **並べ替え・絞り込み・展開を 1 つの形にまとめる。** `view` 層では表示状態が
+/// `ViewSpec`（並べ替えと絞り込み）と `ExpansionState` の並び（展開）に割れているが、
+/// 境界では 1 つにする — 3 つとも**窓が運ぶ行と列を変える**ものであり（`design.md`
+/// 「表示状態」の割り方の根拠）、要求の口は `grid_set_view` 1 つだからである。
+/// 列幅と表示上の列順は**ここに無い** — あれらは窓の中身を変えず、境界を越える理由が無い
+/// （画面側の `DisplayState`。要件 8.1、8.2）。
+///
+/// 空の指定は「絞り込み無し・並べ替え無し・展開無し」であり、文書の行順と宣言の列が
+/// そのまま現れる（ドメインの `ViewSpec` / `RowOrder::recompute` の規約）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridViewSpec {
+    /// 並べ替えの基準列。先頭が第一の基準であり、同値のときだけ次の基準が効く（要件 8.3）。
+    pub sort: Vec<GridSortKey>,
+    /// 絞り込みの条件。**すべてに一致する行だけが可視になる（積）**（要件 8.4）。
+    pub filters: Vec<GridFilterSpec>,
+    /// 入れ子の展開の状態（要件 5.1〜5.4）。列ごとに 1 件である。
+    pub expansion: Vec<GridExpansionState>,
+}
+
+/// 物理のセルの位置（タスク 6.1。要件 3.3、8.6、8.9）。
+///
+/// `types` 層の `CellAddress` を写したもので、**行の識別子（文字列）と列の添字（`u32`）**を
+/// 持つ。**可視行の序数ではない** — 絞り込みや並べ替えの下では表示の位置と一致せず、取り違えると
+/// 別の行を編集する（要件 8.6）。表示の座標からこの位置への写像を持つのは、順序を持つ側
+/// （`src-tauri` の適応層と画面）である。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridCellAddress {
+    /// 行の識別子（文字列表現。64 ビット整数を境界へ出さない）。
+    pub row: String,
+    /// 列の添字（0 起点）。
+    pub column: u32,
+}
+
+/// 1 つのセルへ書く、打たれた文字（タスク 6.1。要件 3.3、3.5、7.3）。
+///
+/// `edit` 層の `EditCommand::SetCells` は `Vec<(CellAddress, String)>` を持つが、境界では
+/// **名前のある欄に分ける** — 位置と文字の 2 つ組は、生成物（`src/ipc/bindings.ts`）で
+/// `[GridCellAddress, string]` という無名の並びになり、読み手に意味を伝えないためである。
+///
+/// `text` は**打たれた文字そのもの**であり、型の解釈は `schema-engine` が行う（要件 3.3）。
+/// 適合しない値も破棄せずに保持し、違反として報告する（要件 3.5）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridCellEdit {
+    /// 書くセル。
+    pub cell: GridCellAddress,
+    /// そこへ打たれた文字。
+    pub text: String,
+}
+
+/// 編集命令（タスク 6.1。要件 3.3、5.7、6.1、6.2、6.3、7.3、7.4、8.9）。
+///
+/// `edit` 層の `EditCommand` を写したもので、**6 つの命令を過不足なく持つ**。命令の意味は
+/// ドメインの同名の変種と同じであり、本型は解釈を持たない（適用するのは `data-grid`）。
+///
+/// **値を型付きで運ばない。** 値を運ぶ 3 つの命令は、いずれも文字列を運ぶ —
+/// `SetCells` は打たれた文字、`SetNested` はセル値の**構造表現（JSON）**、`PasteRange` は
+/// **表形式テキスト**である（要件 7.2。`document-format` の `CellValue` を写した型は境界に
+/// 無い）。**行の構造を変える 3 つの命令は値を運ばない** — 挿入する行の値は宣言が供給し、
+/// 複製する行の値はドメインが写す（要件 6.1、6.3）。
+///
+/// 挿入の位置（`InsertRows::at`）は**文書の行順に対する位置**であり、可視の序数ではない
+/// （画面の位置に挿入したい呼び出し側は、順序を持つ側で行そのものへ写してからその行の位置を
+/// 渡す）。貼り付けは起点と**表示されている行の並び**の 2 つで宛先が決まる（要件 8.9）ため、
+/// `PasteRange::rows` を持つ。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(tag = "command")]
+pub enum GridEditCommand {
+    /// 指定したセルへ打たれた文字を書く。
+    SetCells {
+        /// 書くセルと、そこへ打たれた文字。同じセルが複数回現れた場合は**後ろのものが残る**
+        /// （ドメインの `Document::set_cells` の契約）。
+        cells: Vec<GridCellEdit>,
+    },
+    /// 入れ子のセルへ、構造を保った表現（JSON）を書く（要件 5.5、5.7）。
+    SetNested {
+        /// 書くセル（物理の位置）。
+        cell: GridCellAddress,
+        /// そのセルへ書く値の構造表現。
+        json: String,
+    },
+    /// 指定した**文書の位置**へ、宣言の既定値を持つ行を `count` 行足す（要件 6.1）。
+    InsertRows {
+        /// 挿入する文書の位置（適用前の行順に対する添字。行数までの値が妥当）。
+        at: u32,
+        /// 挿入する行数。`0` は何も変えない。
+        count: u32,
+    },
+    /// 選択された複数の行を 1 回の操作として取り除く（要件 6.2）。
+    RemoveRows {
+        /// 取り除く行の識別子。空なら何も変えない。
+        rows: Vec<String>,
+    },
+    /// 選択された行と同じ値を持つ行を末尾へ足す（要件 6.3、6.4）。
+    DuplicateRows {
+        /// 複製する元の行の識別子。空なら何も変えない。
+        rows: Vec<String>,
+    },
+    /// 表形式テキストを、錨のセルから始まる矩形として貼り付ける（要件 7.3、7.4、7.5、8.9）。
+    PasteRange {
+        /// 貼り付けの起点（**物理の行**と列。要件 8.6）。
+        anchor: GridCellAddress,
+        /// **表示されている行の並び**（順序を持つ側が導出したもの。要件 8.9）。
+        ///
+        /// 貼り付けは錨の行がこの並びに現れる位置から歩くため、**隠れている行には 1 セルも
+        /// 書かれない**。空なら何も書かない。
+        rows: Vec<String>,
+        /// 貼り付ける表形式テキスト（行の区切りと列の区切りを持つ。要件 7.2）。
+        text: String,
+    },
+}
+
+/// 型強制によって値が変換されたことの記録（タスク 6.1。要件 3.4）。
+///
+/// `edit` 層の `CoercionNotice` を写したもので、変換の**前と後**の双方を表示文字列として
+/// 持つ。「変換が起きたこと」と「変換前の値」を人が確認できる形にするためである（要件 3.4）。
+/// 表示文字列の写しはドメインが 1 つだけ持ち、本型はその写しを運ぶ。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridCoercionNotice {
+    /// 変換が起きたセルの位置。
+    pub cell: GridCellAddress,
+    /// 変換**前**の値の表示文字列（打たれた文字そのもの）。
+    pub before: String,
+    /// 変換**後**の値の表示文字列（ドキュメントへ書かれた値）。
+    pub after: String,
+}
+
+/// 違反の位置（タスク 6.1。要件 4.2、4.5、6.4、7.5）。
+///
+/// `schema-engine` の `Violation` と `data-grid` の `CellViolations` / `NestedPath` が持つ
+/// **位置だけ**を写したものである — 行の識別子（文字列）・列の添字（`u32`）・入れ子の内側の
+/// 位置である。**理由（`ViolationReason`）は本型に無い** — 違反の理由を提示する経路
+/// （要件 4.2 の `GridViolationResponse.reason`）は 6.2 / 6.3 の適応層が組み立てる。
+///
+/// **行を持たない違反がある。** ドメインの `Violation::row` は `Option<RowId>` であり、
+/// 列そのものの問題は行を持たない。したがって `row` は `Option<String>` である
+/// （セルに属する違反はつねに行を持つ）。
+///
+/// 内側の位置が空であることは**セル直下**の違反を意味する（要件 4.5 の位置の表現。
+/// ドメインの `NestedPath` と同じ規約）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridViolationLocation {
+    /// 違反の属する行の識別子。`None` は列そのものの問題である。
+    pub row: Option<String>,
+    /// 違反している列の添字（0 起点）。
+    pub column: u32,
+    /// 違反している内側の位置（空 = セル直下。要件 4.5）。
+    pub path: Vec<GridPathSegment>,
+}
+
+/// 編集を適用した結果の要約（タスク 6.1。要件 3.4、4.3、4.6、6.2、6.4、7.5）。
+///
+/// `edit` 層の `EditOutcome` を写したものであり、**判定が返したものと、画面が直ちに要るもの**
+/// だけを運ぶ。運ぶ欄は次のとおりである。
+///
+/// - `affected` — 影響を受けた行（重複を畳み、命令に現れた順）。画面はこの行の窓を捨てる
+///   （要件 1.7）ために使う。
+/// - `coercions` — 型強制の記録（要件 3.4）。変換が起きなければ空である。
+/// - `violation_total` — 違反の総数（`u32`。`usize` を境界へ出さない）。**再検証した列に
+///   閉じた総数**であり、シート全体の総数を保つのは 6.2 の適応層である（ドメインの
+///   `EditOutcome` の docs）。
+/// - `violations` — 適用のあとに再検証した列が持つ違反（重複なし、報告の順）。範囲は
+///   `violation_total` と同じであり、画面は**変わった違反だけ**を受け取れる（要件 4.6）。
+/// - `revalidated_columns` — 適用のあとに再検証した列の添字（昇順・重複なし）。空の命令では
+///   空であり、そのとき違反も 0 件である。
+/// - `row_count` — 適用の**後**のシートの行数。行を足す・取り除く命令がこれを変える
+///   （要件 6.2 が提示する行数の変化）。
+///
+/// 本型は解釈を持たない — 適用したのは `data-grid` であり、判定をしたのは `schema-engine`
+/// である。境界はそれらの結果を写すだけである。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridEditOutcome {
+    /// 影響を受けた行の識別子（重複を畳み、命令に現れた順）。
+    pub affected: Vec<String>,
+    /// 型強制によって値が変換されたセル。変換が起きなければ空である。
+    pub coercions: Vec<GridCoercionNotice>,
+    /// 違反の総数（再検証した列に閉じた総数）。
+    pub violation_total: u32,
+    /// 適用のあとに再検証した列が持つ違反の一覧（重複なし、報告の順）。
+    pub violations: Vec<GridViolationLocation>,
+    /// 適用のあとに再検証した列の添字（昇順・重複なし）。
+    pub revalidated_columns: Vec<u32>,
+    /// 適用の後のシートの行数。
+    pub row_count: u32,
+}

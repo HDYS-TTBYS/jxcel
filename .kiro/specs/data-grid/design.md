@@ -631,6 +631,34 @@ impl<'a> UndoRedo<'a> {
 - Validation: `scripts/check-command-acl.sh` が登録 ⊆ 許可を固定する。`src/ipc/client.ts` の `RawCommandName` に `grid_rows_window` を加える
 - Risks: 境界用の型は `crates/app-shell/src/ipc/grid.rs` に置く（ts-rs の derive が許される唯一の場所）。この型は**他のドメインクレートを参照してはならない**ため、すべて文字列と 32 ビット以下の整数で構成する
 
+##### 荷の型（6.1 が確定させたもの）
+
+封筒（要求・応答の型）は本節のコマンドが持ち、**荷（payload）の型は 6.1 の
+`crates/app-shell/src/ipc/grid.rs` が持つ** — 6.2 / 6.3 はここに並ぶ型を組み合わせるだけで
+足りる（荷の型を新設しない）。`app-shell` は他のドメインクレートに依存しないため、写すのは
+`src-tauri` の適応層である。
+
+| 6.1 の型（生成物 `src/ipc/bindings.ts` に出る） | 写す元 |
+|---|---|
+| `TypeKindTag`（14 種。`ALL` が閉じた集合の唯一の源） | `schema-engine::TypeKind::ALL`（一致の検査は `src-tauri` に置く） |
+| `ColumnDescriptor` / `ColumnElementCount` / `ColumnExpandability` / `GridPathSegment` | `view::LayoutColumn` / `ElementCount` / `Expandability` / `types::NestedPathSegment` |
+| `GridSheetSummary`（列の構成とシートの行数） | `ColumnLayout` とシートの行数 |
+| `GridViewSpec` / `GridSortKey` / `GridFilterSpec` / `GridExpansionState` | `ViewSpec` / `SortKey` / `FilterSpec` / `ExpansionState` |
+| `GridEditCommand` / `GridCellEdit` / `GridCellAddress` | `EditCommand` / （`SetCells` の 2 つ組） / `CellAddress` |
+| `GridEditOutcome` / `GridCoercionNotice` | `EditOutcome` / `CoercionNotice` |
+| `GridViolationLocation` | `Violation` の位置（行・列・内側の経路） |
+
+- **要件 1.5 と 1.6 は列の数で区別する。** `GridSheetSummary` が列の構成と行数を同じ型に載せる
+  ため、「列が 1 本も無い（表を描かない）」と「列はあるが行が無い（列の構成を示す）」が形の上で
+  分かれる。**絞り込みで可視の行が 0 件になった状態は要件 1.5 ではない**（行が在って隠れている）
+  ため、可視行数と隠された行数は `GridViewResponse` が別に運ぶ（要件 8.7）
+- **展開は `GridViewSpec` が運ぶ。** 並べ替え・絞り込み・展開はどれも窓が運ぶ行と列を変えるため
+  （「表示状態」の割り方の根拠）、要求の口は `grid_set_view` の 1 つで足りる
+- **違反の理由（`ViolationReason`）は 6.1 の荷に無い。** `GridViolationResponse.reason` は
+  6.2 / 6.3 が定義する（要件 4.2）
+- **値は打たれた文字として運ぶ。** 境界にセル値の型を置かない（窓の二進形式も「数値としての
+  値を一切含まない」）。`SetNested` の構造表現と `PasteRange` の表形式テキストは文字列である
+
 #### EditorRegistry（拡張点の所有者）
 
 | Field | Detail |

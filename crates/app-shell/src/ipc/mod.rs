@@ -34,20 +34,35 @@
 //!   （[`DOCUMENT_SESSION_CHANGED_EVENT`]）。**実体は `document-session` にあり、ここは
 //!   境界の形だけを持つ**（`crate::ipc::document`）。位置は境界を越えない — 名前は
 //!   ファイル名のみ、件数は `u32` である
+//! - 6.1: グリッドの境界（列の情報 [`ColumnDescriptor`] / [`ColumnElementCount`] /
+//!   [`ColumnExpandability`] / [`GridPathSegment`]、シートの要約 [`GridSheetSummary`]、
+//!   表示の指定 [`GridViewSpec`] / [`GridSortKey`] / [`GridFilterSpec`] /
+//!   [`GridExpansionState`]、編集命令 [`GridEditCommand`] / [`GridCellEdit`] /
+//!   [`GridCellAddress`]、判定の要約 [`GridEditOutcome`] / [`GridCoercionNotice`]、
+//!   違反の位置 [`GridViolationLocation`]、および型の種別の札 [`TypeKindTag`]）。
+//!   **実体は `data-grid` にあり、ここは境界の形だけを持つ**（`crate::ipc::grid`）。
+//!   6 つのコマンドの封筒は 6.2 / 6.3 が組み立て、その荷としてこれらの型を使う
 
 use serde::{Deserialize, Serialize};
 
 pub mod command_names;
 pub mod document;
 pub mod error;
+pub mod grid;
 
 pub use command_names::COMMAND_NAMES;
 pub use document::{
-    DOCUMENT_SESSION_CHANGED_EVENT, DocumentDiscardResponse, DocumentNewOutcome,
-    DocumentNewResponse, DocumentOrigin, DocumentSaveOutcome, DocumentSaveResponse,
-    DocumentSessionStatus, DocumentSheet, DocumentStateResponse, DocumentSummary,
+    DocumentDiscardResponse, DocumentNewOutcome, DocumentNewResponse, DocumentOrigin,
+    DocumentSaveOutcome, DocumentSaveResponse, DocumentSessionStatus, DocumentSheet,
+    DocumentStateResponse, DocumentSummary, DOCUMENT_SESSION_CHANGED_EVENT,
 };
 pub use error::IpcError;
+pub use grid::{
+    ColumnDescriptor, ColumnElementCount, ColumnExpandability, GridCellAddress, GridCellEdit,
+    GridCoercionNotice, GridEditCommand, GridEditOutcome, GridExpansionState, GridFilterSpec,
+    GridPathSegment, GridSheetSummary, GridSortKey, GridViewSpec, GridViolationLocation,
+    TypeKindTag,
+};
 
 /// 境界を越えるすべてのコマンドが返す封筒（要件 4.2、4.4）。
 ///
@@ -636,7 +651,10 @@ fn event_names_constant() -> String {
     for (constant, event) in [
         ("SETTINGS_CHANGED_EVENT", SETTINGS_CHANGED_EVENT),
         ("DIAGNOSTICS_REQUESTED_EVENT", DIAGNOSTICS_REQUESTED_EVENT),
-        ("DOCUMENT_SESSION_CHANGED_EVENT", DOCUMENT_SESSION_CHANGED_EVENT),
+        (
+            "DOCUMENT_SESSION_CHANGED_EVENT",
+            DOCUMENT_SESSION_CHANGED_EVENT,
+        ),
     ] {
         out.push_str(&format!("export const {constant} = \"{event}\";\n"));
     }
@@ -903,6 +921,22 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<DocumentNewOutcome>(&cfg),
         declared::<DocumentNewResponse>(&cfg),
         declared::<DocumentDiscardResponse>(&cfg),
+        declared::<TypeKindTag>(&cfg),
+        declared::<ColumnExpandability>(&cfg),
+        declared::<ColumnElementCount>(&cfg),
+        declared::<ColumnDescriptor>(&cfg),
+        declared::<GridPathSegment>(&cfg),
+        declared::<GridSheetSummary>(&cfg),
+        declared::<GridSortKey>(&cfg),
+        declared::<GridFilterSpec>(&cfg),
+        declared::<GridExpansionState>(&cfg),
+        declared::<GridViewSpec>(&cfg),
+        declared::<GridCellAddress>(&cfg),
+        declared::<GridCellEdit>(&cfg),
+        declared::<GridEditCommand>(&cfg),
+        declared::<GridCoercionNotice>(&cfg),
+        declared::<GridViolationLocation>(&cfg),
+        declared::<GridEditOutcome>(&cfg),
         declared::<IpcError>(&cfg),
         declared::<IpcResult<WindowContext, IpcError>>(&cfg),
         concrete_window_context_result(&cfg),
@@ -1697,5 +1731,710 @@ mod tests {
         let value = serde_json::to_value(&cause).unwrap();
         assert_eq!(value["kind"], "Diagnostics");
         assert!(value["detail"]["message"].is_string());
+    }
+
+    // ------------------------------------------------------------------
+    // 6.1: グリッドの境界の型
+    // （列の情報・表示の指定・編集命令・判定の要約・違反の位置・型の種別の札）
+    // ------------------------------------------------------------------
+
+    /// 設計が固定する札の綴り（`design.md`「EditorRegistry」の `TypeKindTag` の合併型）。
+    /// 7.4 の入力手段の登録簿と 7.1 の描画側が**この綴りで**生成物を取り込む。
+    const DESIGN_TYPE_KIND_SPELLINGS: [&str; 14] = [
+        "Int",
+        "Float",
+        "Decimal",
+        "Text",
+        "Bool",
+        "Date",
+        "DateTime",
+        "Enum",
+        "Ref",
+        "Attachment",
+        "Object",
+        "Array",
+        "Any",
+        "Custom",
+    ];
+
+    /// `export type <name> = "A" | "B";` の形の宣言から、合併の要素を順に取り出す。
+    ///
+    /// 宣言の本体（`=` から `;` まで）にある文字列リテラルだけを拾うので、JSDoc や整形の
+    /// 違いに依らない。
+    fn union_members(ts: &str, name: &str) -> Vec<String> {
+        let head = format!("export type {name} =");
+        let start = ts
+            .find(&head)
+            .unwrap_or_else(|| panic!("生成物に {name} の宣言が無い:\n{ts}"));
+        let rest = &ts[start + head.len()..];
+        let end = rest
+            .find(';')
+            .unwrap_or_else(|| panic!("{name} の宣言が `;` で閉じられていない:\n{ts}"));
+        let mut members = Vec::new();
+        let mut chars = rest[..end].chars();
+        while let Some(c) = chars.next() {
+            if c != '"' {
+                continue;
+            }
+            let mut member = String::new();
+            for c in chars.by_ref() {
+                if c == '"' {
+                    break;
+                }
+                member.push(c);
+            }
+            members.push(member);
+        }
+        members
+    }
+
+    /// 境界の値に現れた数値が**すべて 32 ビット以下の整数**であることを検査する。
+    ///
+    /// グリッドの境界は列の添字・行数・件数を運ぶため数値を持つ（`u32` であり、JavaScript の
+    /// `number` はこれを正確に表せる）。禁止しているのは 64 ビット整数であり、それは JSON でも
+    /// 同じ `number` として現れるため、値の側で上限を見る。
+    fn assert_json_numbers_fit_u32(value: &serde_json::Value, at: &str) {
+        match value {
+            serde_json::Value::Number(n) => {
+                let exact = n
+                    .as_u64()
+                    .unwrap_or_else(|| panic!("{at} の数値が 0 以上の整数でない: {n}"));
+                assert!(
+                    exact <= u64::from(u32::MAX),
+                    "{at} の数値が 32 ビットを越えている: {n}"
+                );
+            }
+            serde_json::Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    assert_json_numbers_fit_u32(item, &format!("{at}[{i}]"));
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for (name, item) in fields {
+                    assert_json_numbers_fit_u32(item, &format!("{at}.{name}"));
+                }
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::String(_) => {
+            }
+        }
+    }
+
+    /// 札が**設計の 14 種と過不足なく一致**し、生成物の合併型も同じ 14 個を同じ綴りで並べる
+    /// ことを固定する（要件 3.2。`TypeKindTag` は入力手段を選ぶ唯一の札である）。
+    #[test]
+    fn type_kind_tag_matches_the_design_union() {
+        assert_eq!(
+            TypeKindTag::ALL.len(),
+            DESIGN_TYPE_KIND_SPELLINGS.len(),
+            "札の数は設計の 14 種である"
+        );
+
+        let spellings = TypeKindTag::ALL
+            .iter()
+            .map(|tag| {
+                serde_json::to_value(tag)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            spellings, DESIGN_TYPE_KIND_SPELLINGS,
+            "札の綴りと並びは設計の合併型と一致しなければならない"
+        );
+
+        let ts = generated::<TypeKindTag>();
+        assert_eq!(
+            union_members(&ts, "TypeKindTag"),
+            DESIGN_TYPE_KIND_SPELLINGS,
+            "生成物の札の合併型が設計と食い違っている:\n{ts}"
+        );
+        assert_no_any(&ts);
+        assert_no_type_token(&ts, "bigint");
+    }
+
+    /// グリッドの境界の型が、型の位置に `any` も 64 ビット整数の数値型も出さないことを
+    /// 固定する（`i64` / `u64` は ts-rs が `bigint` へ落とす）。
+    #[test]
+    fn grid_boundary_types_expose_no_any_and_no_64_bit_number_type() {
+        let declarations = [
+            generated::<ColumnDescriptor>(),
+            generated::<ColumnElementCount>(),
+            generated::<ColumnExpandability>(),
+            generated::<GridPathSegment>(),
+            generated::<GridSheetSummary>(),
+            generated::<GridSortKey>(),
+            generated::<GridFilterSpec>(),
+            generated::<GridExpansionState>(),
+            generated::<GridViewSpec>(),
+            generated::<GridCellAddress>(),
+            generated::<GridCellEdit>(),
+            generated::<GridEditCommand>(),
+            generated::<GridCoercionNotice>(),
+            generated::<GridViolationLocation>(),
+            generated::<GridEditOutcome>(),
+        ];
+        for ts in declarations {
+            assert_no_any(&ts);
+            assert_no_type_token(&ts, "bigint");
+        }
+    }
+
+    /// 列の情報が `view` 層の `LayoutColumn` の持つものを全部運ぶことを固定する
+    /// （列の添字・内側の位置・表示名・葉の型の札・要素数の能力・展開の可否）。
+    ///
+    /// 内側の位置は**セル直下（空）から入れ子の段まで**を表現でき、`Field` と `Index` を
+    /// 区別する（要件 4.5 が入れ子のどの位置かを特定できる形を求めるため）。
+    #[test]
+    fn column_descriptor_mirrors_the_layout_column() {
+        let nested = ColumnDescriptor {
+            column: 3,
+            path: vec![
+                GridPathSegment::Field {
+                    name: "b".to_owned(),
+                },
+                GridPathSegment::Index { position: 2 },
+            ],
+            name: "a.b[2]".to_owned(),
+            kind: Some(TypeKindTag::Array),
+            element_count: Some(ColumnElementCount {
+                items: TypeKindTag::Text,
+                min: Some(1),
+                max: None,
+            }),
+            expandability: ColumnExpandability::Available,
+        };
+        let encoded = serde_json::to_value(&nested).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "column": 3,
+                "path": [
+                    { "segment": "Field", "name": "b" },
+                    { "segment": "Index", "position": 2 },
+                ],
+                "name": "a.b[2]",
+                "kind": "Array",
+                "element_count": { "items": "Text", "min": 1, "max": null },
+                "expandability": "available",
+            })
+        );
+        assert_json_numbers_fit_u32(&encoded, "column");
+        let back: ColumnDescriptor = serde_json::from_value(encoded).unwrap();
+        assert_eq!(back, nested);
+
+        // セル直下（空の位置）・使用不能な列・配列でない列も表現できる。
+        let flat = ColumnDescriptor {
+            column: 0,
+            path: Vec::new(),
+            name: "amount".to_owned(),
+            kind: None,
+            element_count: None,
+            expandability: ColumnExpandability::Leaf,
+        };
+        let encoded = serde_json::to_value(&flat).unwrap();
+        assert_eq!(encoded["path"], serde_json::json!([]));
+        assert_eq!(encoded["kind"], serde_json::Value::Null);
+        assert_eq!(encoded["element_count"], serde_json::Value::Null);
+        assert_eq!(encoded["expandability"], "leaf");
+        assert_eq!(
+            serde_json::from_value::<ColumnDescriptor>(encoded).unwrap(),
+            flat
+        );
+
+        // 展開の可否の 2 つの事実は `expandability` から導かれる（ドメインの
+        // `LayoutColumn::is_expandable` / `requires_detail` と同じ判断である）。
+        assert!(nested.is_expandable());
+        assert!(!nested.requires_detail());
+        let capped = ColumnDescriptor {
+            expandability: ColumnExpandability::Capped,
+            ..nested.clone()
+        };
+        assert!(!capped.is_expandable());
+        assert!(capped.requires_detail());
+        assert!(!flat.is_expandable());
+        assert!(!flat.requires_detail());
+
+        // 要素数の上下限は**開いた端点**を `null` で運ぶ（宣言が無いことと 0 は違う）。
+        assert_eq!(
+            serde_json::to_value(ColumnElementCount {
+                items: TypeKindTag::Int,
+                min: None,
+                max: Some(8),
+            })
+            .unwrap(),
+            serde_json::json!({ "items": "Int", "min": null, "max": 8 })
+        );
+    }
+
+    /// 絞り込みが**要件 8.4 の 5 条件**をすべて表現でき、「違反あり」を含むことを固定する
+    /// （8.4 と、違反の絞り込みを画面が要求できること）。
+    #[test]
+    fn filter_spec_covers_the_five_conditions_including_has_violation() {
+        let cases = [
+            (
+                GridFilterSpec::Equals {
+                    column: 1,
+                    text: "東京".to_owned(),
+                },
+                serde_json::json!({ "filter": "Equals", "column": 1, "text": "東京" }),
+            ),
+            (
+                GridFilterSpec::Contains {
+                    column: 1,
+                    text: "東".to_owned(),
+                },
+                serde_json::json!({ "filter": "Contains", "column": 1, "text": "東" }),
+            ),
+            (
+                GridFilterSpec::IsEmpty { column: 2 },
+                serde_json::json!({ "filter": "IsEmpty", "column": 2 }),
+            ),
+            (
+                GridFilterSpec::IsNotEmpty { column: 2 },
+                serde_json::json!({ "filter": "IsNotEmpty", "column": 2 }),
+            ),
+            (
+                GridFilterSpec::HasViolation { column: None },
+                serde_json::json!({ "filter": "HasViolation", "column": null }),
+            ),
+            (
+                GridFilterSpec::HasViolation { column: Some(4) },
+                serde_json::json!({ "filter": "HasViolation", "column": 4 }),
+            ),
+        ];
+        let mut tags = std::collections::BTreeSet::new();
+        for (spec, expected) in cases {
+            let encoded = serde_json::to_value(&spec).unwrap();
+            assert_eq!(encoded, expected);
+            assert_json_numbers_fit_u32(&encoded, "filter");
+            tags.insert(encoded["filter"].as_str().unwrap().to_owned());
+            assert_eq!(
+                serde_json::from_value::<GridFilterSpec>(encoded).unwrap(),
+                spec
+            );
+        }
+        assert_eq!(
+            tags,
+            [
+                "Equals",
+                "Contains",
+                "IsEmpty",
+                "IsNotEmpty",
+                "HasViolation"
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+
+        // 列を問わない「違反あり」と、列を指定した「違反あり」は別の要求である。
+        assert_ne!(
+            GridFilterSpec::HasViolation { column: None },
+            GridFilterSpec::HasViolation { column: Some(0) }
+        );
+    }
+
+    /// 表示の指定が**並べ替え・絞り込み・展開**を 1 つの形で運ぶことを固定する
+    /// （要件 8.3、8.4、5.3。展開を運ぶ口は `grid_set_view` だけである）。
+    #[test]
+    fn view_spec_carries_sort_filter_and_expansion() {
+        let spec = GridViewSpec {
+            sort: vec![
+                GridSortKey {
+                    column: 0,
+                    descending: true,
+                },
+                GridSortKey {
+                    column: 2,
+                    descending: false,
+                },
+            ],
+            filters: vec![GridFilterSpec::HasViolation { column: None }],
+            expansion: vec![
+                GridExpansionState {
+                    column: 1,
+                    expanded: true,
+                    depth: 2,
+                },
+                GridExpansionState {
+                    column: 3,
+                    expanded: false,
+                    depth: 0,
+                },
+            ],
+        };
+        let encoded = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "sort": [
+                    { "column": 0, "descending": true },
+                    { "column": 2, "descending": false },
+                ],
+                "filters": [{ "filter": "HasViolation", "column": null }],
+                "expansion": [
+                    { "column": 1, "expanded": true, "depth": 2 },
+                    { "column": 3, "expanded": false, "depth": 0 },
+                ],
+            })
+        );
+        assert_json_numbers_fit_u32(&encoded, "view");
+        assert_eq!(
+            serde_json::from_value::<GridViewSpec>(encoded).unwrap(),
+            spec
+        );
+
+        // 空の指定は「絞り込み無し・並べ替え無し・展開無し」である（すべての行と列）。
+        let empty = GridViewSpec::default();
+        assert_eq!(
+            serde_json::to_value(&empty).unwrap(),
+            serde_json::json!({ "sort": [], "filters": [], "expansion": [] })
+        );
+    }
+
+    /// 編集命令が `edit` 層の 6 つの命令を過不足なく写すことを固定する。
+    ///
+    /// 値は**打たれた文字**として運び（`String`）、構造表現と表形式テキストも文字列である
+    /// — 境界に `document-format` のセル値は現れない。
+    #[test]
+    fn edit_command_mirrors_the_domain_commands() {
+        let anchor = GridCellAddress {
+            row: "01J8Z0".to_owned(),
+            column: 2,
+        };
+        let cases = [
+            (
+                GridEditCommand::SetCells {
+                    cells: vec![
+                        GridCellEdit {
+                            cell: anchor.clone(),
+                            text: "1,5".to_owned(),
+                        },
+                        GridCellEdit {
+                            cell: GridCellAddress {
+                                row: "01J8Z1".to_owned(),
+                                column: 0,
+                            },
+                            text: String::new(),
+                        },
+                    ],
+                },
+                serde_json::json!({
+                    "command": "SetCells",
+                    "cells": [
+                        { "cell": { "row": "01J8Z0", "column": 2 }, "text": "1,5" },
+                        { "cell": { "row": "01J8Z1", "column": 0 }, "text": "" },
+                    ],
+                }),
+            ),
+            (
+                GridEditCommand::SetNested {
+                    cell: anchor.clone(),
+                    json: "{\"b\":[1,2]}".to_owned(),
+                },
+                serde_json::json!({
+                    "command": "SetNested",
+                    "cell": { "row": "01J8Z0", "column": 2 },
+                    "json": "{\"b\":[1,2]}",
+                }),
+            ),
+            (
+                GridEditCommand::InsertRows { at: 3, count: 2 },
+                serde_json::json!({ "command": "InsertRows", "at": 3, "count": 2 }),
+            ),
+            (
+                GridEditCommand::RemoveRows {
+                    rows: vec!["01J8Z0".to_owned(), "01J8Z1".to_owned()],
+                },
+                serde_json::json!({ "command": "RemoveRows", "rows": ["01J8Z0", "01J8Z1"] }),
+            ),
+            (
+                GridEditCommand::DuplicateRows {
+                    rows: vec!["01J8Z0".to_owned()],
+                },
+                serde_json::json!({ "command": "DuplicateRows", "rows": ["01J8Z0"] }),
+            ),
+            (
+                GridEditCommand::PasteRange {
+                    anchor: anchor.clone(),
+                    rows: vec!["01J8Z0".to_owned(), "01J8Z1".to_owned()],
+                    text: "a\tb\nc\td".to_owned(),
+                },
+                serde_json::json!({
+                    "command": "PasteRange",
+                    "anchor": { "row": "01J8Z0", "column": 2 },
+                    "rows": ["01J8Z0", "01J8Z1"],
+                    "text": "a\tb\nc\td",
+                }),
+            ),
+        ];
+        let mut tags = std::collections::BTreeSet::new();
+        for (command, expected) in cases {
+            let encoded = serde_json::to_value(&command).unwrap();
+            assert_eq!(encoded, expected);
+            assert_json_numbers_fit_u32(&encoded, "command");
+            tags.insert(encoded["command"].as_str().unwrap().to_owned());
+            assert_eq!(
+                serde_json::from_value::<GridEditCommand>(encoded).unwrap(),
+                command
+            );
+        }
+        assert_eq!(
+            tags,
+            [
+                "SetCells",
+                "SetNested",
+                "InsertRows",
+                "RemoveRows",
+                "DuplicateRows",
+                "PasteRange"
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+
+        // 貼り付けは**表示されている行の並び**を運ぶ（要件 8.9）。空の並びも表現できる。
+        let empty = GridEditCommand::PasteRange {
+            anchor,
+            rows: Vec::new(),
+            text: String::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(&empty).unwrap()["rows"],
+            serde_json::json!([])
+        );
+    }
+
+    /// 判定の要約が `edit` 層の `EditOutcome` の持つものを全部運ぶことを固定する
+    /// （影響を受けた行・変換の記録・違反の総数・違反そのもの・再検証した列・行数）。
+    ///
+    /// 件数は `u32` で運び、`usize` を境界へ出さない。
+    #[test]
+    fn edit_outcome_summarises_the_verdict() {
+        let outcome = GridEditOutcome {
+            affected: vec!["01J8Z0".to_owned()],
+            coercions: vec![GridCoercionNotice {
+                cell: GridCellAddress {
+                    row: "01J8Z0".to_owned(),
+                    column: 1,
+                },
+                before: "1,5".to_owned(),
+                after: "1.5".to_owned(),
+            }],
+            violation_total: 3,
+            violations: vec![GridViolationLocation {
+                row: Some("01J8Z0".to_owned()),
+                column: 1,
+                path: vec![GridPathSegment::Field {
+                    name: "amount".to_owned(),
+                }],
+            }],
+            revalidated_columns: vec![1, 4],
+            row_count: 99,
+        };
+        let encoded = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "affected": ["01J8Z0"],
+                "coercions": [{
+                    "cell": { "row": "01J8Z0", "column": 1 },
+                    "before": "1,5",
+                    "after": "1.5",
+                }],
+                "violation_total": 3,
+                "violations": [{
+                    "row": "01J8Z0",
+                    "column": 1,
+                    "path": [{ "segment": "Field", "name": "amount" }],
+                }],
+                "revalidated_columns": [1, 4],
+                "row_count": 99,
+            })
+        );
+        assert_json_numbers_fit_u32(&encoded, "outcome");
+        assert_eq!(
+            serde_json::from_value::<GridEditOutcome>(encoded).unwrap(),
+            outcome
+        );
+
+        // 空の命令の結果（何も書かず、違反も無い）も表現できる。
+        let empty = GridEditOutcome {
+            affected: Vec::new(),
+            coercions: Vec::new(),
+            violation_total: 0,
+            violations: Vec::new(),
+            revalidated_columns: Vec::new(),
+            row_count: 0,
+        };
+        assert_eq!(
+            serde_json::to_value(&empty).unwrap(),
+            serde_json::json!({
+                "affected": [],
+                "coercions": [],
+                "violation_total": 0,
+                "violations": [],
+                "revalidated_columns": [],
+                "row_count": 0,
+            })
+        );
+    }
+
+    /// 違反の位置が**行の識別子・列の添字・入れ子の内側の位置**を運ぶことを固定する
+    /// （要件 4.5）。
+    ///
+    /// 行を持たない違反（列そのものの問題）も表現できる — ドメインの `Violation::row` は
+    /// `Option<RowId>` である。
+    #[test]
+    fn violation_location_carries_row_column_and_inner_path() {
+        let cell = GridViolationLocation {
+            row: Some("01J8Z0".to_owned()),
+            column: 2,
+            path: vec![
+                GridPathSegment::Field {
+                    name: "b".to_owned(),
+                },
+                GridPathSegment::Index { position: 1 },
+                GridPathSegment::Field {
+                    name: "c".to_owned(),
+                },
+            ],
+        };
+        let encoded = serde_json::to_value(&cell).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "row": "01J8Z0",
+                "column": 2,
+                "path": [
+                    { "segment": "Field", "name": "b" },
+                    { "segment": "Index", "position": 1 },
+                    { "segment": "Field", "name": "c" },
+                ],
+            })
+        );
+        assert_json_numbers_fit_u32(&encoded, "violation");
+        assert_eq!(
+            serde_json::from_value::<GridViolationLocation>(encoded).unwrap(),
+            cell
+        );
+
+        // セル直下の違反は空の位置であり、行を持たない違反は `null` で運ぶ。
+        let column_level = GridViolationLocation {
+            row: None,
+            column: 0,
+            path: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(&column_level).unwrap(),
+            serde_json::json!({ "row": null, "column": 0, "path": [] })
+        );
+    }
+
+    /// 要件 1.5 と 1.6 の 2 つの空の状態が、シートの要約の**形の上で区別できる**ことを
+    /// 固定する。区別するのは列の数であり、行数だけでは足りない。
+    ///
+    /// - 列が 1 本も無い（要件 1.6）: 表を描かず、スキーマが定義されていないことを示す
+    /// - 列はあるが行が 1 件も無い（要件 1.5）: 列の構成を提示したうえで行が無いことを示す
+    #[test]
+    fn sheet_summary_distinguishes_the_two_empty_states() {
+        let column = ColumnDescriptor {
+            column: 0,
+            path: Vec::new(),
+            name: "amount".to_owned(),
+            kind: Some(TypeKindTag::Int),
+            element_count: None,
+            expandability: ColumnExpandability::Leaf,
+        };
+
+        let no_columns = GridSheetSummary {
+            columns: Vec::new(),
+            row_count: 7,
+        };
+        assert!(no_columns.has_no_columns());
+        assert!(!no_columns.has_columns_but_no_rows());
+
+        let no_rows = GridSheetSummary {
+            columns: vec![column.clone()],
+            row_count: 0,
+        };
+        assert!(!no_rows.has_no_columns());
+        assert!(no_rows.has_columns_but_no_rows());
+
+        let populated = GridSheetSummary {
+            columns: vec![column],
+            row_count: 7,
+        };
+        assert!(!populated.has_no_columns());
+        assert!(!populated.has_columns_but_no_rows());
+
+        // 形の上で区別できる（列の数と行数の対が 3 つの状態を分ける）。
+        assert_eq!(
+            serde_json::to_value(&no_columns).unwrap(),
+            serde_json::json!({ "columns": [], "row_count": 7 })
+        );
+        assert_eq!(
+            serde_json::to_value(&no_rows).unwrap()["row_count"],
+            serde_json::json!(0)
+        );
+        assert_ne!(
+            serde_json::to_value(&no_columns).unwrap(),
+            serde_json::to_value(&no_rows).unwrap()
+        );
+        assert_json_numbers_fit_u32(&serde_json::to_value(&populated).unwrap(), "sheet");
+    }
+
+    /// 生成物が 6.1 の境界（列の情報から違反の位置までの型と、札の合併型）をすべて
+    /// 宣言していることを固定する。
+    ///
+    /// **ドリフト検査だけでは足りない。** あれは「生成物と生成器の出力が一致すること」を
+    /// 見るのであって、宣言そのものを消して再生成すれば一致したまま通ってしまう。
+    /// [`bindings_declare_the_document_surface`] と同じ形で、面の存在を名指しで固定する。
+    #[test]
+    fn bindings_declare_the_grid_surface() {
+        let ts = render_bindings().unwrap();
+        for declaration in [
+            "export type TypeKindTag = \"Int\" | \"Float\" | \"Decimal\" | \"Text\" | \"Bool\" | \"Date\" | \"DateTime\" | \"Enum\" | \"Ref\" | \"Attachment\" | \"Object\" | \"Array\" | \"Any\" | \"Custom\";",
+            "export type ColumnExpandability = \"available\" | \"capped\" | \"leaf\";",
+            "export type GridPathSegment =",
+            "export type ColumnElementCount = {",
+            "export type ColumnDescriptor = {",
+            "export type GridSheetSummary = {",
+            "export type GridSortKey = {",
+            "export type GridFilterSpec =",
+            "export type GridExpansionState = {",
+            "export type GridViewSpec = {",
+            "export type GridCellAddress = {",
+            "export type GridCellEdit = {",
+            "export type GridEditCommand =",
+            "export type GridCoercionNotice = {",
+            "export type GridViolationLocation = {",
+            "export type GridEditOutcome = {",
+        ] {
+            assert!(
+                ts.contains(declaration),
+                "生成物に `{declaration}` が無い:\n{ts}"
+            );
+        }
+        for tag in [
+            "{ \"command\": \"SetCells\"",
+            "{ \"command\": \"SetNested\"",
+            "{ \"command\": \"InsertRows\"",
+            "{ \"command\": \"RemoveRows\"",
+            "{ \"command\": \"DuplicateRows\"",
+            "{ \"command\": \"PasteRange\"",
+            "{ \"filter\": \"Equals\"",
+            "{ \"filter\": \"Contains\"",
+            "{ \"filter\": \"IsEmpty\"",
+            "{ \"filter\": \"IsNotEmpty\"",
+            "{ \"filter\": \"HasViolation\"",
+            "{ \"segment\": \"Field\"",
+            "{ \"segment\": \"Index\"",
+        ] {
+            assert!(ts.contains(tag), "生成物に `{tag}` が無い:\n{ts}");
+        }
     }
 }
