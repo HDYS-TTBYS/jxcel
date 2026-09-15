@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
+    "test": "vitest run",
     "check:shared-assets": "bash scripts/check-shared-assets.sh"
   },
   "dependencies": {
@@ -55,6 +56,33 @@
     "eslint": "^10.10.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.70.0",
-    "vite": "^7.3.6"
-  }
+    "vite": "^7.3.6",
+    "vitest": "^4.1.11"
+  },
+  "//devDependencies": [
+    "vitest の導入について（tasks.md 7.1。群 7・群 8 のフロントエンドのタスクは「テストで示す」ことを",
+    "繰り返し要求するが、本リポジトリには TypeScript 側の走らせ手が無かった。7.1 が移植口の契約を",
+    "偽の実装で固定するにあたり、走らせ手ごと入れる（利用者の決定）。",
+    "",
+    "(a) 版: `vitest` 4.1.11（`^` は 4.x に閉じる）。**CI は Node 22 で走る**（.github/workflows/ci.yml の",
+    "    `node-version: \"22\"`）ため、engines が Node 22 を含む版でなければならない — 4.x の engines は",
+    "    `^20.0.0 || ^22.0.0 || >=24.0.0` でありこれを満たす。peer の vite も `^6 || ^7 || ^8` で、",
+    "    既に入っている vite ^7.3.6 と同じ版に解決される（vite の版は上げていない）。",
+    "    5.0.1（2026-09-15 公開）は取り込まない — 公開から 1 日の大手版であり、engines も `^22.12.0` と",
+    "    さらに狭い。上げるのは実測を伴う作業として扱う。",
+    "",
+    "(b) 足すのは vitest だけである: jsdom / happy-dom / testing-library は入れない。7.1 の面",
+    "    （描画層の移植口）は**純粋な論理**であり DOM を持たない。移植口の signature は",
+    "    `mount(container: HTMLElement, …)` なので器を渡す必要があるが、偽の実装は器に触れない —",
+    "    触れないことを前提にせず、器の代役（どの属性を読んでも投げる `Proxy`）を渡して確かめる",
+    "    （`src/features/grid/renderer/interactionDriver.ts` の `standInContainer`）。",
+    "    走らせる環境（`environment: \"node\"`）と探索範囲は `vitest.config.ts` が持つ。",
+    "    **7.2（Glide の実装）は実物の canvas を要する**ので、環境の選択はそこで見直すこと。",
+    "",
+    "(c) 走らせ方: `npm run test` は `vitest run`（見張りを立てない）。CI は既存の `test` ジョブに",
+    "    段を 1 つ足すだけで、**ジョブを新設しない**（要件 6.2、タスク 1.4 の申し送り）。",
+    "    面の型が広がっていないことの検査（`src/features/grid/renderer/port.test.ts`）は",
+    "    `expectTypeOf` ではなく型の等価を `const` の注釈で書いてあるため、**`npm run typecheck` の段が",
+    "    この検査の効き手である**（vitest の実行では型の誤りは見えない）。"
+  ]
 }

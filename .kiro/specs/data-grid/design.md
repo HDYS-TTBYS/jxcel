@@ -219,6 +219,9 @@ src/features/grid/
 ├── nestedInspector.tsx     # 入れ子の値の詳細表示と編集
 ├── violationBar.tsx        # 違反の総数と次の違反への移動
 ├── renderer/port.ts        # 描画層の移植口（インターフェース定義）
+├── renderer/fakeRenderer.ts   # 偽の実装 2 つ（テスト専用。7.1。本物ではない: 引くだけで塗らない）
+├── renderer/interactionDriver.ts  # 操作の並びを注ぎ、外へ出た呼び出しを記録する駆動器（テスト専用。7.1）
+├── renderer/port.test.ts   # 移植口の契約（vitest。7.1）
 ├── renderer/glideAdapter.tsx  # 移植口の Glide Data Grid 実装
 └── renderProbe.ts          # 塗って読み戻す検査とフレーム時間の標本
 ```
@@ -233,6 +236,7 @@ src/features/grid/
 - `src/ipc/bindings.ts` — 生成物。`cargo run -p app-shell --bin generate-bindings` で再生成（手で編集しない）
 - `src/shell/Layout.tsx` — `SHELL_SCREEN_REGISTRY` にグリッド画面を 1 件追加
 - `package.json` — `@glideapps/glide-data-grid` を追加
+- `package.json` / `package-lock.json` / `vitest.config.ts` / `.github/workflows/ci.yml` — フロントエンドのテストの走らせ手（`vitest`）と、その段（タスク 7.1）。群 7・群 8 のフロントエンドのタスクは「テストで示す」ことを要求するため、走らせ手ごと導入した。**ジョブもワークフローも新設しない** — 既存の `test` ジョブへ段を 1 つ足す（要件 6.2、タスク 1.4 の申し送り）。走らせる環境は `node` であり、追加の依存も表示先も要らない
 - `scripts/ci/` — `check-core-deps.sh data-grid` の段、ベンチ予算への `large_grid/*` の追加、および 3 OS で 10 万行の走査と編集を観測する台本（要件 12.1, 12.4）。**既存の 3 OS 検証マトリクスを拡張し、独立した系統を新設しない**
 
 ## System Flows
@@ -896,6 +900,49 @@ export interface GridRendererPort {
 - Integration: Glide の `getCellContent` は引きに来る形であり、窓単位の記憶とそのまま噛み合う。並べ替えと絞り込みは Glide が持たないが、本設計ではいずれも Rust 側にあるため欠点にならない
 - Risks: **上流が止まっている**（stable は 2024-02、最終コミットは 2026-01）。MIT なので取り込みは合法であり、移植口が触る面を小さく保つことで退路を確保する。**タスク最初期の実測で毎秒 60 回に届かない場合、同じ移植口の背後に自前 canvas を置く**
 
+**本設計が名前だけ挙げて形を決めていなかった型（タスク 7.1 が決めた）**
+
+`RendererSpec` は `RenderColumn` / `CellPosition` / `CellRange` / `RowSpan` を名指ししているが、形は
+本文に無い。7.1 が `src/features/grid/renderer/port.ts` で次のように決めた。**いずれも表示の空間の
+型であり、`crates/data-grid/src/types/mod.rs` の同名の型と同じ意味である** — 写す側（8.x）が
+取り違えないよう、名前と成分を揃えてある。
+
+| 型 | 形 | 何を指すか |
+|---|---|---|
+| `CellPosition` | `{ readonly row: RowOrdinal; readonly column: ColumnIndex }` | 可視行の序数と列の添字。**文書の位置ではない**（要件 8.6） |
+| `CellRange` | `{ readonly start: CellPosition; readonly end: CellPosition }` | 両端を含む矩形。正規化（左上・右下へ揃える）は作る側の責任 |
+| `RowSpan` | `{ readonly start: RowOrdinal; readonly count: number }` | 可視行の半開区間（上の WindowCodec 節と同じ規約） |
+| `RenderColumn` | `{ readonly title: string; readonly width: number }` | 見出しの文字列と、描く幅（ピクセル） |
+
+- `RowOrdinal` / `ColumnIndex` は `number` の別名である。**branded type にしない** — 番号に札を
+  付けると、8.x が表示状態や行の順序から受け取った値をそのつど変換することになり、`onColumnResize`
+  / `onColumnMove`（上の interface が素の `number` で書いている）と形が食い違う。混同を防いで
+  いるのは型ではなく名前である（`row` と `column`、`start` と `count`。位置と文字を名前のある欄へ
+  分けた境界型の `GridCellEdit` と同じ判断）。
+- **`RenderColumn` に型の札（`kind`）を載せない。**描き手は見出しの描画に型を要さず、入力手段の
+  選択（要件 3.1、10.1）は `EditorRegistry`（7.4）が列の位置から行う。載せると、移植口が「どの型に
+  どの入力を割り当てるか」を知る経路が生まれる。**`width` を載せるのは要件 8.1 のためである** —
+  列幅を変更できるとは、変更された幅で描けることであり、`onColumnResize` は外向きの知らせに過ぎない
+  （移植口自身は幅を変えない）。幅の入力はこの欄の他に無い。
+- **`TypeKindTag` は生成物（`src/ipc/bindings.ts`）からの型だけの取り込みである**（7.1 の
+  Implementation Notes が禁じている写しの定義をしない）。したがって移植口の module は実行時の値を
+  1 つも輸出せず、判定・履歴・命令の運び手がここに現れる余地が無い（`port.test.ts` が機械検査する）。
+
+**Implementation Notes（7.2 / 8.x への申し送り）**
+- **`mount` が仕様を受け取る唯一の口である。**`RendererHandle` は `scrollTo` / `invalidate` /
+  `destroy` しか持たないため、**列幅・列順**の変化を表示へ反映する経路は、この面では**次に
+  `mount` へ渡す仕様**しかない。7.2 が実装を選ぶとき、この制約（変更のたびに `mount` し直すのか、
+  `spec` の同一性を観測するのか）を明示に扱うこと。8.8 が列幅・列順の操作を結線するときに効いてくる。
+  **選択と現在位置はこれに当てはまらない。**`RendererSpec` に選択を**下ろす**欄が無く、
+  `onSelectionChange` は外向きの知らせ（正規化した矩形）だけである — つまり選択と現在位置は
+  **実装が持ち、外へ報せる一方通行**であり、列幅・列順のように仕様の側から押し戻せない
+  （7.1 のレビューが指摘。要件 2.1 が求める「現在位置を他のセルと区別して提示する」を
+  どこが持つかは 8.1 / 8.8 が明示に決めること — 実装が持つ選択と画面の写しが食い違いうる）。
+- **呼び出しの並びの契約は 7.1 が固定した。**`src/features/grid/renderer/port.test.ts` が
+  決められた操作の並びを逐語で持ち、内部の作りが違う 2 つの偽の実装と 2 通りの行の出所の
+  4 通りで同じ並びが観測されることを示している。7.2 は実物の通知に `RendererEventSource`
+  （テスト専用の面）をかぶせ、**同じ並びと突き合わせる 1 行を足す**こと。
+
 #### WindowCache
 
 | Field | Detail |
@@ -1034,6 +1081,7 @@ pub enum GridError {
 ## Testing Strategy
 
 ### Unit Tests
+- フロントエンド（`src/features/grid/renderer/`）: **移植口の契約を偽の実装 2 つで固定する**（7.1）。走らせ手は `vitest`（`npm run test`。CI は既存の `test` ジョブの段）。走らせる環境は `node` であり、器（DOM）を持たない — 移植口が受け取る `HTMLElement` は、偽の実装が**触れないことを確かめる**代役である（どの属性を読んでも投げる）。**7.2 の Glide の実装は実物の canvas を要するので、環境はそこで見直す**（`vitest.config.ts` に申し送りを書いてある）
 - `RowOrder`: 同一の `Document` と `ViewSpec` から常に同一の順序が出ること。同値の行が `RowId` の順に並ぶこと（8.3, 8.5）
 - `UndoStack`: 各命令の逆命令が元の状態を復元すること。とくに `RemoveRows` の往復（6.6, 9.2）
 - `PasteCodec`: 表形式テキストの解釈と、行と列の区切りを含む値の往復（7.2, 7.3）

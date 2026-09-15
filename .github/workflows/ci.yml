@@ -194,6 +194,25 @@ jobs:
         shell: bash
         run: npm run lint
 
+      # フロントエンドのテスト（tasks.md 7.1。走らせ手は vitest。**導入の理由と版の選び方は
+      # `package.json` の `//devDependencies` にある**）。群 7・群 8 のフロントエンドのタスクは
+      # 「テストで示す」ことを繰り返し要求するため、7.1 が移植口の契約を偽の実装で固定するのと
+      # 同じ作業で走らせ手ごと入れた。
+      #   - **既存の `test` ジョブへ段を足すだけである**（ジョブもワークフローも新設しない。
+      #     要件 6.2、タスク 1.4 の申し送り）。**3 OS すべてで走らせる** — 要るのは先の `npm ci`
+      #     が入れる devDependency だけで、追加のシステム依存も表示先も要らない（走らせる環境は
+      #     `node` であり、器（DOM）を使わない理由は `vitest.config.ts` にある）。
+      #   - `npm run test` は `vitest run`（見張りを立てない）。
+      #   - **位置が `Typecheck` と `Lint` の後である理由**: 移植口の面が広がっていないことの
+      #     検査（`src/features/grid/renderer/port.test.ts`）は型の等価を `const` の注釈として
+      #     書いてあり、その効き手は `tsc --noEmit` である（vitest の実行では型の誤りは見えない）。
+      #     どの段が何を落とすのかを読み違えないよう、型検査の後に置く。
+      # Windows の npm は既定で cmd.exe からスクリプトを起動するため `shell: bash` を明示する
+      # （`lint` / `check:shared-assets` と同じ扱い）。
+      - name: Test frontend (vitest)
+        shell: bash
+        run: npm run test
+
       # 配信先中立な資産の依存検査（要件 9.6、tasks.md 9.4）。`src/shared/` はデスクトップ内と
       # LAN 配信の Web ページの両方で動くため、Tauri の通信境界（`@tauri-apps/*` /
       # `window.__TAURI__` / `../ipc`）に依存してはならない。検査は TypeScript の構文木を
