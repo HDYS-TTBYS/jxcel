@@ -127,8 +127,7 @@
  *     解釈せずに両方を並べる。**前の値を落とさない**ことは検査が固定する
  *   - **残った違反**（要件 3.5）— 適用のあとに再検証した列の違反の位置（`GridEditOutcome.violations`）
  *     と、**シート全体**の違反の総数（`violation_total`。適応層が `GridSession::violation_total()`
- *     から写す — **再検証した列に閉じない**。閉じているのは位置の一覧のほうである）で
- *     あり、シート全体の数ではない（生成物の doc。シート全体を保つのは 6.2 の適応層である）。
+ *     から写す — **再検証した列に閉じない**。閉じているのは位置の一覧のほうである）。
  *     **値は文書に残っている** — 判定する側（`schema-engine`）は `WriteOrigin::Edit` を決して
  *     拒否せず、`grid_apply_edit` は適合しない値も破棄せずに返す（`src-tauri/src/commands/grid.rs`
  *     の同コマンドの docs）。したがって 3.5 の「保持」は**画面が値を捨てないこと**で満たす
@@ -145,8 +144,8 @@
  *   `onPaste`）を実装で置き換える。8.1 はそれらを `onUnavailable` へ流すだけである
  *   （**黙って何もしない実装にしない** — `onCopy` が空文字を返せばクリップボード
  *   が空になり、`onPaste` が黙って捨てれば貼り付けが消える。無反応より悪い）
- * - **8.4（違反の提示）**: 上の「8.4 が引き取るもの」。**違反の総数をシート全体へ広げる**のも
- *   8.4 である（本 module が受け取る `violation_total` は**シート全体**の数である）
+ * - **8.4（違反の提示）**: 上の「8.4 が引き取るもの」（本 module が受け取る `violation_total` は
+ *   6.2 の時点で既に**シート全体**の数である。広げる作業は残っていない）
  * - **8.6（行の増減）**: 行数が変わったら `WindowCache.clear(rowCount)`（7.3 の申し送り）。
  *   `SetCells` は行数を変えないので、本 module の経路では要らない
  * - **8.8（列幅・列順）**: 列幅と表示上の列順は `createDisplayState`（7.5）が持つ。変化は
@@ -298,8 +297,8 @@ export interface CellEditReport {
   /** 確定のあとに残っている違反の位置（要件 3.5）。 */
   readonly violations: readonly GridViolationLocation[];
   /**
-   * 違反の総数。**シート全体**の数である（適応層が `GridSession::violation_total()` から写す）
-   * （生成物の `GridEditOutcome.violation_total` の doc。広げるのは 8.4 である）。
+   * 違反の総数。**シート全体**の数である（生成物の `GridEditOutcome.violation_total` の doc。
+   * 適応層が `GridSession::violation_total()` から写す — 再検証した列には閉じない）。
    */
   readonly violationTotal: number;
 }
