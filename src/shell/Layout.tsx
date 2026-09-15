@@ -126,6 +126,7 @@ import {
   DIAGNOSTICS_SCREEN_ID,
   installDiagnosticsRequests,
 } from "../features/diagnostics/requests";
+import { GRID_SCREEN_ID, GridScreen } from "../features/grid/GridScreen";
 import {
   EmptyWindowScreen,
   EMPTY_WINDOW_SCREEN_ID,
@@ -191,6 +192,12 @@ function InitialScreen(): ReactElement {
  * 3 OS 描画確認用の 2 画面（`src/features/smoke/`）をここへ足した** — 実用画面ではなく、
  * 育てるのは `data-grid` と `macro-editor-lsp` である。
  *
+ * **タスク 8.1（`data-grid`）がグリッド画面（`src/features/grid/GridScreen.tsx`）を 1 件
+ * 足した。`initial` は動かしていない**（既定の初期画面は 9.6 の空ウィンドウの画面のままである）。
+ * グリッド画面は 9.7 の 2 画面と違って**検証専用ではない**ので、`__JXCEL_VERIFICATION__` の
+ * 分岐の外（この配列）へ直接足す — 移植口の実装（`GlideAdapter`）が製品の描画層だからである
+ * （`scripts/check-shipping-bundle.sh` が禁じているのは検証専用の識別子だけである）。
+ *
  * **`initial` が 1 つの識別子であることは 9.1 の契約である**（ウィンドウごとに初期画面を
  * 選ぶ仕組みは無い）。**ウィンドウの状態に応じて提示を変えるのは 9.6 の画面自身の責務**であり、
  * この配列は「最初にどの画面を領域へ差し込むか」だけを決める。その状態をどこから読むかは
@@ -232,6 +239,11 @@ export const SHELL_SCREEN_REGISTRY: ShellScreenRegistry = {
       id: EDITOR_SMOKE_SCREEN_ID,
       title: "描画確認: 文字編集",
       component: EditorSmoke,
+    },
+    {
+      id: GRID_SCREEN_ID,
+      title: "グリッド",
+      component: GridScreen,
     },
   ],
 };

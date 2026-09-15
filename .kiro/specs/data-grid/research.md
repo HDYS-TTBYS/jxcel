@@ -828,6 +828,114 @@ bindings_drift.rs` のドリフト検査が「生成物＝生成器の出力」�
   `null` へ移す口（`toRenderProbeResult`）を用意し、doc でも明記しているが、**強制は型の側では
   できない**（設計の signature を変えない限り）
 
+## 実測と固定: グリッド画面の骨格と 2 つの空の状態（タスク 8.1）
+
+### 決めたこと（実装の形）
+
+- 画面は `src/features/grid/GridScreen.tsx` に 1 つ置き、`SHELL_SCREEN_REGISTRY`
+  （`src/shell/Layout.tsx`）へ **`grid` の 1 件だけ**を足した。**`initial` は動かしていない**
+  （既定の初期画面は 9.6 の空ウィンドウの画面のまま。`GridScreen.test.ts` が登録簿の並びごと
+  固定する）
+- 境界の口は `src/features/grid/gridClient.ts` に集めた（4 つ。`readDocumentState` /
+  `openSheet` / `setView` / `readWindow`）。**画面は `invoke` もコマンド名も知らない**
+- 描画は `react-dom/server` の `renderToStaticMarkup` で読み、読み込みの流れは純粋な非同期関数
+  （`loadGridScreenState`）、状態機械は純粋な遷移として検査する（環境は `node` のまま。
+  `jsdom` を足していない）
+
+### 2 つの空の状態の**判定する欄**（要件 1.5 / 1.6）
+
+| 状態 | 判定する欄 | 画面 |
+|---|---|---|
+| 列が 1 本も宣言されていない（1.6） | `document_state` の `DocumentSheet.columns === 0` | **表を描かず**「スキーマが未定義です」 |
+| 列はあるが行が 1 件も無い（1.5） | `grid_open_sheet` の `GridSheetSummary.row_count === 0` | **列の構成を示したうえで**「行がありません」 |
+| 行がある | `row_count > 0` | 表を描く |
+
+**要件 1.6 は `grid_open_sheet` の応答では届かない。**列 0 本の計画は Rust 側の
+`GridSession::open` が `SchemaUnusable` として拒むため（`crates/data-grid/src/api.rs` の
+`open` の docs「その提示は画面がセッション無しに行う」）、画面は**開く前に**セッションの状態で
+判定する。標本で確かめた（`data-grid` を直接呼ぶ確認器。後述）:
+
+```
+== /tmp/grid-cols-0.jxcel
+  シート 標本シート 列 = [] 行 = 0
+  計画の列数 = 0
+  GridSession::open = 失敗: schema of sheet 01ARZ3NDEKTSV4RRFFQ69G5FB0 is unusable
+== /tmp/grid-rows-0.jxcel
+  シート 標本シート 列 = ["name", "count", "blob"] 行 = 0
+  計画の列数 = 3
+  GridSession::open = 成功
+```
+
+### 起動の観測（`tech.md` の要求。**実物を起動して a11y の木を読んだ**）
+
+検証用の形（`JXCEL_VERIFICATION_BUILD=1 npx tauri build --no-bundle --features
+verification-triggers`。16 秒。Rust 側はキャッシュが効いた）を、
+`JXCEL_VERIFICATION_INITIAL_SCREEN=grid` と**文書を引数に渡して**起動し、
+`GTK_MODULES=gail:atk-bridge` の下でアクセシビリティの木を `busctl` で読んだ
+（7.2 の `scripts/check-port-interaction.sh` と同じ読み方。**一時的な読み手であり、
+リポジトリには残していない**）。
+
+**標本の作り方**（リポジトリの外で作った。生成器は残していない）: 2 つとも
+`document-format` の**公開面**（`DocumentPart` / `SchemaCodec` / `RowsCodec` / `ManifestPart` /
+`ContainerCodec`）で作った本物のコンテナである。0 行の標本はスキーマに列を宣言し、
+40 行の標本は既存のゴールデン fixture（`crates/document-format/tests/fixtures/golden/v1/anchored.jxcel`）
+を読み、**ルートスキーマだけを「3 列を宣言する」形へ差し替えて**書き出した（fixture の
+スキーマは列 0 本であり、そのままでは計画の列数と一致しないため）。
+
+| 標本 | a11y の木に出たもの | 記録（`jxcel.log`） |
+|---|---|---|
+| 列 0 本・行 0 件 | `画面: グリッド` → `グリッド` → **`スキーマが未定義です`** | `document_state` の 1 行**だけ**（`grid_open_sheet` も `grid_set_view` も現れない）|
+| 列 3 本・行 0 件 | `画面: グリッド` → `グリッド` → `行がありません` + 列の構成（`name` / `count` / `blob`。木の並びは逆順に読める） | `grid_open_sheet: … 列 = 3 / 行 = 0`（`grid_set_view` は現れない）|
+| 列 3 本・行 40 件 | （表は canvas なので木に文字は出ない。空の状態の提示は出ない） | `grid_open_sheet: … 列 = 3 / 行 = 40` → `grid_set_view: 可視 = 40 / 隠れ = 0 / 違反 = 60` → `grid_rows_window: 開始序数 = 0 / 要求行数 = 40 / 応答バイト数 = 4773` |
+| 文書なし | `画面: グリッド` → `シートを開けませんでした` + **`再試行`** | `document_state`（状態 = なし）|
+
+**「行 40 件」の行がこの観測の要である。**最初の実装では応答が **33 バイト**（頭だけ＝行 0 件）
+であり、表は読み込み中のままだった — 原因は `grid_open_sheet` のあとに
+**`grid_set_view` を呼んでいなかった**ことである（`GridSession` は可視行の順序を `set_view` で
+導出する）。1 度だけ空の指定を渡すようにして、はじめて窓が行を運ぶようになった（4773 バイト）。
+**単体検査では見つからない誤りであり、起動して記録を読んだから見つかった。**
+
+### 起動の観測で見つかった 2 つ目の誤り（引数の形）
+
+`grid_open_sheet` の最初の呼び出しは**封筒の失敗ではなく `invoke` の拒否**として現れ、画面は
+「シートを開けませんでした」を出した（**症状から原因が読めない**）。原因は payload の形である —
+Tauri が縛る鍵は**コマンドの引数の名前**であり、`fn grid_open_sheet(app, window, request)`
+なので `{ request: { sheet } }` でなければならない（`{ sheet }` では復号が失敗する）。
+`gridClient.test.ts` が `invoke` を差し替えて**4 つの口の綴りと引数の形**を固定するようにした
+（**この層を飛ばす `GridScreen.test.ts` では捕まらない**）。
+
+### 変異の実測（検査が生きていること）
+
+| 入れた変異 | 落ちた検査 |
+|---|---|
+| `ROOT_STYLE` に `borderColor: "#123456"` を足す | 「色の値そのものを 1 つも書かない」（`md5` は変異前後で同一に戻した: `3771c09dd360184b3633e26eec3949ec`）|
+| `var(${APPEARANCE_VARS.screenPanel})` を `var(--glide-accent)` に置き換える | 「参照するカスタムプロパティは器の 10 本だけである」（`var(` の出現数と参照の数が合わない）|
+| `openSheet` を `{ sheet }` で包む形へ戻す | 「シートを開く要求は `request` という名前の引数で包む」 |
+
+### `gridClient.ts` を作った理由（**作った**）
+
+design.md の File Structure Plan が名指ししており、実際に 3 つの利点があった — ① 画面から
+コマンドの綴りを追い出す（綴りに無い名前は `CommandName` / `RawCommandName` の型で落ちる）、
+② 画面の検査が**境界を呼ばずに**流れを読める（偽の実装を渡す）、③ 生バイト経路の引数の形
+（バッファそのもの）と `request` の包みを 1 箇所に閉じる。**③ は実測で裏付けられた**
+（上の「引数の形」）。
+
+### 限界（正直な記録）
+
+- **表そのものの見え方は本タスクの主張ではない。**canvas に何が描かれたかは a11y の木からは
+  読めない。本タスクで観測したのは「窓が行を運んだ」（4773 バイト）までであり、
+  10 万行の走査・選択の区別・列幅の操作は 7.2 の一時的な段（`scripts/check-port-interaction.sh`）
+  と 9.2 / 9.3 が担う
+- **起動の観測は Linux のみである**（この開発機）。3 OS の観測は 9.2 の台本が担う
+- **標本を作る生成器は残していない**（本タスクの成果物ではない）。2 つの空の状態を再現するには、
+  同じ手順（`document-format` の公開面で列を宣言した 0 行の文書を作る）を繰り返す
+- **配色の走査は本 module の源 1 つに限る。**移植口の実装（`glideAdapter.tsx`）は違反の印の色を
+  既定で 1 つ持つ（`RendererSpec` に色を運ぶ欄が無い）。画面から配色を決めるには面を広げる判断が
+  要る（8.4）
+- **移植口の 5 つの操作は結線していない**（8.3〜8.9）。届いた通知は画面内の告知 1 行へ流す
+  （黙って捨てない）。**「まだ使えません」という告知は 8.2〜8.9 がそれぞれの欄を実装した時点で
+  出なくなる** — 実装の穴を隠さないための暫定の提示である
+
 ## References
 
 - [Glide Data Grid](https://github.com/glideapps/glide-data-grid) — MIT、canvas、`getCellContent` が引きに来る形

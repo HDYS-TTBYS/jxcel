@@ -1,0 +1,123 @@
+/**
+ * グリッド画面が境界へ出す呼び出しの**薄いラッパ**（tasks.md 8.1。design.md「File Structure
+ * Plan」の `src/features/grid/gridClient.ts`。6.2 のコマンドと `src/ipc/client.ts` の間に置く）。
+ *
+ * 所有: `GridClient`（design.md「Components and Interfaces → Frontend Layer」の GridScreen が
+ * 使う境界の口）。
+ *
+ * # なぜ 1 枚はさむのか（画面から綴りを追い出す）
+ *
+ * 3 つの理由がある。どれも「画面を読めるままに保つ」ためのものである。
+ *
+ * 1. **コマンドの綴りを 1 箇所に閉じる。** 画面（`./GridScreen`）は
+ *    `"document_state"` / `"grid_open_sheet"` / `"grid_rows_window"` という文字列を 1 つも
+ *    書かない。綴りを書かないので、境界の名前が変わっても画面は触らない — 触るのは
+ *    [`createGridClient`] の 3 行だけである。名前は `src/ipc/client.ts` の `CommandName` /
+ *    `RawCommandName` で型付けしてあるので、**生成物（`src/ipc/bindings.ts` の
+ *    `COMMAND_NAMES`）に無い綴りはその場で型検査が落ちる**（要件 4.1、4.2）。
+ * 2. **画面の検査が境界を呼ばずに済む。** 画面は [`GridClient`] を受け取る（既定は
+ *    [`createGridClient`]）。検査は応答を固定した偽の実装を渡せるので、**IPC も Tauri も
+ *    DOM も無しに**画面の流れ（開く・失敗・再試行）を読める。
+ * 3. **生バイト経路の引数の形を 1 箇所に保つ。** `grid_rows_window` の引数は**バッファ全体**で
+ *    あり、入れ子（`{ argument: buffer }`）にすると Tauri が数値の配列へ変換して**例外を
+ *    投げずに空の窓を返す**（`src-tauri/src/commands/bulk.rs` のモジュール docs「経路の性質」、
+ *    および `./windowCache` の `defaultTransport`）。引数の組み立て（`encodeWindowRequest`）は
+ *    7.3 の窓の記憶が持ち、本 module は**その 1 つの引数をそのまま渡す**だけである。
+ *
+ * # 判定を持たない
+ *
+ * 本 module は封筒を開けない。成功と失敗は `status` で判別できる型のまま返り、**どちらの腕を
+ * どう見せるか**は画面（`./GridScreen`）が決める（design.md「Error Handling」— 失敗の理由の
+ * 文言は適応層が組み立て、見せ方を決めるのは呼び出し元である）。例外を投げるのは移送そのものが
+ * 拒否されたときだけであり、それも `invoke` の拒否として `src/ipc/client.ts` が封筒の失敗へ
+ * 写す（`FrontendIpcError`）。
+ */
+import { invokeCommand, invokeRaw } from "../../ipc/client";
+import type { CommandName, IpcClientResult, RawCommandName } from "../../ipc/client";
+import type {
+  DocumentStateResponse,
+  GridOpenResponse,
+  GridViewResponse,
+  GridViewSpec,
+} from "../../ipc/bindings";
+
+/**
+ * セッションの状態を問い合わせるコマンド（タスク 3.1 の口。要件 1.6、1.7）。
+ *
+ * 画面がここから読むのは**シートの一覧（識別子・名前・列数・行数）**である。列数は要件 1.6 の
+ * 判定に要る（後述）。
+ */
+const DOCUMENT_STATE_COMMAND: CommandName = "document_state";
+
+/** 表示するシートを開くコマンド（6.2。要件 1.1、1.5、1.6）。 */
+const GRID_OPEN_SHEET_COMMAND: CommandName = "grid_open_sheet";
+
+/**
+ * 表示の指定（並べ替え・絞り込み・展開）を適用するコマンド（6.2。要件 8.3、8.4、8.7）。
+ *
+ * **開いた直後に 1 度だけ呼ぶ。** `GridSession` は**可視行の順序をこの呼び出しで導出する**
+ * ため（`crates/data-grid/src/api.rs` の `set_view` が `recompute_order` を行う）、呼ばずに
+ * 窓を要求すると**どの窓も行 0 件（頭だけの 33 バイト）で返る** — 表は読み込み中のままに
+ * なる（8.1 の起動観測で実測した）。空の指定は「絞り込み無し・並べ替え無し・展開無し」で
+ * あり、文書の行順と宣言の列がそのまま現れる（`GridViewSpec` の doc）。
+ */
+const GRID_SET_VIEW_COMMAND: CommandName = "grid_set_view";
+
+/** 窓を生バイトで取るコマンド（6.2 / 7.3。要件 1.4、11.2）。 */
+const GRID_ROWS_WINDOW_COMMAND: RawCommandName = "grid_rows_window";
+
+/**
+ * 表示の指定を変えない指定（**空の指定＝絞り込み無し・並べ替え無し・展開無し**）。
+ *
+ * 8.1 は開いた直後にこれ 1 つだけを適用し、**並べ替え・絞り込み・展開の操作は 8.8 の担当**
+ * である（本 module は操作を持たない）。
+ */
+export const EMPTY_GRID_VIEW: GridViewSpec = { sort: [], filters: [], expansion: [] };
+
+/** 画面が境界へ出す口。**この 4 つだけである。** */
+export interface GridClient {
+  /** 呼び出し元ウィンドウのセッションの状態（シートの一覧を含む）。 */
+  readonly readDocumentState: () => Promise<IpcClientResult<DocumentStateResponse>>;
+  /**
+   * 表示するシートを開く。**シートは識別子の文字列で選ぶ**（64 ビット整数を境界へ出さない
+   * 規約。`GridOpenRequest` の doc）ので、呼び出し側は `DocumentSheet.id` をそのまま渡す。
+   *
+   * 応答の `sheet`（`GridSheetSummary`）が**列の構成とシートの行数**を運ぶ — 要件 1.5 の
+   * 「列はあるが行が無い」はここから読む。要件 1.6 の「列が 1 本も無い」はここへは来ない
+   * （列 0 本の計画は Rust 側が `SchemaUnusable` として拒む。`./GridScreen` の module doc）。
+   */
+  readonly openSheet: (sheet: string) => Promise<IpcClientResult<GridOpenResponse>>;
+  /**
+   * 表示の指定を適用し、**可視行の順序を導出させる**（要件 8.3、8.4、8.7）。
+   *
+   * 応答の `visible_rows` が**窓が覆う行数**である（窓の区間は可視行の序数で表される。
+   * `RowSpan` の doc）。8.1 は [`EMPTY_GRID_VIEW`] だけを渡す。
+   */
+  readonly setView: (view: GridViewSpec) => Promise<IpcClientResult<GridViewResponse>>;
+  /**
+   * 窓を 1 つ取る（**引数はバッファそのもの**。上のモジュール doc の 3）。失敗は拒否として
+   * 現れ、呼び出し側（7.3 の窓の記憶）は**未取得のまま残して次の引きで再試行する**
+   * （設計の誤り表「経路の失敗」）。本 module は拒否を握らない。
+   */
+  readonly readWindow: (argument: Uint8Array) => Promise<ArrayBuffer>;
+}
+
+/**
+ * 既定の実装。**`src/ipc/client.ts` の 2 つの入口へ委譲するだけである**（型付け以上のことを
+ * しない。判定も文言も持たない）。
+ *
+ * **要求の型は `request` という名前の引数で渡す。** `grid_open_sheet` の実体は
+ * `fn grid_open_sheet(app, window, request: GridOpenRequest)`（`src-tauri/src/commands/grid.rs`）
+ * であり、Tauri が縛る payload の鍵は**引数の名前**である（`{ request: { sheet } }`）。
+ * `{ sheet }` を直接渡すと**コマンドへ届く前に復号が失敗し**、封筒ではなく `invoke` の拒否と
+ * して現れる（画面はそれを失敗として扱うが、原因は引数の形である）。
+ */
+export function createGridClient(): GridClient {
+  return {
+    readDocumentState: () => invokeCommand<DocumentStateResponse>(DOCUMENT_STATE_COMMAND),
+    openSheet: (sheet) =>
+      invokeCommand<GridOpenResponse>(GRID_OPEN_SHEET_COMMAND, { request: { sheet } }),
+    setView: (view) => invokeCommand<GridViewResponse>(GRID_SET_VIEW_COMMAND, { request: { view } }),
+    readWindow: (argument) => invokeRaw(GRID_ROWS_WINDOW_COMMAND, argument),
+  };
+}
