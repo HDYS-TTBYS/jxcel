@@ -1,5 +1,5 @@
-//! 取り消し履歴（命令と逆命令の対）の検査（データグリッドのタスク 4.1。data-grid 要件 6.6, 7.6,
-//! 9.1, 9.5）。
+//! 取り消し履歴（命令と逆命令の対）の検査（データグリッドのタスク 4.1 と 4.2。data-grid 要件
+//! 6.6, 7.6, 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7）。
 //!
 //! このファイルは統合テストであり、クレートの**公開面だけ**を使う。固定するのは次のものである。
 //!
@@ -23,6 +23,19 @@
 //! 7. **決定性**。同じ文書と同じ命令の並びは同じ**形**の履歴を与える（識別子は実行ごとに
 //!    変わるため比較しない。標本の契約）。
 //!
+//! タスク 4.2 が足すのは次の 3 つである。
+//!
+//! 8. **取り消しとやり直しがドキュメントへ適用される**（要件 9.2, 9.3）。スタックと適用を
+//!    1 つの口で繋ぎ（[`data_grid::UndoRedo`]）、取り消しは適用前の状態へ戻し、やり直しは
+//!    もう一度適用する。セルの編集・行の追加・行の削除・貼り付けの 4 つについて、
+//!    **文書全体**（識別子・値・位置）を突き合わせる。
+//! 9. **結果が影響を受けた行を運ぶ**（要件 9.2, 9.3 の「結果」）。取り消し・やり直しの
+//!    結果は [`data_grid::EditOutcome`] であり、`affected` がその操作の触れた行である。
+//! 10. **上限による追い出しと、やり直しの対象の破棄**（要件 9.4, 9.6）。上限を超えたら
+//!     **古い側から**捨て、上限を超える回数の編集の後では**最も古い操作が取り消せない**。
+//!     上限 0 は「1 件も保持しない」。取り消しの後に新しい操作を積むと、やり直しの対象
+//!     （取り消した対）は**破棄される**。
+//!
 //! # 前提を先に確かめる
 //!
 //! 標本（`tests/common/sample.rs`）を使う検査は、**標本がその検査の前提を満たしていることを
@@ -41,8 +54,9 @@ mod common;
 
 use common::sample::{sample, Sample, SampleEditParts, SampleOptions};
 use data_grid::{
-    CellAddress, ColumnIndex, EditApply, EditCommand, FilterSpec, HistoryCommand, HistoryPair,
-    RowOrder, RowOrdinal, SortKey, UndoEntry, UndoLabel, UndoStack, ViewSpec,
+    CellAddress, ColumnIndex, EditApply, EditCommand, EditOutcome, FilterSpec, GridError,
+    HistoryCommand, HistoryPair, RowOrder, RowOrdinal, SortKey, UndoEntry, UndoLabel, UndoRedo,
+    UndoStack, ViewSpec,
 };
 use document_format::{CellValue, Document, RowId, SchemaPart, SheetId};
 use schema_engine::{
@@ -1453,4 +1467,869 @@ fn the_shape_of_the_history_is_deterministic() {
     }
 
     assert_eq!(shape(), shape(), "同じ命令の並びは同じ形の履歴を与える");
+}
+
+
+// ---------------------------------------------------------------------------
+// 取り消しとやり直しの適用（タスク 4.2。要件 9.2, 9.3）
+// ---------------------------------------------------------------------------
+
+/// 標本の整数の列（列 1）へ書く、**標本の元の値と決して衝突しない**数。
+///
+/// 標本の整数は 1〜1000 であり（`tests/common/sample.rs` の列 1）、宣言の制約は 1〜100000 で
+/// ある。上限と追い出しの検査は「どの操作の値が残っているか」で境界を突き合わせるため、
+/// 書く値が元の値と等しいと**操作が文書を変えず**、状態の比較が操作の効果を捉えられなくなる。
+/// 範囲外（1001 以上）の値を使ってこの曖昧さを消す。
+fn distinct_value(offset: usize) -> String {
+    (1001 + offset).to_string()
+}
+
+/// 標本・適用の経路・履歴・**適用前と各操作の後の文書全体**をまとめた足場。
+///
+/// 検査の本体は「操作 → 取り消し → やり直し」の往復であり、そのたびに**文書全体**
+/// （識別子・値・位置）を突き合わせる。覚えるのは往復の比較のためだけであり、標本の契約
+/// （識別子は実行ごとに変わる）に反しない — **同一の実行の中でしか比べない**。
+struct Session {
+    fixture: Fixture,
+    apply: EditApply,
+    stack: UndoStack,
+    /// `states[i]` は `i` 件目までの操作を**すべて適用した**後の文書全体（`states[0]` は適用前）。
+    states: Vec<Vec<(RowId, Vec<CellValue>)>>,
+}
+
+impl Session {
+    /// `limit` 件を保持する履歴で足場を作る（履歴は空、状態は適用前の 1 つだけ）。
+    ///
+    /// **前提を先に確かめる**（tasks.md の Implementation Notes の規則）。とくに
+    /// [`distinct_value`] が標本の既存の値と**衝突しない**ことを、依拠する前に表明する —
+    /// 衝突していれば「操作が文書を変えない」ことになり、状態の比較が操作の効果を捉えられない。
+    fn new(rows: usize, columns: usize, limit: usize) -> Self {
+        let fixture = Fixture::clean(rows, columns);
+        for index in 0..rows {
+            let value = fixture.value_at(fixture.row(index), INT_COLUMN);
+            match value {
+                CellValue::Int(found) => assert!(
+                    (1..=1000).contains(&found),
+                    "前提: 標本の整数は 1〜1000（実際 {found}）。distinct_value と衝突しない"
+                ),
+                other => panic!("前提: 整数の列の値は整数である: {other:?}"),
+            }
+        }
+        // 標本の整数はすべて 1〜1000 であり、`distinct_value` は 1001 以上を返す
+        // （上の表明がその根拠である）。
+        assert_eq!("1001", distinct_value(0), "前提: distinct_value の下端");
+        let apply = fixture.apply();
+        let before = fixture.snapshot();
+        Self {
+            fixture,
+            apply,
+            stack: UndoStack::new(limit),
+            states: vec![before],
+        }
+    }
+
+    fn snapshot(&self) -> Vec<(RowId, Vec<CellValue>)> {
+        self.fixture.snapshot()
+    }
+
+    fn row(&self, index: usize) -> RowId {
+        self.fixture.row(index)
+    }
+
+    fn value_at(&self, row: RowId, column: usize) -> CellValue {
+        self.fixture.value_at(row, column)
+    }
+
+    fn displayed(&self) -> Vec<RowId> {
+        ids_of(self.fixture.document(), self.fixture.sheet())
+    }
+
+    /// 編集命令を適用し、対を履歴へ積み、適用後の状態を覚える（**積む唯一の口**を通る）。
+    fn edit(&mut self, command: EditCommand) -> EditOutcome {
+        let label = UndoLabel::of_edit(&command);
+        let (outcome, pair) = self
+            .apply
+            .apply_with_inverse(self.fixture.document_mut(), command)
+            .expect("編集は適用できる");
+        let pair = pair.expect("状態を変える編集は対を持つ");
+        self.stack.push(UndoEntry {
+            label,
+            inverse: pair.inverse,
+            redo: pair.redo,
+        });
+        self.states.push(self.fixture.snapshot());
+        outcome
+    }
+
+    /// セルの編集（整数の列へ、元の値と衝突しない数を書く）。
+    fn edit_int(&mut self, row: RowId, offset: usize) -> EditOutcome {
+        self.edit(set_cell(row, INT_COLUMN, &distinct_value(offset)))
+    }
+
+    /// 取り消しの生の結果（失敗も観測する検査のため）。
+    ///
+    /// 履歴と適用の経路を**借用の対**として束ねる（本検査の対象そのもの）。`self` 越しに
+    /// 2 つの可変参照を取ると借用が重なるため、フィールドを分解して束ねる。
+    fn undo_result(&mut self) -> Result<Option<EditOutcome>, GridError> {
+        let Self {
+            fixture,
+            apply,
+            stack,
+            ..
+        } = self;
+        UndoRedo::new(stack, apply).undo(fixture.document_mut())
+    }
+
+    /// やり直しの生の結果（失敗も観測する検査のため）。
+    fn redo_result(&mut self) -> Result<Option<EditOutcome>, GridError> {
+        let Self {
+            fixture,
+            apply,
+            stack,
+            ..
+        } = self;
+        UndoRedo::new(stack, apply).redo(fixture.document_mut())
+    }
+
+    /// 取り消しを 1 回適用する（**取り消せる操作がある**ことを前提にする）。
+    fn undo(&mut self) -> EditOutcome {
+        self.undo_result()
+            .expect("取り消しは適用できる")
+            .expect("取り消せる操作がある")
+    }
+
+    /// やり直しを 1 回適用する（**やり直せる操作がある**ことを前提にする）。
+    fn redo(&mut self) -> EditOutcome {
+        self.redo_result()
+            .expect("やり直しは適用できる")
+            .expect("やり直せる操作がある")
+    }
+
+    /// 履歴の並びそのもの（取り消しとやり直しが積まないことの観測に使う）。
+    fn entries(&self) -> Vec<UndoEntry> {
+        self.stack.entries().to_vec()
+    }
+}
+
+/// 取り消しが**直前の操作の前の状態**へ戻し、やり直しが**再び適用する**こと（要件 9.2, 9.3）。
+///
+/// セルの編集・行の追加・行の削除・貼り付けの 4 つを 1 つの履歴に積み、**文書全体**
+/// （識別子・値・位置）を 1 操作ずつ突き合わせる。
+#[test]
+fn an_undo_returns_to_the_state_before_the_operation_and_a_redo_applies_it_again() {
+    let mut session = Session::new(8, 13, 64);
+    let row = session.row(2);
+    let remove = vec![session.row(1), session.row(5)];
+
+    session.edit_int(row, 0);
+    session.edit(EditCommand::InsertRows {
+        at: RowOrdinal::new(3),
+        count: 2,
+    });
+    session.edit(EditCommand::RemoveRows { rows: remove });
+    // 貼り付けの `rows` は**適用の直前**の文書から取る（行の増減で識別子の集合が変わるため）。
+    let displayed = session.displayed();
+    session.edit(EditCommand::PasteRange {
+        anchor: CellAddress::new(displayed[0], ColumnIndex::new(INT_COLUMN)),
+        rows: displayed,
+        text: format!("{}\t{}\n{}\t{}", distinct_value(1), distinct_value(2), distinct_value(3), distinct_value(4)),
+    });
+
+    assert_eq!(4, session.stack.depth(), "4 つの操作が積まれている");
+    assert_eq!(5, session.states.len(), "適用前 ＋ 4 つの操作の後");
+
+    // **取り消しは 1 つずつ前の状態へ戻す**（4 → 3 → 2 → 1 → 0）。
+    for step in (0..4).rev() {
+        let outcome = session.undo();
+        assert_eq!(
+            session.states[step],
+            session.snapshot(),
+            "取り消しは操作 {} の前の状態へ戻す",
+            step + 1
+        );
+        assert!(
+            !outcome.affected.is_empty(),
+            "取り消しの結果は影響を受けた行を運ぶ（操作 {}）",
+            step + 1
+        );
+        assert_eq!(
+            4,
+            session.stack.depth(),
+            "取り消しは depth を変えない（操作 {}）",
+            step + 1
+        );
+    }
+    assert_eq!(
+        session.states[0],
+        session.snapshot(),
+        "すべて取り消すと適用前へ戻る"
+    );
+    assert!(
+        session.undo_result().expect("失敗ではない").is_none(),
+        "これ以上取り消せない（`None` は失敗ではない）"
+    );
+
+    // **やり直しは再び適用する**（0 → 1 → 2 → 3 → 4）。
+    for step in 1..5 {
+        let outcome = session.redo();
+        assert_eq!(
+            session.states[step],
+            session.snapshot(),
+            "やり直しは操作 {step} を再び適用する"
+        );
+        assert!(
+            !outcome.affected.is_empty(),
+            "やり直しの結果も影響を受けた行を運ぶ（操作 {step}）"
+        );
+        assert_eq!(
+            4,
+            session.stack.depth(),
+            "やり直しは depth を変えない（操作 {step}）"
+        );
+    }
+    assert!(
+        session.redo_result().expect("失敗ではない").is_none(),
+        "これ以上やり直せない（`None` は失敗ではない）"
+    );
+    assert_eq!(4, session.stack.depth(), "往復しても積んだ件数は変わらない");
+}
+
+/// 取り消しとやり直しの**結果が影響を受けた行を運ぶ**こと（要件 9.2, 9.3 の「結果」）。
+///
+/// セルの編集では**編集した行**、行の追加では**挿入された行**、行の削除では**取り除かれた行**、
+/// 貼り付けでは**書いた行**である。4 つの操作それぞれで、取り消しとやり直しの双方を確かめる。
+#[test]
+fn the_result_of_an_undo_and_a_redo_carries_the_rows_it_touched() {
+    // --- セルの編集 ---
+    let mut session = Session::new(8, 13, 64);
+    let row = session.row(2);
+    let applied = session.edit_int(row, 0);
+    assert_eq!(vec![row], applied.affected, "編集は編集した行を報告する");
+    assert_eq!(
+        vec![row],
+        session.undo().affected,
+        "取り消しは編集した行を運ぶ"
+    );
+    assert_eq!(
+        vec![row],
+        session.redo().affected,
+        "やり直しも編集した行を運ぶ"
+    );
+
+    // --- 行の追加 ---
+    let mut session = Session::new(8, 13, 64);
+    let inserted = session
+        .edit(EditCommand::InsertRows {
+            at: RowOrdinal::new(3),
+            count: 2,
+        })
+        .affected;
+    assert_eq!(2, inserted.len(), "挿入した 2 行が報告される");
+    assert_eq!(
+        inserted,
+        session.undo().affected,
+        "取り消しは挿入された行（取り除く行）を運ぶ"
+    );
+    assert_eq!(
+        inserted,
+        session.redo().affected,
+        "やり直しも同じ行を運ぶ"
+    );
+
+    // --- 行の削除 ---
+    let mut session = Session::new(8, 13, 64);
+    let removed = vec![session.row(2), session.row(5)];
+    let applied = session.edit(EditCommand::RemoveRows {
+        rows: removed.clone(),
+    });
+    assert_eq!(removed, applied.affected, "削除は取り除かれた行を報告する");
+    assert_eq!(
+        removed,
+        session.undo().affected,
+        "取り消しは戻した行を運ぶ"
+    );
+    assert_eq!(
+        removed,
+        session.redo().affected,
+        "やり直しも同じ行を運ぶ"
+    );
+
+    // --- 貼り付け ---
+    let mut session = Session::new(8, 13, 64);
+    let displayed = session.displayed();
+    let written: Vec<RowId> = displayed.iter().copied().take(3).collect();
+    let applied = session.edit(EditCommand::PasteRange {
+        anchor: CellAddress::new(displayed[0], ColumnIndex::new(INT_COLUMN)),
+        rows: displayed,
+        text: format!(
+            "{}\n{}\n{}",
+            distinct_value(0),
+            distinct_value(1),
+            distinct_value(2)
+        ),
+    });
+    assert_eq!(written, applied.affected, "貼り付けは書いた行を報告する");
+    assert_eq!(
+        written,
+        session.undo().affected,
+        "取り消しは書いた行を運ぶ"
+    );
+    assert_eq!(
+        written,
+        session.redo().affected,
+        "やり直しも書いた行を運ぶ"
+    );
+}
+
+/// 取り消しとやり直しが**履歴へ積まれない**こと（要件 9.2, 9.3 と「登録口は `push` 1 つ」の
+/// 交わり）。
+///
+/// 積むと「取り消しの取り消し」になり、同じ操作が 2 回適用される経路ができる。したがって
+/// 2 回目の取り消しは**さらに前**へ戻り（前へ進まず）、履歴の並びも件数も変わらない。
+#[test]
+fn an_undo_and_a_redo_do_not_become_history_entries() {
+    let mut session = Session::new(6, 13, 64);
+    let row = session.row(1);
+    session.edit_int(row, 0);
+    session.edit_int(row, 1);
+    let depth = session.stack.depth();
+    let entries = session.entries();
+    assert_eq!(2, depth, "2 つの編集が積まれている");
+
+    session.undo();
+    session.undo();
+    assert_eq!(depth, session.stack.depth(), "取り消しは depth を変えない");
+    assert_eq!(
+        entries,
+        session.entries(),
+        "取り消しは履歴の並びを 1 件も変えない"
+    );
+    assert_eq!(
+        session.states[0],
+        session.snapshot(),
+        "2 回目の取り消しは**さらに前**へ戻る（取り消しを積んでいれば前へ進んでしまう）"
+    );
+
+    session.redo();
+    session.redo();
+    assert_eq!(depth, session.stack.depth(), "やり直しも depth を変えない");
+    assert_eq!(
+        entries,
+        session.entries(),
+        "やり直しも履歴の並びを 1 件も変えない"
+    );
+    assert_eq!(
+        session.states[2],
+        session.snapshot(),
+        "2 回のやり直しで最新の状態へ戻る"
+    );
+}
+
+/// **取り消しの後に新しい操作が行われたとき、やり直しの対象が破棄される**こと（要件 9.4）。
+///
+/// A を積む → B を積む → 取り消す（位置が A の直後へ戻る）→ C を積むと、**B はもう
+/// やり直せない**。破棄は `push` が行う（4.1 が既に実装していた）— 本検査は**破棄の帰結まで**
+/// を固定する: `redo()` が `None` を返すこと、`entries()` の並びに B が**残っていない**こと、
+/// 件数が減っていること、やり直しが C を適用することである。
+#[test]
+fn a_new_operation_after_an_undo_discards_the_redo_tail() {
+    let mut session = Session::new(6, 13, 64);
+    let row = session.row(1);
+    // A, B, C は互いに異なる値である（同じ値だと操作が文書を変えない）。
+    let (a, b, c) = (
+        distinct_value(0),
+        distinct_value(1),
+        distinct_value(2),
+    );
+    session.edit(set_cell(row, INT_COLUMN, &a));
+    session.edit(set_cell(row, INT_COLUMN, &b));
+    let after_a = session.states[1].clone();
+    assert_eq!(2, session.stack.depth(), "A と B が積まれている");
+
+    // 取り消す（位置が A の直後へ戻り、B がやり直しの対象になる）。
+    let undone = session.undo().affected;
+    assert_eq!(vec![row], undone, "取り消したのは B である");
+    assert_eq!(after_a, session.snapshot(), "A の後の状態へ戻る");
+    assert!(
+        session.redo_result().expect("失敗ではない").is_some(),
+        "前提: この時点では B をやり直せる"
+    );
+    session.undo(); // もう一度取り消して、B をやり直しの対象へ戻す。
+
+    // 取り消した状態で新しい操作 C を積む（ここで B が破棄される）。
+    session.edit(set_cell(row, INT_COLUMN, &c));
+    assert_eq!(2, session.stack.depth(), "C を積んだ後の件数（A と C。B は破棄された）");
+    assert_eq!(
+        vec![UndoLabel::CellEdit, UndoLabel::CellEdit],
+        session
+            .entries()
+            .iter()
+            .map(|entry| entry.label)
+            .collect::<Vec<_>>(),
+        "並びの区分（A と C）"
+    );
+    // **破棄された B はやり直せない**（C を積んだ時点で位置が末尾にある）。
+    assert!(
+        session.redo_result().expect("失敗ではない").is_none(),
+        "取り消した後に積むと、やり直しの対象は破棄される"
+    );
+
+    // 往復で確かめる: 取り消しは C を戻し（A の後の状態）、やり直しは C を再び適用する
+    // （破棄された B は現れない）。
+    session.undo();
+    assert_eq!(after_a, session.snapshot(), "取り消しは C を戻す");
+    session.redo();
+    assert_eq!(
+        CellValue::Int(1003),
+        session.value_at(row, INT_COLUMN),
+        "やり直しは積んだ C を適用する（破棄された B ではない）"
+    );
+    assert_eq!(2, session.stack.depth(), "往復しても件数は A と C の 2 件のまま");
+}
+
+/// **保持する操作数の上限を設け、超えたら古い側から捨てる**こと（要件 9.6）。
+///
+/// 上限 2 で 3 件積むと、**最も古い操作は取り消せない**。取り消しは 2 回で尽き（1 回目が
+/// 3 件目、2 回目が 2 件目）、**適用前の状態へは戻れない**。
+#[test]
+fn the_limit_discards_the_oldest_operations_and_they_can_no_longer_be_undone() {
+    let mut session = Session::new(6, 13, 2);
+    let row = session.row(1);
+    assert_eq!(2, session.stack.limit(), "前提: 上限は 2 件");
+
+    // 上限を 1 件超える 3 件を積む。
+    session.edit_int(row, 0);
+    session.edit_int(row, 1);
+    session.edit_int(row, 2);
+    assert_eq!(
+        2,
+        session.stack.depth(),
+        "上限に収まる（3 件目を積むときに 1 件目が捨てられた）"
+    );
+    assert_eq!(session.states[3], session.snapshot(), "3 件目まで適用した状態である");
+
+    // 1 回目の取り消しは 3 件目である（2 件目まで適用した状態へ戻る）。
+    session.undo();
+    assert_eq!(
+        CellValue::Int(1002),
+        session.value_at(row, INT_COLUMN),
+        "取り消したのは 3 件目である（その前の値は 2 件目の値 1002）"
+    );
+    assert_eq!(session.states[2], session.snapshot(), "3 件目の前の状態へ戻る");
+
+    // 2 回目の取り消しは 2 件目である（1 件目まで適用した状態へ戻る）。
+    session.undo();
+    assert_eq!(session.states[1], session.snapshot(), "2 件目の前の状態へ戻る");
+
+    // **これ以上取り消せない** — 1 件目は上限で捨てられており、履歴に無い。
+    assert!(
+        session.undo_result().expect("失敗ではない").is_none(),
+        "上限を超えて捨てられた最も古い操作は取り消せない（要件 9.6 の本体）"
+    );
+    assert_ne!(
+        session.states[0],
+        session.snapshot(),
+        "適用前の状態へは戻れない（捨てられた 1 件目の効果は取り消せない）"
+    );
+    assert_eq!(
+        CellValue::Int(1001),
+        session.value_at(row, INT_COLUMN),
+        "残っているのは保持された 2 件の結果（1 件目の値 1001）であり、適用前の値ではない"
+    );
+    assert_eq!(
+        2,
+        session.stack.depth(),
+        "取り消しは件数を変えない（上限で決まった 2 件のまま）"
+    );
+}
+
+/// 上限の**境界でどの 1 件が残るか**を、取り消しが**保持している対を 1 件も飛ばさずに**
+/// 歩くことで確かめる（要件 9.6。`cursor` の寄せ忘れの症状を直接捕まえる）。
+///
+/// 上限 2 で 3 件積むと**最後の 2 件**が残る。取り消しの 1 回目は 3 件目、2 回目は 2 件目で
+/// なければならない — 捨てた 1 件目の位置が残っていれば、取り消しが 2 件目を**飛ばして**
+/// 1 件目を指し、値が 1 段ずれる。
+#[test]
+fn the_boundary_of_eviction_keeps_the_newest_entries_and_walks_them_all() {
+    let mut session = Session::new(6, 13, 2);
+    let row = session.row(1);
+    session.edit_int(row, 0);
+    session.edit_int(row, 1);
+    session.edit_int(row, 2);
+
+    // 1 回目は 3 件目を戻す（書く前の値は 2 件目の値 1002）。
+    session.undo();
+    assert_eq!(
+        CellValue::Int(1002),
+        session.value_at(row, INT_COLUMN),
+        "1 回目の取り消しは 3 件目を戻す"
+    );
+    // 2 回目は 2 件目を戻す（書く前の値は 1 件目の値 1001。1 件目を飛ばしていれば 1003 のまま残る）。
+    session.undo();
+    assert_eq!(
+        CellValue::Int(1001),
+        session.value_at(row, INT_COLUMN),
+        "2 回目の取り消しは 2 件目を戻す（保持している対を飛ばさない）"
+    );
+    assert!(
+        session.undo_result().expect("失敗ではない").is_none(),
+        "保持している 2 件を使い切った（捨てられた 1 件目は現れない）"
+    );
+}
+
+/// 上限 **0 は「1 件も保持しない」** こと（4.2 の裁定）。
+///
+/// 0 に「無制限」を負わせると、10 万行を扱う道具で**有界でない記憶の伸びる経路**が既定で
+/// 開く。0 は「1 件も保持しない」であり、積んでも `depth()` は 0、`undo()` / `redo()` は
+/// つねに `None` である（文書はそのまま — 保持されないのは履歴だけである）。
+#[test]
+fn a_limit_of_zero_retains_nothing() {
+    let mut session = Session::new(6, 13, 0);
+    let row = session.row(1);
+    assert_eq!(0, session.stack.limit(), "前提: 上限は 0");
+
+    // 積んでも 1 件も残らない（専用の分岐ではなく、追い出しの一般の規則の帰結である）。
+    session.edit_int(row, 0);
+    assert_eq!(0, session.stack.depth(), "上限 0 は 1 件も保持しない");
+    assert!(
+        session.stack.entries().is_empty(),
+        "並びも空である（対が 1 件も残らない）"
+    );
+    assert_eq!(
+        session.states[1],
+        session.snapshot(),
+        "編集そのものは適用されている"
+    );
+
+    // 取り消しもやり直しも何も戻さない（位置の端ではなく、保持する対が 1 件も無い）。
+    assert_eq!(
+        None,
+        session.undo_result().expect("失敗ではない"),
+        "上限 0 の履歴からは取り消せない"
+    );
+    assert_eq!(
+        None,
+        session.redo_result().expect("失敗ではない"),
+        "上限 0 の履歴からはやり直せない"
+    );
+    assert_eq!(
+        session.states[1],
+        session.snapshot(),
+        "取り消せないので、文書は編集後のままである"
+    );
+
+    // 2 件目を積んでも同じである（上限 0 はつねに空）。
+    session.edit_int(row, 1);
+    assert_eq!(0, session.stack.depth(), "何件積んでも 0 のまま");
+    assert_eq!(
+        None,
+        session.undo_result().expect("失敗ではない"),
+        "やはり取り消せない"
+    );
+}
+
+/// 上限の**直下**（`limit == 1`）でも同じ規律が働くこと（境界のもう一方）。
+///
+/// 上限 1 は「直近の 1 件だけを取り消せる」である。1 件目は 2 件目を積んだ時点で捨てられる。
+#[test]
+fn a_limit_of_one_keeps_only_the_most_recent_operation() {
+    let mut session = Session::new(6, 13, 1);
+    let row = session.row(1);
+    session.edit_int(row, 0);
+    assert_eq!(1, session.stack.depth(), "1 件目が残っている");
+
+    session.edit_int(row, 1);
+    assert_eq!(1, session.stack.depth(), "2 件目を積むと 1 件目が捨てられる");
+
+    session.undo();
+    assert_eq!(
+        CellValue::Int(1001),
+        session.value_at(row, INT_COLUMN),
+        "取り消せるのは 2 件目だけである（1 件目は捨てられた。1 件目が残っていれば 1000 へ戻る）"
+    );
+    assert!(
+        session.undo_result().expect("失敗ではない").is_none(),
+        "1 件目へは戻れない"
+    );
+}
+
+/// 取り消し・やり直しの往復が、**上限を跨いでも**保持している対の中で閉じること
+/// （追い出しと往復の交わり。要件 9.2, 9.6）。
+///
+/// 上限 3 で 5 件積むと、残るのは 3 件目・4 件目・5 件目である。取り消しは 5 → 4 → 3、
+/// やり直しは 3 → 4 → 5 と進む。**捨てられた 1 件目と 2 件目は現れない**。
+#[test]
+fn a_round_trip_across_the_limit_stays_inside_the_retained_entries() {
+    let mut session = Session::new(6, 13, 3);
+    let row = session.row(1);
+    for offset in 0..5 {
+        session.edit_int(row, offset);
+    }
+    assert_eq!(3, session.stack.depth(), "上限 3 に収まる");
+
+    // 取り消しは 5 件目 → 4 件目 → 3 件目（保持している 3 件を使い切る）。
+    for expected in [1004, 1003, 1002] {
+        session.undo();
+        assert_eq!(
+            CellValue::Int(expected),
+            session.value_at(row, INT_COLUMN),
+            "取り消しは保持している対だけを順に戻す"
+        );
+    }
+    assert!(
+        session.undo_result().expect("失敗ではない").is_none(),
+        "捨てられた 2 件目へは戻れない"
+    );
+
+    // やり直しは 3 件目 → 4 件目 → 5 件目。
+    for expected in [1003, 1004, 1005] {
+        session.redo();
+        assert_eq!(
+            CellValue::Int(expected),
+            session.value_at(row, INT_COLUMN),
+            "やり直しは保持している対だけを順に進める"
+        );
+    }
+    assert!(
+        session.redo_result().expect("失敗ではない").is_none(),
+        "保持している 3 件を使い切った"
+    );
+}
+
+/// 行を補充する貼り付けの往復が、**文書全体**（識別子・値・位置）として正しいこと
+/// （要件 9.2, 9.3 と 7.6 の交わり）。
+///
+/// 取り消しは補充した行を取り除き、やり直しは**同じ識別子のまま**差し戻してから貼り付けを
+/// もう一度適用する（差し戻さなければ識別子が変わり、積んだ対が指す行が消える）。
+#[test]
+fn a_paste_that_appended_rows_round_trips_through_the_session() {
+    let mut session = Session::new(6, 13, 8);
+    let displayed = session.displayed();
+    let before = session.snapshot();
+    let anchor = displayed[displayed.len() - 2];
+    let text = (0..4)
+        .map(|offset| distinct_value(offset))
+        .collect::<Vec<_>>()
+        .join("\n");
+    session.edit(EditCommand::PasteRange {
+        anchor: CellAddress::new(anchor, ColumnIndex::new(INT_COLUMN)),
+        rows: displayed,
+        text,
+    });
+    let after = session.snapshot();
+    assert_eq!(8, after.len(), "前提: 矩形が既存の行数を超えて行が補充された");
+    assert_ne!(before, after, "前提: 貼り付けが文書を変えた");
+
+    let undone = session.undo();
+    assert_eq!(
+        before,
+        session.snapshot(),
+        "取り消しは適用前の状態へ戻す（補充した行も消える）"
+    );
+    assert_eq!(4, undone.affected.len(), "取り消しは触れた 4 行を運ぶ");
+
+    let redone = session.redo();
+    assert_eq!(
+        after,
+        session.snapshot(),
+        "やり直しは適用後の状態へ戻す（識別子も同じ）"
+    );
+    assert_eq!(4, redone.affected.len(), "やり直しも触れた 4 行を運ぶ");
+}
+
+/// 適用が失敗したとき、**履歴の位置が動かない**こと（取り消しの失敗の規律）。
+///
+/// 古い対は、対象の行がもう文書に無いために失敗しうる（対を積んだ後に、その行が別の経路で
+/// 取り除かれた場合）。位置を先に動かす実装は、文書が変わっていないのに**取り消し済みの
+/// 件数だけを増やし**、そのあとの往復が 1 件ずれる。本検査は失敗の**前後**で「次に取り消す
+/// 命令」を公開の面から突き合わせる（`undo` が返す命令そのものである）。
+#[test]
+fn a_failed_undo_leaves_the_position_unchanged() {
+    let mut session = Session::new(6, 13, 8);
+    let row = session.row(1);
+    session.edit_int(row, 0);
+    // 対象の行を、履歴を経ない経路で取り除く（積んだ対が**古くなる**）。
+    session
+        .apply
+        .apply(
+            session.fixture.document_mut(),
+            EditCommand::RemoveRows { rows: vec![row] },
+        )
+        .expect("行の削除は適用できる");
+
+    // 失敗の**前**に、次に取り消す命令を観測して位置を元へ戻しておく（前後で比べるため）。
+    let next = session.stack.undo().cloned();
+    assert!(next.is_some(), "前提: 取り消す対がある");
+    session.stack.redo();
+    let before = session.snapshot();
+    let depth = session.stack.depth();
+
+    let failed = session.undo_result();
+    assert!(
+        matches!(failed, Err(GridError::UnknownRow { .. })),
+        "取り除かれた行を戻す取り消しは失敗する: {failed:?}"
+    );
+    assert_eq!(before, session.snapshot(), "失敗した取り消しは文書を変えない");
+    assert_eq!(depth, session.stack.depth(), "失敗した取り消しは depth を変えない");
+    // **位置が動いていない** — 次に取り消す命令は、失敗の前と同じ対の逆命令である。
+    // 位置を先に動かす実装では、ここが `None`（先頭に着いている）になる。
+    assert_eq!(
+        next,
+        session.stack.undo().cloned(),
+        "失敗した取り消しは位置を動かさない（同じ対がまだ指されている）"
+    );
+}
+
+/// **失敗したやり直し**も位置を動かさない（[`UndoRedo::redo`] の規律。要件 9.3）。
+///
+/// 取り消し側（上の検査）と対である。ここが無いと、`redo` が適用の前に位置を進める実装
+/// （適用が失敗すると位置だけがずれ、次にやり直すと**別の操作**を適用してしまう）を
+/// 誰も捕まえられない（レビューの変異試験が実測）。
+#[test]
+fn a_failed_redo_leaves_the_position_unchanged() {
+    let mut session = Session::new(6, 13, 8);
+    let row = session.row(1);
+    // 対を 2 つ積む: (1) セルの編集（取り消してから、その行を取り除いて古くする）、
+    // (2) 行の追加（失敗したやり直しが**飛び越してはならない**次の操作）。
+    session.edit_int(row, 0);
+    let added = session.edit(EditCommand::InsertRows {
+        at: RowOrdinal::new(session.fixture.row_count()),
+        count: 1,
+    });
+    let added_row = added.affected[0];
+
+    // 両方を取り消して、やり直しの対象を 2 つにする。
+    session.undo_result().expect("1 回目の取り消しは成功する");
+    session.undo_result().expect("2 回目の取り消しは成功する");
+
+    // 1 つ目のやり直し（セルの編集）の対象行を、履歴を経ない経路で取り除く（対が古くなる）。
+    {
+        let mut raw = session.fixture.apply();
+        raw.apply(
+            session.fixture.document_mut(),
+            EditCommand::RemoveRows { rows: vec![row] },
+        )
+        .expect("行の削除は適用できる");
+    }
+
+    // 失敗の**前**に、次にやり直す命令を観測して位置を元へ戻しておく（前後で比べるため）。
+    let next = session.stack.redo().cloned();
+    assert!(next.is_some(), "前提: やり直す対がある");
+    session.stack.undo();
+    let before = session.snapshot();
+    let depth = session.stack.depth();
+
+    let failed = session.redo_result();
+    assert!(
+        matches!(failed, Err(GridError::UnknownRow { .. })),
+        "取り除かれた行を戻すやり直しは失敗する: {failed:?}"
+    );
+    assert_eq!(before, session.snapshot(), "失敗したやり直しは文書を変えない");
+    assert_eq!(depth, session.stack.depth(), "失敗したやり直しは depth を変えない");
+    // **位置が動いていない** — 次にやり直す命令は、失敗の前と同じものである。
+    // 位置を先に動かす実装では、2 つ目の対（行の追加）へ飛び越してしまう。
+    assert_eq!(
+        next,
+        session.stack.redo().cloned(),
+        "失敗したやり直しは位置を動かさない（同じ対がまだ指されている）"
+    );
+    // 飛び越していれば、行の追加が適用されて行が増えている（失敗の観測）。
+    assert!(
+        session
+            .fixture
+            .document()
+            .sheet_by_id(session.fixture.sheet())
+            .expect("シートがある")
+            .rows()
+            .iter()
+            .all(|candidate| candidate.id() != added_row),
+        "失敗したやり直しが次の操作を飛び越して適用している"
+    );
+}
+
+/// 同じ操作の並びが、同じ**形**の履歴と、同じ**往復の帰結**を与えること（決定性。要件 9.2）。
+///
+/// 標本の識別子は実行ごとに変わるため比較しない（tasks.md の Implementation Notes）。比較する
+/// のは履歴の形（区分と材料の行数）と、**同一の実行の中で**観測した往復の帰結である。
+#[test]
+fn the_undo_redo_round_trip_is_deterministic() {
+    /// 標本を 1 つ作り、同じ並びの操作を積んで、履歴の形と往復の帰結を返す。
+    fn run() -> (Vec<(UndoLabel, usize, usize)>, Vec<i64>) {
+        let mut session = Session::new(8, 13, 64);
+        let row = session.row(2);
+        session.edit_int(row, 0);
+        session.edit(EditCommand::InsertRows {
+            at: RowOrdinal::new(1),
+            count: 2,
+        });
+        session.edit_int(row, 1);
+        // 履歴の**形**: 区分と、両方向の材料の行数（識別子は写さない）。
+        let shape: Vec<(UndoLabel, usize, usize)> = session
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.label,
+                    material_rows(&entry.inverse),
+                    material_rows(&entry.redo),
+                )
+            })
+            .collect();
+        // 往復の帰結: 2 回取り消し、編集したセルの値と行数を観測する。
+        let mut observed: Vec<i64> = Vec::new();
+        for _ in 0..2 {
+            session.undo();
+            observed.push(match session.value_at(row, INT_COLUMN) {
+                CellValue::Int(value) => value,
+                other => panic!("整数の列の値が整数でない: {other:?}"),
+            });
+        }
+        observed.push(ids_of(session.fixture.document(), session.fixture.sheet()).len() as i64);
+        (shape, observed)
+    }
+
+    /// 材料が運ぶ行の件数（形の比較のためだけに写す。**識別子も値も写さない**）。
+    fn material_rows(command: &HistoryCommand) -> usize {
+        match command {
+            HistoryCommand::Edit(EditCommand::RemoveRows { rows }) => rows.len(),
+            HistoryCommand::Edit(EditCommand::PasteRange { rows, .. }) => rows.len(),
+            HistoryCommand::Edit(EditCommand::InsertRows { count, .. }) => *count,
+            HistoryCommand::Edit(EditCommand::DuplicateRows { rows }) => rows.len(),
+            HistoryCommand::RestoreRows { rows, .. } => rows.len(),
+            HistoryCommand::RestoreValues { rows, .. } => rows.len(),
+            HistoryCommand::Composite(parts) => parts.iter().map(material_rows).sum(),
+            _ => 0,
+        }
+    }
+
+    assert_eq!(run(), run(), "同じ操作の並びは同じ形と往復を与える");
+}
+
+/// 適用の口が**履歴を増やす口を足さない**こと（要件 9.1 の拡張点と、9.2, 9.3 の交わり）。
+///
+/// `UndoRedo` が束ねるのは履歴と適用の経路であり、登録口は `push` ただ 1 つのままである。
+/// 往復の前後で `entries()` の**並びそのもの**が変わらないことで示す。
+#[test]
+fn the_undo_redo_entry_point_does_not_add_entries() {
+    let mut session = Session::new(6, 13, 8);
+    let row = session.row(1);
+    session.edit_int(row, 0);
+    session.edit(EditCommand::InsertRows {
+        at: RowOrdinal::new(2),
+        count: 1,
+    });
+    let entries = session.entries();
+    let depth = session.stack.depth();
+
+    session.undo();
+    session.redo();
+    session.undo();
+
+    assert_eq!(
+        entries,
+        session.entries(),
+        "取り消しとやり直しは履歴の並びを 1 件も変えない"
+    );
+    assert_eq!(depth, session.stack.depth(), "件数も変わらない");
+    assert_eq!(2, depth, "前提: 2 件が積まれている");
 }

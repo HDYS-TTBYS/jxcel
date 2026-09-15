@@ -328,7 +328,7 @@ stateDiagram-v2
 | 8.5 | 保存される順序を変更しない | RowOrder | 表示順は `Document` を書き換えない | — |
 | 8.6, 8.9 | 並べ替え・絞り込み中の編集と貼り付け | RowOrder, EditApply | 表示位置ではなく `RowId` で対象を決める | 編集の適用と判定 |
 | 8.8 | 並べ替えの基準列の編集で行が動かない | RowOrder | 順序は明示の指示でのみ再計算する | — |
-| 9.1, 9.2, 9.3, 9.4, 9.5, 9.6 | 取り消しとやり直しの対象・復元・破棄・単位・上限 | UndoStack | `undo`, `redo` | — |
+| 9.1, 9.2, 9.3, 9.4, 9.5, 9.6 | 取り消しとやり直しの対象・復元・破棄・単位・上限 | UndoStack, UndoRedo | `undo`, `redo`, `push`（上限） | UndoRedo が履歴と `EditApply` を借用で束ねてドキュメントへ適用する |
 | 9.7 | 数式とマクロが同じ履歴に加わる | UndoStack | `UndoStack.push` の公開 | — |
 | 9.8 | 取り消し後に対象範囲を見せる | GridScreen, RendererHandle | `scrollTo` | — |
 | 10.1, 10.2, 10.3, 10.4, 10.5, 10.6 | 入力手段の登録簿と既定・重複検出 | EditorRegistry | `CellEditorRegistry` | — |
@@ -502,8 +502,11 @@ pub struct CoercionNotice { pub cell: CellAddress, pub before: String, pub after
 **Responsibilities & Constraints**
 - 命令と**逆命令の対**を積む。逆命令は適用時に生成する（適用後には作れないため）
 - 履歴は**ドキュメント単位**であり、シートごとではない（要件 9.5）。`macro-runtime` の実行が複数シートに跨るため
-- 上限を持ち、超えたら古い側から捨てる（要件 9.6）
+- 上限を持ち、超えたら古い側から捨てる（要件 9.6）。**上限 0 は「1 件も保持しない」**
 - **公開する登録口は `push` 1 つ**に絞る。乗る側が履歴の内部構造に触れない
+- 取り消し・やり直しの**適用**は `UndoRedo`（履歴と `EditApply` を借用で束ねた口）が担う。
+  `UndoStack` 自身は `Document` を持たず、適用の経路も持たない（この分離が層の鎖を閉じたまま
+  にする）
 
 **Contracts**: Service [x] / State [x]
 
@@ -520,8 +523,30 @@ impl UndoStack {
     pub fn redo(&mut self) -> Option<&HistoryCommand>;
     pub fn depth(&self) -> usize;
 }
+
+/// 履歴と適用の経路を**借用の対**として束ね、取り消し・やり直しをドキュメントへ適用する
+/// （要件 9.2, 9.3）。`history` 層に置く — 本層は `edit` 層を参照してよい（鎖の向きのまま）。
+pub struct UndoRedo<'a> { /* stack: &'a mut UndoStack, apply: &'a mut EditApply */ }
+
+impl<'a> UndoRedo<'a> {
+    pub fn new(stack: &'a mut UndoStack, apply: &'a mut EditApply) -> Self;
+    pub fn undo(&mut self, doc: &mut Document) -> Result<Option<EditOutcome>, GridError>;
+    pub fn redo(&mut self, doc: &mut Document) -> Result<Option<EditOutcome>, GridError>;
+}
 ```
-- Invariants: `push` は `cursor` 以降のやり直し対象を破棄する（要件 9.4）
+- Invariants: `push` は `cursor` 以降のやり直し対象を破棄する（要件 9.4）。そのうえで**上限を
+  超えた分を古い側から捨て**、`cursor` を捨てた件数だけ手前へ寄せる（要件 9.6）— 寄せなければ
+  取り消しが捨てた対の位置を指し、保持している対を飛ばす
+- Invariants: `limit == 0` は**「1 件も保持しない」**（「無制限」ではない。無制限が要るなら
+  上限を持たない型が正しい表現であり、10 万行を扱う道具で有界でない記憶の伸びる経路を既定で
+  開かない）。専用の分岐は無く、追い出しの一般の規則の帰結である
+- Invariants: `undo` / `redo` は位置を動かすだけで、**履歴へ積まない**（積むと「取り消しの
+  取り消し」になり、同じ操作が 2 回適用される経路ができる）。したがって `depth()` はこれらで
+  変わらない（変わるのは `push` と追い出しだけである）
+- Invariants: `UndoRedo::undo` / `redo` は**適用が失敗したとき位置を動かさない**（先に読んで
+  適用し、成功してから位置を進める）。戻る／進む対が無ければ `Ok(None)`（失敗ではない）
+- Invariants: 取り消し・やり直しの結果は `EditOutcome` であり、**影響を受けた行**
+  （`affected`）を運ぶ（要件 9.2, 9.3 の「結果」）
 - `HistoryCommand` / `RestoredRow` は **`edit` 層**の型である（適用の経路が復元の材料を名指すため。層の鎖 `error / types → view → edit → history` を閉じたままにする）。`entries` は `Vec` である（`VecDeque` ではなく、積んだ並びを借用の切片として読める必要がある）
 
 **Implementation Notes**
