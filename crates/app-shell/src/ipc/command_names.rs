@@ -127,6 +127,16 @@ pub const GRID_HISTORY: &str = "grid_history";
 /// 正常な結果として返す。
 pub const GRID_FIND_VIOLATION: &str = "grid_find_violation";
 
+/// 呼び出し元ウィンドウのグリッドの窓を、生バイトで返す（タスク 6.3。要件 1.1、11.2）。
+///
+/// **封筒を返さない唯一のグリッドのコマンドである**（`bulk_echo` と同じ生バイトの経路）。
+/// 引数は要求の頭を含む二進の 1 つであり、**引数全体でなければならない** — 入れ子にすると
+/// Tauri が数値の配列へ変換して JSON として送るため、経路の意味が失われる
+/// （`src-tauri/src/commands/grid.rs` のモジュール docs「引数を入れ子にしない」）。
+///
+/// 失敗と世代違いは**空の窓**で表す（この経路は封筒を運べないため）。
+pub const GRID_ROWS_WINDOW: &str = "grid_rows_window";
+
 /// フロントエンドから呼び出せるコマンド名の一覧（要件 4.1、4.2）。
 ///
 /// `src-tauri` のハンドラ登録（タスク 7.1）と TypeScript の生成物（タスク 2.2）の**両方**が
@@ -152,4 +162,5 @@ pub const COMMAND_NAMES: &[&str] = &[
     GRID_APPLY_EDIT,
     GRID_HISTORY,
     GRID_FIND_VIOLATION,
+    GRID_ROWS_WINDOW,
 ];

@@ -53,13 +53,17 @@ import type { COMMAND_NAMES, IpcError, IpcResult } from "./bindings";
 export type CommandName = (typeof COMMAND_NAMES)[number];
 
 /**
- * 生バイトで応答するコマンド名（要件 4.5）。生成物の `CommandName` から取り出す。
+ * 生バイトで応答するコマンド名（要件 4.5、11.2）。生成物の `CommandName` から取り出す。
  *
  * `Extract` を使うのは、名前を 2 つ目の一覧として手書きしないためである。単一の源
- * （`crates/app-shell/src/ipc/command_names.rs` の `COMMAND_NAMES`）から `bulk_echo` が
- * 消えれば、この型は `never` になり、`invokeRaw` の呼び出しが型検査で落ちる。
+ * （`crates/app-shell/src/ipc/command_names.rs` の `COMMAND_NAMES`）から `bulk_echo` や
+ * `grid_rows_window` が消えれば、この型はその名前を含まなくなり（両方消えれば `never`）、
+ * `invokeRaw` の呼び出しが型検査で落ちる。
+ *
+ * 2 つが並ぶのは、封筒を返さない経路がこの 2 つだけだからである — 一括転送（要件 4.5）と、
+ * グリッドの窓（要件 11.2）。
  */
-export type RawCommandName = Extract<CommandName, "bulk_echo">;
+export type RawCommandName = Extract<CommandName, "bulk_echo" | "grid_rows_window">;
 
 /**
  * フロントエンド局所の失敗（要件 4.4）。`invoke` 自体の拒否を表す。
@@ -141,10 +145,11 @@ function describeRejection(cause: unknown): string {
  * 「すべてのコマンドは `IpcResult` を返す。例外に頼らない」、要件 4.2・4.4）。`invoke` は
  * その封筒に解決するので、本関数は**解決値を再包装せずそのまま返す**。
  *
- * **例外は生バイトの経路（要件 4.5）だけである。** `bulk_echo` は JSON を通さない
- * `tauri::ipc::Response` で応答するため、封筒へ解決しない。その呼び出しには
- * [`invokeRaw`] を使うこと（本関数を当てると、`application/octet-stream` のバイト列を
- * 封筒として解釈することになり、`status` の分岐が成立しない。tasks.md 7.2）。
+ * **例外は生バイトの経路である。** `bulk_echo`（要件 4.5）と、可視範囲の窓を返す
+ * `grid_rows_window`（要件 1.1、11.2）は JSON を通さない `tauri::ipc::Response` で応答する
+ * ため、封筒へ解決しない。その呼び出しには [`invokeRaw`] を使うこと（本関数を当てると、
+ * `application/octet-stream` のバイト列を封筒として解釈することになり、`status` の分岐が
+ * 成立しない。tasks.md 7.2、6.3）。
  *
  * 戻り値は常に判別可能な合併型である:
  * - 解決した封筒はそのまま返る。成功なら `data` がコマンドのペイロード、失敗なら `error` が

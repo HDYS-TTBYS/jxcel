@@ -171,7 +171,7 @@
   - 登録名と許可の一致を検査する段が通り、5 つのコマンドが呼び出せる
   - _Requirements: 3.3, 4.4, 8.3, 8.4, 9.2, 9.3_
 
-- [ ] 6.3 窓のコマンドを生バイト経路として登録する
+- [x] 6.3 窓のコマンドを生バイト経路として登録する
   - 要求の頭を含む引数 1 つを受け取り、二進の窓を返すコマンドを登録する
   - **他の 5 つと同じ 3 点セットを揃える**: 名前の定数を単一の源に足し、登録の根へ 1 行足し、**専用の権限ブロックを定義して与える集合へ所属させる**
   - **引数を入れ子にしない**（入れ子にすると要素ごとの配列へ変換され、経路の意味が失われる）
@@ -361,3 +361,5 @@
   1. **`grid_find_violation` だけ写像が食い違う**（`src-tauri/src/commands/grid.rs:1071-1112`）。ウィンドウの文書が差し替わると（メニュー「開く…」/ `pick_document_file` → `dialog::hand_off` → `DocumentSessions::attach`。未保存でなければ同じウィンドウへ再引き渡しできる）、保持している `entry.sheet` は文書に存在しなくなる。この状態で `grid_find_violation` は `IpcResult::Ok { violation: None }` を返す（レビューの実測: 違反 1 件の文書 A で `Ok(Some(..))`、同一ウィンドウを文書 B へ attach した後 `Ok(None)`）一方、同じ状態で `grid_set_view` / `grid_apply_edit` は**失敗腕**（`SchemaUnusable`）を返す。モジュール doc と `answer_open` は「要求されたシートが文書に無い」を経路の失敗と定めているので、**6 つの写像を揃えること**（「違反が無い」と「シートが無い」を混同させない）。
   2. **失敗した適用でも未保存の印が立つ**（`grid.rs:931-986`、`column_index` は `grid.rs:442`）。`column_index` は範囲検査をせずドメインの判定に委ねるため、`ColumnOutOfRange`（例: 列 999）が閉包の内側で到達しうる。文書の本体は変わらない（`data-grid` は書き込み前に検査する: `crates/data-grid/src/edit/mod.rs:1702-1704`）が、`SessionState::Open { unsaved: true }` だけが立つ。**変換を閉包の外へ出す**（`a_malformed_row_identifier_does_not_touch_the_document` が既に採った回避と同じ形）こと。
   どちらも `src-tauri/src/commands/grid.rs` の中であり、**6.3 が 6 本目を足すときに同じ検査（6 本の写像の一致・失敗時に状態を動かさない）で固定すること。**
+- **生バイト経路（6.3）で確定したこと**: 引数のバイト配置は `src-tauri/src/commands/grid.rs` の「生バイト経路」節が唯一の源である — 頭 33 バイト（版 `u8` / 世代 `u64` / 開始序数 `u64` / 行数 `u64` / シート長 `u64`、すべてリトルエンディアン）+ シートの UTF-8。`WINDOW_REQUEST_VERSION` は**窓の `WINDOW_FORMAT_VERSION` とは別の名前空間**である（どちらも今は 1）。**7.3 の窓の記憶が同じ配置を TS で符号化する**ので、形を変えるときは両側を同時に直すこと。シートは `grid_open_sheet` に渡した文字列と同一のものを載せる（レビューの指摘。1 文で明記する価値がある）。失敗も世代違いも**空の窓**で表し、panic しない（1,248 個の雑音入力で実測）。`RowSpan` は溢れを切り落とす（2^40 行の要求が 13.7 µs で 3 行に切られる）— **確保量を要求の大きさに比例させない**。
+- **6.3 のレビューが境界外として残した陳腐化した記述（このタスクの成果物ではない。所有者が直すこと）**: `bulk_echo` を「封筒を通らない唯一のコマンド」とする記述が**他のスペックと steering に残っている** — `.kiro/steering/ipc-contract.md:35`、`.kiro/specs/app-shell/design.md:707`、`.kiro/specs/app-shell/tasks.md:671`。6.3 で `grid_rows_window` が加わったため**アプリ全体で偽**になった。**6.1/6.2/6.3 の境界内（`src-tauri` と `crates/app-shell` のグリッド面、`src/ipc`）はすべて直してある**（最終レビューで境界内の陳腐化は 0 件）。steering はプロジェクト記憶なので、`data-grid` の実装が一段落した時点で `$kiro-steering` で追随させること。

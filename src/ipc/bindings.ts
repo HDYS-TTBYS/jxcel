@@ -31,6 +31,7 @@ export const COMMAND_NAMES = [
   "grid_apply_edit",
   "grid_history",
   "grid_find_violation",
+  "grid_rows_window",
 ] as const;
 
 /**

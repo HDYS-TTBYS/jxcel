@@ -44,7 +44,7 @@ commands.allow = ["settings_set"]
 
 [[permission]]
 identifier = "allow-bulk-echo"
-description = "大きなペイロードを 1 回の往復で受け渡す生バイト経路のコマンド（bulk_echo）を許可する。JSON を通らない応答を返す唯一のコマンドである（要件 4.5）。"
+description = "大きなペイロードを 1 回の往復で受け渡す生バイト経路のコマンド（bulk_echo）を許可する。JSON を通らない応答を返す 2 つのコマンドのうちの 1 つである（もう 1 つは生バイトの窓を返す grid_rows_window。要件 4.5）。"
 commands.allow = ["bulk_echo"]
 
 [[permission]]
@@ -132,7 +132,12 @@ identifier = "allow-grid-find-violation"
 description = "呼び出し元ウィンドウのグリッドで次の違反を探すコマンド（grid_find_violation）を許可する。表示範囲の外にある違反にも到達し、見つかった違反の位置と理由を返す（要件 4.2、4.4、4.5）。"
 commands.allow = ["grid_find_violation"]
 
+[[permission]]
+identifier = "allow-grid-rows-window"
+description = "呼び出し元ウィンドウのグリッドの可視範囲の窓を、二進の生バイトで返すコマンド（grid_rows_window）を許可する。引数は要求の頭（シート・開始序数・行数・世代）を含む 1 つのバッファであり、入れ子にすると経路の意味が失われる。失敗と世代違いは空の窓で表し、封筒は運ばない（要件 1.1、4.5、11.2）。"
+commands.allow = ["grid_rows_window"]
+
 [[set]]
 identifier = "app-shell"
 description = "app-shell が登録する自前コマンドの集合。capability はこの集合名だけを参照する。ファイルシステム系・シェル系の権限はここにも含めない（要件 4.7）。"
-permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file", "allow-render-heartbeat", "allow-diagnostics-log-location", "allow-diagnostics-export", "allow-diagnostics-verbosity-get", "allow-diagnostics-verbosity-set", "allow-window-document-state", "allow-document-state", "allow-document-save", "allow-document-new", "allow-document-discard", "allow-grid-open-sheet", "allow-grid-set-view", "allow-grid-apply-edit", "allow-grid-history", "allow-grid-find-violation"]
+permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file", "allow-render-heartbeat", "allow-diagnostics-log-location", "allow-diagnostics-export", "allow-diagnostics-verbosity-get", "allow-diagnostics-verbosity-set", "allow-window-document-state", "allow-document-state", "allow-document-save", "allow-document-new", "allow-document-discard", "allow-grid-open-sheet", "allow-grid-set-view", "allow-grid-apply-edit", "allow-grid-history", "allow-grid-find-violation", "allow-grid-rows-window"]

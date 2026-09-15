@@ -1,21 +1,27 @@
-//! グリッドのコマンド面 — 5 つの封筒つきコマンドと、**ドメイン型 ⇄ 境界用の型の変換を行う
-//! 唯一の場所**（タスク 6.2。design.md「GridCommands」の API Contract、要件 3.3、4.4、
-//! 8.3、8.4、9.2、9.3）。
+//! グリッドのコマンド面 — 封筒つきの 5 つと生バイトの 1 つ、そして**ドメイン型 ⇄ 境界用の
+//! 型の変換を行う唯一の場所**（タスク 6.2、6.3。design.md「GridCommands」の API Contract、
+//! 要件 1.1、3.3、4.4、8.3、8.4、9.2、9.3、11.2）。
 //!
-//! # 5 つの経路
+//! # 6 つの経路
 //!
 //! | コマンド | 経路 | 何を答えるか |
 //! |---|---|---|
 //! | [`grid_open_sheet`] | 文書から対象シートを引き、スキーマを計画へ落として [`GridSession::open`] | 列の構成とシートの行数（要件 1.1、1.5、1.6） |
 //! | [`grid_set_view`] | [`GridSession::set_view`]（＋展開の適用） | 可視行数・隠された行数・違反の総数（要件 8.3、8.4、8.7） |
+//! | [`grid_rows_window`] | 生バイトの要求を読み、[`GridSession::encode_window`] | 可視範囲の窓（二進。要件 1.1、11.2） |
 //! | [`grid_apply_edit`] | [`GridSession::apply`] | 影響範囲・型強制・違反・行数（要件 3.3、3.5） |
 //! | [`grid_history`] | [`GridSession::undo`] / [`GridSession::redo`] | 同じ要約（要件 9.2、9.3） |
 //! | [`grid_find_violation`] | [`GridSession::find_violation`] | 次の違反の位置と理由（要件 4.2、4.4、4.5） |
 //!
+//! **5 つは封筒（[`IpcResult`]）を返し、[`grid_rows_window`] だけが生バイトを返す**
+//! （要件 4.5 が JSON を経由しない経路を要求するため。根拠と消費者への見え方は
+//! `crate::commands::bulk` のモジュール doc にある）。生バイトの経路は封筒を運べないため、
+//! **失敗は空の窓で表す**（本モジュールの「生バイト経路」節）。
+//!
 //! **呼び出し元ウィンドウは基盤が注入する [`WebviewWindow`] から取る**（ペイロードで
-//! 受け取らない ＝ 偽装できない。要件 4.6、`ipc-contract.md`）。したがって 5 つとも要求の型に
+//! 受け取らない ＝ 偽装できない。要件 4.6、`ipc-contract.md`）。したがって 6 つとも要求の型に
 //! ウィンドウは現れない — 要求が運ぶのは操作の対象（シートの識別子・表示の指定・編集命令・
-//! 進める向き・探索の起点）だけである。
+//! 進める向き・探索の起点・窓の区間）だけである。
 //!
 //! # 失敗の載せ方（design.md「Error Handling」の表）
 //!
@@ -34,6 +40,93 @@
 //!
 //! 理由の文言を組み立てるのは適応層の仕事である（`session/commands.rs` と同じ規律。
 //! `GridError` / `SessionError` / `ViolationReason` はいずれも表示用の文言を持たない）。
+//!
+//! # 生バイト経路（`grid_rows_window`。要件 1.1、11.2）
+//!
+//! ## 引数の配置（**本節が唯一の源**。design.md の入力の 1 行をここで確定させる）
+//!
+//! ```text
+//! 引数 = 頭 || シートの識別子
+//!
+//! 頭（33 バイト = [`WINDOW_REQUEST_HEADER_LEN`]。数の欄はすべて u64 リトルエンディアン）:
+//!   0       版        u8      = WINDOW_REQUEST_VERSION
+//!   1..9    世代      u64     要求が名乗る世代
+//!   9..17   開始序数  u64     可視行の序数（文書の位置ではない）
+//!   17..25  行数      u64     要求する行の数
+//!   25..33  シート長  u64     シートの識別子の UTF-8 のバイト長
+//! 33..     シート    UTF-8   シートの識別子（要求の末尾まで）
+//! ```
+//!
+//! 全体の長さは `WINDOW_REQUEST_HEADER_LEN + シート長` であり、**それより長い入力も短い
+//! 入力も拒む**（余りを黙って捨てると、壊れた要求が正常に見える — 窓の復号と同じ規律）。
+//!
+//! 配置を決めた理由は 3 つある:
+//!
+//! 1. **固定部分の幅を固定する**（33 ＝ 窓の [`HEADER_LEN`] と同じ幅）。数の欄は位置だけで
+//!    引けるため、復号は前へ 1 回走査するだけで閉じる
+//! 2. **可変長の欄の長さを本体の直前に置く**（窓と同じ規律）。シートの終端を推し量る経路を
+//!    作らない
+//! 3. 数の欄を u64 にする理由は窓と同じである — 符号化の側に「収まらない」経路を作らない
+//!    （復号の側だけが、32 ビットのホストで表せない値を拒む）
+//!
+//! **版は窓の版（`WINDOW_FORMAT_VERSION`）とは別の体系である。** 要求は本モジュールが
+//! 定める配置であり、窓は `data-grid` の `transport` 層が定める配置である。欄を足すときは
+//! 版を上げる（知らない版の要求は空の窓である ＝ フロントエンドは窓の記憶を捨てて要求を
+//! 組み直す。7.3）。
+//!
+//! ## 引数を入れ子にしない（`bulk_echo` と同じ罠）
+//!
+//! **バッファは引数全体でなければならない。** `invoke("grid_rows_window", buffer)` の形で
+//! 呼ぶ（`src/ipc/client.ts` の `invokeRaw` がこれを行う）。`{ argument: buffer }` のように
+//! 入れ子にすると、Tauri は `Uint8Array` を `Array.from()` で数値の配列へ変換し、JSON
+//! （[`InvokeBody::Json`]）として送る — 受け手は生バイトとして読めない。この場合は
+//! **例外を投げず**空の窓と警告を返す（長さ 0 で観測できる。`bulk` のモジュール doc「経路の
+//! 性質」）。したがって本コマンドの引数は [`Request`] **1 つ**であり、構造体や `serde` の
+//! 型で包まない。
+//!
+//! ## 失敗と世代違いは空の窓（この経路は封筒を運べない）
+//!
+//! 空の窓は [`EMPTY_WINDOW`]（長さ 0 のバイト列）であり、**行 0 の窓**（頭だけを持つ
+//! [`HEADER_LEN`] バイト。可視行の末尾に接する要求や、可視行が 0 のシート）とは区別できる。
+//! 画面は「端に達した」と「要求が通らなかった」を別に扱う（前者は読み込み中のまま再試行
+//! しない。`transport` のモジュール docs「空の窓の表現」）。
+//!
+//! | 状態 | 答え |
+//! |---|---|
+//! | 引数が生バイトでない（入れ子の罠） | 空の窓 |
+//! | 引数を読めない（短い・長い・知らない版・UTF-8 でない） | 空の窓 |
+//! | グリッドがまだ開かれていない | 空の窓 |
+//! | 要求のシートが表示中のシートと違う | 空の窓 |
+//! | 世代が一致しない（古い・**新しすぎる**） | 空の窓 |
+//! | 文書にシートが無い・開始序数が可視行数より後ろ・行を引けない | 空の窓 |
+//! | 可視行の末尾に接する要求 | **行 0 の窓**（空の窓ではない） |
+//!
+//! ## シートの照合（design.md の入力と 5.1 の `WindowRequest` の食い違いの解決）
+//!
+//! design.md の Batch 契約は要求の頭が**シート**を運ぶと定める。一方 5.1 の
+//! [`WindowRequest`] は**シートを持たない** — `GridSession` は 1 枚のシートに閉じた操作口で
+//! あり、どのシートを見ているかはセッションが既に知っているためである（`transport` の
+//! モジュール docs が同じ理由を書いている）。
+//!
+//! **解決は本層で行う**: シートは**要求の側にだけ**現れ、本層が
+//!
+//! 1. 引数のシートを復号し（[`decode_window_argument`]）
+//! 2. **保持しているシート（[`SheetEntry::sheet`]）と突き合わせ**、
+//! 3. 一致したときだけ世代と区間を [`WindowRequest`] へ写して
+//!    [`GridSession::encode_window`] へ渡す
+//!
+//! という順序を取る。**一致しなければ空の窓である**（表示していないシートの窓を返す経路を
+//! 作らない）。この照合があるため、文書の差し替え（メニュー「開く…」）の後に古いシートを
+//! 名指す要求が来ても、窓ではなく空の窓が返る。
+//!
+//! ## 世代を比べるのは本層である（5.1 が開いたままにした点）
+//!
+//! [`GridSession::encode_window`] は `WindowRequest` を**自分で組み立てる**（世代は
+//! `self.codec.generation()` ＝ いまの世代）。したがって**要求が名乗る世代を見られるのは
+//! 呼び出し側だけ**であり、5.1 のモジュール docs の表も「6.3 のコマンドが要求の頭から世代を
+//! 読み、`is_stale` を見て空の窓を失敗と同じに扱う」と定めている。比較の規則そのものは
+//! [`WindowCodec::is_stale`] が唯一の源であり、本層は**自分で `!=` を書かない**（一致しない
+//! 世代＝古い世代と新しい世代の扱いを二重に定めない）。
 //!
 //! # 唯一の変換の場所
 //!
@@ -63,10 +156,10 @@
 //! そのまま使う。テストは二重（`session/watch.rs` の `testing::AlwaysPresent`）を駆動する）。購読は登録済みの
 //! ラベルの集合で 1 回に抑え、破棄の通知と、登録できなかったときの掃除が同じ後始末を通る。
 //!
-//! # 実行モデル（5 つとも主スレッドの外で走らせる）
+//! # 実行モデル（封筒の 5 つは主スレッドの外、生バイトの 1 つは同期）
 //!
-//! **5 つとも `#[tauri::command(async)]` である。** これは関数を非同期にするのではなく、
-//! **同期の本体を Tauri のブロッキング用のスレッドプールで走らせる**印である（Tauri の
+//! **封筒を返す 5 つは `#[tauri::command(async)]` である。** これは関数を非同期にするのでは
+//! なく、**同期の本体を Tauri のブロッキング用のスレッドプールで走らせる**印である（Tauri の
 //! 既定では同期コマンドは IPC の処理の中＝主スレッドで走る）。
 //!
 //! 理由は費用である。`grid_set_view` は最初の 1 回に**シート全体の検証**を行って違反の索引を
@@ -81,6 +174,19 @@
 //!
 //! **応答の形は変わらない。** 封筒（[`IpcResult`]）を返すことは、経路がどこで走るかに
 //! 依らない（要件 4.4）。
+//!
+//! ## `grid_rows_window` だけが同期である理由（型が決めている）
+//!
+//! [`Request`] は invoke のメッセージを**借用**する型である（`Request<'a>`）。Tauri の
+//! コマンドのマクロは `#[tauri::command(async)]` の本体を `async move` の内側へ引数を移して
+//! 組むため、借用を含む引数はそこへ持ち込めない（`bulk_echo`（7.2）が同じ理由で同期である）。
+//! 生バイトの引数を取る唯一の形が `Request` である以上、この経路は同期に固定される。
+//!
+//! 費用の形は 5 つと違って**行数に依らない**: 窓の符号化は行の値を窓の行数ぶんだけ引く
+//! （10 万行のシートでも窓は画面 1 枚ぶんである。`data-grid` の `transport` のモジュール docs
+//! 「費用の形」）。10 万行のシートの末尾の窓を要求したときの実測は
+//! `tests` の `a_window_at_an_arbitrary_position_of_a_hundred_thousand_rows_is_retrieved`
+//! にあり、要件 11.2 の 1 秒に対して十分な余裕を持つ。
 //!
 //! # スキーマはどこから来るか（要件 1.1、1.2）
 //!
@@ -106,13 +212,22 @@
 //!
 //! # テストの形
 //!
-//! Tauri の実体（`WebviewWindow` / `AppHandle`）を要するのはコマンド関数の 5 つだけであり、
-//! 中身は**すべて本体の関数**（[`answer_open`] / [`answer_set_view`] / [`answer_apply_edit`] /
-//! [`answer_history`] / [`answer_find_violation`]）へ切り出してある。テストはそれらを直接
-//! 駆動する — GUI を起こさず、**本物の文書**（`document-format` は dev-dependency）と、
-//! 破棄の購読の二重（`session/watch.rs` の `testing::AlwaysPresent`）だけで足りる。
-//! 5 つのコマンド関数そのものの形（注入の 2 引数と要求、封筒の戻り値）は、関数の型を
-//! 書いたテストがコンパイル時に固定する。
+//! Tauri の実体（`WebviewWindow` / `AppHandle`）を要するのはコマンド関数の 6 つだけであり、
+//! 中身は**すべて本体の関数**（[`answer_open`] / [`answer_set_view`] / [`answer_rows_window`] /
+//! [`answer_apply_edit`] / [`answer_history`] / [`answer_find_violation`]）へ切り出してある。
+//! テストはそれらを直接駆動する — GUI を起こさず、**本物の文書**（`document-format` は
+//! dev-dependency）と、破棄の購読の二重（`session/watch.rs` の `testing::AlwaysPresent`）
+//! だけで足りる。生バイトの経路の本体は [`InvokeBody`] を取る（[`Request`] を組む公開の口が
+//! `tauri` に無いため）ので、テストは生バイトと**入れ子の JSON** の両方を差し込める。
+//! 6 つのコマンド関数そのものの形（注入の 2 引数と要求、応答の型）は、関数の型を
+//! 書いたテストがコンパイル時に固定する（[`grid_rows_window`] は [`Response`] を返す ＝
+//! 封筒を返さないことがそこに現れる）。
+//!
+//! モジュール docs が参照するが、本モジュールの `use` に無い名前の宛先（`data-grid` の
+//! `transport` のモジュール docs と同じ流儀 — 名前を `use` すると、docs だけの利用が
+//! 未使用の import になる）。
+//!
+//! [`HEADER_LEN`]: data_grid::HEADER_LEN
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -127,14 +242,16 @@ use app_shell::ipc::{
 };
 use data_grid::{
     display_text, CellAddress, CoercionNotice, ColumnIndex, EditCommand, EditOutcome, ElementCount,
-    Expandability, ExpansionState, FilterSpec, GridError, GridSession, LayoutColumn,
-    NestedPathSegment, RowOrdinal, SearchDirection, SortKey, ViewSpec,
+    Expandability, ExpansionState, FilterSpec, Generation, GridError, GridSession, LayoutColumn,
+    NestedPathSegment, RowOrdinal, RowSpan, SearchDirection, SortKey, ViewSpec, WindowCodec,
+    WindowRequest, EMPTY_WINDOW,
 };
 use document_session::{DocumentSessions, DocumentSessionsApi, SessionError};
 use schema_engine::{
     CompiledSchema, Expected, SchemaEngine, SchemaEngineApi, TypeKind, TypeRegistry,
     ValidationOptions, ValuePathSegment, Violation, ViolationReason,
 };
+use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tauri_plugin_log::log;
 
@@ -349,6 +466,14 @@ fn not_open(command: &str, label: &WindowLabel) -> IpcError {
     path_failure(command, label, "グリッドがまだ開かれていない")
 }
 
+/// 「要求・保持しているシートが文書に無い」の理由（**文言の唯一の源**）。
+///
+/// 3 つの経路が同じ状態を報告する（開く要求のシートが無い・探索の保持シートが無い・
+/// 生バイトの要求のシートが保持と違う）ため、文言を組み立てる場所を 1 つに閉じる。
+fn unknown_sheet(sheet: &str) -> String {
+    format!("シート {sheet} が文書に無い")
+}
+
 /// ドメインの誤りを封筒の失敗腕へ写す（design.md「Error Handling」の「操作の誤り」）。
 ///
 /// **値の不適合はここへ来ない** — 違反は値を保持したまま成功腕の要約に載る（要件 3.5）。
@@ -438,9 +563,33 @@ fn expansion_state(state: &GridExpansionState) -> ExpansionState {
 /// 境界の列の添字をドメインの [`ColumnIndex`] へ写す。
 ///
 /// 範囲の検査はここでしない — 範囲外の列はドメインの判定（`ColumnOutOfRange`）が答える
-/// （境界で 2 つ目の規則を作らない）。
+/// （境界で 2 つ目の規則を作らない）。**この入口を使うのは表示の指定と展開である**
+/// （範囲外の列は「その要求を拒む」で足りる経路。表の描画は列の構成が変われば追随する）。
 fn column_index(column: u32) -> ColumnIndex {
     ColumnIndex::new(column as usize)
+}
+
+/// 編集の経路が使う列の写像（**宣言の列数で検査してから**写す）。
+///
+/// 範囲の規則そのものはドメインが持つ。`edit` 層の `usable_columns` は計画の列数
+/// （`CompiledSchema::column_count`）を返し、各命令はその数と列を比べる —
+/// 本関数は**同じ数**を同じ源（保持している計画）から取る。したがってこれは 2 つ目の規則
+/// ではなく、**同じ判定を閉包の外で先に通す**ものである。
+///
+/// 先に通すのは、閉包の内側で失敗すると [`DocumentSessionsApi::edit`] が「閉包が文書を
+/// 変えたか」を判定できず、**1 つのセルも書いていないのに未保存の印を立てる**ためである
+/// （[`answer_apply_edit`] の doc「命令の変換は閉包の外で済ませる」）。
+///
+/// **文書そのものの前提**（シートが無い・列数が食い違う → `SchemaUnusable`）は依然として
+/// 閉包の内側で決まる。あれは要求ではなく**文書の現在の内容**に依る失敗であり、変換の時点
+/// では決められない（[`answer_apply_edit`] の doc を参照）。
+fn checked_column_index(column: u32, columns: usize) -> Result<ColumnIndex, String> {
+    if column as usize >= columns {
+        return Err(format!(
+            "編集命令の列 {column} が宣言の列数 {columns} の外にある"
+        ));
+    }
+    Ok(ColumnIndex::new(column as usize))
 }
 
 /// 行の識別子の文字列を、行の識別子の型へ解釈する。失敗は**理由の文字列**である
@@ -459,10 +608,12 @@ where
 }
 
 /// 境界のセルの位置をドメインの [`CellAddress`] へ写す（要件 3.3、8.6）。
-fn cell_address(cell: &GridCellAddress) -> Result<CellAddress, String> {
+///
+/// 列は [`checked_column_index`] を通す（宣言の列数の外の列はここで失敗する）。
+fn cell_address(cell: &GridCellAddress, columns: usize) -> Result<CellAddress, String> {
     Ok(CellAddress::new(
         parse_row(&cell.row)?,
-        column_index(cell.column),
+        checked_column_index(cell.column, columns)?,
     ))
 }
 
@@ -481,18 +632,23 @@ where
 /// ここがコンパイルエラーになり、境界の形を追随させ忘れない）。**値を型付きで運ばない**
 /// 規約は 6.1 の型が既に守っているため、ここは文字列と位置をそのまま渡す。
 ///
+/// `columns` は**保持している計画の列数**である（[`checked_column_index`] の doc）。
+/// 列を運ぶ 3 つの命令（`SetCells` / `SetNested` / `PasteRange` の錨）は、ここで宣言の
+/// 列数の外を弾く — 弾かなければ失敗が適用の閉包の内側で起き、文書を 1 つも変えていないのに
+/// 未保存の印が立つ。
+///
 /// 失敗は**理由の文字列**である（封筒への写像は [`answer_apply_edit`] が 1 箇所で行う）。
-fn edit_command(command: &GridEditCommand) -> Result<EditCommand, String> {
+fn edit_command(command: &GridEditCommand, columns: usize) -> Result<EditCommand, String> {
     Ok(match command {
         GridEditCommand::SetCells { cells } => {
             let mut converted = Vec::with_capacity(cells.len());
             for cell in cells {
-                converted.push((cell_address(&cell.cell)?, cell.text.clone()));
+                converted.push((cell_address(&cell.cell, columns)?, cell.text.clone()));
             }
             EditCommand::SetCells { cells: converted }
         }
         GridEditCommand::SetNested { cell, json } => EditCommand::SetNested {
-            cell: cell_address(cell)?,
+            cell: cell_address(cell, columns)?,
             json: json.clone(),
         },
         GridEditCommand::InsertRows { at, count } => EditCommand::InsertRows {
@@ -506,7 +662,7 @@ fn edit_command(command: &GridEditCommand) -> Result<EditCommand, String> {
             rows: row_ids(rows)?,
         },
         GridEditCommand::PasteRange { anchor, rows, text } => EditCommand::PasteRange {
-            anchor: cell_address(anchor)?,
+            anchor: cell_address(anchor, columns)?,
             rows: row_ids(rows)?,
             text: text.clone(),
         },
@@ -777,6 +933,127 @@ fn describe_reason(reason: &ViolationReason) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// 生バイト経路の要求の頭（タスク 6.3）
+//
+// 引数の配置は**本節が唯一の源**である。`data-grid` の `transport` 層は `WindowRequest` を
+// **組み立て済みの値**として受け取り、バイト列を読まない（5.1 が「要求の頭の復号は 6.3 の
+// 適応層が行う」と定めている）。全体像はモジュール docs の「生バイト経路」節にある。
+// ---------------------------------------------------------------------------
+
+/// 要求の頭の版（1 バイト目）。
+///
+/// **窓の版（`WINDOW_FORMAT_VERSION`）とは別の体系である** — 要求は要求の配置、窓は窓の配置を
+/// 持つ（モジュール docs「引数の配置」）。欄を足すときはこの数を上げる。
+pub const WINDOW_REQUEST_VERSION: u8 = 1;
+
+/// 要求の頭の**固定部分**の幅（バイト）: 版 1 + 世代 8 + 開始序数 8 + 行数 8 + シート長 8。
+///
+/// 引数の全体の長さは `WINDOW_REQUEST_HEADER_LEN + シート長` である。窓の `HEADER_LEN` と
+/// 同じ 33 であるのは偶然ではない — 数の欄を位置だけで引ける固定の幅にすると、復号が前へ
+/// 1 回走査するだけで閉じる（モジュール docs の理由 1）。
+pub const WINDOW_REQUEST_HEADER_LEN: usize = 33;
+
+/// 生バイトの引数から読み取った要求（[`WindowRequest`] へ写す前の値）。
+///
+/// [`WindowRequest`] がシートを持たない（セッションが 1 枚のシートに閉じている）ため、
+/// 要求の側にだけ現れるシートはここで保持し、渡す前に**保持しているシートと突き合わせる**
+/// （モジュール docs「シートの照合」）。
+struct WindowArgument {
+    /// 要求が対象とするシート。**一度も記録へ流さない**（要件 8.4 の規律。
+    /// `bulk` のモジュール doc「記録に何を書くか」と同じ扱いである）。
+    sheet: String,
+    /// 要求が名乗る世代（[`WindowCodec::is_stale`] が現在の世代と比べる）。
+    generation: Generation,
+    /// 可視行の序数の区間（**文書の位置ではない**）。
+    span: RowSpan,
+}
+
+/// 生バイトの引数を復号する（**前方 1 回の走査**。モジュール docs「引数の配置」）。
+///
+/// 失敗は**理由の文字列**である（空の窓への写像と記録は [`answer_rows_window`] が 1 箇所で
+/// 行う）。理由に**シートの識別子の値そのものを入れない**のは、記録へ内容を流さないためで
+/// ある（要件 8.4）— 入るのは長さ・版・位置だけである。
+///
+/// # 検査（窓の復号と同じ規律）
+///
+/// - 頭に満たない入力（`WINDOW_REQUEST_HEADER_LEN` 未満）を拒む
+/// - 知らない版を拒む
+/// - **シートの識別子が宣言した長さに足りない入力も、余分なバイトを持つ入力も拒む**
+///   （余りを黙って捨てると、壊れた要求が正常に見える）
+/// - シートの識別子が UTF-8 でなければ拒む
+/// - 数の欄は `usize` へ落とす。落ちない値（32 ビットのホストで 64 ビットの値）は拒む —
+///   窓の復号が `WindowDecodeError::TooLarge` で同じことをする
+///
+/// **panic しない。** この引数は webview から届くバイト列であり、壊れた入力は誤りとして
+/// 返さなければならない（呼び出し元が空の窓へ写す）。
+fn decode_window_argument(bytes: &[u8]) -> Result<WindowArgument, String> {
+    /// 位置 `at` から 8 バイトを u64 として読む（呼び出し元が長さを確かめてから呼ぶ）。
+    fn u64_at(bytes: &[u8], at: usize) -> u64 {
+        let mut field = [0_u8; 8];
+        field.copy_from_slice(&bytes[at..at + 8]);
+        u64::from_le_bytes(field)
+    }
+
+    /// 64 ビットの値を `usize` へ落とす（落ちなければ理由を返す）。
+    fn to_usize(value: u64, what: &str) -> Result<usize, String> {
+        usize::try_from(value).map_err(|_| format!("要求の{what} {value} がこのホストで表せない"))
+    }
+
+    if bytes.len() < WINDOW_REQUEST_HEADER_LEN {
+        return Err(format!(
+            "要求の頭が {} バイトに足りない（{} バイト以上が要る）",
+            bytes.len(),
+            WINDOW_REQUEST_HEADER_LEN
+        ));
+    }
+    let version = bytes[0];
+    if version != WINDOW_REQUEST_VERSION {
+        return Err(format!(
+            "知らない版の要求である（版 {version}。知っているのは {WINDOW_REQUEST_VERSION} だけである）"
+        ));
+    }
+
+    let generation = Generation::new(u64_at(bytes, 1));
+    let start = to_usize(u64_at(bytes, 9), "開始序数")?;
+    let count = to_usize(u64_at(bytes, 17), "行数")?;
+    let sheet_len = to_usize(u64_at(bytes, 25), "シートの識別子の長さ")?;
+    let total = WINDOW_REQUEST_HEADER_LEN
+        .checked_add(sheet_len)
+        .ok_or_else(|| format!("要求のシートの識別子の長さ {sheet_len} が大きすぎる"))?;
+    match bytes.len().cmp(&total) {
+        core::cmp::Ordering::Less => {
+            return Err(format!(
+                "要求のシートの識別子が {sheet_len} バイトに足りない（{} バイト在る）",
+                bytes.len() - WINDOW_REQUEST_HEADER_LEN
+            ))
+        }
+        core::cmp::Ordering::Greater => {
+            return Err(format!(
+                "要求の後ろに余分なバイトが {} バイト在る",
+                bytes.len() - total
+            ))
+        }
+        core::cmp::Ordering::Equal => {}
+    }
+    // `RowSpan::new` の前提は「開始序数 + 行数が `usize` を溢れないこと」である
+    // （`types` の同型の doc）。ここで確かめるのは、壊れた要求でその前提を破らないためである。
+    if start.checked_add(count).is_none() {
+        return Err(format!(
+            "要求の区間が大きすぎる（開始序数 {start} + 行数 {count}）"
+        ));
+    }
+    let sheet = core::str::from_utf8(&bytes[WINDOW_REQUEST_HEADER_LEN..])
+        .map_err(|error| format!("要求のシートの識別子が UTF-8 でない: {error}"))?
+        .to_owned();
+
+    Ok(WindowArgument {
+        sheet,
+        generation,
+        span: RowSpan::new(RowOrdinal::new(start), count),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // 本体（Tauri に依らない。テストはここを直接駆動する）
 // ---------------------------------------------------------------------------
 
@@ -804,7 +1081,7 @@ pub(crate) fn answer_open(
             .iter()
             .find(|sheet| sheet.id().to_string() == request.sheet)
         else {
-            return Err(format!("シート {} が文書に無い", request.sheet));
+            return Err(unknown_sheet(&request.sheet));
         };
         let schema = SchemaEngine::new()
             .compile(sheet, &TypeRegistry::new())
@@ -919,12 +1196,155 @@ pub(crate) fn answer_set_view(
     }
 }
 
+/// 空の窓で答える（**失敗と世代違いの表現**。生バイト経路は封筒を運べない）。
+///
+/// 表現そのものは `data-grid` の [`EMPTY_WINDOW`]（長さ 0 のバイト列）が唯一の源である —
+/// 行 0 の窓（頭だけを持つ `HEADER_LEN` バイト）とは区別でき、画面は「端に達した」と
+/// 「要求が通らなかった」を別に扱える（モジュール docs「失敗と世代違いは空の窓」）。
+fn empty_window() -> Response {
+    Response::new(EMPTY_WINDOW.to_vec())
+}
+
+/// 窓の要求に答える本体（[`grid_rows_window`] の中身。要件 1.1、11.2）。
+///
+/// # 引数は引数全体でなければならない
+///
+/// 生バイトで届いたときだけ窓を作る。入れ子にすると Tauri は数値の配列へ変換して JSON として
+/// 送るため（[`InvokeBody::Json`]）、ここへは生バイトとして届かない — **例外を投げず**空の窓と
+/// 警告で答える（`bulk` のモジュール doc「経路の性質」。呼び出し側は長さ 0 で気づく）。
+///
+/// # 手順
+///
+/// 1. **引数を復号する**（[`decode_window_argument`]）。読めなければ空の窓
+/// 2. **シートを照合する** — 要求のシートが保持しているシート（[`SheetEntry::sheet`]）と
+///    一致しなければ空の窓（モジュール docs「シートの照合」）
+/// 3. **世代を見る** — 一致しない要求（古い・新しすぎる）は空の窓。規則は
+///    [`WindowCodec::is_stale`] が唯一の源である
+/// 4. **[`GridSession::encode_window`] が窓を作る**。符号化は文書を**読むだけ**であり
+///    （`&Document`）、失敗（範囲外・未知の行・シートが無い）は空の窓へ写す
+///
+/// **どの失敗でも空の窓であり、封筒は返らない**（要件 4.4 の規則からの例外。モジュール docs）。
+///
+/// # 記録に何を書くか
+///
+/// 書くのは**呼び出し元ウィンドウのラベル・受信バイト数・成否・窓の大きさ**だけである。
+/// シートの識別子もセルの値も記録へ流さない（要件 8.4。`bulk` と同じ規律）。
+pub(crate) fn answer_rows_window(
+    documents: &Arc<DocumentSessions>,
+    grids: &GridSessions,
+    label: &WindowLabel,
+    body: &InvokeBody,
+) -> Response {
+    let command = command_names::GRID_ROWS_WINDOW;
+    let InvokeBody::Raw(bytes) = body else {
+        // 入れ子の罠（モジュール docs「引数を入れ子にしない」）。生バイトではないので返せる
+        // ものが無い — 長さ 0 が「要求が通らなかった」の表現である。
+        log::warn!(
+            "{command}: 引数が生バイトでない（呼び出し元ウィンドウ = {}）— \
+             バッファは引数全体でなければならない。入れ子にすると数値の配列へ変換される",
+            label.as_str()
+        );
+        return empty_window();
+    };
+
+    let Some(entry) = grids.entry(label) else {
+        // 表示状態・履歴・違反の索引は `grid_open_sheet` が作る（他の 5 つと同じ順序）。
+        log::warn!(
+            "{command}: 呼び出し元ウィンドウ = {} のグリッドがまだ開かれていない\
+             （受信バイト数 = {}）",
+            label.as_str(),
+            bytes.len()
+        );
+        return empty_window();
+    };
+
+    let argument = match decode_window_argument(bytes) {
+        Ok(argument) => argument,
+        Err(reason) => {
+            log::warn!(
+                "{command}: 要求の頭を読めない（呼び出し元ウィンドウ = {}, 受信バイト数 = {}）: \
+                 {reason}",
+                label.as_str(),
+                bytes.len()
+            );
+            return empty_window();
+        }
+    };
+
+    let entry = lock(&entry);
+
+    // シートの照合（モジュール docs「シートの照合」）。**表示していないシートの窓は返さない** —
+    // 文書の差し替えの後はこの経路で古いシートが弾かれる。
+    if argument.sheet != entry.sheet {
+        log::warn!(
+            "{command}: 要求のシートが表示中のシートと違う（呼び出し元ウィンドウ = {}）— \
+             空の窓を返す",
+            label.as_str()
+        );
+        return empty_window();
+    }
+
+    // 世代。**比較の規則は `data-grid` の 1 つに閉じる**（本層は `!=` を書かない）。
+    // 要求が名乗る世代を見られるのは本層だけである — `encode_window` は自分でいまの世代から
+    // `WindowRequest` を組む（モジュール docs「世代を比べるのは本層である」）。
+    let codec = WindowCodec::new(entry.session.generation());
+    if codec.is_stale(&WindowRequest::new(argument.generation, argument.span)) {
+        log::debug!(
+            "{command}: 要求の世代がいまの世代と一致しない（呼び出し元ウィンドウ = {}）— \
+             空の窓を返す",
+            label.as_str()
+        );
+        return empty_window();
+    }
+
+    // 窓は文書を読むだけで作れる（要件 8.5 と同じく、この経路は文書を変えない）。
+    let encoded = documents.read(label, &mut |document| {
+        entry.session.encode_window(document, argument.span)
+    });
+
+    match encoded {
+        Ok(Ok(window)) => {
+            log::info!(
+                "{command}: 呼び出し元ウィンドウ = {} / 開始序数 = {} / 要求行数 = {} / \
+                 列 = {} / 応答バイト数 = {}",
+                label.as_str(),
+                argument.span.start().get(),
+                argument.span.count(),
+                entry.schema.column_count(),
+                window.len()
+            );
+            Response::new(window)
+        }
+        Ok(Err(error)) => {
+            log::warn!(
+                "{command}: 窓を作れない（呼び出し元ウィンドウ = {}）: {error} — 空の窓を返す",
+                label.as_str()
+            );
+            empty_window()
+        }
+        Err(error) => {
+            log::warn!(
+                "{command}: 文書を読めない（呼び出し元ウィンドウ = {}）: {error} — 空の窓を返す",
+                label.as_str()
+            );
+            empty_window()
+        }
+    }
+}
+
 /// 編集を適用する本体（[`grid_apply_edit`] の中身。要件 3.3、3.4、3.5、4.3、4.6）。
 ///
-/// **命令の変換は閉包の外で済ませる。** 変換できない要求（解釈できない行の識別子）で
-/// 文書へ触れると、何も変えていないのに未保存の印が立つ — [`DocumentSessionsApi::edit`] は
-/// 閉包が失敗を返しても印を立てる（閉包が文書を変えたかを判定できないため保守側に倒す）から
-/// である。したがって境界からドメインへの写像は先に済ませ、失敗はそこで返す。
+/// **命令の変換は閉包の外で済ませる。** 変換できない要求（解釈できない行の識別子、宣言の
+/// 列数の外の列）で文書へ触れると、何も変えていないのに未保存の印が立つ —
+/// [`DocumentSessionsApi::edit`] は閉包が失敗を返しても印を立てる（閉包が文書を変えたかを
+/// 判定できないため保守側に倒す）からである。したがって境界からドメインへの写像は先に済ませ、
+/// 失敗はそこで返す。**列の範囲は同じ計画（[`SheetEntry::schema`]）から取る**ため、
+/// ここで弾かれる列はドメインも弾く（[`checked_column_index`] の doc）。
+///
+/// **閉包の内側に残る失敗は「文書の現在の内容」に依るものだけである**（保持しているシートが
+/// 文書に無い・列数が食い違う ＝ [`GridError::SchemaUnusable`]、行が消えている ＝
+/// [`GridError::UnknownRow`]）。要求だけで決まる失敗をここへ残さないことが本経路の規律で
+/// あり、残せば未保存の印だけが立つ。
 ///
 /// 適用そのものは `document-session` の**可変の貸出口**を通す（文書を変える唯一の経路。
 /// 未保存の印と版も同じ臨界区間の内側で記録される）。
@@ -945,7 +1365,7 @@ pub(crate) fn answer_apply_edit(
     };
     let mut entry = lock(&entry);
 
-    let mut converted = match edit_command(&request.command) {
+    let mut converted = match edit_command(&request.command, entry.schema.column_count()) {
         Ok(converted) => Some(converted),
         Err(reason) => {
             return IpcResult::Err {
@@ -1034,17 +1454,37 @@ pub(crate) fn answer_history(
 
 /// 次の違反を探す本体（[`grid_find_violation`] の中身。要件 4.2、4.4、4.5）。
 ///
-/// 手順は 3 つである:
+/// 手順は 4 つである:
 ///
-/// 1. **[`GridSession::find_violation`] が位置を答える**（可視行の序数から最も近い違反セルへ。
+/// 1. **経路の成立を確かめる** — 保持しているシートが文書に在ること。無ければ**経路の失敗**
+///    である（`violation: None` ではない。下の「3 つの状態の区別」）
+/// 2. **[`GridSession::find_violation`] が位置を答える**（可視行の序数から最も近い違反セルへ。
 ///    索引を読むだけなので、表示範囲の外にある違反にも到達する。要件 4.4）
-/// 2. **理由を組み立てる**（要件 4.2）。理由を持つのは判定だけであり、セッションは
+/// 3. **理由を組み立てる**（要件 4.2）。理由を持つのは判定だけであり、セッションは
 ///    違反そのものを外へ出さない。そこで**見つかった列をもう一度だけ判定**し
 ///    （[`SchemaEngineApi::validate_columns`]。全件検証ではない）、その列の報告から
 ///    見つかったセルの違反を選んで文言へ写す
-/// 3. **見つからなければ `None` を返す** — 「これ以上違反が無い」は正常な結果である
+/// 4. **見つからなければ `None` を返す** — 「これ以上違反が無い」は正常な結果である
 ///
-/// 手順 2 の判定は**列に閉じた 1 回**である。理由は利用者が明示的に指示したときにだけ要る
+/// # 3 つの状態の区別（6.2 のレビューが残した点。6.3 で揃えた）
+///
+/// | 状態 | 答え | 根拠 |
+/// |---|---|---|
+/// | 保持しているシートが文書に無い | 封筒の**失敗腕**（経路の失敗） | [`grid_set_view`] / [`grid_apply_edit`] / [`grid_history`] は同じ状態でセッションの `SchemaUnusable` を失敗腕へ写す |
+/// | 違反が 1 件も無い | 成功腕の `violation: None` | 要件 4.4「これ以上違反が無い」＝**正常な結果** |
+/// | 違反が在る | 成功腕の `violation: Some(...)` | 要件 4.2、4.4 |
+///
+/// **1 つ目を 2 つ目と同じ答えにしてはならない。** 文書が差し替わると（メニュー「開く…」→
+/// `dialog::hand_off` → [`DocumentSessionsApi::attach`]。未保存でなければ同じウィンドウへ
+/// 引き渡せる）、セッションは前のシートを表示したまま残る。その状態は「表示しているシートが
+/// もう無い」であり、探す先が無い — 画面が開き直すべき失敗である。
+///
+/// [`GridSession`] は文書を所有しないため（`data-grid` の `api` のモジュール docs）、
+/// **この照合は本層が行う**（他の 5 つは文書を受け取るドメインの操作が同じ照合を内側で
+/// 通っている）。照合は 1 回の読みで済み、探索そのものは索引だけを読む（要件 4.4 の費用は
+/// 変わらない）。
+///
+/// 手順 3 の判定は**列に閉じた 1 回**である。理由は利用者が明示的に指示したときにだけ要る
 /// （要件 4.2）ため、走査の経路（窓の符号化）でこの費用を払うことはない。
 pub(crate) fn answer_find_violation(
     documents: &Arc<DocumentSessions>,
@@ -1063,6 +1503,28 @@ pub(crate) fn answer_find_violation(
     };
     let entry = lock(&entry);
 
+    // 1. 経路の成立（保持しているシートが文書に在ること）。**探索より先に見る** —
+    //    索引は文書に依らないため、あとから見ると「違反が無い」に紛れる。
+    let present = documents.read(label, &mut |document| {
+        document
+            .sheets()
+            .iter()
+            .any(|sheet| sheet.id().to_string() == entry.sheet)
+    });
+    match present {
+        Ok(true) => {}
+        Ok(false) => {
+            return IpcResult::Err {
+                error: path_failure(command, label, &unknown_sheet(&entry.sheet)),
+            }
+        }
+        Err(error) => {
+            return IpcResult::Err {
+                error: session_failure(command, label, &error),
+            }
+        }
+    }
+
     let from = RowOrdinal::new(request.from as usize);
     let direction = match request.direction {
         GridSearchDirection::Forward => SearchDirection::Forward,
@@ -1080,33 +1542,44 @@ pub(crate) fn answer_find_violation(
     let column = found.column();
     let row = found.row().to_string();
     // 理由は判定だけが持つ。**見つかった列に閉じた 1 回の判定**で写す（全件検証ではない）。
-    let composed = documents.read(label, &mut |document| {
-        let sheet = document
-            .sheets()
-            .iter()
-            .find(|sheet| sheet.id().to_string() == entry.sheet)?;
-        let report = SchemaEngine::new().validate_columns(
-            document,
-            sheet.id(),
-            &entry.schema,
-            &[column],
-            &ValidationOptions::default(),
-        );
-        report
-            .violations()
-            .iter()
-            .find(|violation| {
-                violation.column() == column
-                    && violation.row().map(|row| row.to_string()) == Some(row.clone())
-            })
-            .map(|violation| GridViolation {
-                location: violation_location(violation),
-                reason: describe_reason(violation.reason()),
-            })
-    });
+    // シートを引けない場合は `Err`（**「理由が無い」ではなく経路の失敗**）として返す —
+    // 手順 1 の照合と読みが分かれているため、その間に文書が差し替わりうる。
+    let composed = documents.read(
+        label,
+        &mut |document| -> Result<Option<GridViolation>, String> {
+            let sheet = document
+                .sheets()
+                .iter()
+                .find(|sheet| sheet.id().to_string() == entry.sheet)
+                .ok_or_else(|| unknown_sheet(&entry.sheet))?;
+            let report = SchemaEngine::new().validate_columns(
+                document,
+                sheet.id(),
+                &entry.schema,
+                &[column],
+                &ValidationOptions::default(),
+            );
+            Ok(report
+                .violations()
+                .iter()
+                .find(|violation| {
+                    violation.column() == column
+                        && violation.row().map(|row| row.to_string()) == Some(row.clone())
+                })
+                .map(|violation| GridViolation {
+                    location: violation_location(violation),
+                    reason: describe_reason(violation.reason()),
+                }))
+        },
+    );
 
     let violation = match composed {
-        Ok(violation) => violation,
+        Ok(Ok(violation)) => violation,
+        Ok(Err(reason)) => {
+            return IpcResult::Err {
+                error: path_failure(command, label, &reason),
+            }
+        }
         Err(error) => {
             return IpcResult::Err {
                 error: session_failure(command, label, &error),
@@ -1119,13 +1592,13 @@ pub(crate) fn answer_find_violation(
 }
 
 // ---------------------------------------------------------------------------
-// コマンド面（5 つ）
+// コマンド面（6 つ）
 // ---------------------------------------------------------------------------
 
 /// 呼び出し元ウィンドウに表示するシートを開く（要件 1.1、1.5、1.6、4.6）。
 ///
 /// 呼び出し元は注入された [`WebviewWindow`] から取る（要件 4.6）。**`grid_open_sheet` が
-/// 通らなければ他の 4 つは失敗する** — 表示状態・履歴・違反の索引はこの経路が作る。
+/// 通らなければ他の 5 つは失敗する** — 表示状態・履歴・違反の索引はこの経路が作る。
 ///
 /// 開いたセッションは**ウィンドウごとに 1 つ**保持され、ウィンドウが閉じたら破棄される
 /// （[`GridSessions`]）。
@@ -1225,6 +1698,42 @@ pub fn grid_apply_edit(
     result
 }
 
+/// 呼び出し元ウィンドウのグリッドの窓を、生バイトで返す（要件 1.1、11.2）。
+///
+/// # 引数の契約（**入れ子にしない**）
+///
+/// **バッファは引数全体でなければならない。** フロントエンドは
+/// `invoke("grid_rows_window", buffer)` の形で呼ぶ（`src/ipc/client.ts` の `invokeRaw` が
+/// これを行う）。`{ argument: buffer }` のように入れ子にすると、Tauri は `Uint8Array` を
+/// `Array.from()` で数値の配列へ変換して JSON として送るため、ここへは生バイトが届かない —
+/// 受け手は `InvokeBody::Json` を見て空の窓を返す（`bulk_echo` と同じ罠。`bulk` の
+/// モジュール doc「経路の性質」）。
+///
+/// 引数のバイト配置は本モジュールの「生バイト経路の要求の頭」節が唯一の源である
+/// （`WINDOW_REQUEST_HEADER_LEN` バイトの頭 ＋ シートの識別子）。**構造体や `serde` の型で
+/// 包まない** — 包むと上の入れ子の罠へ落ちる。
+///
+/// # 応答の契約
+///
+/// 二進の窓（`application/octet-stream`）を [`Response`] で返す。**封筒（[`IpcResult`]）を
+/// 返さない** — 生バイト経路は JSON を通せないため、失敗と世代違いは**空の窓**で表す
+/// （モジュール docs「失敗と世代違いは空の窓」）。
+///
+/// # 実行モデル
+///
+/// **`#[tauri::command(async)]` を付けない。** あの印は同期の本体を別のスレッドへ移すが、
+/// [`Request`] は invoke のメッセージを**借用**する型であり、非同期の本体へ持ち込めない
+/// （モジュール docs「`grid_rows_window` だけが同期である理由」）。`bulk_echo`（7.2）と
+/// 同じ実行モデルである。
+#[tauri::command]
+pub fn grid_rows_window(app: AppHandle, window: WebviewWindow, request: Request<'_>) -> Response {
+    let context = caller_context(&window);
+    let documents = documents_of(&app);
+    let grids = grid_state(&app);
+
+    answer_rows_window(&documents, &grids, &context.window, request.body())
+}
+
 /// 呼び出し元ウィンドウのグリッドの履歴を進める（要件 9.2、9.3、4.6）。
 ///
 /// **進める履歴が無ければ成功腕で `outcome: None` を返す**（失敗ではない）。
@@ -1288,28 +1797,34 @@ pub fn grid_find_violation(
 }
 
 // ---------------------------------------------------------------------------
-// テスト（タスク 6.2）
+// テスト（タスク 6.2、6.3）
 //
-// Tauri の実体（`WebviewWindow` / `AppHandle`）を要するのはコマンド関数の 5 つだけであり、
+// Tauri の実体（`WebviewWindow` / `AppHandle`）を要するのはコマンド関数の 6 つだけであり、
 // 中身は**すべて本体の関数**へ切り出してある。したがってテストは本体を直接駆動する —
 // GUI を起こさず、**本物の文書**（`document-format` は dev-dependency）と、破棄の購読の
-// 二重だけで足りる。5 つのコマンド関数そのものの形は、関数の型を書いた 1 つのテストが
+// 二重だけで足りる。6 つのコマンド関数そのものの形は、関数の型を書いた 1 つのテストが
 // コンパイル時に固定する。
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::str::FromStr;
+    use std::time::{Duration, Instant};
 
     use app_shell::ipc::{
         GridCellEdit, GridEditRequest, GridHistoryRequest, GridOpenRequest, GridSearchDirection,
         GridSortKey, GridViewRequest, GridViolationRequest,
     };
-    use document_format::{CellValue, Document, DocumentFormat, DocumentFormatApi, SchemaPart};
+    use data_grid::{decode_window, VariantTag, HEADER_LEN, ROW_KEY_LEN, WINDOW_FORMAT_VERSION};
+    use document_format::{
+        CellValue, Document, DocumentFormat, DocumentFormatApi, RowId, SchemaPart,
+    };
     use document_session::{DocumentSessions, DocumentSessionsApi, SessionState};
     use schema_engine::{
         schema_to_text, ColumnDecl, Constraints, DeclaredKind, Schema, TypeDecl, TypeKind,
     };
+    use tauri::ipc::{InvokeResponseBody, IpcResponse};
 
     use super::*;
     use crate::session::watch::testing::AlwaysPresent;
@@ -1403,6 +1918,16 @@ mod tests {
     /// 3 行（品番 = `A` / `B` / `C`、数量 = `1` / `2` / `3`、単価 = `10`〜`30`）の
     /// **本物の文書**を書く。
     fn write_document(path: &Path) {
+        write_document_with(path, [1, 2, 3]);
+    }
+
+    /// 3 行の標本を書く（**数量の並びだけ**を差し替えられる）。
+    ///
+    /// 数量は `int` の 0〜100 であるため、`[1, 999, 3]` のように範囲外の値を置くと
+    /// **違反をちょうど 1 件だけ持つ文書**になる。編集を 1 度も適用せずに違反の索引を持つ
+    /// セッションを作れることが要る — 文書の引き渡し（`DocumentSessions::attach`）は
+    /// **未保存でない**文書にしか効かないためである（差し替えの検査はこの形でしか作れない）。
+    fn write_document_with(path: &Path, quantities: [i64; 3]) {
         let mut document = Document::new();
         let sheet = document.add_sheet("台帳");
         document
@@ -1422,7 +1947,7 @@ mod tests {
                     row,
                     vec![
                         CellValue::Text(label.to_owned()),
-                        CellValue::Int(index as i64 + 1),
+                        CellValue::Int(quantities[index]),
                         CellValue::Int(index as i64 * 10 + 10),
                     ],
                 )
@@ -1447,6 +1972,63 @@ mod tests {
             .collect()
     }
 
+    /// **10 万行**の標本を書く（要件 1.1 の規模）。
+    ///
+    /// 列は [`declaration`] の 3 本で足りる — 窓の費用は**窓の行数**に比例し、シートの行数には
+    /// 依らない（`data-grid` の `transport` のモジュール docs「費用の形」）。品番は一意制約を
+    /// 満たし（`P0`〜`P99999`）、数量と単価は 0〜100 に収める（違反を 1 件も作らない）。
+    fn write_large_document(path: &Path, rows: usize) {
+        let mut document = Document::new();
+        let sheet = document.add_sheet("台帳");
+        document
+            .set_sheet_columns(
+                sheet,
+                vec!["品番".to_owned(), "数量".to_owned(), "単価".to_owned()],
+            )
+            .expect("標本のシートは実在する");
+        document
+            .set_root_schema(sheet, declaration())
+            .expect("標本のシートは実在する");
+        for index in 0..rows {
+            let row = document.add_row(sheet).expect("標本のシートは実在する");
+            let within = (index % 100) as i64;
+            document
+                .set_row_values(
+                    sheet,
+                    row,
+                    vec![
+                        CellValue::Text(format!("P{index}")),
+                        CellValue::Int(within),
+                        CellValue::Int(within),
+                    ],
+                )
+                .expect("標本の行は実在する");
+        }
+        DocumentFormat::new()
+            .save(&document, path)
+            .expect("標本を保存できる");
+    }
+
+    /// 保持している文書の、指定した位置の行の識別子を返す（10 万行を写さないための入口）。
+    fn stored_rows_at(
+        sessions: &Arc<DocumentSessions>,
+        label: &WindowLabel,
+        positions: &[usize],
+    ) -> Vec<String> {
+        sessions
+            .read(label, &mut |document| {
+                let sheet = document
+                    .sheets()
+                    .first()
+                    .expect("標本にはシートが 1 つある");
+                positions
+                    .iter()
+                    .map(|position| sheet.rows()[*position].id().to_string())
+                    .collect()
+            })
+            .expect("保持している文書を読める")
+    }
+
     /// グリッドの表（破棄の購読は常に成功し、どのラベルも引ける二重）。
     fn grids() -> GridSessions {
         GridSessions::new(Arc::new(AlwaysPresent))
@@ -1464,9 +2046,17 @@ mod tests {
 
     /// 標本を開いた状態（表 + 文書 + ラベル）を作る。**開く経路そのものを通す。**
     fn opened(tag: &str) -> (Scratch, Arc<DocumentSessions>, GridSessions, WindowLabel) {
+        opened_with(tag, [1, 2, 3])
+    }
+
+    /// 標本を開いた状態を作る。数量の並びを指定できる（違反を持つ文書を作る唯一の口）。
+    fn opened_with(
+        tag: &str,
+        quantities: [i64; 3],
+    ) -> (Scratch, Arc<DocumentSessions>, GridSessions, WindowLabel) {
         let scratch = Scratch::new(tag);
         let path = scratch.file("台帳.jxcel");
-        write_document(&path);
+        write_document_with(&path, quantities);
         let (sessions, label) = documents(&path);
         let grids = grids();
         let opened = answer_open(
@@ -1528,17 +2118,64 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 5 つのコマンド関数の形（コンパイル時の表明）
+    // 生バイト経路の材料（要件 1.1、11.2）
     // -----------------------------------------------------------------------
 
-    /// **5 つのコマンド関数は、基盤が注入する 2 引数と要求 1 つを取り、封筒を返す。**
+    /// 生バイト経路の引数を組み立てる。
     ///
-    /// これは実行時テストではなく**コンパイル時の表明**である — 5 つを実体
+    /// **本モジュールが定めた配置の写しである**（モジュール docs「引数の配置」）。フロント
+    /// エンド側の符号化器は 7.3 の持ち物であり、ここにあるのは検査の材料である。
+    fn window_argument(sheet: &str, generation: u64, start: u64, count: u64) -> Vec<u8> {
+        let mut argument = Vec::with_capacity(WINDOW_REQUEST_HEADER_LEN + sheet.len());
+        argument.push(WINDOW_REQUEST_VERSION);
+        argument.extend_from_slice(&generation.to_le_bytes());
+        argument.extend_from_slice(&start.to_le_bytes());
+        argument.extend_from_slice(&count.to_le_bytes());
+        argument.extend_from_slice(&(sheet.len() as u64).to_le_bytes());
+        argument.extend_from_slice(sheet.as_bytes());
+        argument
+    }
+
+    /// 応答から生バイトを取り出す（**封筒ではないこと**を値でも確かめる）。
+    fn window_bytes(response: Response) -> Vec<u8> {
+        match response.body().expect("生バイトの応答は常に作れる") {
+            InvokeResponseBody::Raw(bytes) => bytes,
+            InvokeResponseBody::Json(text) => panic!("封筒が返った: {text}"),
+        }
+    }
+
+    /// そのウィンドウのグリッドのいまの世代（要求の頭へ載せる値）。
+    fn generation_of(grids: &GridSessions, label: &WindowLabel) -> u64 {
+        let entry = grids.entry(label).expect("グリッドは開いている");
+        let entry = lock(&entry);
+        entry.session.generation().get()
+    }
+
+    /// 行の識別子の文字列（境界の表現）を、窓の鍵（生 16 バイト）へ写す。
+    fn row_key(text: &str) -> [u8; ROW_KEY_LEN] {
+        RowId::from_str(text)
+            .expect("標本の行の識別子は解釈できる")
+            .ulid()
+            .to_bytes()
+    }
+
+    // -----------------------------------------------------------------------
+    // 6 つのコマンド関数の形（コンパイル時の表明）
+    // -----------------------------------------------------------------------
+
+    /// **6 つのコマンド関数は、基盤が注入する 2 引数と要求 1 つを取り、応答を返す。**
+    ///
+    /// これは実行時テストではなく**コンパイル時の表明**である — 6 つを実体
     /// （`WebviewWindow` / `AppHandle`）つきで呼ぶには本物のウィンドウ基盤が要り、単体テスト
     /// では起こせない（`tauri` のモック基盤は `MockRuntime` のアプリしか作れず、コマンドの
     /// 引数は `Wry` に固定されている）。ここで関数の型を書くことで、**呼び出し元ウィンドウを
-    /// 引数で受け取る形（要件 4.6）と封筒の型（要件 4.4）が変わればコンパイルが壊れる**。
+    /// 引数で受け取る形（要件 4.6）と応答の型（要件 4.4）が変わればコンパイルが壊れる**。
     /// 中身の呼び出し可能性は下の各テストが本体を通して示す。
+    ///
+    /// [`grid_rows_window`] の行がこのテストの要である: **引数は [`Request`] 1 つ**（生バイトの
+    /// バッファそのもの ＝ 入れ子にできない）であり、**戻り値は [`Response`]**（封筒つきの
+    /// `IpcResult` ではない）である。`Request` を構造体や `serde` の型で包めば、その型が
+    /// 引数の数として現れてこの表明が壊れる。
     #[test]
     fn the_command_wrappers_have_the_injected_window_shape() {
         let _: fn(
@@ -1551,6 +2188,7 @@ mod tests {
             WebviewWindow,
             GridViewRequest,
         ) -> IpcResult<GridViewResponse, IpcError> = grid_set_view;
+        let _: fn(AppHandle, WebviewWindow, Request<'_>) -> Response = grid_rows_window;
         let _: fn(
             AppHandle,
             WebviewWindow,
@@ -1830,6 +2468,38 @@ mod tests {
         assert_eq!(2, second.violations[0].column, "違反した列は単価である");
     }
 
+    /// **範囲外の列は経路の失敗であり、文書へ触れない**（未保存の印も立てない）。
+    ///
+    /// 境界は列の範囲を検査しない（範囲の判定はドメインが持つ。6.2 が決めたこと）ため、
+    /// 列 999 の失敗は**適用の閉包の内側**で起こりうる。`DocumentSessions::edit` は閉包が
+    /// 失敗しても未保存の印を立てる（閉包が文書を変えたかを判定できないため保守側に倒す）ので、
+    /// そのままでは**1 つのセルも書いていないのに未保存になる** — 利用者が 1 文字も変えていない
+    /// のに、閉じるときに保存を求められる。変換を閉包の外で済ませて固定する。
+    #[test]
+    fn a_column_outside_the_declaration_does_not_touch_the_document() {
+        let (_scratch, sessions, grids, label) = opened("column-range");
+        let path = _scratch.file("台帳.jxcel");
+        let rows = stored_rows(&path);
+
+        let failure = error(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest {
+                command: set_one(&rows[0], 999, "1"),
+            },
+        ));
+        assert!(matches!(failure, IpcError::Document { .. }));
+        assert!(
+            matches!(
+                sessions.state(&label),
+                SessionState::Open { unsaved: false, .. }
+            ),
+            "範囲外の列で未保存の印を立てない"
+        );
+        assert_eq!(rows, stored_rows(&path), "文書の本体も変わらない");
+    }
+
     /// **解釈できない行の識別子は経路の失敗であり、文書へ触れない**（未保存の印も立てない）。
     #[test]
     fn a_malformed_row_identifier_does_not_touch_the_document() {
@@ -2003,6 +2673,435 @@ mod tests {
         assert!(
             backward.violation.is_some(),
             "後ろ向きでも同じ違反へ到達する"
+        );
+    }
+
+    /// **保持しているシートが文書に無いときは経路の失敗である**（「違反が無い」ではない）。
+    ///
+    /// メニュー「開く…」→ `pick_document_file` → `dialog::hand_off` →
+    /// `DocumentSessions::attach` は、同じウィンドウの文書を**差し替える**（未保存でなければ
+    /// 通る）。差し替えの後も `GridSession` は前のシートを表示したままであり、そのシートは
+    /// 新しい文書に無い。このとき `grid_find_violation` だけが成功腕の `violation: None` を
+    /// 返すと、「これ以上違反が無い」（要件 4.4 の**正常な結果**）と「そのシートが文書に無い」
+    /// （経路の失敗）が同じ答えになる — `grid_set_view` / `grid_apply_edit` は後者を失敗腕で
+    /// 返している。6 つすべての写像を揃える。
+    #[test]
+    fn a_swapped_document_makes_finding_a_violation_fail_at_the_path() {
+        let (scratch, sessions, grids, label) = opened_with("swapped", [1, 999, 3]);
+        let path = scratch.file("台帳.jxcel");
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+
+        // 前提: いまは違反が 1 件見つかる（2 行目の数量が範囲外である）。
+        let found = data(answer_find_violation(
+            &sessions,
+            &grids,
+            &label,
+            &GridViolationRequest {
+                from: 0,
+                direction: GridSearchDirection::Forward,
+            },
+        ));
+        assert!(found.violation.is_some(), "索引に違反が 1 件ある");
+
+        // 別の文書を同じウィンドウへ引き渡す（未保存でないので通る）。
+        let other = scratch.file("別台帳.jxcel");
+        write_document(&other);
+        assert_ne!(
+            sheet_id(&path),
+            sheet_id(&other),
+            "別の文書は別のシートを持つ（差し替えの前提）"
+        );
+        sessions
+            .attach(&label, &other)
+            .expect("未保存でない文書は引き渡せる");
+
+        // 保持しているシートは新しい文書に無い — **経路の失敗**である。
+        let failure = error(answer_find_violation(
+            &sessions,
+            &grids,
+            &label,
+            &GridViolationRequest {
+                from: 0,
+                direction: GridSearchDirection::Forward,
+            },
+        ));
+        assert!(matches!(failure, IpcError::Document { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // 窓の生バイト経路（要件 1.1、11.2。タスク 6.3）
+    // -----------------------------------------------------------------------
+
+    /// **生バイトの要求から、復号できる窓が返る**（要件 1.1、11.2）。
+    ///
+    /// 要求の世代は**いまの世代**である — `encode_window` は自分でいまの世代から
+    /// `WindowRequest` を組むため、要求が名乗る世代を見られるのは本層だけである
+    /// （モジュール docs「世代を比べるのは本層である」）。
+    #[test]
+    fn a_window_request_answers_a_decodable_window() {
+        let (_scratch, sessions, grids, label) = opened("window");
+        let path = _scratch.file("台帳.jxcel");
+        let sheet = sheet_id(&path);
+        let rows = stored_rows(&path);
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+        let generation = generation_of(&grids, &label);
+
+        // 可視行の 2 番目から 2 行（0 起点の序数である）。
+        let argument = window_argument(&sheet, generation, 1, 2);
+        let bytes = window_bytes(answer_rows_window(
+            &sessions,
+            &grids,
+            &label,
+            &InvokeBody::Raw(argument.clone()),
+        ));
+        let window = decode_window(&bytes).expect("窓は復号できる");
+        assert_eq!(WINDOW_FORMAT_VERSION, window.version(), "窓の版が載る");
+        assert_eq!(
+            generation,
+            window.generation().get(),
+            "要求の世代がそのまま載る"
+        );
+        assert_eq!(1, window.start().get(), "開始序数が載る");
+        assert_eq!(2, window.row_count(), "要求した行数が載る");
+        assert_eq!(3, window.columns(), "窓は宣言の列数を運ぶ");
+        assert_eq!(
+            row_key(&rows[1]),
+            window.rows()[0].key(),
+            "1 行目は可視行の 2 番である（識別子は生バイトのまま運ばれる）"
+        );
+        assert_eq!(row_key(&rows[2]), window.rows()[1].key());
+        let cells: Vec<(&str, VariantTag)> = window.rows()[0]
+            .cells()
+            .iter()
+            .map(|cell| (cell.text(), cell.tag()))
+            .collect();
+        assert_eq!(
+            vec![
+                ("B", VariantTag::TEXT),
+                ("2", VariantTag::INT),
+                ("20", VariantTag::INT)
+            ],
+            cells,
+            "表示文字列と変種の札が列順に載る"
+        );
+        assert!(
+            !window.rows()[0].cells()[1].violated(),
+            "違反のないセルである"
+        );
+
+        // 冪等: 同じ世代・同じ区間の要求は**同じバイト列**になる（design.md の Idempotency 句）。
+        let again = window_bytes(answer_rows_window(
+            &sessions,
+            &grids,
+            &label,
+            &InvokeBody::Raw(argument),
+        ));
+        assert_eq!(bytes, again, "同じ要求は同じ窓になる");
+
+        // **端に接する要求は行 0 の窓**（可視行数と同じ開始序数）であり、空の窓ではない —
+        // 画面は「端に達した」と「要求が通らなかった」を別に扱う（5.1 の 2 つの表現）。
+        let edge = window_bytes(answer_rows_window(
+            &sessions,
+            &grids,
+            &label,
+            &InvokeBody::Raw(window_argument(&sheet, generation, 3, 2)),
+        ));
+        assert_eq!(HEADER_LEN, edge.len(), "頭だけの窓である");
+        let edge = decode_window(&edge).expect("行 0 の窓も復号できる");
+        assert_eq!(0, edge.row_count(), "運ぶ行が 0 である");
+        assert_eq!(3, edge.start().get(), "開始序数はそのまま載る");
+    }
+
+    /// **入れ子の引数は生バイトとして届かない** — 空の窓で答える（例外は投げない）。
+    ///
+    /// `{ argument: buffer }` の形で呼ぶと Tauri は `Uint8Array` を `Array.from()` で数値の
+    /// 配列へ変換し、JSON として送るため、ここへは [`InvokeBody::Json`] が届く（`bulk_echo` と
+    /// 同じ罠）。呼び出し側は長さ 0 で気づく（`bulk` のモジュール doc「経路の性質」）。
+    ///
+    /// **JSON の中身は読まない**（値の型は `tauri` が外へ出していない）ため、ここで組める
+    /// 最も近い形＝「JSON の本体」そのものを差し込む。本コマンドは**変種だけを見て**生バイト
+    /// でなければ空の窓を返すので、中身が何であっても答えは変わらない — 入れ子の渡し方の
+    /// 細部（どの鍵で包むか）に依存しないことがこの検査の要点である。
+    #[test]
+    fn a_nested_argument_answers_the_empty_window() {
+        let (_scratch, sessions, grids, label) = opened("nested");
+        let path = _scratch.file("台帳.jxcel");
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+
+        // 前提: 生バイトなら同じウィンドウで窓が返る（下の空の窓が「入れ子のため」である証拠）。
+        let sheet = sheet_id(&path);
+        let generation = generation_of(&grids, &label);
+        assert!(
+            !window_bytes(answer_rows_window(
+                &sessions,
+                &grids,
+                &label,
+                &InvokeBody::Raw(window_argument(&sheet, generation, 0, 1))
+            ))
+            .is_empty(),
+            "生バイトの引数なら窓が返る"
+        );
+
+        let nested = InvokeBody::default();
+        assert!(
+            matches!(nested, InvokeBody::Json(_)),
+            "既定の本体は JSON である（入れ子の引数が届く形）"
+        );
+        let window = window_bytes(answer_rows_window(&sessions, &grids, &label, &nested));
+        assert!(window.is_empty(), "生バイトでない引数には空の窓で答える");
+    }
+
+    /// **壊れた引数は空の窓で答える**（panic しない。窓の復号と同じ規律）。
+    #[test]
+    fn a_malformed_argument_answers_the_empty_window() {
+        let (_scratch, sessions, grids, label) = opened("broken-argument");
+        let path = _scratch.file("台帳.jxcel");
+        let sheet = sheet_id(&path);
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+        let generation = generation_of(&grids, &label);
+        let good = window_argument(&sheet, generation, 0, 1);
+
+        let truncated = good[..WINDOW_REQUEST_HEADER_LEN - 1].to_vec();
+        let mut unknown_version = good.clone();
+        unknown_version[0] = WINDOW_REQUEST_VERSION + 1;
+        let short_sheet = good[..good.len() - 1].to_vec();
+        let mut extra_byte = good.clone();
+        extra_byte.push(0);
+        let mut huge_sheet = good.clone();
+        huge_sheet[25..33].copy_from_slice(&u64::MAX.to_le_bytes());
+        let mut bad_utf8 = good.clone();
+        let last = bad_utf8.len() - 1;
+        bad_utf8[last] = 0xFF;
+        let mut overflowing_span = good.clone();
+        overflowing_span[9..17].copy_from_slice(&u64::MAX.to_le_bytes());
+
+        let cases: [(&str, Vec<u8>); 8] = [
+            ("空", Vec::new()),
+            ("頭に満たない", truncated),
+            ("知らない版", unknown_version),
+            ("シートが足りない", short_sheet),
+            ("余分なバイト", extra_byte),
+            ("シートの長さが過大", huge_sheet),
+            ("シートが UTF-8 でない", bad_utf8),
+            ("区間が桁あふれする", overflowing_span),
+        ];
+        for (what, bytes) in cases {
+            let window = window_bytes(answer_rows_window(
+                &sessions,
+                &grids,
+                &label,
+                &InvokeBody::Raw(bytes),
+            ));
+            assert!(
+                window.is_empty(),
+                "{what}: 空の窓で答える（{} バイト返った）",
+                window.len()
+            );
+        }
+    }
+
+    /// **表示していないシートと、一致しない世代は空の窓で答える**（要件 1.1、5.1 の世代の規則）。
+    ///
+    /// 世代の比較は**一致するかどうか**である（5.1 が「古い」を安全側に一般化した）ため、
+    /// 前の世代も先の世代も同じ答えになる。
+    #[test]
+    fn an_unknown_sheet_and_a_mismatched_generation_answer_the_empty_window() {
+        let (_scratch, sessions, grids, label) = opened("window-empty");
+        let path = _scratch.file("台帳.jxcel");
+        let sheet = sheet_id(&path);
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+        let generation = generation_of(&grids, &label);
+        let previous = generation
+            .checked_sub(1)
+            .expect("`set_view` は世代を進める（前の世代を作れる）");
+
+        // 前提: 正しい要求は窓を返す（下の 2 つが「別の理由」で空になることの対照）。
+        let ok = window_argument(&sheet, generation, 0, 1);
+        assert!(
+            !window_bytes(answer_rows_window(
+                &sessions,
+                &grids,
+                &label,
+                &InvokeBody::Raw(ok)
+            ))
+            .is_empty(),
+            "正しい要求は窓を返す"
+        );
+
+        let other_sheet = window_argument("別のシート", generation, 0, 1);
+        for (what, argument) in [
+            ("表示していないシート", other_sheet),
+            ("前の世代", window_argument(&sheet, previous, 0, 1)),
+            (
+                "知らない世代",
+                window_argument(&sheet, generation + 1, 0, 1),
+            ),
+        ] {
+            let window = window_bytes(answer_rows_window(
+                &sessions,
+                &grids,
+                &label,
+                &InvokeBody::Raw(argument),
+            ));
+            assert!(window.is_empty(), "{what}: 空の窓で答える");
+        }
+    }
+
+    /// **開いていないウィンドウの要求と、可視行数より後ろの要求は空の窓で答える。**
+    ///
+    /// どちらも封筒なら失敗腕になる状態である（この経路には封筒が無い）。
+    #[test]
+    fn a_request_before_opening_or_past_the_end_answers_the_empty_window() {
+        let scratch = Scratch::new("window-not-open");
+        let path = scratch.file("台帳.jxcel");
+        write_document(&path);
+        let (sessions, label) = documents(&path);
+        let empty_grids = grids();
+        let sheet = sheet_id(&path);
+
+        let before = window_argument(&sheet, 0, 0, 1);
+        let window = window_bytes(answer_rows_window(
+            &sessions,
+            &empty_grids,
+            &label,
+            &InvokeBody::Raw(before),
+        ));
+        assert!(window.is_empty(), "開いていなければ空の窓である");
+
+        // 開いたあと、可視行数より後ろの開始序数（3 行の標本で 4 番目）。
+        let (_scratch, sessions, grids, label) = opened("window-range");
+        let path = _scratch.file("台帳.jxcel");
+        let sheet = sheet_id(&path);
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+        let generation = generation_of(&grids, &label);
+        let past = window_argument(&sheet, generation, 4, 2);
+        let window = window_bytes(answer_rows_window(
+            &sessions,
+            &grids,
+            &label,
+            &InvokeBody::Raw(past),
+        ));
+        assert!(
+            window.is_empty(),
+            "可視行数より後ろの要求（0 起点で 4 番目）は空の窓である"
+        );
+    }
+
+    /// **10 万行のシートから任意の位置の窓が取れ、要件 11.2 の 1 秒に収まる**（要件 1.1、11.2）。
+    ///
+    /// 窓の費用は**窓の行数**に比例し、シートの行数には依らない（5.1 の「費用の形」）。
+    /// ここでは末尾に近い任意の位置（可視行の 99,800 番目）から 200 行を要求し、
+    /// **その位置の行の識別子と表示文字列**が返ることを確かめる。
+    #[test]
+    fn a_window_at_an_arbitrary_position_of_a_hundred_thousand_rows_is_retrieved() {
+        const ROWS: usize = 100_000;
+        const START: usize = 99_800;
+        const WINDOW: usize = 200;
+
+        let scratch = Scratch::new("window-100k");
+        let path = scratch.file("台帳.jxcel");
+        write_large_document(&path, ROWS);
+        let (sessions, label) = documents(&path);
+        let grids = grids();
+        let sheet = sheet_id(&path);
+        assert!(
+            matches!(
+                answer_open(
+                    &sessions,
+                    &grids,
+                    &label,
+                    &GridOpenRequest {
+                        sheet: sheet.clone()
+                    }
+                ),
+                IpcResult::Ok { .. }
+            ),
+            "10 万行のシートも開ける"
+        );
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+        let generation = generation_of(&grids, &label);
+
+        let started = Instant::now();
+        let bytes = window_bytes(answer_rows_window(
+            &sessions,
+            &grids,
+            &label,
+            &InvokeBody::Raw(window_argument(
+                &sheet,
+                generation,
+                START as u64,
+                WINDOW as u64,
+            )),
+        ));
+        let elapsed = started.elapsed();
+        println!(
+            "10 万行のシートの {START} 番から {WINDOW} 行の窓: {elapsed:?}（応答 {} バイト）",
+            bytes.len()
+        );
+
+        let window = decode_window(&bytes).expect("窓は復号できる");
+        assert_eq!(START, window.start().get());
+        assert_eq!(WINDOW, window.row_count());
+        let positions = [START, ROWS - 1];
+        let expected = stored_rows_at(&sessions, &label, &positions);
+        assert_eq!(
+            row_key(&expected[0]),
+            window.rows()[0].key(),
+            "任意の位置（99,800 番目）の行が載る"
+        );
+        assert_eq!(
+            row_key(&expected[1]),
+            window.rows()[WINDOW - 1].key(),
+            "窓の最後の行は 99,999 番目である"
+        );
+        let cells: Vec<&str> = window.rows()[0]
+            .cells()
+            .iter()
+            .map(|cell| cell.text())
+            .collect();
+        assert_eq!(
+            vec![format!("P{START}"), "0".to_owned(), "0".to_owned()],
+            cells,
+            "その位置の値が載る（99,800 % 100 = 0）"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "要件 11.2 の予算（1 秒）に収まる: {elapsed:?}"
         );
     }
 
