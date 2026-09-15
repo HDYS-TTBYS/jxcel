@@ -116,12 +116,36 @@
 //! 一括の書き込みと再検証 1 回で完了する（要件 7.7, 11.5。**1 万行でも同じ呼び出しの形**で
 //! あることをテストが数えて固定する）。
 //!
-//! 残りの層（`history` は群 4、`transport` / `api` は群 5）は設計の File Structure Plan に
+//! タスク 4.1 が [`history`] 層の入口を足した（[`UndoStack`] / [`UndoEntry`] / [`UndoLabel`]）。
+//! 命令と逆命令の対を積む**拡張点の所有者**であり、`formula-engine` と `macro-runtime` が
+//! 後から**同じ 1 つの登録口**（[`UndoStack::push`]）で乗る（要件 9.1, 9.7。区分
+//! [`UndoLabel::Recalculation`] / [`UndoLabel::MacroRun`] を先に用意してある）。履歴は
+//! **ドキュメント単位**でありシートごとではない（要件 9.5）— マクロの実行が複数シートに
+//! 跨る 1 つの操作になりうるためである。
+//!
+//! **逆命令は適用の時にしか作れない**（適用の後には変更前の値も、取り除かれた行も、その位置も
+//! 存在しない。要件 9.1 / 6.6）。したがって `edit` 層へ [`EditApply::apply_with_inverse`] を
+//! 足し、適用と**同じ本体**で対（[`HistoryPair`]）を組み立てて返す（[`EditApply::apply`] は
+//! それを捨てるだけの委譲であり、3.1〜3.4 の呼び出しの形は 1 つも変わらない）。材料の型
+//! （[`HistoryCommand`] / [`RestoredRow`]）は **`edit` 層に置く** — 適用の経路がその型を
+//! 名指すためであり、`history` 層に置くと層の鎖（`error / types → view → edit → history`）が
+//! 閉じない。**公開の [`EditCommand`] は 1 変種も増えない**。
+//!
+//! 材料は**表示文字列を経由しない**。セルの編集の逆命令は**変更前の値そのもの**を保持する —
+//! 表示文字列へ写して書き戻す経路は、添付の列（hex のテキストになる）と入れ子の列
+//! （要素数の要約になる）で値の変種を変えてしまい、元の状態を復元できない。行の削除の逆命令
+//! （design.md の「復元用の内部命令」）は**値・識別子・位置**を保持し、適用は `Row` を
+//! 復号の正規の入口（行データの wire 形式）から組み立てて差し戻す（`Row` は `Clone` を
+//! 持たず、本クレートの外で組み立てられない）。1 回の貼り付けは**1 つの操作**として積まれ、
+//! 1 回の適用で適用前の状態へ戻る（要件 7.6）。
+//!
+//! 残りの層（`transport` / `api` は群 5）は設計の File Structure Plan に
 //! 挙げられた順に後続のタスクが足す。**実体の無いモジュールを先に宣言しない**（錆びた宣言は、
 //! 層の鎖が実際に守られているかを検査できなくする）。
 
 pub mod edit;
 pub mod error;
+pub mod history;
 pub mod types;
 pub mod view;
 
@@ -158,3 +182,12 @@ pub use edit::{
 // 5.2 の `GridSession` が選択範囲の複製（要件 7.2）と貼り付けの受理（要件 7.3）の双方に
 // **この 1 つの写し**を使う（貼り付けの適用そのものは `EditCommand::PasteRange` が担う）。
 pub use edit::paste::PasteCodec;
+// `edit` 層の履歴の材料（タスク 4.1）: 履歴が積む**復元用の内部命令**と、適用の時に組んだ
+// 命令と逆命令の対。材料の型を `edit` 層に置くのは、適用の経路（`EditApply`）がその型を
+// 名指すためである — `history` 層に置くと層の鎖が閉じない（層の向きの説明は `history` の
+// モジュール docs）。**公開の `EditCommand` は 1 変種も増えない**。
+pub use edit::{HistoryCommand, HistoryPair, RestoredRow};
+// `history` 層の取り消し履歴（タスク 4.1）: 命令と逆命令の対を積む**拡張点の所有者**。
+// `formula-engine` / `macro-runtime` が同じ 1 つの登録口（`UndoStack::push`）で乗り、
+// 5.2 の `GridSession` がドキュメントと一緒に保持する。
+pub use history::{UndoEntry, UndoLabel, UndoStack};

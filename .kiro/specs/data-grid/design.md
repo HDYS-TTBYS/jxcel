@@ -509,23 +509,26 @@ pub struct CoercionNotice { pub cell: CellAddress, pub before: String, pub after
 
 ##### Service Interface
 ```rust
-pub struct UndoStack { /* entries: VecDeque<UndoEntry>, cursor: usize, limit: usize */ }
-pub struct UndoEntry { pub label: UndoLabel, pub inverse: EditCommand, pub redo: EditCommand }
+pub struct UndoStack { /* entries: Vec<UndoEntry>, cursor: usize, limit: usize */ }
+pub struct UndoEntry { pub label: UndoLabel, pub inverse: HistoryCommand, pub redo: HistoryCommand }
 pub enum UndoLabel { CellEdit, RowInsert, RowRemove, RowDuplicate, Paste, Recalculation, MacroRun }
 
 impl UndoStack {
     pub fn new(limit: usize) -> Self;
     pub fn push(&mut self, entry: UndoEntry);
-    pub fn undo(&mut self) -> Option<&EditCommand>;
-    pub fn redo(&mut self) -> Option<&EditCommand>;
+    pub fn undo(&mut self) -> Option<&HistoryCommand>;
+    pub fn redo(&mut self) -> Option<&HistoryCommand>;
     pub fn depth(&self) -> usize;
 }
 ```
 - Invariants: `push` は `cursor` 以降のやり直し対象を破棄する（要件 9.4）
+- `HistoryCommand` / `RestoredRow` は **`edit` 層**の型である（適用の経路が復元の材料を名指すため。層の鎖 `error / types → view → edit → history` を閉じたままにする）。`entries` は `Vec` である（`VecDeque` ではなく、積んだ並びを借用の切片として読める必要がある）
 
 **Implementation Notes**
 - Integration: `UndoLabel::Recalculation` と `MacroRun` は本機能では生成されない。**後続スペックのために先に場所を空けてある**（拡張点は所有者が形を決める、`structure.md`）
+- Integration: 逆命令は `EditApply::apply_with_inverse` が**適用と同じ本体の中で**組む（適用の後には変更前の値・取り除かれた行・位置が存在しない）。`apply` は対を捨てるだけの委譲である
 - Risks: 行の削除の逆命令は取り除いた行の値と `RowId` と位置を保持する必要がある。`document-format::remove_rows` が `Vec<Row>` を返す理由がこれである
+- Risks: その逆命令は**`EditCommand` では表せない** — `Row` は `Clone` を持たず、公開の構築子も `document-format` の外に無い（`Row` を得る公開経路は `remove_rows` と `parts::RowsCodec::decode` + `SheetRows::into_rows` だけである）。したがって **`edit` 層に履歴専用の命令型 `HistoryCommand`** を置き、復元用の内部命令はその `RestoreValues` / `RestoreRows` が運ぶ（**公開の `EditCommand` は 1 変種も増えない**）。`RestoreRows` の適用は行データの wire 形式を組み立てて復号の正規の入口を通す
 
 #### WindowCodec
 
@@ -764,12 +767,16 @@ export interface DisplayState {
 
 | 命令 | 逆命令 | 逆命令が保持するもの |
 |---|---|---|
-| `SetCells` | `SetCells` | 変更前の表示文字列 |
-| `SetNested` | `SetNested` | 変更前の JSON |
-| `InsertRows` | `RemoveRows` | 追加された `RowId` |
-| `RemoveRows` | 復元用の内部命令 | 取り除いた `Row` の値・`RowId`・位置 |
-| `DuplicateRows` | `RemoveRows` | 追加された `RowId` |
-| `PasteRange` | `SetCells` + `RemoveRows` | 変更前の値と、補充された行の `RowId` |
+| `SetCells` | `RestoreValues`（復元用の内部命令） | 変更前の**値そのもの**（触れた行の、適用前の値の並び。位置と `RowId` を含む） |
+| `SetNested` | `RestoreValues`（復元用の内部命令） | 変更前の**値そのもの**（同上） |
+| `InsertRows` | `RemoveRows` | 追加された `RowId`（やり直しは発行済みの行の `RestoreRows`） |
+| `RemoveRows` | `RestoreRows`（復元用の内部命令） | 取り除いた `Row` の値（**値の個数＝行の幅も含む**。幅 0 も可）・`RowId`・位置 |
+| `DuplicateRows` | `RemoveRows` | 追加された `RowId`（やり直しは発行済みの行の `RestoreRows`） |
+| `PasteRange` | `RestoreValues` + `RemoveRows`（`Composite` で 1 操作） | 変更前の値と、補充された行の `RowId` |
+
+**貼り付けの逆命令の材料は「表示されている行の並び」から取る**（要件 8.9 と 9.2 の交わり）: 貼り付けの宛先は錨（物理の行）と表示の並びの 2 つの成分で決まり、絞り込みや並べ替えの下では**表示の位置が文書の位置と一致しない**。材料を文書の位置で引くと別の行を指し、取り消しが実際に書いた行を戻さない。**行の幅も復元の対象である**: 値の並びが列数に満たない行も、値を 1 つも持たない行（幅 0）も正当であり、埋めない。復元は**行の値の並びごと置換**して書く — セル単位の書き込みは行を伸ばすことしかできない（`Row::set_cell` は `resize(column + 1, Null)` であり決して縮めない）ため、編集が短い行を広げていた場合に幅が材料より大きいまま残る。
+
+**セルの編集の逆命令が保持するのは表示文字列ではなく値そのものである**: 表示文字列へ写して書き戻す経路は、添付の列（hex のテキストになる）と入れ子の列（要素数の要約になる）で値の変種を変えてしまい、元の状態を復元できない（要件 9.2）。**貼り付けの逆命令は `Composite` の 1 操作として積まれる**（要件 7.6。「値を戻す → 補充した行を取り除く」の順である）。
 
 ## Error Handling
 

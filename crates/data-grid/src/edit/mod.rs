@@ -237,12 +237,16 @@
 //! 性質（一意性と参照の実在）も含むが、1 行分の判定は含まない）。2 つを足すと同じ違反を
 //! 二重に数える。
 //!
-//! # 履歴（4.x）との境目
+//! # 履歴（4.1）との境目
 //!
-//! 本層は履歴を積まない（`UndoStack` は 4.1 が足す）。**空の `SetCells`（セル 0 個）は
-//! 何も変えないため、適用の結果を「影響を受けた行なし・違反の総数 0」として返し、判定も
-//! 再検証も呼ばない。** 4.1 はこれを履歴に積まないこと — 状態を変えない命令を積むと、
-//! 取り消しが何も戻さない操作になる。
+//! 本層は履歴を**積まない**（積むのは `history` 層の `UndoStack`。design.md
+//! 「UndoStack（拡張点の所有者）」）が、逆命令の**材料**は適用の時に本層が読んで返す
+//! （[`EditApply::apply_with_inverse`]。適用の後には材料が存在しないため。要件 9.1）。
+//!
+//! **空の `SetCells`（セル 0 個）は何も変えないため、適用の結果を「影響を受けた行なし・
+//! 違反の総数 0」として返し、判定も再検証も呼ばず、対も返さない（`None`）。** 対を返さないのは、
+//! 取り消しが何も戻さない操作を履歴へ入れないためである（`tests/undo_stack.rs` の
+//! `an_empty_command_changes_nothing_and_leaves_no_pair`）。
 //!
 //! # 群 3 の残りのタスクへの拡張
 //!
@@ -256,7 +260,7 @@
 //!
 //! [`EditCommand::SetNested`] は、入れ子のセルを**構造を保った表現**として受け取り、
 //! 構造を保ったまま書き戻す。表現の形も、表現とセル値の相互変換も**上流が持っている**:
-//! `document-format` の [`to_json_bytes`](document_format::to_json_bytes) /
+//! `document-format` の [`to_json_bytes`] /
 //! [`from_json_bytes`] がセル値の JSON 表現の唯一の源であり
 //! （同クレートの行データの符号化もこの 2 つを通る）、**本層は解析器を 1 つも持たない**。
 //! 本層がやるのは `from_json_bytes` に渡すことと、返った [`CellValue`] を判定へ渡すことだけ
@@ -322,16 +326,14 @@
 //! `tests/edit_nested.rs` の `a_nested_edit_is_a_single_cell_edit_for_the_call_shape` が
 //! 記録の全体を 1 つの表明で固定する。
 //!
-//! ## 4.1 の逆命令が要る「変更前の JSON」
+//! ## `SetNested` の逆命令が要る「変更前の値」
 //!
-//! design.md「編集命令と逆命令の対応」は `SetNested` の逆命令を `SetNested`（変更前の JSON）と
-//! する。**本層は履歴を積まない**（`UndoStack` は 4.1）ため、変更前の JSON を本層は返さない。
-//! ただし 4.1 が要るものは**適用の前に既存の口から取り出せる**: セルの値は
-//! `&Document` から読め（`Sheet::rows()[..].values()`）、JSON 表現への変換は
-//! [`to_json_bytes`](document_format::to_json_bytes) が公開面にある。したがって 4.1 は
-//! 適用の前に対象セルの値（とその表現）を読んでおけばよく、**本層の seam も `EditOutcome` の
-//! 形も変えずに済む**（3.1 の `SetCells` が「変更前の表示文字列」を同じ形で取り出せるのと
-//! 同じ規律である）。往復が値と表現の双方で可逆であることは
+//! design.md「編集命令と逆命令の対応」は `SetNested` の逆命令を「変更前の値」とする。
+//! **本層は履歴を積まない**（積むのは `history` 層の `UndoStack`。4.1）が、材料は
+//! [`EditApply::apply_with_inverse`] が**適用と同じ本体の中で**読んで返す — 変更前の値は
+//! 適用の後には存在しないためである（要件 9.1）。`SetNested` は `SetCells` と同じく
+//! **値そのもの**を材料にする（表示文字列や JSON ではない。モジュール docs「履歴（4.1）が
+//! 逆命令を組み立てるのに要るもの」）。往復が値と表現の双方で可逆であることは
 //! `editing_one_inner_field_leaves_every_other_field_and_the_rest_of_the_document_unchanged`
 //! が固定する。
 //!
@@ -391,48 +393,66 @@
 //! 錨の行が `rows` に現れない（表示されていない行を錨にした）場合は、**成功し、何も変えず、
 //! 縫い目を 1 回も呼ばない**（3.1 の空の命令と同じ規則）。
 //!
-//! # 履歴（4.x）が逆命令を組み立てるのに要るもの
+//! # 履歴（4.1）が逆命令を組み立てるのに要るもの
 //!
 //! design.md「編集命令と逆命令の対応」は `InsertRows` / `DuplicateRows` の逆命令を
 //! `RemoveRows`（追加された `RowId` を保持する）とし、`RemoveRows` の逆命令を「復元用の
 //! 内部命令」（取り除いた `Row` の値・`RowId`・位置を保持する）とする。
 //!
-//! 本層は履歴を積まないが、**その材料を `EditOutcome` から取り出せる形にしてある**:
-//! 追加された行の識別子は `affected` そのものであり、取り除かれた行の識別子も `affected` で
-//! ある。取り除かれた**値**は本層に残らない（[`Row`](document_format::Row) は `Clone` を
-//! 持たず、[`Document::remove_rows`] が返した行は本層の外へ出せない）ため、4.1 は
-//! **適用の前に**対象の行の値を読んでおく（その読み口は `&Document` から既にある）か、
-//! 本層へ返させるときに `affected` を広げる（3.1 の seam の形は変えない）。
+//! **逆命令は適用時にしか作れない**（適用の後には変更前の値も、取り除かれた行も存在しない。
+//! tasks.md 4.1）。したがって本層は [`EditApply::apply_with_inverse`] を持ち、適用と
+//! **同じ本体**で対（[`HistoryPair`]）を組み立てて返す — [`EditApply::apply`] はそれを
+//! 捨てるだけの委譲である（3.1〜3.4 の呼び出しの形は 1 つも変わらない）。
 //!
-//! 位置まで要るのは `RemoveRows` の逆命令だけであり、位置は**適用前の文書の位置**である
-//! （適用後には行が消えているため、後からは導けない）。
+//! ## 逆命令は [`EditCommand`] では表せない（[`HistoryCommand`] を持つ理由）
 //!
-//! ## `PasteRange` の逆命令（`SetCells` + `RemoveRows`）が要るもの
+//! `RemoveRows` の逆命令（取り除いた行を**同じ識別子・同じ値・同じ位置**へ戻す）は、
+//! [`EditCommand`] のどの変種でも表せない。表すには [`Row`] を保持する
+//! 必要があり、`Row` は `Clone` を実装せず（識別子発行の単発行者保証を黙って壊さないため）、
+//! 本クレートの外で組み立てる公開の口も無い（[`Document::insert_rows_at`] は `Vec<Row>` を
+//! 取るが、`Row` を得る公開経路は [`Document::remove_rows`] と
+//! [`RowsCodec::decode`] + `SheetRows::into_rows` だけである）。
 //!
-//! design.md「編集命令と逆命令の対応」は `PasteRange` の逆命令を `SetCells` + `RemoveRows` と
-//! し、保持するものを「**変更前の値**と、**補充された行の `RowId`**」とする。
+//! そこで本層は**履歴専用の命令型** [`HistoryCommand`] を置く。`EditCommand` で表せる
+//! 方向は [`HistoryCommand::Edit`] に包んで運び、値の復元は
+//! [`HistoryCommand::RestoreValues`]、行の差し戻しは [`HistoryCommand::RestoreRows`] が
+//! 運ぶ。**公開の [`EditCommand`] は 1 変種も増えない**（履歴の材料は履歴の側の型である）。
 //!
-//! **補充された行の `RowId`** は `affected` から取り出せる: `affected` は矩形の行
-//! （表示の並びの錨から先）と補充した行を**書いた順**に持ち、呼び出し側が知っている `rows` に
-//! 現れないものが補充された行である（`tests/edit_paste.rs` の
-//! `a_paste_beyond_the_last_row_appends_the_missing_rows` がこの取り出しを固定する。
-//! `RemoveRows`（補充した行を取り除く）はその識別子だけで足りる）。
+//! ## 適用時に読む材料
 //!
-//! **変更前の値** は本層に残らない（`SetCells` の逆命令が要る「変更前の表示文字列」と同じ
-//! 事情である）。捨てるのではなく、**適用の前に呼び出し側が既存の口から読み出す** —
-//! 矩形が覆うセルは `anchor` の列と `rows` の錨の位置から導ける（`PasteRange` 自身が運ぶ
-//! 2 つの成分から決まる）ため、4.1 は適用の前にその範囲の値を読んでおけばよい。本層の seam も
-//! `EditOutcome` の形も変えずに済む（3.1 / 3.3 と同じ規律）。
+//! | 命令 | 逆命令 | 材料を読む時点 |
+//! |---|---|---|
+//! | `SetCells` / `SetNested` | [`HistoryCommand::RestoreValues`] | 書き込みの**前**（事前検査で作る行の位置の索引を使い、触れる行の値の並びをそのまま読む） |
+//! | `InsertRows` | `Edit(RemoveRows)` | 挿入の**後**（挿入した識別子そのもの。`affected` と同一） |
+//! | `RemoveRows` | [`HistoryCommand::RestoreRows`] | 取り除く**前**（[`Document::remove_rows`] は**シート順**の `Vec<Row>` を返すが `Row` は外へ出せないため、位置と値は事前に読み、返った行から識別子を取る） |
+//! | `DuplicateRows` | `Edit(RemoveRows)` | 複製の後（複製の識別子そのもの） |
+//! | `PasteRange` | [`HistoryCommand::Composite`] | 書き込みの**前**（矩形が覆う行の値）と後（補充した行の識別子） |
 //!
-//! **矩形が覆わない列を触らない**（モジュール docs「貼り付け」）ことも 4.1 の材料の形を
-//! 決める: 逆命令の `SetCells` が保持すべきセルは**矩形の内側だけ**であり、矩形の行が短い
-//! 場合に「値なしを書いて戻す」必要が生じない。
+//! **セルの編集の材料は値そのものであり、表示文字列ではない。**表示文字列へ写して書き戻す
+//! 経路は、添付の列（hex のテキストになる）と入れ子の列（要素数の要約になる）で値の変種を
+//! 変えてしまい、元の状態を復元できない（`tests/undo_stack.rs` がこの 2 列で復元を固定する）。
+//!
+//! ## 復元の経路（本層の中で完結させる）
+//!
+//! [`HistoryCommand`] の適用（[`EditApply::apply_history`]）は [`EditApply::apply`] と
+//! **同じ層の中で**行う。`history` 層は本層を参照してよい（層の鎖は
+//! `error / types → view → edit → history`）が、**逆向きの参照は無い** — 履歴の内部命令の
+//! 型を `history` に置くと、本層が適用のためにその型を名指すことになり層の鎖が閉じない。
+//! したがって材料の型は本層が持ち、履歴の層（`history`）がそれを積む。
+//!
+//! [`HistoryCommand::RestoreRows`] の適用は、[`RowsCodec`] の復号経路（行データの
+//! wire 形式）を通して [`Row`] を組み立て、[`Document::insert_rows_at`] へ渡す。**判定は
+//! 呼ばない** — 差し戻す値はドキュメントに既にあった値そのものであり、判定（書き込みの門）を
+//! 通せば値が変わりうる（複製が判定を通らないのと同じ理由。モジュール docs
+//! 「行の構造を変える命令の再検証」）。再検証は差し戻しの後に**すべての列**を 1 回だけ呼ぶ
+//! （行の集合が変わるため。同じ節）。
 
 use std::collections::{HashMap, HashSet};
 
+use document_format::parts::RowsCodec;
 use document_format::{
-    from_json_bytes, CellValue, CellWriteError, Document, RowId, RowInsertionError, RowRemovalError,
-    Sheet, SheetId,
+    from_json_bytes, to_json_bytes, CellValue, CellWriteError, Document, EntryName, Row, RowId,
+    RowInsertionError, RowRemovalError, Sheet, SheetId,
 };
 use schema_engine::{
     validate_columns, validate_sheet, validate_write, Coercion, ColumnIndex, CompiledSchema,
@@ -446,6 +466,13 @@ use schema_engine::coerce::coerce;
 use crate::error::GridError;
 use crate::types::{CellAddress, RowOrdinal, RowSpan};
 use crate::view::display_text;
+
+/// 行データの wire 形式（NDJSON）の予約キー（行識別子を 26 文字 ULID テキストで持つ）。
+///
+/// 復元用の内部経路（[`EditApply::rows_from_materials`]）が行を組み立てるときに使う。
+/// `document-format` の `parts::rows_codec` が同じ名前を私的に持つ（本クレートは復号の
+/// 側だけを使うため、名前を写して**書く側**を組み立てる）。
+const ROW_ID_KEY: &str = "$id";
 
 pub mod paste;
 
@@ -490,7 +517,8 @@ pub enum EditCommand {
     ///
     /// 入れ子の値を編集する呼び出し側は、**編集の前の値を同じ表現で読んでおく**こと —
     /// design.md「編集命令と逆命令の対応」の `SetNested` の逆命令が保持する「変更前の JSON」
-    /// であり、4.1 の履歴は適用の後には作れない（同「4.1 の逆命令が要る「変更前の JSON」」）。
+    /// であり、履歴の材料は適用の後には作れない（同「`SetNested` の逆命令が要る
+    /// 「変更前の値」」）。
     SetNested {
         /// 書くセル（行の識別子と列の添字）。`SetCells` と同じく**物理のセル**である。
         cell: CellAddress,
@@ -643,6 +671,94 @@ pub struct EditOutcome {
     /// 変わらない（`PasteRange` は矩形が既存の行数を超えるときに増える。要件 7.4。行を増減する
     /// 命令（3.2）がこの欄に変化を載せる）。
     pub row_count: usize,
+}
+
+/// 取り消し履歴が運ぶ命令（履歴の**復元用の内部命令**。要件 6.6, 9.1, 9.2）。
+///
+/// [`EditCommand`] は「利用者が起こした編集」であり、そのままでは**逆方向**を表せない。
+/// とくに `RemoveRows` の逆命令（取り除いた行を同じ識別子・同じ値・同じ位置へ戻す）は、
+/// [`Row`] を保持する必要があるが、`Row` は `Clone` を実装せず
+/// （識別子発行の単発行者保証を黙って壊さないため）、本クレートの外で組み立てる公開の口も
+/// 無い（[`Document::insert_rows_at`] は `Vec<Row>` を取るが、`Row` を得る公開経路は
+/// [`Document::remove_rows`] と [`RowsCodec::decode`] + `SheetRows::into_rows` だけである）。
+///
+/// したがって履歴は**この型**を積む。本層が持つのは、適用の経路
+/// （[`EditApply::apply_history`]）がこの型を名指すためである（層の鎖
+/// `error / types → view → edit → history` の向きを閉じたままにする）。
+/// **公開の [`EditCommand`] は 1 変種も増えない。**
+///
+/// 等値と複製を持つのは、履歴の形を検査（`tests/undo_stack.rs`）が突き合わせられるように
+/// するためである。[`CellValue`] が `Eq` を持たない（浮動小数を持つ）ため `Eq` は導出しない。
+#[derive(Debug, Clone, PartialEq)]
+pub enum HistoryCommand {
+    /// [`EditCommand`] で表せる方向（逆方向も `EditCommand` で表せるもの）。
+    ///
+    /// `SetCells` / `SetNested` の**やり直し**、`InsertRows` / `RemoveRows` / `DuplicateRows` の
+    /// **逆命令**（いずれも `RemoveRows`）、および `PasteRange` のやり直しがこれに載る。
+    Edit(EditCommand),
+    /// セルの編集を**適用前の値そのもの**へ戻す（`SetCells` / `SetNested` の逆命令、および
+    /// 貼り付けが覆ったセルの復元）。
+    ///
+    /// 保持するのは**行の値の並びそのもの**であり、表示文字列でも JSON でもない。
+    /// 表示文字列へ写して書き戻す経路は、添付の列（hex のテキストになる）と入れ子の列
+    /// （要素数の要約になる）で値の変種を変えてしまい、元の状態を復元できない
+    /// （`tests/undo_stack.rs` の `a_cell_edit_is_undone_to_the_values_read_at_apply_time`）。
+    RestoreValues {
+        /// 復元する行が属するシート。
+        sheet: SheetId,
+        /// 復元する行（識別子・位置・適用前の値の並び）。**位置は適用前の文書の位置**である。
+        rows: Vec<RestoredRow>,
+    },
+    /// 取り除いた行を**同じ識別子・同じ値・同じ位置**へ差し戻す（`RemoveRows` の逆命令、
+    /// および行を補充した操作のやり直し）。要件 6.6 / 9.2 の本体である。
+    ///
+    /// 適用は [`RowsCodec`] の復号経路で [`Row`] を組み立て、
+    /// [`Document::insert_rows_at`] へ**位置の昇順に連続する区間ごとに 1 回**渡す
+    /// （質量削除の差し戻しが 1 回の呼び出しで済むようにする。連続する区間へ分けるのは、
+    /// 挿入位置が挿入前の行順に対する添字であるためである）。
+    RestoreRows {
+        /// 復元する行が属するシート。
+        sheet: SheetId,
+        /// 差し戻す行（識別子・位置・値の並び）。
+        rows: Vec<RestoredRow>,
+    },
+    /// 複数の部分から成る**1 つの操作**（貼り付け。要件 7.6）。
+    ///
+    /// 部分は**この並びの順**に適用される。貼り付けの逆命令は
+    /// 「覆ったセルの値を戻す → 補充した行を取り除く」であり、この順でなければならない
+    /// （先に補充した行を取り除くと、その行に書かれた値の復元先が消える）。
+    /// 履歴には**1 つの対として**積まれ、取り消しは 1 回で元の状態へ戻る。
+    Composite(Vec<HistoryCommand>),
+}
+
+/// 復元の材料としての 1 行（識別子・位置・値の並び）。
+///
+/// [`Row`] は `Clone` を持たず外へ出す口も無いため、履歴が保持する形へ
+/// **写し取る**。位置を持つのは、行の削除の逆命令が**同じ位置**へ戻さなければならないため
+/// である（適用後には行が消えており、後からは導けない）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestoredRow {
+    /// 行の識別子（**同じ識別子へ戻す**。要件 6.6）。
+    pub id: RowId,
+    /// 適用前の文書の位置（0 起点。行の挿入はこの位置に対して行う）。
+    pub position: usize,
+    /// 行の値の並び（列の添字で並ぶ。値なしの列も含めて**そのまま**）。
+    pub values: Vec<CellValue>,
+}
+
+/// 1 回の適用が生んだ**命令と逆命令の対**（[`EditApply::apply_with_inverse`] の戻り値）。
+///
+/// `inverse` を適用すると適用前の状態へ戻り、`redo` を適用すると適用後の状態へ戻る。
+/// どちらも**適用の時点**で組み立てられる（適用の後には材料が存在しない。tasks.md 4.1）。
+///
+/// 4.1 の履歴（`history` 層の `UndoStack`）はこの対をそのまま積む。**本層は履歴を積まない**
+/// （積むのは操作口の仕事である）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryPair {
+    /// 適用前の状態へ戻す命令。
+    pub inverse: HistoryCommand,
+    /// 適用後の状態へ進める命令。
+    pub redo: HistoryCommand,
 }
 
 /// 型強制によって値が変換されたことの記録（design.md「EditApply」の Service Interface。
@@ -806,17 +922,75 @@ impl EditApply {
         doc: &mut Document,
         command: EditCommand,
     ) -> Result<EditOutcome, GridError> {
+        // 本体は 1 つである（[`EditApply::apply_with_inverse`]）。本経路は履歴へ積まないため、
+        // 適用時に組んだ対を捨てるだけである — 対を組む作業は「材料を読む」ことであり、
+        // 読む場所は適用の本体の中（書き込みの前）にしか無い。
+        self.apply_with_inverse(doc, command)
+            .map(|(outcome, _)| outcome)
+    }
+
+    /// 編集命令を適用し、**適用時に組んだ命令と逆命令の対**も返す（tasks.md 4.1。要件 6.6,
+    /// 9.1, 9.2）。
+    ///
+    /// # 逆命令は適用の時にしか作れない
+    ///
+    /// 適用の後には、変更前の値も、取り除かれた行も、その位置も存在しない（要件 9.1）。
+    /// したがって材料は適用の**本体の中で**（書き込みの前に）読み、ここで対へまとめる。
+    /// 材料の型と、命令ごとに何をいつ読むかはモジュール docs
+    /// 「履歴（4.1）が逆命令を組み立てるのに要るもの」にある。
+    ///
+    /// **状態を変えない適用（空の命令）は `None` を返す** — 何も戻さない操作を履歴に積むと、
+    /// 取り消しが何もしない操作になる（モジュール docs「空の命令」）。
+    pub fn apply_with_inverse(
+        &mut self,
+        doc: &mut Document,
+        command: EditCommand,
+    ) -> Result<(EditOutcome, Option<HistoryPair>), GridError> {
         match command {
-            EditCommand::SetCells { cells } => self.set_cells(doc, cells),
-            EditCommand::SetNested { cell, json } => self.set_nested(doc, cell, json),
-            EditCommand::InsertRows { at, count } => self.insert_rows(doc, at, count),
-            EditCommand::RemoveRows { rows } => self.remove_rows(doc, rows),
-            EditCommand::DuplicateRows { rows } => self.duplicate_rows(doc, rows),
+            EditCommand::SetCells { cells } => self.set_cells_with_inverse(doc, cells),
+            EditCommand::SetNested { cell, json } => self.set_nested_with_inverse(doc, cell, json),
+            EditCommand::InsertRows { at, count } => self.insert_rows_with_inverse(doc, at, count),
+            EditCommand::RemoveRows { rows } => self.remove_rows_with_inverse(doc, rows),
+            EditCommand::DuplicateRows { rows } => self.duplicate_rows_with_inverse(doc, rows),
             EditCommand::PasteRange {
                 anchor,
                 rows,
                 text,
-            } => self.paste_range(doc, anchor, rows, text),
+            } => self.paste_range_with_inverse(doc, anchor, rows, text),
+        }
+    }
+
+    /// 履歴の命令（**[`HistoryCommand`]**。逆命令とやり直しの命令）を適用する（要件 6.6, 9.2）。
+    ///
+    /// `EditCommand` で表せる方向は [`EditApply::apply`] へそのまま委ねる（判定を呼ぶ形も
+    /// 再検証の形も編集経路のものと**同一**である）。復元用の内部命令
+    /// （[`HistoryCommand::RestoreValues`] / [`HistoryCommand::RestoreRows`]）と合成
+    /// （[`HistoryCommand::Composite`]）は本層のこの経路が担う。
+    ///
+    /// # 復元の材料が名乗るシート
+    ///
+    /// [`HistoryCommand::Edit`] はシートを運ばないため**この適用の対象シート**
+    /// （`self.sheet`）へ書く。復元の 2 つは材料が**シートを名乗る** — 履歴がドキュメント単位
+    /// であるため（要件 9.5）、取り消しは別のシートの操作を指しうる。適用はその名乗った
+    /// シートへ行い、**計画の列数と食い違えば [`GridError::SchemaUnusable`] で止まる**
+    /// （列の添字が食い違ったまま書くより、止まるほうが回復可能である。編集経路と同じ規律）。
+    ///
+    /// # 判定を呼ばない
+    ///
+    /// 復元の材料はドキュメントに**既にあった値**そのものであり、判定（打たれた文字を型へ
+    /// 変換する門）を通せば値が変わりうる。判定を呼ばないのは複製・挿入と同じ理由である
+    /// （モジュール docs「行の構造を変える命令の再検証」）。再検証は材料が触れる行の集合に
+    /// ついて**全列を 1 回**だけ呼ぶ。
+    pub fn apply_history(
+        &mut self,
+        doc: &mut Document,
+        command: &HistoryCommand,
+    ) -> Result<EditOutcome, GridError> {
+        match command {
+            HistoryCommand::Edit(edit) => self.apply(doc, edit.clone()),
+            HistoryCommand::RestoreValues { sheet, rows } => self.restore_values(doc, *sheet, rows),
+            HistoryCommand::RestoreRows { sheet, rows } => self.restore_rows(doc, *sheet, rows),
+            HistoryCommand::Composite(parts) => self.apply_parts(doc, parts),
         }
     }
 
@@ -890,19 +1064,24 @@ impl EditApply {
             .total_violations()
     }
 
-    /// `InsertRows` の適用（[`EditApply::apply`] の本体。要件 6.1）。
+    /// `InsertRows` の適用（[`EditApply::apply_with_inverse`] の本体。要件 6.1）。
     ///
     /// 空の命令（`count == 0`）は**位置を見ない** — 何も挿入しないため、位置の妥当性も
     /// 問わない（モジュール docs「空の命令」）。
-    fn insert_rows(
+    ///
+    /// 逆命令は**挿入した行の削除**（`RemoveRows`）である — 追加された識別子は挿入が発行する
+    /// ものであり、`affected` と同一である。やり直しは**発行済みの行の差し戻し**であって
+    /// 「もう一度挿入する」ではない（挿入し直すと識別子が変わり、逆命令が指す行が消える）。
+    /// 差し戻す位置と値も適用の時点で揃う。
+    fn insert_rows_with_inverse(
         &mut self,
         doc: &mut Document,
         at: RowOrdinal,
         count: usize,
-    ) -> Result<EditOutcome, GridError> {
+    ) -> Result<(EditOutcome, Option<HistoryPair>), GridError> {
         self.usable_columns(doc)?;
         if count == 0 {
-            return self.unchanged(doc);
+            return Ok((self.unchanged(doc)?, None));
         }
         // 挿入位置の事前検査（`at == 行数` は末尾への追加として妥当）。
         let rows_before = self.target_sheet(doc)?.rows().len();
@@ -917,6 +1096,7 @@ impl EditApply {
         // clone するだけであり、列ごとに値を組み立て直さない）。
         let defaults = self.schema.default_row();
         let mut inserted: Vec<RowId> = Vec::with_capacity(count);
+        let mut restored: Vec<RestoredRow> = Vec::with_capacity(count);
         for offset in 0..count {
             // 位置は挿入のたびに 1 つずつ後ろへずれる（`at + offset` は挿入前の行順に対する
             // 位置であり、直前までの挿入で空けた分だけ後ろにある）。
@@ -928,46 +1108,117 @@ impl EditApply {
             // 書くのは本層である（モジュール docs「既定値の適用」）。
             doc.set_row_values(self.sheet, row, defaults.clone())
                 .map_err(|error| GridError::UnknownRow { row: error.row })?;
+            // やり直しの材料は「いま書いた値」であり、`defaults` がその唯一の源である。
+            restored.push(RestoredRow {
+                id: row,
+                position: index,
+                values: defaults.clone(),
+            });
             inserted.push(row);
         }
 
-        self.changed_rows(doc, inserted)
+        let outcome = self.changed_rows(doc, inserted.clone())?;
+        Ok((
+            outcome,
+            Some(HistoryPair {
+                inverse: HistoryCommand::Edit(EditCommand::RemoveRows { rows: inserted }),
+                redo: HistoryCommand::RestoreRows {
+                    sheet: self.sheet,
+                    rows: restored,
+                },
+            }),
+        ))
     }
 
-    /// `RemoveRows` の適用（[`EditApply::apply`] の本体。要件 6.2）。
-    fn remove_rows(
+    /// `RemoveRows` の適用（[`EditApply::apply_with_inverse`] の本体。要件 6.2）。
+    ///
+    /// 逆命令は**取り除いた行の差し戻し**（[`HistoryCommand::RestoreRows`]）であり、
+    /// **同じ識別子・同じ値・同じ位置**を保持する（要件 6.6 / 9.2 の本体）。材料は
+    /// 取り除く**前**にしか読めない: [`Document::remove_rows`] は取り除いた行を返すが、
+    /// [`Row`] は `Clone` を持たず外へも出せないため、**位置と値は事前に**読み、
+    /// 返った行からは**識別子だけ**を取る（返る順はシート順である。モジュール docs
+    /// 「削除は 1 回の操作である」）。
+    ///
+    /// やり直しは**同じ識別子をもう一度取り除く** — 差し戻しで識別子が元へ戻っているため、
+    /// そのまま使える。
+    fn remove_rows_with_inverse(
         &mut self,
         doc: &mut Document,
         rows: Vec<RowId>,
-    ) -> Result<EditOutcome, GridError> {
+    ) -> Result<(EditOutcome, Option<HistoryPair>), GridError> {
         self.usable_columns(doc)?;
         if rows.is_empty() {
-            return self.unchanged(doc);
+            return Ok((self.unchanged(doc)?, None));
         }
+        // 事前検査（読み）: 取り除く行の**位置と値**を、要求の並びに依らず**シート順**で読む
+        // （上流が返す行の順と対になる材料を、同じ規律で組んでおく）。
+        let materials: Vec<RestoredRow> = {
+            let sheet = self.target_sheet(doc)?;
+            let positions: HashMap<RowId, usize> = sheet
+                .rows()
+                .iter()
+                .enumerate()
+                .map(|(position, row)| (row.id(), position))
+                .collect();
+            let mut wanted: Vec<usize> = Vec::with_capacity(rows.len());
+            let mut seen: HashSet<RowId> = HashSet::with_capacity(rows.len());
+            for row in &rows {
+                let Some(position) = positions.get(row).copied() else {
+                    return Err(GridError::UnknownRow { row: *row });
+                };
+                if seen.insert(*row) {
+                    wanted.push(position);
+                }
+            }
+            wanted.sort_unstable();
+            wanted
+                .into_iter()
+                .map(|position| {
+                    let row = &sheet.rows()[position];
+                    RestoredRow {
+                        id: row.id(),
+                        position,
+                        values: row.values().to_vec(),
+                    }
+                })
+                .collect()
+        };
         // **1 回の呼び出し**で取り除く（上流が 1 パスで事前検査し、1 つでも不正なら 1 行も
         // 取り除かない。モジュール docs「削除は 1 回の操作である」）。返る行は**シート順**で
-        // あり、`affected` はその識別子である（要求の並びに依らない。取り除かれた**値**は
-        // 4.1 の逆命令が要る — モジュール docs「履歴（4.x）が逆命令を組み立てるのに要るもの」）。
+        // あり、`affected` はその識別子である（要求の並びに依らない）。
         let removed = doc
             .remove_rows(self.sheet, &rows)
             .map_err(row_removal_error)?;
         let affected: Vec<RowId> = removed.iter().map(|row| row.id()).collect();
 
-        self.changed_rows(doc, affected)
+        let outcome = self.changed_rows(doc, affected.clone())?;
+        Ok((
+            outcome,
+            Some(HistoryPair {
+                inverse: HistoryCommand::RestoreRows {
+                    sheet: self.sheet,
+                    rows: materials,
+                },
+                redo: HistoryCommand::Edit(EditCommand::RemoveRows { rows: affected }),
+            }),
+        ))
     }
 
-    /// `DuplicateRows` の適用（[`EditApply::apply`] の本体。要件 6.3, 6.4）。
+    /// `DuplicateRows` の適用（[`EditApply::apply_with_inverse`] の本体。要件 6.3, 6.4）。
     ///
     /// 元の行の値を**そのまま写して**末尾へ足す。判定を通さないため、一意制約に重複が生じても
     /// 中止しない — 行は増え、重複は再検証の報告に現れる（要件 6.4）。
-    fn duplicate_rows(
+    ///
+    /// 逆命令は**複製の削除**である。やり直しは、複製の値（元の行と同じ値）を発行済みの
+    /// 識別子のまま差し戻す（複製し直すと識別子が変わるため使えない）。
+    fn duplicate_rows_with_inverse(
         &mut self,
         doc: &mut Document,
         rows: Vec<RowId>,
-    ) -> Result<EditOutcome, GridError> {
+    ) -> Result<(EditOutcome, Option<HistoryPair>), GridError> {
         self.usable_columns(doc)?;
         if rows.is_empty() {
-            return self.unchanged(doc);
+            return Ok((self.unchanged(doc)?, None));
         }
 
         // 事前検査（読み）: 要求された行を**文書の位置**へ写し、同じ行の 2 度の要求を畳んで
@@ -1001,22 +1252,39 @@ impl EditApply {
         };
 
         let mut copies: Vec<RowId> = Vec::with_capacity(sources.len());
+        let mut restored: Vec<RestoredRow> = Vec::with_capacity(sources.len());
         // 末尾へ足す（`at == 行数`）。元の行は 1 つも動かず、`index` は足すたびに伸びる。
         let mut index = self.target_sheet(doc)?.rows().len();
         for values in sources {
             let copy = doc
                 .insert_row_at(self.sheet, index)
                 .map_err(|error| row_insertion_error(error, RowOrdinal::new(index), 1))?;
-            doc.set_row_values(self.sheet, copy, values)
+            doc.set_row_values(self.sheet, copy, values.clone())
                 .map_err(|error| GridError::UnknownRow { row: error.row })?;
+            restored.push(RestoredRow {
+                id: copy,
+                position: index,
+                values,
+            });
             copies.push(copy);
             index += 1;
         }
 
-        self.changed_rows(doc, copies)
+        let outcome = self.changed_rows(doc, copies.clone())?;
+        Ok((
+            outcome,
+            Some(HistoryPair {
+                inverse: HistoryCommand::Edit(EditCommand::RemoveRows { rows: copies }),
+                redo: HistoryCommand::RestoreRows {
+                    sheet: self.sheet,
+                    rows: restored,
+                },
+            }),
+        ))
     }
 
-    /// `PasteRange` の適用（[`EditApply::apply`] の本体。要件 7.3, 7.4, 7.5, 7.7, 8.9）。
+    /// `PasteRange` の適用（[`EditApply::apply_with_inverse`] の本体。要件 7.3, 7.4, 7.5, 7.7,
+    /// 8.9）。
     ///
     /// 段の順は 3.1 の経路と同じ「事前検査 → 書き込み → 再検証」であり、**判定（1 行分の
     /// 書き込み判定）を挟まない**。理由はモジュール docs「貼り付け」にある — 上流の判定は
@@ -1029,13 +1297,30 @@ impl EditApply {
     /// 縫い目が数えるのは `schema-engine` の 3 つの入口（判定・再検証・全件検証）であり、
     /// 規則表は列の型に応じた写しを返すだけである。強制したうえで書くため、貼り付けの
     /// セルの意味論は 1 セルの編集（3.1）と一致する。
-    fn paste_range(
+    ///
+    /// # 1 回の貼り付けは 1 つの操作である（要件 7.6）
+    ///
+    /// 逆命令は 2 つの部分から成りうる — **覆ったセルの値を戻す**（
+    /// [`HistoryCommand::RestoreValues`]。材料は覆った行の**変更前の値**であり、書き込みの
+    /// 前に読む）と、**補充した行を取り除く**（`RemoveRows`。識別子は補充が発行する）。
+    /// 履歴には**1 つの対**として積まれる（[`HistoryCommand::Composite`]）ため、取り消しは
+    /// 1 回で適用前の状態へ戻る。部分の順は「値を戻す → 行を取り除く」である — 逆にすると、
+    /// 取り除いた行に書かれていた値の復元先が消える。
+    ///
+    /// 補充が起きなかった貼り付けの逆命令は**値の復元だけ**である（部分 1 つの合成にしない。
+    /// 履歴の形が操作の形を写す）。
+    ///
+    /// やり直しは、補充した行を**同じ識別子のまま差し戻してから**、貼り付けを**もう一度**
+    /// 適用する。差し戻す行を貼り付けの宛先へ明示的に加えるのは、そのためである — 元の
+    /// 表示の並びだけを渡すと、やり直しの貼り付けは残りの行が足りないと見て**新しい行を
+    /// もう一度補充し**、行数が増えてしまう（識別子も変わり、積んだ対が指す行が消える）。
+    fn paste_range_with_inverse(
         &mut self,
         doc: &mut Document,
         anchor: CellAddress,
         rows: Vec<RowId>,
         text: String,
-    ) -> Result<EditOutcome, GridError> {
+    ) -> Result<(EditOutcome, Option<HistoryPair>), GridError> {
         let columns = self.usable_columns(doc)?;
         let rectangle = PasteCodec::parse(&text);
         // 書くセルが 1 つも無い場合（行 0 件のテキスト、または表示されている行が 1 つも無い）は、
@@ -1043,7 +1328,7 @@ impl EditApply {
         // 「空の貼り付けと、書くセルが無い場合」）。
         let column = anchor.column();
         if rectangle.is_empty() || rows.is_empty() {
-            return self.unchanged(doc);
+            return Ok((self.unchanged(doc)?, None));
         }
         // 錨の列は範囲内でなければならない（矩形の列はここを起点とする相対位置である）。
         if column.index() >= columns {
@@ -1092,7 +1377,7 @@ impl EditApply {
                 .map(|position| (displayed, position))
         };
         let Some((displayed, start)) = start else {
-            return self.unchanged(doc);
+            return Ok((self.unchanged(doc)?, None));
         };
 
         // 矩形が覆う行と列の範囲を確かめる。列は錨の列から右へ、行は表示の並びの錨の位置から
@@ -1107,6 +1392,47 @@ impl EditApply {
         // （要件 7.4）。`rows` の残りで足りるなら 0 である。
         let available = displayed.len() - start;
         let appended = rectangle.len().saturating_sub(available);
+
+        // 矩形が**書き込む行**（表示の並びの錨から先の、矩形の行数ぶん）を先に決める。
+        // これは `destination` の先頭部分そのものであり、**材料の読み口と書き込みの宛先が
+        // 同一の 1 つの並びから出る**ようにするための取り出しである（下の `destination` は
+        // これに補充した行を継ぎ足すだけである）。
+        //
+        // 文書の位置で引いてはならない — 錨の位置は**表示の並び**に対する位置であり、
+        // 並べ替えや絞り込みの下では文書の位置と食い違う（表示の並びを決めるのは `view` 層の
+        // `RowOrder` であり、本層は表示の座標を受け取る。要件 8.6, 8.9）。食い違えば材料が
+        // **別の行**を指し、取り消しが実際に書いた行ではなく他の行を戻してしまう。
+        let covered: Vec<RowId> = displayed[start..]
+            .iter()
+            .copied()
+            .take(rectangle.len())
+            .collect();
+
+        // **変更前の値**（逆命令の最初の部分）を書き込みの前に読む。覆った行の値の並びの
+        // 全体を写す（矩形の外の列の値も写すが、それは元の値と同じであり、復元の結果を
+        // 変えない — 材料の形が操作の形に依らず一様になる）。
+        let restore_values: Vec<RestoredRow> = {
+            let sheet = self.target_sheet(doc)?;
+            // 文書の位置の索引はこの 1 回だけ作る（位置は材料が要る — 行の集合を変える命令の
+            // 材料と同じく、位置は適用の後には導けない）。
+            let positions: HashMap<RowId, usize> = sheet
+                .rows()
+                .iter()
+                .enumerate()
+                .map(|(position, row)| (row.id(), position))
+                .collect();
+            covered
+                .iter()
+                .map(|row| {
+                    let position = positions[row];
+                    RestoredRow {
+                        id: *row,
+                        position,
+                        values: sheet.rows()[position].values().to_vec(),
+                    }
+                })
+                .collect()
+        };
 
         // 不足する行を文書の**末尾**へ足す（`InsertRows` と同じ位置であり、既存の行は 1 つも
         // 動かない。モジュール docs「複製は末尾へ足し」と同じ規律）。既定値の源は宣言ただ 1 つ。
@@ -1124,15 +1450,11 @@ impl EditApply {
                 targets.push(row);
             }
         }
-        // 表示の並びの残りを先に、補充した行を後ろに並べる（矩形の行 *i* はこの並びの *i* 番目
-        // へ書かれる）。補充した行を末尾へ足したため、順序は「表示の並びの錨から先」＋
+        // 宛先は「覆った行」＋「補充した行」である（矩形の行 *i* はこの並びの *i* 番目へ
+        // 書かれる）。補充した行を末尾へ足したため、順序は「表示の並びの錨から先」＋
         // 「足した行」である。矩形が表示の並びより短ければ、残りの行は**書かれない**
-        // （`take` がその上限そのものであり、覆わない行の値は変わらない）。
-        let mut destination: Vec<RowId> = displayed[start..]
-            .iter()
-            .copied()
-            .take(rectangle.len())
-            .collect();
+        // （上の `take` がその上限そのものであり、覆わない行の値は変わらない）。
+        let mut destination = covered;
         destination.extend(targets.iter().copied());
 
         // 全セルの値と宛先を 1 回の走査で組み立てる（強制もここで一度きりである）。
@@ -1173,12 +1495,97 @@ impl EditApply {
             &ValidationOptions::capped(0),
         );
 
-        Ok(EditOutcome {
+        let outcome = EditOutcome {
             affected,
             coercions,
             violation_total: report.total_violations(),
             row_count: self.target_sheet(doc)?.rows().len(),
-        })
+        };
+        let pair = self.paste_pair(doc, anchor, displayed, restore_values, &targets, text)?;
+        Ok((outcome, pair))
+    }
+
+    /// 貼り付けの対（1 回の貼り付け = 1 つの操作。要件 7.6）を組む。
+    ///
+    /// `displayed` は**適用の前**の表示の並びであり、`appended_rows` は補充した行の識別子である。
+    /// 逆命令の部分は最大 2 つ（値の復元と、補充した行の削除）であり、順は
+    /// 「値を戻す → 行を取り除く」に固定する。補充が無ければ**値の復元だけ**を返す
+    /// （部分 1 つの合成にしない — 履歴の形が操作の形を写す）。
+    ///
+    /// やり直しは、補充した行を**同じ識別子のまま**差し戻してから、元の貼り付けを
+    /// **補充した行を宛先に加えた形**で適用する（加えなければ、やり直しの貼り付けが
+    /// 行数の不足を見て新しい行をもう一度補充し、識別子が変わる）。
+    fn paste_pair(
+        &self,
+        doc: &Document,
+        anchor: CellAddress,
+        displayed: Vec<RowId>,
+        restore_values: Vec<RestoredRow>,
+        appended_rows: &[RowId],
+        text: String,
+    ) -> Result<Option<HistoryPair>, GridError> {
+        // 逆命令: 覆ったセルの値を戻す（材料は適用の前に読んだ値そのもの）。
+        let mut parts: Vec<HistoryCommand> = Vec::with_capacity(2);
+        if !restore_values.is_empty() {
+            parts.push(HistoryCommand::RestoreValues {
+                sheet: self.sheet,
+                rows: restore_values,
+            });
+        }
+        if !appended_rows.is_empty() {
+            parts.push(HistoryCommand::Edit(EditCommand::RemoveRows {
+                rows: appended_rows.to_vec(),
+            }));
+        }
+        let inverse = match parts.len() {
+            0 => return Ok(None),
+            1 => parts.pop().expect("長さを確かめた"),
+            _ => HistoryCommand::Composite(parts),
+        };
+
+        // やり直し: 補充した行（**適用の後に読む**。値は貼り付けが書いたもの）を差し戻し、
+        // そのうえで貼り付けをもう一度適用する。
+        let redo = if appended_rows.is_empty() {
+            HistoryCommand::Edit(EditCommand::PasteRange {
+                anchor,
+                rows: displayed,
+                text,
+            })
+        } else {
+            let sheet = self.target_sheet(doc)?;
+            let positions: HashMap<RowId, usize> = sheet
+                .rows()
+                .iter()
+                .enumerate()
+                .map(|(position, row)| (row.id(), position))
+                .collect();
+            let mut restored: Vec<RestoredRow> = Vec::with_capacity(appended_rows.len());
+            for row in sheet.rows() {
+                if appended_rows.contains(&row.id()) {
+                    restored.push(RestoredRow {
+                        id: row.id(),
+                        position: positions[&row.id()],
+                        values: row.values().to_vec(),
+                    });
+                }
+            }
+            // 宛先に補充した行を加えた並び。貼り付けは錨の位置から矩形の行数ぶんを歩くため、
+            // 行数が足り、**もう補充しない**（発行済みの識別子のまま書く）。
+            let mut destinations = displayed;
+            destinations.extend(appended_rows.iter().copied());
+            HistoryCommand::Composite(vec![
+                HistoryCommand::RestoreRows {
+                    sheet: self.sheet,
+                    rows: restored,
+                },
+                HistoryCommand::Edit(EditCommand::PasteRange {
+                    anchor,
+                    rows: destinations,
+                    text,
+                }),
+            ])
+        };
+        Ok(Some(HistoryPair { inverse, redo }))
     }
 
     /// 貼り付けの後に再検証する列の集合（貼り付けの列、または行を補充した場合は全列）。
@@ -1215,20 +1622,25 @@ impl EditApply {
             .collect()
     }
 
-    /// `SetCells` の適用（[`EditApply::apply`] の本体）。
-    fn set_cells(
+    /// `SetCells` の適用（[`EditApply::apply_with_inverse`] の本体）。
+    fn set_cells_with_inverse(
         &mut self,
         doc: &mut Document,
         cells: Vec<(CellAddress, String)>,
-    ) -> Result<EditOutcome, GridError> {
+    ) -> Result<(EditOutcome, Option<HistoryPair>), GridError> {
         // セッションの前提を先に検査する（命令の中身に依らない。2 つの前提の理由は
         // `usable_columns` の docs「セッションの前提」）。
         let columns = self.usable_columns(doc)?;
-        // 空の命令は何も変えない（判定も再検証も呼ばない。モジュール docs「履歴（4.x）との
+        // 空の命令は何も変えない（判定も再検証も呼ばない。モジュール docs「履歴（4.1）との
         // 境目」）。ただしセッションの前提は空の命令でも検査する（前提は命令に依らない）。
         if cells.is_empty() {
-            return self.unchanged(doc);
+            return Ok((self.unchanged(doc)?, None));
         }
+        // やり直しの命令は**適用した命令そのもの**である（編集は打たれた文字を運ぶため、
+        // 適用の後に値を写し直す必要が無い）。
+        let redo = EditCommand::SetCells {
+            cells: cells.clone(),
+        };
 
         // 事前検査（読み）。行の位置の索引を 1 度だけ作り、列の範囲と行の存在を確かめながら、
         // **編集の対象になった行ごとに**その行の値（打たれた文字を当該の列へ置いたもの）を
@@ -1241,8 +1653,13 @@ impl EditApply {
         // 行ごとにまとめるのは、上流の判定（`validate_write`）が**1 行分の値**を受け取る
         // ためである。1 つの行の複数のセルの編集は 1 回の判定で足りる（判定の回数は命令の
         // セル数ではなく**編集の対象になった行数**に等しい。要件 11.4 の費用の形）。
+        //
+        // 逆命令の材料（変更前の値）も**同じ 1 度の走査**で読む — 位置の索引からその行を引き、
+        // 値の並びをそのまま写す（表示文字列を経由しない。モジュール docs「履歴（4.1）が逆命令を
+        // 組み立てるのに要るもの」）。
         let mut affected: Vec<RowId> = Vec::new();
         let mut rows: Vec<RowEdit> = Vec::new();
+        let mut restore: Vec<RestoredRow> = Vec::new();
         {
             let sheet = self.target_sheet(doc)?;
             let positions: HashMap<RowId, usize> = sheet
@@ -1268,9 +1685,15 @@ impl EditApply {
                     None => {
                         seen.insert(address.row(), rows.len());
                         affected.push(address.row());
+                        let values = sheet.rows()[position].values().to_vec();
+                        restore.push(RestoredRow {
+                            id: address.row(),
+                            position,
+                            values: values.clone(),
+                        });
                         rows.push(RowEdit::from_text(
                             address.row(),
-                            sheet.rows()[position].values().to_vec(),
+                            values,
                             column,
                             text,
                         ));
@@ -1282,7 +1705,8 @@ impl EditApply {
         // 判定（型システム）。編集の対象になった行ごとに、その行の値を（当該の列を打たれた
         // 文字へ置き換えて）渡し、返った値と変換の記録をそのまま写す。列の型を見て受理を
         // 決める分岐はここに無い。
-        self.write_judged_rows(doc, affected, rows)
+        let outcome = self.write_judged_rows(doc, affected, rows)?;
+        Ok((outcome, self.cell_pair(restore, redo)))
     }
 
     /// `SetNested` の適用（[`EditApply::apply`] の本体。要件 5.5, 5.7）。
@@ -1302,17 +1726,22 @@ impl EditApply {
     /// 解釈できた値が入れ子であるかは本層が判定しない — そのまま 1 セルの書き込みとして
     /// 判定へ渡す（同「解釈できた値が入れ子でない場合の取り決め」）。したがって判定を呼ぶ形は
     /// 1 セルの編集そのものである（要件 11.4）。
-    fn set_nested(
+    fn set_nested_with_inverse(
         &mut self,
         doc: &mut Document,
         cell: CellAddress,
         json: String,
-    ) -> Result<EditOutcome, GridError> {
+    ) -> Result<(EditOutcome, Option<HistoryPair>), GridError> {
         let columns = self.usable_columns(doc)?;
         // 解釈できない入力は**値の不適合ではなく入力の破損**である。`CellValue` が 1 つも
         // 得られないため判定を呼ぶ値が無く、処理を止める（`error` 層の 2 分法。
         // モジュール docs「解釈できない入力は処理を止める」）。
         let value = from_json_bytes(json.as_bytes()).map_err(|_| GridError::NestedDecode { cell })?;
+        // やり直しの命令は**適用した命令そのもの**である（打たれた表現をそのまま運ぶ）。
+        let redo = EditCommand::SetNested {
+            cell,
+            json: json.clone(),
+        };
 
         // 事前検査（読み）。`SetCells` と同じく**書き込みの前に**宛先を検査するため、1 つでも
         // 不正なら判定も呼ばず、1 つのセルも書かない。
@@ -1323,19 +1752,53 @@ impl EditApply {
                 count: columns,
             });
         }
-        let values = {
+        let (values, position) = {
             let sheet = self.target_sheet(doc)?;
-            let Some(row) = sheet.rows().iter().find(|found| found.id() == cell.row()) else {
+            let Some((position, row)) = sheet
+                .rows()
+                .iter()
+                .enumerate()
+                .find(|(_, found)| found.id() == cell.row())
+            else {
                 return Err(GridError::UnknownRow { row: cell.row() });
             };
-            row.values().to_vec()
+            (row.values().to_vec(), position)
         };
 
-        self.write_judged_rows(
+        // 逆命令の材料は**書き込みの前に**読む（変更前の値そのもの）。
+        let restore = vec![RestoredRow {
+            id: cell.row(),
+            position,
+            values: values.clone(),
+        }];
+        let outcome = self.write_judged_rows(
             doc,
             vec![cell.row()],
             vec![RowEdit::from_value(cell.row(), values, column, value)],
-        )
+        )?;
+        Ok((outcome, self.cell_pair(restore, redo)))
+    }
+
+    /// セルの編集の対（逆命令は**適用前の値の復元**、やり直しは適用した編集そのもの）を組む。
+    ///
+    /// `SetCells` と `SetNested` は値を書く形が違うだけで、対の形は同一である —
+    /// 逆命令は「触れた行の、適用前の値の並びへ戻す」であり、やり直しは適用した命令そのもの。
+    /// どちらの材料（逆命令の値と、やり直しの命令）も**適用の前に**揃う（要件 9.1）。
+    ///
+    /// 触れた行が 0 個の場合は `None` を返す — そのような命令は上の段で
+    /// [`EditApply::unchanged`] へ分岐しているため、ここへは来ない（来たなら**対を持たない
+    /// 適用**を作らないための門である）。
+    fn cell_pair(&self, restore: Vec<RestoredRow>, redo: EditCommand) -> Option<HistoryPair> {
+        if restore.is_empty() {
+            return None;
+        }
+        Some(HistoryPair {
+            inverse: HistoryCommand::RestoreValues {
+                sheet: self.sheet,
+                rows: restore,
+            },
+            redo: HistoryCommand::Edit(redo),
+        })
     }
 
     /// 判定へかける編集の一覧を受け取り、**判定 → 1 回の書き込み → 編集した列に限定した
@@ -1408,8 +1871,291 @@ impl EditApply {
         })
     }
 
-    /// 対象シートを引く。文書に無い場合と、計画の列数と食い違う場合は使用不能として返す。
+    /// セルの編集の逆命令を適用する（[`HistoryCommand::RestoreValues`]。要件 9.2）。
     ///
+    /// 材料は**適用前の値そのもの**である。したがって判定（打たれた文字を型へ変換する門）を
+    /// 通さず、**行の値の並びごと**書く（[`EditApply::write_material_rows`]）— 通せば値が
+    /// 変わりうる（複製・挿入の経路が判定を呼ばないのと同じ理由）。
+    ///
+    /// **行の幅も材料の幅へ戻る。**セル単位の書き込み（[`Document::set_cells`]）は行を
+    /// **伸ばすことしかできない**（`Row::set_cell` は `resize(column + 1, Null)` であり、
+    /// 決して縮めない）ため、編集が行を広げていた場合（短い行の先の列へ書いた場合）に
+    /// 幅が材料より大きいまま残る — しかし材料こそが適用前の状態である（要件 9.2）。
+    ///
+    /// 行の集合・並び・識別子は変えない。再検証は差し戻しの後に
+    /// **すべての列**を 1 回だけ呼ぶ（行を跨ぐ違反（一意性）は差し戻しで変わりうる。全列を
+    /// 明示するのは「どの列を見たか」を呼び出しの形に残すためである）。
+    ///
+    /// # 名乗られたシート
+    ///
+    /// 材料が名乗るシートへ書く（[`EditApply::apply_history`] の docs「復元の材料が名乗る
+    /// シート」）。計画の列数と食い違えば [`GridError::SchemaUnusable`] で止まる。
+    fn restore_values(
+        &mut self,
+        doc: &mut Document,
+        sheet: SheetId,
+        rows: &[RestoredRow],
+    ) -> Result<EditOutcome, GridError> {
+        self.usable_columns_of(doc, sheet)?;
+        if rows.is_empty() {
+            return self.unchanged_of(doc, sheet);
+        }
+        Self::write_material_rows(doc, sheet, rows)?;
+        Ok(EditOutcome {
+            affected: rows.iter().map(|row| row.id).collect(),
+            coercions: Vec::new(),
+            violation_total: self.revalidate_every_column_of(doc, sheet),
+            row_count: self.sheet_of(doc, sheet)?.rows().len(),
+        })
+    }
+
+    /// 取り除いた行の逆命令を適用する（[`HistoryCommand::RestoreRows`]。要件 6.6 / 9.2 の本体）。
+    ///
+    /// 差し戻す行は**同じ識別子・同じ値・同じ位置**へ戻る。材料は
+    /// [`EditApply::rows_from_materials`] が **wire 形式（行データの NDJSON）** を組み立て、
+    /// 上流の復号経路（[`RowsCodec::decode`]）を通して [`Row`] にする — `Row` は `Clone` を
+    /// 持たず本クレートの外で組み立てられないため、**本クレートが唯一の正規の入口**
+    /// （復号）を使う。判定は呼ばない（材料はドキュメントに既にあった値である。
+    /// [`EditApply::restore_values`] と同じ理由）。
+    ///
+    /// 挿入は**位置の昇順に連続する区間ごとに 1 回**呼ぶ（質量削除の差し戻しが 1 回の
+    /// 呼び出しで済む）。[`Document::insert_rows_at`] の位置は**挿入前の行順**に対する添字で
+    /// あり、昇順に差し戻せば元の位置がそのまま復元される（前の区間を差し込んだ分だけ後ろの
+    /// 位置がずれるが、升順の挿入ではこのずれが「挿入前の位置」と一致する）。
+    ///
+    /// # 既に在る行（古い履歴の対）
+    ///
+    /// 同じ対を 2 度適用すると、差し戻す行が既に文書にある。`insert_rows_at` はこれを
+    /// [`RowInsertionError::DuplicateRow`] として返すが、これは**履歴の対が古い**ことを意味する
+    /// （適用の対象が変わった）ため [`GridError::UnknownRow`] へ写す — 「戻そうとした行は既に
+    /// そこにある」という意味であり、この型の既存の 5 変種で最も近い（**変種は増やさない**）。
+    fn restore_rows(
+        &mut self,
+        doc: &mut Document,
+        sheet: SheetId,
+        rows: &[RestoredRow],
+    ) -> Result<EditOutcome, GridError> {
+        self.usable_columns_of(doc, sheet)?;
+        if rows.is_empty() {
+            return self.unchanged_of(doc, sheet);
+        }
+        // 復号済みの行を、材料の**位置の昇順**（材料の並びに依らない）で受け取る。
+        let mut rest = Self::rows_from_materials(sheet, self.schema.column_count(), rows)?;
+        // 連続した位置の区間ごとに 1 回だけ差し込む（質量削除の差し戻しが 1 回で済む）。
+        // 位置は昇順に並んでいるため、先頭から区間を切り出しては差し込むことを繰り返す
+        // （差し込む位置は**挿入前の行順**に対する添字であり、昇順に差し込めば元の位置が
+        // そのまま戻る）。
+        // [`Row`] は `Clone` を持たないため、区間は `drain` で所有権ごと渡す。
+        while !rest.is_empty() {
+            let start = rest[0].0;
+            let mut end = 1;
+            while end < rest.len() && rest[end].0 == rest[end - 1].0 + 1 {
+                end += 1;
+            }
+            let batch: Vec<(usize, Row)> = rest.drain(..end).collect();
+            let inserted: Vec<Row> = batch.into_iter().map(|(_, row)| row).collect();
+            doc.insert_rows_at(sheet, start, inserted).map_err(|error| {
+                // 差し戻そうとした行が既にある（古い対）か、名乗られたシートが無い。位置の
+                // 範囲外は材料が壊れている場合だけであり、先頭の行を載せて返す。
+                match error {
+                    RowInsertionError::UnknownSheet { sheet } => GridError::SchemaUnusable { sheet },
+                    RowInsertionError::DuplicateRow { row } => GridError::UnknownRow { row },
+                    RowInsertionError::IndexOutOfRange { .. } => GridError::UnknownRow {
+                        row: rows[0].id,
+                    },
+                }
+            })?;
+        }
+        // **行の幅を材料の幅へ戻す**。wire 形式（復号の正規の入口）は列数ぶんのキーを書くため、
+        // 復号された行の幅は**つねに列数**である — 決して材料の幅ではない（材料が短い行でも、
+        // 幅 0 の行でも同じ）。行の値の並びが列数に満たないことは正当であり（モジュール docs
+        // 「複製は末尾へ足し、値をそのまま写す」）、差し戻した行が材料と違う幅になるのは復元に
+        // ならない — 複製のやり直しが埋まった幅のまま残ってしまう（要件 9.2 の往復）。
+        //
+        // 書き手は [`EditApply::restore_values`] と同じ 1 つを使う（材料の値の並びを置換で
+        // 書く）。**幅 0 の行もここで戻る** — 空の並びの置換は「値なし」ではなく「値なしを
+        // 1 つも持たない」であり、[`Row::set_values`] が並びを丸ごと差し替えるためである。
+        Self::write_material_rows(doc, sheet, rows)?;
+        Ok(EditOutcome {
+            affected: rows.iter().map(|row| row.id).collect(),
+            coercions: Vec::new(),
+            violation_total: self.revalidate_every_column_of(doc, sheet),
+            row_count: self.sheet_of(doc, sheet)?.rows().len(),
+        })
+    }
+
+    /// 復元の材料を**行の値の並びごと**書く（`RestoreValues` と `RestoreRows` が共有する
+    /// 唯一の書き手。要件 9.2 の往復）。
+    ///
+    /// [`Document::set_row_values`] は行の値の並びを**置換**する（上流の `Row::set_values` が
+    /// `self.values = values` である）。これは復元に要る 3 つの性質を同時に満たす唯一の口で
+    /// ある:
+    ///
+    /// 1. **短い行をそのまま書ける**（材料の並びの長さがそのまま行の幅になる。列数まで埋めない）
+    /// 2. **広げられた行を縮められる** — セル単位の書き込み（[`Document::set_cells`]）は
+    ///    `Row::set_cell` の `resize(column + 1, Null)` を通るため**伸びるだけで決して縮まない**。
+    ///    編集が短い行の先の列へ書いていた場合、セル単位の逆命令では幅が材料より大きいまま
+    ///    残る（`tests/undo_stack.rs` の
+    ///    `an_undo_of_an_edit_that_widened_a_short_row_restores_its_original_width`）
+    /// 3. **幅 0 の行を書ける** — 空の並びの置換は「値なし 1 件」ではなく「1 件も持たない」
+    ///    である（`tests/undo_stack.rs` の
+    ///    `a_removed_zero_width_row_is_restored_with_zero_width`）。wire 形式（復号の経路）は
+    ///    キーを 1 つも持てないため幅 0 の行を運べないが、差し戻しの後にここで書けば戻る
+    ///
+    /// 行の識別子・集合・並びには触れない（置換であって追加でも移動でもない）。
+    fn write_material_rows(
+        doc: &mut Document,
+        sheet: SheetId,
+        rows: &[RestoredRow],
+    ) -> Result<(), GridError> {
+        for row in rows {
+            doc.set_row_values(sheet, row.id, row.values.clone())
+                .map_err(|error| GridError::UnknownRow { row: error.row })?;
+        }
+        Ok(())
+    }
+
+    /// 復元の材料から [`Row`] を組み立てる（**復元用の内部経路**）。
+    ///
+    /// # なぜこの経路が要るか
+    ///
+    /// [`Row`] は `Clone` を実装せず（識別子発行の単発行者保証を黙って壊さないため）、
+    /// 本クレートの外で組み立てる公開の口も無い。本クレートが `Row` を得る正規の入口は
+    /// **復号**（[`RowsCodec::decode`] → `SheetRows::into_rows`）である。したがって材料
+    /// （識別子・値の並び）を、行データの **wire 形式**（`$id` + 列キーのオブジェクトの
+    /// NDJSON）へ組み立ててから復号する。
+    ///
+    /// **公開の [`EditCommand`] は 1 変種も増えない** — この経路は履歴の復元のためだけの
+    /// 内部経路である（design.md「編集命令と逆命令の対応」の「復元用の内部命令」）。
+    ///
+    /// # 組み立ての規則
+    ///
+    /// - 列のキーは `c0`, `c1`, … `cN-1`（`N` はこの適用の列数）を使う。キー名は行データの
+    ///   復号が受理する形（`$` 始まりでない）であり、**この 1 行のキー列がそのまま値の位置を
+    ///   定める**（`RowsCodec::decode` の契約）。シートの列名に依存しないのは、材料が列名を
+    ///   持たないためである（値の並びの位置が列の添字である）。
+    /// - セルは [`to_json_bytes`]（value 層の単一の源）で写す — 非有限の浮動小数はここで
+    ///   拒否され、不正な JSON を 1 バイトも書かない。
+    /// - 値の並びは列数まで [`CellValue::Null`] で埋める。行の値の並びは列数に満たないことが
+    ///   あり（値を持たない列は上流でも値なしとして扱われる。モジュール docs「複製は末尾へ
+    ///   足し、値をそのまま写す」）、wire 形式は**全行が同じキー列**を要求するためである。
+    ///   埋めた位置は値なしであり、ドキュメント上も同じ値なしになる。
+    /// - 位置の昇順に並べ替える（材料の並びに依らない。同じ行集合の材料は常に同じ結果になる）。
+    fn rows_from_materials(
+        sheet: SheetId,
+        columns: usize,
+        rows: &[RestoredRow],
+    ) -> Result<Vec<(usize, Row)>, GridError> {
+        let entry = EntryName::Rows { sheet };
+        let location = entry.to_string();
+        let mut sorted: Vec<&RestoredRow> = rows.iter().collect();
+        sorted.sort_by_key(|row| row.position);
+        let mut bytes: Vec<u8> = Vec::new();
+        for row in &sorted {
+            bytes.extend_from_slice(b"{\"");
+            bytes.extend_from_slice(ROW_ID_KEY.as_bytes());
+            bytes.extend_from_slice(b"\":\"");
+            bytes.extend_from_slice(row.id.to_string().as_bytes());
+            bytes.push(b'"');
+            for column in 0..columns {
+                bytes.push(b',');
+                bytes.extend_from_slice(format!("\"c{column}\":").as_bytes());
+                let value = row.values.get(column).unwrap_or(&CellValue::Null);
+                // 非有限の浮動小数はここで拒否される（value 層が単一の源）。材料は
+                // ドキュメントにあった値であるため、通常は起こらない — 起こったなら
+                // その行の値を書き戻せないという意味であり、行の識別子を載せて返す
+                // （`GridError` の 5 変種にこれ以上適切な変種は無い。**変種は増やさない**）。
+                let encoded = to_json_bytes(value, &location)
+                    .map_err(|_| GridError::UnknownRow { row: row.id })?;
+                bytes.extend_from_slice(&encoded);
+            }
+            bytes.extend_from_slice(b"}\n");
+        }
+        let decoded = RowsCodec::decode(&entry, &bytes)
+            .map_err(|_| GridError::UnknownRow { row: sorted[0].id })?;
+        // 復号は列数ぶんのキーを書いた形を返す（行の幅はつねに列数である）。材料の幅は
+        // 差し戻しの**後**に [`EditApply::write_material_rows`] が書く。
+        Ok(sorted
+            .iter()
+            .zip(decoded.into_rows())
+            .map(|(material, row)| (material.position, row))
+            .collect())
+    }
+
+    /// 履歴の合成（**1 つの操作**）を順に適用する（要件 7.6）。
+    ///
+    /// 部分は**並びの順**に適用する（貼り付けの逆命令は「覆ったセルの値を戻す → 補充した行を
+    /// 取り除く」であり、逆にすると値の復元先が消える）。結果は 1 つにまとめる — 影響を
+    /// 受けた行は部分の和、違反の総数は**最後に 1 回**全列を再検証したもの
+    /// （部分が触れた列は重なりうるため、部分の総数を足すと同じ違反を二重に数える）、
+    /// 行数は適用の後の実数である。
+    fn apply_parts(
+        &mut self,
+        doc: &mut Document,
+        parts: &[HistoryCommand],
+    ) -> Result<EditOutcome, GridError> {
+        let sheet = self.sheet;
+        let mut affected: Vec<RowId> = Vec::new();
+        for part in parts {
+            let outcome = self.apply_history(doc, part)?;
+            affected.extend(outcome.affected);
+        }
+        // 同じ行が 2 度現れる合成（値の復元と行の削除が同じ行を指す等）は 1 回へ畳む
+        // （`affected` の既存の規律）。
+        let mut seen: HashSet<RowId> = HashSet::with_capacity(affected.len());
+        affected.retain(|row| seen.insert(*row));
+        Ok(EditOutcome {
+            affected,
+            coercions: Vec::new(),
+            violation_total: self.revalidate_every_column_of(doc, sheet),
+            row_count: self.sheet_of(doc, sheet)?.rows().len(),
+        })
+    }
+
+    /// 名指されたシートの前提を検査し、**この適用で使える列数**を返す
+    /// （[`EditApply::usable_columns`] のシート指定版）。
+    fn usable_columns_of(&self, doc: &Document, sheet: SheetId) -> Result<usize, GridError> {
+        let columns = self.schema.column_count();
+        if columns == 0 {
+            return Err(GridError::SchemaUnusable { sheet });
+        }
+        self.sheet_of(doc, sheet)?;
+        Ok(columns)
+    }
+
+    /// 名指されたシートを引く（計画の列数の一致も確かめる）。
+    fn sheet_of<'d>(&self, doc: &'d Document, sheet: SheetId) -> Result<&'d Sheet, GridError> {
+        let found = doc
+            .sheet_by_id(sheet)
+            .ok_or(GridError::SchemaUnusable { sheet })?;
+        if found.columns().len() != self.schema.column_count() {
+            return Err(GridError::SchemaUnusable { sheet });
+        }
+        Ok(found)
+    }
+
+    /// 名指されたシートについて、何も変えなかった適用の結果を返す。
+    fn unchanged_of(&self, doc: &Document, sheet: SheetId) -> Result<EditOutcome, GridError> {
+        Ok(EditOutcome {
+            affected: Vec::new(),
+            coercions: Vec::new(),
+            violation_total: 0,
+            row_count: self.sheet_of(doc, sheet)?.rows().len(),
+        })
+    }
+
+    /// 名指されたシートの**すべての列**を 1 回だけ再検証し、その総数を返す
+    /// （[`EditApply::revalidate_every_column`] のシート指定版）。
+    fn revalidate_every_column_of(&self, doc: &Document, sheet: SheetId) -> usize {
+        let columns: Vec<ColumnIndex> = (0..self.schema.column_count())
+            .map(ColumnIndex::new)
+            .collect();
+        self.query
+            .revalidate_columns(doc, sheet, &self.schema, &columns, &ValidationOptions::capped(0))
+            .total_violations()
+    }
+
+    /// 対象シートを引く。文書に無い場合と、計画の列数と食い違う場合は使用不能として返す。
     /// 文書にシートが無い状態・列数の食い違う計画は、セッションが前提とするシート（とその
     /// 計画）が使えない状態である（[`GridError`] の 5 変種にこれ以上適切な変種は無い。
     /// `error.rs` の docs「宣言・指定が壊れている」）。
