@@ -373,7 +373,12 @@ impl From<&ValuePath> for NestedPath {
     /// （セル直下）は [`NestedPath::root`] へ写る。
     #[inline]
     fn from(path: &ValuePath) -> Self {
-        Self(path.segments().iter().map(NestedPathSegment::from).collect())
+        Self(
+            path.segments()
+                .iter()
+                .map(NestedPathSegment::from)
+                .collect(),
+        )
     }
 }
 

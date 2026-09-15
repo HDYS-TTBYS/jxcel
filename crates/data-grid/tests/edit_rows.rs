@@ -64,8 +64,9 @@ use std::sync::{Arc, Mutex};
 use common::sample::sample;
 use common::sample::{SampleEditParts, SampleOptions};
 use data_grid::{
-    display_text, CellAddress, CoercionNotice, ColumnIndex, EditApply, EditCommand, EditSchemaQuery,
-    GridError, RowOrder, RowOrdinal, RowSpan, SchemaEngineQuery, SortKey, ViewSpec,
+    display_text, CellAddress, CoercionNotice, ColumnIndex, EditApply, EditCommand,
+    EditSchemaQuery, GridError, RowOrder, RowOrdinal, RowSpan, SchemaEngineQuery, SortKey,
+    ViewSpec,
 };
 use document_format::{CellValue, Document, RowId, SheetId};
 use schema_engine::{
@@ -359,7 +360,12 @@ fn foreign_row(fixture: &Fixture) -> RowId {
 /// 選択された行の要求（文書の位置で 7・2・2・40。同じ行の 2 度の要求と、シート順と逆の並びを
 /// 含む。要求の並びが結果へ漏れないことを見るために使う）。
 fn selection(fixture: &Fixture) -> Vec<RowId> {
-    vec![fixture.row(7), fixture.row(2), fixture.row(2), fixture.row(40)]
+    vec![
+        fixture.row(7),
+        fixture.row(2),
+        fixture.row(2),
+        fixture.row(40),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -422,7 +428,11 @@ fn inserting_rows_applies_the_schema_defaults_at_the_documented_position() {
     );
 
     // **位置**（隣の行を突き合わせる。ずれた位置に挿入する誤りを捕まえる）。
-    assert_eq!(before[at - 1], after[at - 1], "挿入位置の直前の行は動かない");
+    assert_eq!(
+        before[at - 1],
+        after[at - 1],
+        "挿入位置の直前の行は動かない"
+    );
     assert_eq!(
         before[at],
         after[at + count],
@@ -619,7 +629,10 @@ fn removing_several_rows_is_one_operation_and_the_rest_keep_their_order_and_valu
     // **1 回の操作**であることの 1 つ目の観測: 再検証は 1 回だけである（行ごとに削除して
     // 1 行ずつ再検証すれば複数回になる）。
     assert_row_operation_call_shape(&calls, &fixture.plan);
-    assert_eq!(0, outcome.violation_total, "適合する値だけの標本では違反が無い");
+    assert_eq!(
+        0, outcome.violation_total,
+        "適合する値だけの標本では違反が無い"
+    );
 }
 
 /// 1 回の操作であることの 2 つ目の観測: 不正な行が 1 つ混ざった命令は、**先の行も取り除かない**
@@ -758,10 +771,7 @@ fn duplicating_a_short_row_copies_exactly_the_values_it_has() {
         .apply(
             fixture.document_mut(),
             EditCommand::SetCells {
-                cells: vec![(
-                    CellAddress::new(short, ColumnIndex::new(1)),
-                    "7".to_owned(),
-                )],
+                cells: vec![(CellAddress::new(short, ColumnIndex::new(1)), "7".to_owned())],
             },
         )
         .expect("適合する値の書き込みは成功する");
@@ -1110,7 +1120,10 @@ fn empty_row_commands_change_nothing_and_call_no_judgement() {
             outcome.affected,
             "{command:?}: 影響を受けた行は無い"
         );
-        assert_eq!(row_count, outcome.row_count, "{command:?}: 行数は変わらない");
+        assert_eq!(
+            row_count, outcome.row_count,
+            "{command:?}: 行数は変わらない"
+        );
         assert_eq!(0, outcome.violation_total, "{command:?}: 違反の総数も 0");
         assert!(outcome.coercions.is_empty(), "{command:?}: 変換も無い");
         assert_eq!(before, fixture.snapshot(), "{command:?}: 何も変わらない");

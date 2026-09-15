@@ -98,23 +98,27 @@ fn the_sample_declares_the_thirty_columns() {
         "標本は名前つき型定義を使わない（入れ子はインラインで宣言する）"
     );
     let declaration = declaration(&sample);
-    assert_eq!(SAMPLE_COLUMNS, declaration.columns.len(), "宣言の列数が違う");
+    assert_eq!(
+        SAMPLE_COLUMNS,
+        declaration.columns.len(),
+        "宣言の列数が違う"
+    );
 
     // タスク 1.4 が挙げる組込の各型が、それぞれ 1 列以上ある（列名で対応を示す）。
     for (kind, name) in [
-        (TypeKind::Text, "品番"),        // 一意制約かつ必須の文字列
-        (TypeKind::Int, "数量"),         // 範囲つきの整数（必須）
-        (TypeKind::Float, "予備率"),     // 範囲つきの小数
-        (TypeKind::Decimal, "単価"),     // 桁と範囲つきの 10 進数
-        (TypeKind::Bool, "検査済み"),    // 真偽
-        (TypeKind::Date, "発注日"),      // 範囲つきの日付
+        (TypeKind::Text, "品番"),         // 一意制約かつ必須の文字列
+        (TypeKind::Int, "数量"),          // 範囲つきの整数（必須）
+        (TypeKind::Float, "予備率"),      // 範囲つきの小数
+        (TypeKind::Decimal, "単価"),      // 桁と範囲つきの 10 進数
+        (TypeKind::Bool, "検査済み"),     // 真偽
+        (TypeKind::Date, "発注日"),       // 範囲つきの日付
         (TypeKind::DateTime, "確定日時"), // オフセットを要求する日時
-        (TypeKind::Enum, "状態"),        // 選択肢
-        (TypeKind::Ref, "仕入先"),       // シート間参照（必須）
-        (TypeKind::Attachment, "添付"),  // 添付参照
-        (TypeKind::Object, "届け先"),    // 入れ子（フィールドの集合）
-        (TypeKind::Array, "明細"),       // 入れ子（要素の並び）
-        (TypeKind::Any, "機械可読値"),   // 任意（必須）
+        (TypeKind::Enum, "状態"),         // 選択肢
+        (TypeKind::Ref, "仕入先"),        // シート間参照（必須）
+        (TypeKind::Attachment, "添付"),   // 添付参照
+        (TypeKind::Object, "届け先"),     // 入れ子（フィールドの集合）
+        (TypeKind::Array, "明細"),        // 入れ子（要素の並び）
+        (TypeKind::Any, "機械可読値"),    // 任意（必須）
     ] {
         let column = column_named(&declaration, name);
         assert_eq!(kind, declared_kind(column), "列 {name} の型が違う");
@@ -222,22 +226,14 @@ fn a_narrower_sample_keeps_the_coverage_of_the_documented_prefix() {
     let engine = SchemaEngine::new();
     let narrow = sample(&SampleOptions::new(8, COVERAGE_COLUMNS));
     let schema = narrow.compiled();
-    assert_eq!(
-        COVERAGE_COLUMNS,
-        narrow.column_count(),
-        "前置の列数が違う"
-    );
+    assert_eq!(COVERAGE_COLUMNS, narrow.column_count(), "前置の列数が違う");
     assert!(
         schema.unusable_columns().is_empty(),
         "前置に使用不能な列がある"
     );
 
     let declaration = declaration(&narrow);
-    let kinds: HashSet<TypeKind> = declaration
-        .columns
-        .iter()
-        .filter_map(known_kind)
-        .collect();
+    let kinds: HashSet<TypeKind> = declaration.columns.iter().filter_map(known_kind).collect();
     for kind in TypeKind::ALL {
         // 標本は拡張型を使わない（登録を要する標本は群 9 の関心である）。
         if kind == TypeKind::Custom {
@@ -401,7 +397,8 @@ fn the_hundred_thousand_row_sample_builds_at_the_requested_ratio() {
 #[test]
 fn the_shared_sample_can_carry_unique_violations() {
     let engine = SchemaEngine::new();
-    let options = SampleOptions::new(UNIQUE_GROUPS * 2, SAMPLE_COLUMNS).with_unique_collisions(true);
+    let options =
+        SampleOptions::new(UNIQUE_GROUPS * 2, SAMPLE_COLUMNS).with_unique_collisions(true);
     let sample = sample(&options);
     let schema = sample.compiled();
     let report = engine.validate_sheet(
@@ -565,18 +562,10 @@ fn the_same_options_yield_the_same_values_and_violations() {
             right.column_count(),
             "計画の列数が一致しない"
         );
-        let left_report = engine.validate_sheet(
-            first.document(),
-            first.sheet(),
-            &left,
-            &validation,
-        );
-        let right_report = engine.validate_sheet(
-            second.document(),
-            second.sheet(),
-            &right,
-            &validation,
-        );
+        let left_report =
+            engine.validate_sheet(first.document(), first.sheet(), &left, &validation);
+        let right_report =
+            engine.validate_sheet(second.document(), second.sheet(), &right, &validation);
         assert_eq!(
             violation_signature(&first, &left_report),
             violation_signature(&second, &right_report),
@@ -622,7 +611,8 @@ fn a_different_seed_changes_the_values_but_not_the_violations() {
     );
     let (left, right) = (first.compiled(), second.compiled());
     let left_report = engine.validate_sheet(first.document(), first.sheet(), &left, &validation);
-    let right_report = engine.validate_sheet(second.document(), second.sheet(), &right, &validation);
+    let right_report =
+        engine.validate_sheet(second.document(), second.sheet(), &right, &validation);
     assert_eq!(
         violation_signature(&first, &left_report),
         violation_signature(&second, &right_report),
@@ -711,7 +701,11 @@ fn masked_values(sample: &Sample) -> Vec<Vec<CellValue>> {
     sample
         .row_values()
         .into_iter()
-        .map(|row| row.into_iter().map(|value| masked(sample, &value)).collect())
+        .map(|row| {
+            row.into_iter()
+                .map(|value| masked(sample, &value))
+                .collect()
+        })
         .collect()
 }
 
@@ -725,14 +719,12 @@ fn masked(sample: &Sample, value: &CellValue) -> CellValue {
             Some(position) => CellValue::Int(position as i64),
             None => value.clone(),
         },
-        CellValue::Nested(NestedValue::Object(entries)) => {
-            CellValue::Nested(NestedValue::Object(
-                entries
-                    .iter()
-                    .map(|(name, inner)| (name.clone(), masked(sample, inner)))
-                    .collect(),
-            ))
-        }
+        CellValue::Nested(NestedValue::Object(entries)) => CellValue::Nested(NestedValue::Object(
+            entries
+                .iter()
+                .map(|(name, inner)| (name.clone(), masked(sample, inner)))
+                .collect(),
+        )),
         CellValue::Nested(NestedValue::Array(items)) => CellValue::Nested(NestedValue::Array(
             items.iter().map(|item| masked(sample, item)).collect(),
         )),

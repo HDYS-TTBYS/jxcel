@@ -99,7 +99,10 @@ fn column_index_is_the_upstream_type_itself_not_a_second_definition() {
     let via_grid = data_grid::ColumnIndex::new(1);
     let via_upstream: schema_engine::ColumnIndex = via_grid;
     assert_eq!(via_upstream.index(), 1);
-    assert_eq!(data_grid::ColumnIndex::new(via_upstream.index()), via_upstream);
+    assert_eq!(
+        data_grid::ColumnIndex::new(via_upstream.index()),
+        via_upstream
+    );
 }
 
 #[test]
@@ -159,7 +162,10 @@ fn row_span_covers_a_half_open_interval_of_ordinals() {
     // 窓の符号化と無効化は同じ区間の型を受け取る（`Copy` であり、持ち回れる）。
     let window = span;
     assert_eq!(window.end(), 8);
-    assert_eq!(span.contains(RowOrdinal::new(6)), window.contains(RowOrdinal::new(6)));
+    assert_eq!(
+        span.contains(RowOrdinal::new(6)),
+        window.contains(RowOrdinal::new(6))
+    );
 }
 
 #[test]
@@ -190,7 +196,11 @@ fn cell_range_counts_cells_for_each_selection_shape() {
     // 1 セル（要件 2.5 の最小の場合）
     let single = CellRange::new(at(3, 2), at(3, 2));
     assert_eq!(
-        (single.row_count(), single.column_count(), single.cell_count()),
+        (
+            single.row_count(),
+            single.column_count(),
+            single.cell_count()
+        ),
         (1, 1, 1)
     );
 
@@ -390,7 +400,12 @@ fn grid_error_variants_are_discriminable_and_carry_only_their_context() {
     // 同じ入力からは同じ誤りになり、別の変種とは等しくない（`PartialEq` が要る）。
     assert_eq!(errors[1], GridError::UnknownRow { row: row_id });
     assert_ne!(errors[0], errors[1]);
-    assert_ne!(errors[4], GridError::NestedDecode { cell: CellAddress::new(row_id, ColumnIndex::new(2)) });
+    assert_ne!(
+        errors[4],
+        GridError::NestedDecode {
+            cell: CellAddress::new(row_id, ColumnIndex::new(2))
+        }
+    );
 
     // 文言は呼び出し元が組み立てる（structure.md）。`Display` は持ち物をそのまま写すだけである。
     assert!(errors[0].to_string().contains(&sheet_id.to_string()));

@@ -185,7 +185,9 @@ impl Fixture {
         }
         let plan = SchemaEngine::new()
             .compile(
-                self.document().sheet_by_id(second).expect("シートは文書にある"),
+                self.document()
+                    .sheet_by_id(second)
+                    .expect("シートは文書にある"),
                 &TypeRegistry::new(),
             )
             .expect("同じ宣言はもう一度コンパイルできる");
@@ -254,10 +256,7 @@ fn add_short_row(apply: &mut EditApply, fixture: &mut Fixture, text: &str) -> Ro
         .add_row(sheet)
         .expect("行を追加できない");
     apply
-        .apply(
-            fixture.document_mut(),
-            set_cell(row, INT_COLUMN, text),
-        )
+        .apply(fixture.document_mut(), set_cell(row, INT_COLUMN, text))
         .expect("適合する値の書き込みは成功する");
     assert!(
         fixture.values_of(row).len() < fixture.plan.column_count(),
@@ -376,8 +375,7 @@ fn a_cell_edit_is_undone_to_the_values_read_at_apply_time() {
             "位置は適用前の文書の位置"
         );
         assert_eq!(
-            &before[restored[0].position].1,
-            &restored[0].values,
+            &before[restored[0].position].1, &restored[0].values,
             "値は適用前の行の値の並びそのもの（列 {column}）"
         );
 
@@ -385,7 +383,11 @@ fn a_cell_edit_is_undone_to_the_values_read_at_apply_time() {
         apply
             .apply_history(fixture.document_mut(), &pair.inverse)
             .expect("逆命令は適用できる");
-        assert_eq!(before, fixture.snapshot(), "適用前の状態へ戻る（列 {column}）");
+        assert_eq!(
+            before,
+            fixture.snapshot(),
+            "適用前の状態へ戻る（列 {column}）"
+        );
         assert_eq!(0, fixture.violations_now(), "違反も元へ戻る（列 {column}）");
 
         // やり直しの命令も同じ編集である（適用の時点で組になったもの）。
@@ -492,7 +494,10 @@ fn an_inserted_row_is_undone_by_removing_the_added_rows() {
     assert_eq!(10, outcome.row_count, "適用後の行数");
     let pair = pair.expect("状態を変える適用は対を持つ");
     let HistoryCommand::Edit(EditCommand::RemoveRows { rows }) = &pair.inverse else {
-        panic!("行の追加の逆命令は追加された行の削除である: {:?}", pair.inverse);
+        panic!(
+            "行の追加の逆命令は追加された行の削除である: {:?}",
+            pair.inverse
+        );
     };
     assert_eq!(
         &outcome.affected, rows,
@@ -622,15 +627,16 @@ fn a_duplicated_row_is_undone_by_removing_the_copies() {
     assert_eq!(&outcome.affected, rows, "逆命令は複製の識別子を保持する");
 
     // やり直しは、複製の値（元の行と同じ値）をそのまま差し戻す。
-    let HistoryCommand::RestoreRows {
-        rows: restored, ..
-    } = &pair.redo
-    else {
+    let HistoryCommand::RestoreRows { rows: restored, .. } = &pair.redo else {
         panic!("行の複製のやり直しは差し戻しである: {:?}", pair.redo);
     };
     for (copy, source_index) in restored.iter().zip([1usize, 4]) {
         assert_eq!(
-            values_of(fixture.document(), fixture.sheet(), fixture.row(source_index)),
+            values_of(
+                fixture.document(),
+                fixture.sheet(),
+                fixture.row(source_index)
+            ),
             copy.values,
             "複製の値は元の行の値と同じ"
         );
@@ -700,7 +706,10 @@ fn one_paste_is_one_undo_operation() {
     );
     let pair = pair.expect("状態を変える適用は対を持つ");
     let HistoryCommand::Composite(parts) = &pair.inverse else {
-        panic!("行を補充した貼り付けの逆命令は合成である: {:?}", pair.inverse);
+        panic!(
+            "行を補充した貼り付けの逆命令は合成である: {:?}",
+            pair.inverse
+        );
     };
     assert_eq!(2, parts.len(), "値の復元と、補充した行の削除");
     assert!(
@@ -850,7 +859,10 @@ fn a_paste_round_trip_under_a_filter_restores_the_rows_it_actually_wrote() {
     // 診断である — 食い違うと、どの行を指すべきだったかがここに出る）。
     let written: Vec<RowId> = displayed.iter().copied().take(3).collect();
     let HistoryCommand::RestoreValues { rows, .. } = &pair.inverse else {
-        panic!("行を補充しない貼り付けの逆命令は値の復元である: {:?}", pair.inverse);
+        panic!(
+            "行を補充しない貼り付けの逆命令は値の復元である: {:?}",
+            pair.inverse
+        );
     };
     assert_eq!(
         written,
@@ -860,7 +872,10 @@ fn a_paste_round_trip_under_a_filter_restores_the_rows_it_actually_wrote() {
     assert_eq!(
         written
             .iter()
-            .map(|row| document_ids.iter().position(|id| id == row).expect("文書にある"))
+            .map(|row| document_ids
+                .iter()
+                .position(|id| id == row)
+                .expect("文書にある"))
             .collect::<Vec<_>>(),
         rows.iter().map(|row| row.position).collect::<Vec<_>>(),
         "材料の位置は**文書の位置**である（表示の位置ではない）"
@@ -892,7 +907,11 @@ fn a_paste_round_trip_under_a_sort_restores_the_rows_it_actually_wrote() {
 
     // 前提: 行は隠れていないが、並びが文書の並びと食い違う。
     assert_eq!(0, summary.hidden, "前提: 並べ替えは行を隠さない");
-    assert_eq!(document_ids.len(), displayed.len(), "前提: 全行が表示される");
+    assert_eq!(
+        document_ids.len(),
+        displayed.len(),
+        "前提: 全行が表示される"
+    );
     assert_ne!(
         document_ids, displayed,
         "前提: 並べ替えで表示の並びが文書の並びと食い違う"
@@ -915,7 +934,11 @@ fn a_paste_round_trip_under_a_sort_restores_the_rows_it_actually_wrote() {
     apply
         .apply_history(fixture.document_mut(), &pair.inverse)
         .expect("逆命令は適用できる");
-    assert_eq!(before, fixture.snapshot(), "適用前の状態へ戻る（並べ替えの下でも）");
+    assert_eq!(
+        before,
+        fixture.snapshot(),
+        "適用前の状態へ戻る（並べ替えの下でも）"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -987,7 +1010,10 @@ fn a_duplicated_short_row_keeps_its_width_through_undo_and_redo() {
 
     // 取り消し → やり直し（やり直しは発行済みの行の差し戻しである）。
     apply
-        .apply_history(fixture.document_mut(), &pair.as_ref().expect("対がある").inverse)
+        .apply_history(
+            fixture.document_mut(),
+            &pair.as_ref().expect("対がある").inverse,
+        )
         .expect("逆命令は適用できる");
     assert_eq!(before, fixture.snapshot(), "適用前の状態へ戻る");
     apply
@@ -1020,14 +1046,21 @@ fn a_removed_zero_width_row_is_restored_with_zero_width() {
     let before = fixture.snapshot();
 
     let (outcome, pair) = apply
-        .apply_with_inverse(fixture.document_mut(), EditCommand::RemoveRows { rows: vec![zero] })
+        .apply_with_inverse(
+            fixture.document_mut(),
+            EditCommand::RemoveRows { rows: vec![zero] },
+        )
         .expect("行の削除は適用できる");
     assert_eq!(row_count, outcome.row_count, "前提: 1 行減った");
 
     apply
         .apply_history(fixture.document_mut(), &pair.expect("対がある").inverse)
         .expect("逆命令は適用できる");
-    assert_eq!(before, fixture.snapshot(), "適用前の状態へ戻る（幅 0 の行を含む）");
+    assert_eq!(
+        before,
+        fixture.snapshot(),
+        "適用前の状態へ戻る（幅 0 の行を含む）"
+    );
     assert!(
         fixture.values_of(zero).is_empty(),
         "前提つきの表明: 幅 0 の行は幅 0 のまま戻る（列数まで埋まらない。実際の幅 {}）",
@@ -1052,10 +1085,7 @@ fn an_undo_of_an_edit_that_widened_a_short_row_restores_its_original_width() {
 
     // 錨から遠い列（列 5）へ書くと、その行の幅は 6 へ**広がる**。
     let (_, pair) = apply
-        .apply_with_inverse(
-            fixture.document_mut(),
-            set_cell(short, 5, "ひろげる"),
-        )
+        .apply_with_inverse(fixture.document_mut(), set_cell(short, 5, "ひろげる"))
         .expect("編集は適用できる");
     let pair = pair.expect("状態を変える適用は対を持つ");
     // 前提: 幅が実際に広がった（本検査の対象そのもの）。
@@ -1418,13 +1448,7 @@ fn the_shape_of_the_history_is_deterministic() {
         stack
             .entries()
             .iter()
-            .map(|entry| {
-                (
-                    entry.label,
-                    describe(&entry.inverse),
-                    describe(&entry.redo),
-                )
-            })
+            .map(|entry| (entry.label, describe(&entry.inverse), describe(&entry.redo)))
             .collect()
     }
 
@@ -1432,7 +1456,9 @@ fn the_shape_of_the_history_is_deterministic() {
     fn describe(command: &HistoryCommand) -> String {
         match command {
             HistoryCommand::Edit(EditCommand::SetCells { cells }) => format!("set:{}", cells.len()),
-            HistoryCommand::Edit(EditCommand::RemoveRows { rows }) => format!("remove:{}", rows.len()),
+            HistoryCommand::Edit(EditCommand::RemoveRows { rows }) => {
+                format!("remove:{}", rows.len())
+            }
             // 貼り付けのやり直しは、覆う行の件数と矩形の大きさだけを写す（**識別子は写さない**。
             // 実行を跨ぐと変わるため、形の比較に含められない）。
             HistoryCommand::Edit(EditCommand::PasteRange { rows, text, .. }) => {
@@ -1468,7 +1494,6 @@ fn the_shape_of_the_history_is_deterministic() {
 
     assert_eq!(shape(), shape(), "同じ命令の並びは同じ形の履歴を与える");
 }
-
 
 // ---------------------------------------------------------------------------
 // 取り消しとやり直しの適用（タスク 4.2。要件 9.2, 9.3）
@@ -1632,7 +1657,13 @@ fn an_undo_returns_to_the_state_before_the_operation_and_a_redo_applies_it_again
     session.edit(EditCommand::PasteRange {
         anchor: CellAddress::new(displayed[0], ColumnIndex::new(INT_COLUMN)),
         rows: displayed,
-        text: format!("{}\t{}\n{}\t{}", distinct_value(1), distinct_value(2), distinct_value(3), distinct_value(4)),
+        text: format!(
+            "{}\t{}\n{}\t{}",
+            distinct_value(1),
+            distinct_value(2),
+            distinct_value(3),
+            distinct_value(4)
+        ),
     });
 
     assert_eq!(4, session.stack.depth(), "4 つの操作が積まれている");
@@ -1730,11 +1761,7 @@ fn the_result_of_an_undo_and_a_redo_carries_the_rows_it_touched() {
         session.undo().affected,
         "取り消しは挿入された行（取り除く行）を運ぶ"
     );
-    assert_eq!(
-        inserted,
-        session.redo().affected,
-        "やり直しも同じ行を運ぶ"
-    );
+    assert_eq!(inserted, session.redo().affected, "やり直しも同じ行を運ぶ");
 
     // --- 行の削除 ---
     let mut session = Session::new(8, 13, 64);
@@ -1743,16 +1770,8 @@ fn the_result_of_an_undo_and_a_redo_carries_the_rows_it_touched() {
         rows: removed.clone(),
     });
     assert_eq!(removed, applied.affected, "削除は取り除かれた行を報告する");
-    assert_eq!(
-        removed,
-        session.undo().affected,
-        "取り消しは戻した行を運ぶ"
-    );
-    assert_eq!(
-        removed,
-        session.redo().affected,
-        "やり直しも同じ行を運ぶ"
-    );
+    assert_eq!(removed, session.undo().affected, "取り消しは戻した行を運ぶ");
+    assert_eq!(removed, session.redo().affected, "やり直しも同じ行を運ぶ");
 
     // --- 貼り付け ---
     let mut session = Session::new(8, 13, 64);
@@ -1769,16 +1788,8 @@ fn the_result_of_an_undo_and_a_redo_carries_the_rows_it_touched() {
         ),
     });
     assert_eq!(written, applied.affected, "貼り付けは書いた行を報告する");
-    assert_eq!(
-        written,
-        session.undo().affected,
-        "取り消しは書いた行を運ぶ"
-    );
-    assert_eq!(
-        written,
-        session.redo().affected,
-        "やり直しも書いた行を運ぶ"
-    );
+    assert_eq!(written, session.undo().affected, "取り消しは書いた行を運ぶ");
+    assert_eq!(written, session.redo().affected, "やり直しも書いた行を運ぶ");
 }
 
 /// 取り消しとやり直しが**履歴へ積まれない**こと（要件 9.2, 9.3 と「登録口は `push` 1 つ」の
@@ -1836,11 +1847,7 @@ fn a_new_operation_after_an_undo_discards_the_redo_tail() {
     let mut session = Session::new(6, 13, 64);
     let row = session.row(1);
     // A, B, C は互いに異なる値である（同じ値だと操作が文書を変えない）。
-    let (a, b, c) = (
-        distinct_value(0),
-        distinct_value(1),
-        distinct_value(2),
-    );
+    let (a, b, c) = (distinct_value(0), distinct_value(1), distinct_value(2));
     session.edit(set_cell(row, INT_COLUMN, &a));
     session.edit(set_cell(row, INT_COLUMN, &b));
     let after_a = session.states[1].clone();
@@ -1858,7 +1865,11 @@ fn a_new_operation_after_an_undo_discards_the_redo_tail() {
 
     // 取り消した状態で新しい操作 C を積む（ここで B が破棄される）。
     session.edit(set_cell(row, INT_COLUMN, &c));
-    assert_eq!(2, session.stack.depth(), "C を積んだ後の件数（A と C。B は破棄された）");
+    assert_eq!(
+        2,
+        session.stack.depth(),
+        "C を積んだ後の件数（A と C。B は破棄された）"
+    );
     assert_eq!(
         vec![UndoLabel::CellEdit, UndoLabel::CellEdit],
         session
@@ -1884,7 +1895,11 @@ fn a_new_operation_after_an_undo_discards_the_redo_tail() {
         session.value_at(row, INT_COLUMN),
         "やり直しは積んだ C を適用する（破棄された B ではない）"
     );
-    assert_eq!(2, session.stack.depth(), "往復しても件数は A と C の 2 件のまま");
+    assert_eq!(
+        2,
+        session.stack.depth(),
+        "往復しても件数は A と C の 2 件のまま"
+    );
 }
 
 /// **保持する操作数の上限を設け、超えたら古い側から捨てる**こと（要件 9.6）。
@@ -1906,7 +1921,11 @@ fn the_limit_discards_the_oldest_operations_and_they_can_no_longer_be_undone() {
         session.stack.depth(),
         "上限に収まる（3 件目を積むときに 1 件目が捨てられた）"
     );
-    assert_eq!(session.states[3], session.snapshot(), "3 件目まで適用した状態である");
+    assert_eq!(
+        session.states[3],
+        session.snapshot(),
+        "3 件目まで適用した状態である"
+    );
 
     // 1 回目の取り消しは 3 件目である（2 件目まで適用した状態へ戻る）。
     session.undo();
@@ -1915,11 +1934,19 @@ fn the_limit_discards_the_oldest_operations_and_they_can_no_longer_be_undone() {
         session.value_at(row, INT_COLUMN),
         "取り消したのは 3 件目である（その前の値は 2 件目の値 1002）"
     );
-    assert_eq!(session.states[2], session.snapshot(), "3 件目の前の状態へ戻る");
+    assert_eq!(
+        session.states[2],
+        session.snapshot(),
+        "3 件目の前の状態へ戻る"
+    );
 
     // 2 回目の取り消しは 2 件目である（1 件目まで適用した状態へ戻る）。
     session.undo();
-    assert_eq!(session.states[1], session.snapshot(), "2 件目の前の状態へ戻る");
+    assert_eq!(
+        session.states[1],
+        session.snapshot(),
+        "2 件目の前の状態へ戻る"
+    );
 
     // **これ以上取り消せない** — 1 件目は上限で捨てられており、履歴に無い。
     assert!(
@@ -2039,7 +2066,11 @@ fn a_limit_of_one_keeps_only_the_most_recent_operation() {
     assert_eq!(1, session.stack.depth(), "1 件目が残っている");
 
     session.edit_int(row, 1);
-    assert_eq!(1, session.stack.depth(), "2 件目を積むと 1 件目が捨てられる");
+    assert_eq!(
+        1,
+        session.stack.depth(),
+        "2 件目を積むと 1 件目が捨てられる"
+    );
 
     session.undo();
     assert_eq!(
@@ -2117,7 +2148,11 @@ fn a_paste_that_appended_rows_round_trips_through_the_session() {
         text,
     });
     let after = session.snapshot();
-    assert_eq!(8, after.len(), "前提: 矩形が既存の行数を超えて行が補充された");
+    assert_eq!(
+        8,
+        after.len(),
+        "前提: 矩形が既存の行数を超えて行が補充された"
+    );
     assert_ne!(before, after, "前提: 貼り付けが文書を変えた");
 
     let undone = session.undo();
@@ -2169,8 +2204,16 @@ fn a_failed_undo_leaves_the_position_unchanged() {
         matches!(failed, Err(GridError::UnknownRow { .. })),
         "取り除かれた行を戻す取り消しは失敗する: {failed:?}"
     );
-    assert_eq!(before, session.snapshot(), "失敗した取り消しは文書を変えない");
-    assert_eq!(depth, session.stack.depth(), "失敗した取り消しは depth を変えない");
+    assert_eq!(
+        before,
+        session.snapshot(),
+        "失敗した取り消しは文書を変えない"
+    );
+    assert_eq!(
+        depth,
+        session.stack.depth(),
+        "失敗した取り消しは depth を変えない"
+    );
     // **位置が動いていない** — 次に取り消す命令は、失敗の前と同じ対の逆命令である。
     // 位置を先に動かす実装では、ここが `None`（先頭に着いている）になる。
     assert_eq!(
@@ -2224,8 +2267,16 @@ fn a_failed_redo_leaves_the_position_unchanged() {
         matches!(failed, Err(GridError::UnknownRow { .. })),
         "取り除かれた行を戻すやり直しは失敗する: {failed:?}"
     );
-    assert_eq!(before, session.snapshot(), "失敗したやり直しは文書を変えない");
-    assert_eq!(depth, session.stack.depth(), "失敗したやり直しは depth を変えない");
+    assert_eq!(
+        before,
+        session.snapshot(),
+        "失敗したやり直しは文書を変えない"
+    );
+    assert_eq!(
+        depth,
+        session.stack.depth(),
+        "失敗したやり直しは depth を変えない"
+    );
     // **位置が動いていない** — 次にやり直す命令は、失敗の前と同じものである。
     // 位置を先に動かす実装では、2 つ目の対（行の追加）へ飛び越してしまう。
     assert_eq!(

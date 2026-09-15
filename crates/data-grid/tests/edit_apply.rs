@@ -66,8 +66,8 @@ use std::sync::{Arc, Mutex};
 use common::sample::sample;
 use common::sample::{SampleEditParts, SampleOptions};
 use data_grid::{
-    display_text, CellAddress, CoercionNotice, ColumnIndex, EditApply, EditCommand, EditSchemaQuery,
-    GridError, SchemaEngineQuery,
+    display_text, CellAddress, CoercionNotice, ColumnIndex, EditApply, EditCommand,
+    EditSchemaQuery, GridError, SchemaEngineQuery,
 };
 use document_format::{CellValue, Document, RowId, SchemaPart, SheetId};
 use schema_engine::{
@@ -263,7 +263,11 @@ impl Fixture {
 /// 標本を使う検査の前提を先に確かめる（モジュール docs「前提を先に確かめる」）。
 fn assert_clean_premises(sample: &common::sample::Sample) {
     assert_eq!(0, sample.injected_violations(), "違反を仕込んでいない標本");
-    assert_eq!(0, sample.unique_violations(), "一意制約の重複を混ぜていない標本");
+    assert_eq!(
+        0,
+        sample.unique_violations(),
+        "一意制約の重複を混ぜていない標本"
+    );
 
     let plan = sample.compiled();
     // 列 0（品番）が標本で唯一の一意制約つきの列であり、同点が零であること。
@@ -467,7 +471,10 @@ fn a_value_that_does_not_fit_is_kept_in_the_document_and_reported() {
         .expect("編集経路は拒否しない（違反があっても成功する）");
 
     assert_eq!(vec![row], outcome.affected, "影響を受けた行");
-    assert_eq!(1, outcome.violation_total, "違反の総数（再検証した列に閉じる）");
+    assert_eq!(
+        1, outcome.violation_total,
+        "違反の総数（再検証した列に閉じる）"
+    );
     assert!(outcome.coercions.is_empty(), "変換は起きていない");
 
     // **値は破棄されず、ドキュメントにそのまま残る**（要件 3.5）。
@@ -611,8 +618,7 @@ fn clearing_an_optional_cell_writes_the_absence_of_a_value() {
         "空の文字列は値なしとして書かれる"
     );
     assert_eq!(
-        0,
-        outcome.violation_total,
+        0, outcome.violation_total,
         "値なしを許す列では違反にならない"
     );
     assert_eq!(vec![row], outcome.affected, "消した行も影響を受けた行");
@@ -663,7 +669,11 @@ fn the_same_text_takes_two_different_paths_because_the_columns_differ() {
         "`bool` の列では打たれた文字のまま"
     );
     assert_eq!(1, outcome.violation_total, "違反は `bool` の列の 1 件だけ");
-    assert_eq!(vec![row], outcome.affected, "同じ行を 2 セル書いても行は 1 つ");
+    assert_eq!(
+        vec![row],
+        outcome.affected,
+        "同じ行を 2 セル書いても行は 1 つ"
+    );
     assert_eq!(1, outcome.coercions.len(), "変換の記録は起きた 1 件だけ");
     assert_eq!(
         quantity,
@@ -698,7 +708,11 @@ fn an_unknown_row_stops_before_any_write() {
 
     assert_eq!(GridError::UnknownRow { row: foreign }, error);
     assert_eq!(before, fixture.snapshot(), "1 つのセルも書かれない");
-    assert_eq!(Vec::<QueryCall>::new(), recorded(&calls), "判定も呼ばれない");
+    assert_eq!(
+        Vec::<QueryCall>::new(),
+        recorded(&calls),
+        "判定も呼ばれない"
+    );
 }
 
 /// 列の数の外を指す命令は [`GridError::ColumnOutOfRange`] を返し、**何も書かない**。
@@ -723,7 +737,11 @@ fn an_out_of_range_column_stops_before_any_write() {
         error
     );
     assert_eq!(before, fixture.snapshot(), "1 つのセルも書かれない");
-    assert_eq!(Vec::<QueryCall>::new(), recorded(&calls), "判定も呼ばれない");
+    assert_eq!(
+        Vec::<QueryCall>::new(),
+        recorded(&calls),
+        "判定も呼ばれない"
+    );
 }
 
 /// 複数のセルのうち 1 つでも不正なら、**どのセルも書かない**（部分適用が無い）。
@@ -762,7 +780,11 @@ fn a_command_with_one_invalid_cell_writes_nothing() {
         fixture.snapshot(),
         "先のセルも書かれない（部分適用が無い）"
     );
-    assert_eq!(Vec::<QueryCall>::new(), recorded(&calls), "判定も呼ばれない");
+    assert_eq!(
+        Vec::<QueryCall>::new(),
+        recorded(&calls),
+        "判定も呼ばれない"
+    );
 }
 
 /// 列が 1 件も宣言されていないシートは編集できない（[`GridError::SchemaUnusable`]）。
@@ -796,7 +818,11 @@ fn a_sheet_without_columns_cannot_be_edited() {
 
     assert_eq!(GridError::SchemaUnusable { sheet }, error);
     assert_eq!(before, snapshot(&document, sheet), "何も変わらない");
-    assert_eq!(Vec::<QueryCall>::new(), recorded(&calls), "判定も呼ばれない");
+    assert_eq!(
+        Vec::<QueryCall>::new(),
+        recorded(&calls),
+        "判定も呼ばれない"
+    );
 }
 
 /// シートの列数と食い違う計画は使えない（列の添字がドキュメントの列名と対応しない）。
@@ -906,8 +932,14 @@ fn a_repeated_cell_keeps_the_last_text_and_judges_only_that_value() {
             fixture.document_mut(),
             EditCommand::SetCells {
                 cells: vec![
-                    (CellAddress::new(row, ColumnIndex::new(column)), "7".to_owned()),
-                    (CellAddress::new(row, ColumnIndex::new(column)), "9".to_owned()),
+                    (
+                        CellAddress::new(row, ColumnIndex::new(column)),
+                        "7".to_owned(),
+                    ),
+                    (
+                        CellAddress::new(row, ColumnIndex::new(column)),
+                        "9".to_owned(),
+                    ),
                 ],
             },
         )
@@ -951,9 +983,18 @@ fn affected_lists_each_row_once_and_row_count_is_the_count_after_the_edit() {
             fixture.document_mut(),
             EditCommand::SetCells {
                 cells: vec![
-                    (CellAddress::new(second, ColumnIndex::new(1)), "7".to_owned()),
-                    (CellAddress::new(first, ColumnIndex::new(3)), "1.5".to_owned()),
-                    (CellAddress::new(second, ColumnIndex::new(3)), "2.5".to_owned()),
+                    (
+                        CellAddress::new(second, ColumnIndex::new(1)),
+                        "7".to_owned(),
+                    ),
+                    (
+                        CellAddress::new(first, ColumnIndex::new(3)),
+                        "1.5".to_owned(),
+                    ),
+                    (
+                        CellAddress::new(second, ColumnIndex::new(3)),
+                        "2.5".to_owned(),
+                    ),
                 ],
             },
         )
@@ -1004,8 +1045,16 @@ fn an_empty_command_changes_nothing_and_calls_nothing() {
         )
         .expect("空の命令は成功する");
 
-    assert_eq!(Vec::<RowId>::new(), outcome.affected, "影響を受けた行は無い");
-    assert_eq!(Vec::<CoercionNotice>::new(), outcome.coercions, "変換も無い");
+    assert_eq!(
+        Vec::<RowId>::new(),
+        outcome.affected,
+        "影響を受けた行は無い"
+    );
+    assert_eq!(
+        Vec::<CoercionNotice>::new(),
+        outcome.coercions,
+        "変換も無い"
+    );
     assert_eq!(0, outcome.violation_total, "違反の総数も 0");
     assert_eq!(row_count, outcome.row_count, "行数は変わらない");
     assert_eq!(before, fixture.snapshot(), "何も変わらない");
@@ -1046,7 +1095,7 @@ fn the_default_path_produces_the_engines_own_conversions_and_violations() {
     let row = fixture.row(0);
     let quantity = 1; // `int`。`"007"` は変換される（先頭の 0 は情報ではない）。
     let checked = 4; // `bool`。`"yes"` は変換されず、違反として残る。
-    // 既定の経路（本番の構築）だけを使う。
+                     // 既定の経路（本番の構築）だけを使う。
     let mut apply = EditApply::new(sheet, fixture.plan.clone());
 
     let outcome = apply
@@ -1171,8 +1220,14 @@ fn a_repeated_cell_whose_last_text_is_empty_writes_the_absence_of_a_value() {
             fixture.document_mut(),
             EditCommand::SetCells {
                 cells: vec![
-                    (CellAddress::new(row, ColumnIndex::new(column)), "7".to_owned()),
-                    (CellAddress::new(row, ColumnIndex::new(column)), String::new()),
+                    (
+                        CellAddress::new(row, ColumnIndex::new(column)),
+                        "7".to_owned(),
+                    ),
+                    (
+                        CellAddress::new(row, ColumnIndex::new(column)),
+                        String::new(),
+                    ),
                 ],
             },
         )

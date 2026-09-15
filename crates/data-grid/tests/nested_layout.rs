@@ -313,7 +313,11 @@ fn expanding_lists_the_inner_fields_in_declaration_order() {
 
     for (offset, field) in fields.iter().enumerate() {
         let entry = &expanded.columns()[DESTINATION + offset];
-        assert_eq!(column(DESTINATION), entry.column, "内側の列も最上位の列を指す");
+        assert_eq!(
+            column(DESTINATION),
+            entry.column,
+            "内側の列も最上位の列を指す"
+        );
         assert_eq!(
             vec![NestedPathSegment::Field(field.name().into())],
             entry.path.segments().to_vec(),
@@ -356,12 +360,7 @@ fn the_depth_limit_stops_the_descent_and_marks_the_capped_position() {
     // 上限を超える段数を要求しても、降りるのは上限までである。展開したオブジェクトは内部の
     // フィールドに**置き換わる**（要件 5.1, 5.2）ため、途中のオブジェクトは列として現れない。
     assert_eq!(
-        vec![
-            "根.葉1",
-            "根.次1.葉2",
-            "根.次1.次2.葉3",
-            "根.次1.次2.次3",
-        ],
+        vec!["根.葉1", "根.次1.葉2", "根.次1.次2.葉3", "根.次1.次2.次3",],
         names(&layout)
     );
     assert_eq!(4, layout.len());
@@ -388,10 +387,7 @@ fn the_depth_limit_stops_the_descent_and_marks_the_capped_position() {
     assert!(!shallow.columns()[1].requires_detail());
     assert_eq!(Some(TypeKind::Object), shallow.columns()[1].kind);
     let shallow = expanded_state(0, 2).layout(&schema);
-    assert_eq!(
-        vec!["根.葉1", "根.次1.葉2", "根.次1.次2"],
-        names(&shallow)
-    );
+    assert_eq!(vec!["根.葉1", "根.次1.葉2", "根.次1.次2"], names(&shallow));
     assert_eq!(Expandability::Available, shallow.columns()[2].expandability);
     assert!(!shallow.columns()[2].requires_detail());
 
@@ -421,12 +417,7 @@ fn nesting_deeper_than_the_limit_yields_a_finite_layout() {
     // 名前の中身**（上限まで降りた 3 段のパスが `.` で連結されていること）であり、
     // 件数ではない（件数は上の `layout.len()` が固定する）。
     assert_eq!(
-        vec![
-            "根.葉1",
-            "根.次1.葉2",
-            "根.次1.次2.葉3",
-            "根.次1.次2.次3"
-        ],
+        vec!["根.葉1", "根.次1.葉2", "根.次1.次2.葉3", "根.次1.次2.次3"],
         names
     );
     // 最深部は上限に一致し、それより深い位置は列として現れない。
@@ -521,7 +512,9 @@ fn array_columns_carry_their_declared_element_count() {
         layout.columns()[REVISIONS].element_count
     );
     // 上下限が一致する宣言は要素数そのものである（5.6 の「要素数を導出できる」）。
-    let exact = layout.columns()[LINE_ITEMS].element_count.expect("配列である");
+    let exact = layout.columns()[LINE_ITEMS]
+        .element_count
+        .expect("配列である");
     assert_eq!(None, exact.exact(), "1..=8 は 1 つに定まらない");
     assert_eq!(None, layout.columns()[0].element_count);
     assert_eq!(Some(TypeKind::Array), layout.columns()[LINE_ITEMS].kind);
@@ -530,10 +523,7 @@ fn array_columns_carry_their_declared_element_count() {
 /// 上下限が一致する配列の宣言は、要素数を 1 つに定める（要件 5.6）。
 #[test]
 fn an_array_with_equal_bounds_has_an_exact_element_count() {
-    let schema = compile(&single(
-        "固定",
-        array(int(), Some(3), Some(3)),
-    ));
+    let schema = compile(&single("固定", array(int(), Some(3), Some(3))));
     let layout = ViewState::new().layout(&schema);
     let count = layout.columns()[0].element_count.expect("配列である");
     assert_eq!(Some(3), count.exact());
@@ -630,7 +620,10 @@ fn a_capped_position_is_not_a_leaf() {
             "子",
             object(vec![optional(
                 "孫",
-                object(vec![optional("曾孫", object(vec![optional("玄孫", int())]))]),
+                object(vec![optional(
+                    "曾孫",
+                    object(vec![optional("玄孫", int())]),
+                )]),
             )]),
         )]),
     ));
@@ -715,10 +708,12 @@ fn a_collapsed_expansion_also_survives_recomputing_the_order() {
     let mut order = RowOrder::default();
     state.recompute_order(&mut order, sample.document(), sample.sheet());
     assert_eq!(before, state.layout(&schema));
-    assert!(!state
-        .expansion_of(column(DESTINATION))
-        .expect("届け先の指定は残っている")
-        .expanded);
+    assert!(
+        !state
+            .expansion_of(column(DESTINATION))
+            .expect("届け先の指定は残っている")
+            .expanded
+    );
 }
 
 // ---------------------------------------------------------------------------

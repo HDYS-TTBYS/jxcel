@@ -45,9 +45,7 @@ mod common;
 
 use common::sample::{sample, SampleOptions};
 use data_grid::{ColumnIndex, RowOrder, RowOrdinal, RowSpan, SortKey, ViewSpec, ViewSummary};
-use document_format::{
-    AttachmentId, CellValue, Document, IdFactory, NestedValue, RowId, SheetId,
-};
+use document_format::{AttachmentId, CellValue, Document, IdFactory, NestedValue, RowId, SheetId};
 
 /// 表示の指定を短く書く（基準列と、降順かどうかの対の並び）。絞り込みは指定しない
 /// （絞り込みの検査は `tests/filter_order.rs` が持つ）。
@@ -196,7 +194,12 @@ fn the_variant_rank_is_the_documented_total_order() {
     }
 
     // 8 変種を混ぜた全順序。入力は `ranks` の逆順であり、期待は `ranks` の順である。
-    let rows: Vec<Vec<CellValue>> = ranks.iter().rev().cloned().map(|value| vec![value]).collect();
+    let rows: Vec<Vec<CellValue>> = ranks
+        .iter()
+        .rev()
+        .cloned()
+        .map(|value| vec![value])
+        .collect();
     let (document, sheet, ids) = build(rows, 1);
     let expected: Vec<RowId> = ranks
         .iter()
@@ -214,8 +217,14 @@ fn the_variant_rank_is_the_documented_total_order() {
 
 #[test]
 fn boolean_values_order_false_before_true() {
-    let (document, sheet, ids) = build(vec![vec![CellValue::Bool(true)], vec![CellValue::Bool(false)]], 1);
-    assert_eq!(vec![ids[1], ids[0]], visible(&document, sheet, &ascending(0)));
+    let (document, sheet, ids) = build(
+        vec![vec![CellValue::Bool(true)], vec![CellValue::Bool(false)]],
+        1,
+    );
+    assert_eq!(
+        vec![ids[1], ids[0]],
+        visible(&document, sheet, &ascending(0))
+    );
 }
 
 #[test]
@@ -227,7 +236,10 @@ fn integers_and_floats_compare_numerically() {
         "整数は数値として比較する"
     );
 
-    let (document, sheet, ids) = build(vec![vec![float(10.5)], vec![float(-0.5)], vec![float(2.5)]], 1);
+    let (document, sheet, ids) = build(
+        vec![vec![float(10.5)], vec![float(-0.5)], vec![float(2.5)]],
+        1,
+    );
     assert_eq!(
         vec![ids[1], ids[2], ids[0]],
         visible(&document, sheet, &ascending(0)),
@@ -300,10 +312,17 @@ fn decimals_compare_as_numbers_not_as_display_strings() {
 
     // 桁区切りや指数表記ではなく値の大小で並ぶ。
     let (document, sheet, ids) = build(
-        vec![vec![decimal("99.999")], vec![decimal("100")], vec![decimal("1e3")]],
+        vec![
+            vec![decimal("99.999")],
+            vec![decimal("100")],
+            vec![decimal("1e3")],
+        ],
         1,
     );
-    assert_eq!(vec![ids[0], ids[1], ids[2]], visible(&document, sheet, &ascending(0)));
+    assert_eq!(
+        vec![ids[0], ids[1], ids[2]],
+        visible(&document, sheet, &ascending(0))
+    );
 }
 
 #[test]
@@ -326,7 +345,10 @@ fn decimal_spellings_of_one_value_are_equal_and_decided_by_row_id() {
 
     // 指数表記も同じ値である。
     let (document, sheet, ids) = build(vec![vec![decimal("1e1")], vec![decimal("10")]], 1);
-    assert_eq!(vec![ids[0], ids[1]], visible(&document, sheet, &ascending(0)));
+    assert_eq!(
+        vec![ids[0], ids[1]],
+        visible(&document, sheet, &ascending(0))
+    );
 }
 
 #[test]
@@ -364,8 +386,12 @@ fn integers_floats_and_decimals_keep_their_variant_rank() {
 #[test]
 fn nested_values_compare_by_their_structure() {
     // オブジェクトが配列より前。
-    let (document, sheet, ids) = build(vec![vec![array(vec![int(1)])], vec![object(Vec::new())]], 1);
-    assert_eq!(vec![ids[1], ids[0]], visible(&document, sheet, &ascending(0)));
+    let (document, sheet, ids) =
+        build(vec![vec![array(vec![int(1)])], vec![object(Vec::new())]], 1);
+    assert_eq!(
+        vec![ids[1], ids[0]],
+        visible(&document, sheet, &ascending(0))
+    );
 
     // オブジェクトはキー、次に値の順。
     let (document, sheet, ids) = build(
@@ -402,7 +428,10 @@ fn nested_values_compare_by_their_structure() {
         ],
         1,
     );
-    assert_eq!(vec![ids[1], ids[0]], visible(&document, sheet, &ascending(0)));
+    assert_eq!(
+        vec![ids[1], ids[0]],
+        visible(&document, sheet, &ascending(0))
+    );
 
     // **長さが違い、かつ先頭のキーも違う**対。ここが「長さを先に見る」実装と
     // 「キー→値の順に見る」実装が食い違う点である。
@@ -427,22 +456,30 @@ fn nested_values_compare_by_their_structure() {
         vec![vec![array(vec![int(2)])], vec![array(vec![int(1), int(9)])]],
         1,
     );
-    assert_eq!(vec![ids[1], ids[0]], visible(&document, sheet, &ascending(0)));
+    assert_eq!(
+        vec![ids[1], ids[0]],
+        visible(&document, sheet, &ascending(0))
+    );
 }
 
 #[test]
 fn attachments_compare_by_their_digest_bytes() {
     // 添付は内容アドレスの識別子であり、その `Ord`（ダイジェストのバイト列順）で並ぶ。
     // 期待値は識別子自身の順序から作る（固定幅の小文字 hex はバイト列の順序と一致する）。
-    let digests: Vec<AttachmentId> = (0..8u8).map(|byte| AttachmentId::from_bytes(&[byte])).collect();
+    let digests: Vec<AttachmentId> = (0..8u8)
+        .map(|byte| AttachmentId::from_bytes(&[byte]))
+        .collect();
     let rows: Vec<Vec<CellValue>> = digests
         .iter()
         .rev()
         .map(|id| vec![CellValue::Attachment(*id)])
         .collect();
     let (document, sheet, ids) = build(rows, 1);
-    let mut pairs: Vec<(AttachmentId, RowId)> =
-        digests.iter().copied().zip(ids.iter().rev().copied()).collect();
+    let mut pairs: Vec<(AttachmentId, RowId)> = digests
+        .iter()
+        .copied()
+        .zip(ids.iter().rev().copied())
+        .collect();
     pairs.sort_by_key(|(id, _)| *id);
     let expected: Vec<RowId> = pairs.into_iter().map(|(_, row)| row).collect();
     assert_eq!(expected, visible(&document, sheet, &ascending(0)));
@@ -529,7 +566,8 @@ fn multiple_keys_are_applied_from_the_first() {
 fn an_empty_sort_keeps_the_document_row_order() {
     // 基準列が 0 本のときは比較を行わないため、文書の行順がそのまま可視の順になる
     // （`RowId` の順ではない。`Document::reorder_rows` の後では両者は食い違う）。
-    let (mut document, sheet, ids) = build(vec![vec![text("b")], vec![text("a")], vec![text("c")]], 1);
+    let (mut document, sheet, ids) =
+        build(vec![vec![text("b")], vec![text("a")], vec![text("c")]], 1);
     document
         .reorder_rows(sheet, &[ids[2], ids[1], ids[0]])
         .expect("行順を置き換えられない");
@@ -594,7 +632,10 @@ fn missing_values_are_treated_as_the_absence_of_a_value() {
 
     // 列の添字が行の値の数を超える場合も同じ。
     let (document, sheet, ids) = build(vec![vec![int(1), int(2)], vec![int(3)]], 2);
-    assert_eq!(vec![ids[1], ids[0]], visible(&document, sheet, &ascending(1)));
+    assert_eq!(
+        vec![ids[1], ids[0]],
+        visible(&document, sheet, &ascending(1))
+    );
 }
 
 #[test]
@@ -651,7 +692,9 @@ fn the_order_derivation_only_borrows_the_document() {
 
     // ドキュメントの**共有借用を生かしたまま** `recompute` を呼ぶ。`&mut Document` を取る形なら
     // ここで借用が衝突し、このテストはコンパイルに失敗する（要件 8.5 の型の上の証明）。
-    let sheet_ref = document.sheet_by_id(sheet).expect("標本のシートは文書にある");
+    let sheet_ref = document
+        .sheet_by_id(sheet)
+        .expect("標本のシートは文書にある");
     let mut order = RowOrder::default();
     let summary = recompute_order(&mut order, &document, sheet, &ascending(0));
 
@@ -686,7 +729,13 @@ fn row_at_ordinal_of_and_span_round_trip_and_respect_their_bounds() {
     let (document, sheet, ids) = build(vec![vec![int(3)], vec![int(1)], vec![int(2)]], 1);
     let mut order = RowOrder::default();
     let summary = order.recompute(&document, sheet, &ascending(0));
-    assert_eq!(ViewSummary { visible: 3, hidden: 0 }, summary);
+    assert_eq!(
+        ViewSummary {
+            visible: 3,
+            hidden: 0
+        },
+        summary
+    );
     assert_eq!(3, order.len());
     assert!(!order.is_empty());
 
@@ -744,7 +793,13 @@ fn an_empty_order_has_no_rows_and_no_lookups() {
     let (bare, bare_sheet, _) = build(Vec::new(), 1);
     let mut order = RowOrder::default();
     let summary = order.recompute(&bare, bare_sheet, &ascending(0));
-    assert_eq!(ViewSummary { visible: 0, hidden: 0 }, summary);
+    assert_eq!(
+        ViewSummary {
+            visible: 0,
+            hidden: 0
+        },
+        summary
+    );
     assert_eq!(0, order.len());
     assert!(order.is_empty());
     assert_eq!(None, order.row_at(RowOrdinal::new(0)));
@@ -761,7 +816,10 @@ fn an_empty_order_has_no_rows_and_no_lookups() {
     assert_eq!(None, order.ordinal_of(other_row));
     let summary = order.recompute(&other, unknown_sheet, &ascending(0));
     assert_eq!(
-        ViewSummary { visible: 0, hidden: 0 },
+        ViewSummary {
+            visible: 0,
+            hidden: 0
+        },
         summary,
         "文書に無いシートは行が 1 件も無いものとして扱う"
     );
@@ -784,7 +842,10 @@ fn a_view_spec_without_keys_is_a_valid_derivation() {
     assert_eq!(0, summary.hidden);
     assert_eq!(0, order.hidden());
     assert_eq!(
-        ViewSummary { visible: 2, hidden: 0 },
+        ViewSummary {
+            visible: 2,
+            hidden: 0
+        },
         summary,
         "行数と可視行数の差が隠れた行数である"
     );
@@ -824,13 +885,20 @@ fn the_shared_sample_sorts_by_the_values_of_a_column() {
 
     // 標本の値を写して自分の文書を組む（`Sample` は文書を可変で貸さないため、行順を
     // `RowId` の順と食い違わせるには自分で組む必要がある）。
-    let values: Vec<Vec<CellValue>> = sheet.rows().iter().map(|row| row.values().to_vec()).collect();
+    let values: Vec<Vec<CellValue>> = sheet
+        .rows()
+        .iter()
+        .map(|row| row.values().to_vec())
+        .collect();
     let (mut document, sheet, ids) = build(values, sample.column_count());
 
     // 前提: 列 4 は真偽であり、偽と真の双方が複数行ずつ現れる（同値の群が実在する）。
     let mut falses: Vec<RowId> = Vec::new();
     let mut trues: Vec<RowId> = Vec::new();
-    for (id, row) in ids.iter().zip(document.sheet_by_id(sheet).expect("シート").rows()) {
+    for (id, row) in ids
+        .iter()
+        .zip(document.sheet_by_id(sheet).expect("シート").rows())
+    {
         match row.values().get(column) {
             Some(CellValue::Bool(false)) => falses.push(*id),
             Some(CellValue::Bool(true)) => trues.push(*id),
@@ -868,7 +936,10 @@ fn the_shared_sample_sorts_by_the_values_of_a_column() {
     );
     // 期待は文書の行順（逆順にしたもの）とは異なる。この不一致があるから、決着が無ければ
     // この検査が落ちる（前提の `falses.len() >= 2 && trues.len() >= 2` がそれを保証する）。
-    assert_ne!(reversed, expected, "文書の行順と決着の結果が一致してしまった");
+    assert_ne!(
+        reversed, expected,
+        "文書の行順と決着の結果が一致してしまった"
+    );
 
     // 決着は文書の行順ではなく `RowId` にだけ依る。行順をもう一度別の並び（今度は
     // 先頭と末尾を入れ替えた巡回）にしても、同じ順序が出る。

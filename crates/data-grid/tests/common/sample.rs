@@ -104,12 +104,13 @@ use std::str::FromStr;
 
 use document_format::parts::{to_parts, DocumentParts, ManifestEntry, ManifestPart};
 use document_format::{
-    to_json_bytes, AttachmentId, CellValue, Document, DocumentFormat, DocumentFormatApi,
-    EntryName, FormatVersion, IdFactory, NestedValue, RowId, SchemaPart, SheetId,
+    to_json_bytes, AttachmentId, CellValue, Document, DocumentFormat, DocumentFormatApi, EntryName,
+    FormatVersion, IdFactory, NestedValue, RowId, SchemaPart, SheetId,
 };
 use schema_engine::{
-    schema_to_text, ColumnDecl, CompiledSchema, Constraints, DeclaredKind, DecimalDigits, FieldDecl,
-    OffsetPolicy, Schema, SchemaEngine, SchemaEngineApi, TypeDecl, TypeKind, TypeRegistry,
+    schema_to_text, ColumnDecl, CompiledSchema, Constraints, DecimalDigits, DeclaredKind,
+    FieldDecl, OffsetPolicy, Schema, SchemaEngine, SchemaEngineApi, TypeDecl, TypeKind,
+    TypeRegistry,
 };
 
 /// 標本の既定の行数（要件 1.1「1 つのシートにつき 10 万行かつ 30 列」の行数の側）。
@@ -213,7 +214,6 @@ impl SampleOptions {
         self.unique_collisions = collisions;
         self
     }
-
 }
 
 impl Default for SampleOptions {
@@ -401,17 +401,22 @@ pub fn sample(options: &SampleOptions) -> Sample {
     let reference = skeleton.add_sheet(REFERENCE_SHEET_NAME);
 
     // 参照先シートを先に符号化して行識別子を得る（参照列の適合する値がこれを要る）。
-    let reference_names: Vec<String> = REFERENCE_FIELDS.iter().map(|name| name.to_string()).collect();
+    let reference_names: Vec<String> = REFERENCE_FIELDS
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
     skeleton
         .set_sheet_columns(reference, reference_names.clone())
         .expect("標本の参照先シートは骨格にある");
-    let (reference_entry, reference_bytes, reference_rows) =
-        encode_rows(reference, &reference_names, REFERENCE_ROWS, |row, column| {
-            match column {
-                0 => CellValue::Text(format!("取引先{:02}", row % 10)),
-                _ => CellValue::Text(["購買", "資材", "経理", "物流"][row % 4].to_owned()),
-            }
-        });
+    let (reference_entry, reference_bytes, reference_rows) = encode_rows(
+        reference,
+        &reference_names,
+        REFERENCE_ROWS,
+        |row, column| match column {
+            0 => CellValue::Text(format!("取引先{:02}", row % 10)),
+            _ => CellValue::Text(["購買", "資材", "経理", "物流"][row % 4].to_owned()),
+        },
+    );
 
     let mut context = SampleContext {
         reference_rows: reference_rows.clone(),
@@ -432,21 +437,23 @@ pub fn sample(options: &SampleOptions) -> Sample {
         .set_sheet_columns(sheet, names.clone())
         .expect("標本のシートは骨格にある");
     skeleton
-        .set_root_schema(sheet, SchemaPart::parse(&envelope(columns)).expect("標本の宣言は妥当"))
+        .set_root_schema(
+            sheet,
+            SchemaPart::parse(&envelope(columns)).expect("標本の宣言は妥当"),
+        )
         .expect("標本のシートは骨格にある");
 
     // 行の値は列ごとの 2 つの規則から決まる（適合する値と、違反を 1 つだけ生む値）。
     let rows = options.rows;
     let column_count = columns.len();
     let plan = ViolationPlan::ratio(rows * column_count, options.ratio);
-    let (rows_entry, rows_bytes, row_ids) =
-        encode_rows(sheet, &names, rows, |row, column| {
-            if plan.is_violation(flat_index(row, column, rows)) {
-                (columns[column].violating)(&mut context, row)
-            } else {
-                (columns[column].conforming)(&mut context, row)
-            }
-        });
+    let (rows_entry, rows_bytes, row_ids) = encode_rows(sheet, &names, rows, |row, column| {
+        if plan.is_violation(flat_index(row, column, rows)) {
+            (columns[column].violating)(&mut context, row)
+        } else {
+            (columns[column].conforming)(&mut context, row)
+        }
+    });
 
     // 骨格の行エントリを差し替えて 1 回で復元する。添付の実体も足す（参照の実在は
     // `attachments/<hex>.bin` の存在であり、内容は識別子と一致する）。
@@ -619,10 +626,7 @@ fn sample_columns(reference_sheet: SheetId) -> Vec<SampleColumn> {
             conforming: |context, row| {
                 if context.unique_collisions {
                     // 値が UNIQUE_GROUPS 個を巡回する（重複が生じる）。
-                    CellValue::Text(format!(
-                        "{UNIQUE_PREFIX}{:07}",
-                        row % UNIQUE_GROUPS
-                    ))
+                    CellValue::Text(format!("{UNIQUE_PREFIX}{:07}", row % UNIQUE_GROUPS))
                 } else {
                     CellValue::Text(format!("{UNIQUE_PREFIX}{row:07}"))
                 }
@@ -666,9 +670,7 @@ fn sample_columns(reference_sheet: SheetId) -> Vec<SampleColumn> {
                 false,
                 None,
             ),
-            conforming: |context, _| {
-                decimal(context.rng.below(10_000), context.rng.below(100))
-            },
+            conforming: |context, _| decimal(context.rng.below(10_000), context.rng.below(100)),
             // 桁だけを外す（文法にも範囲にも合うが、宣言された scale を超える）。
             violating: |_, _| CellValue::Decimal("1.23456".to_owned()),
         },
@@ -807,13 +809,7 @@ fn sample_columns(reference_sheet: SheetId) -> Vec<SampleColumn> {
         },
         // 11 明細: 入れ子の配列（要素はインラインのオブジェクト。要素数の範囲つき）。
         SampleColumn {
-            decl: column(
-                "明細",
-                line_items_type(),
-                false,
-                false,
-                None,
-            ),
+            decl: column("明細", line_items_type(), false, false, None),
             conforming: |context, row| line_items(context, row),
             // 要素 0 の数量だけを外す（違反は 1 件。位置は `[0].数量`）。
             violating: |context, _| line_items_with_bad_quantity(context),
@@ -827,9 +823,7 @@ fn sample_columns(reference_sheet: SheetId) -> Vec<SampleColumn> {
                 false,
                 None,
             ),
-            conforming: |context, _| {
-                CellValue::Text(format!("k={}", context.rng.below(100)))
-            },
+            conforming: |context, _| CellValue::Text(format!("k={}", context.rng.below(100))),
             violating: |_, _| CellValue::Null,
         },
         // 13 単位: 選択肢（既定値あり）。
@@ -910,9 +904,7 @@ fn sample_columns(reference_sheet: SheetId) -> Vec<SampleColumn> {
                 false,
                 None,
             ),
-            conforming: |context, _| {
-                decimal(context.rng.below(1_000_000), context.rng.below(100))
-            },
+            conforming: |context, _| decimal(context.rng.below(1_000_000), context.rng.below(100)),
             violating: |_, _| CellValue::Decimal("1.23456".to_owned()),
         },
         // 18 カテゴリ: 選択肢。
@@ -942,9 +934,7 @@ fn sample_columns(reference_sheet: SheetId) -> Vec<SampleColumn> {
                 false,
                 None,
             ),
-            conforming: |context, _| {
-                CellValue::Text(format!("備考{}", context.rng.below(1_000)))
-            },
+            conforming: |context, _| CellValue::Text(format!("備考{}", context.rng.below(1_000))),
             violating: |_, _| CellValue::Text("x".repeat(201)),
         },
         // 20 社内コード: 長さと書式の両方を持つ文字列（違反は書式だけを外す）。
@@ -1015,9 +1005,7 @@ fn sample_columns(reference_sheet: SheetId) -> Vec<SampleColumn> {
                 let month = context.rng.below(12) + 1;
                 let day = context.rng.below(28) + 1;
                 let hour = context.rng.below(24);
-                CellValue::Text(format!(
-                    "2026-{month:02}-{day:02}T{hour:02}:00:00+09:00"
-                ))
+                CellValue::Text(format!("2026-{month:02}-{day:02}T{hour:02}:00:00+09:00"))
             },
             // オフセットの表記が正準でない（`+0900`）。
             violating: |_, _| CellValue::Text("2026-09-12T10:30:00+0900".to_owned()),
@@ -1103,13 +1091,7 @@ fn sample_columns(reference_sheet: SheetId) -> Vec<SampleColumn> {
         },
         // 27 改訂履歴: 入れ子の配列（要素はインラインのオブジェクト。日付を持つ）。
         SampleColumn {
-            decl: column(
-                "改訂履歴",
-                revisions_type(),
-                false,
-                false,
-                None,
-            ),
+            decl: column("改訂履歴", revisions_type(), false, false, None),
             conforming: |context, row| revisions(context, row),
             // 要素 0 の版だけを外す（違反は 1 件。位置は `[0].版`）。
             violating: |context, _| revisions_with_bad_version(context),
@@ -1593,7 +1575,11 @@ impl Rng {
     /// 種から作る。
     fn new(seed: u64) -> Self {
         Self {
-            state: if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed },
+            state: if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            },
         }
     }
 
@@ -1650,8 +1636,8 @@ where
             out.push(b',');
             push_json_string(&mut out, name);
             out.push(b':');
-            let bytes =
-                to_json_bytes(&value_at(row, column), &location).expect("標本のセル値は符号化できる");
+            let bytes = to_json_bytes(&value_at(row, column), &location)
+                .expect("標本のセル値は符号化できる");
             out.extend_from_slice(&bytes);
         }
         out.extend_from_slice(b"}\n");

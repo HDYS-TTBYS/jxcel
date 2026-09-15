@@ -66,8 +66,8 @@ use std::sync::{Arc, Mutex};
 use common::sample::sample;
 use common::sample::{SampleEditParts, SampleOptions};
 use data_grid::{
-    display_text, CellAddress, CoercionNotice, ColumnIndex, EditApply, EditCommand, EditSchemaQuery,
-    GridError, NestedPath, NestedPathSegment, SchemaEngineQuery,
+    display_text, CellAddress, CoercionNotice, ColumnIndex, EditApply, EditCommand,
+    EditSchemaQuery, GridError, NestedPath, NestedPathSegment, SchemaEngineQuery,
 };
 use document_format::{
     from_json_bytes, to_json_bytes, CellValue, Document, NestedValue, RowId, SchemaPart, SheetId,
@@ -347,7 +347,11 @@ impl Fixture {
 /// 標本を使う検査の前提を先に確かめる（モジュール docs「前提を先に確かめる」）。
 fn assert_clean_premises(sample: &common::sample::Sample) {
     assert_eq!(0, sample.injected_violations(), "違反を仕込んでいない標本");
-    assert_eq!(0, sample.unique_violations(), "一意制約の重複を混ぜていない標本");
+    assert_eq!(
+        0,
+        sample.unique_violations(),
+        "一意制約の重複を混ぜていない標本"
+    );
 
     let plan = sample.compiled();
     // 列 0（品番）が標本で唯一の一意制約つきの列であり、同点が零であること。
@@ -466,7 +470,11 @@ fn assert_only_cell_changed(
     assert_eq!(before.0, after.0, "行の並びと識別子は変わらない");
     assert_eq!(before.1.len(), after.1.len(), "行数は変わらない");
     for (position, (before_row, after_row)) in before.1.iter().zip(&after.1).enumerate() {
-        assert_eq!(before_row.len(), after_row.len(), "行 {position} の値数が変わった");
+        assert_eq!(
+            before_row.len(),
+            after_row.len(),
+            "行 {position} の値数が変わった"
+        );
         for (index, (before_value, after_value)) in before_row.iter().zip(after_row).enumerate() {
             if before.0[position] == row && index == column {
                 assert_ne!(
@@ -529,7 +537,10 @@ fn editing_one_inner_field_leaves_every_other_field_and_the_rest_of_the_document
     let edited_field = fields[2].clone();
     let edited_text = CellValue::Text("架空市9丁目9番9号".to_owned());
     let edited = with_field(&before, &edited_field, edited_text.clone());
-    assert_ne!(before, edited, "編集した値が元の値と同じ（検査が空虚になる）");
+    assert_ne!(
+        before, edited,
+        "編集した値が元の値と同じ（検査が空虚になる）"
+    );
     let edited_json = json_of(&edited);
     assert_ne!(
         before_json, edited_json,
@@ -540,7 +551,10 @@ fn editing_one_inner_field_leaves_every_other_field_and_the_rest_of_the_document
     let before_document = fixture.snapshot();
 
     let outcome = apply
-        .apply(fixture.document_mut(), set_nested(row, column, &edited_json))
+        .apply(
+            fixture.document_mut(),
+            set_nested(row, column, &edited_json),
+        )
         .expect("構造表現として解釈できる入力の書き込みは成功する");
 
     assert_eq!(vec![row], outcome.affected, "影響を受けた行");
@@ -549,7 +563,10 @@ fn editing_one_inner_field_leaves_every_other_field_and_the_rest_of_the_document
         outcome.row_count,
         "入れ子の編集は行数を変えない"
     );
-    assert_eq!(0, outcome.violation_total, "適合する入れ子の値は違反を生まない");
+    assert_eq!(
+        0, outcome.violation_total,
+        "適合する入れ子の値は違反を生まない"
+    );
     assert!(outcome.coercions.is_empty(), "変換は起きていない");
 
     // 1. 編集したフィールドは変わり、他のフィールドは 1 つも変わらない。
@@ -581,7 +598,10 @@ fn editing_one_inner_field_leaves_every_other_field_and_the_rest_of_the_document
 
     // 4. 往復: 変更前の JSON で書き戻すと、値が 1 つも違わずに戻る（要件 5.5, 5.7）。
     let restored = apply
-        .apply(fixture.document_mut(), set_nested(row, column, &before_json))
+        .apply(
+            fixture.document_mut(),
+            set_nested(row, column, &before_json),
+        )
         .expect("変更前の表現の書き戻しも成功する");
     assert_eq!(vec![row], restored.affected, "書き戻しも同じ行を報告する");
     assert_eq!(
@@ -626,7 +646,10 @@ fn editing_an_element_of_an_array_keeps_the_other_elements() {
         CellValue::Text("ITEM-9999".to_owned()),
     );
     let edited = with_element(&before, 0, edited_first.clone());
-    assert_ne!(before, edited, "編集した値が元の値と同じ（検査が空虚になる）");
+    assert_ne!(
+        before, edited,
+        "編集した値が元の値と同じ（検査が空虚になる）"
+    );
     let (mut apply, _calls) = counting(sheet, fixture.plan.clone());
 
     let outcome = apply
@@ -670,7 +693,10 @@ fn a_violation_inside_an_array_reports_the_element_position() {
 
     // 前提: 宣言されたフィールドのうち 2 番目が数量である（最小値 1 の `int`）。
     let fields = fixture.object_fields(column);
-    assert_eq!("数量", fields[1], "明細の要素の 2 番目のフィールドが前提と違う");
+    assert_eq!(
+        "数量", fields[1],
+        "明細の要素の 2 番目のフィールドが前提と違う"
+    );
     let before = fixture.value_at(row, column);
     let first_before = element_of(&before, 0);
     // 編集する値は、**上流の変換で**組み立てる（要素 0 の数量を下限の外へ出す）。
@@ -683,11 +709,17 @@ fn a_violation_inside_an_array_reports_the_element_position() {
     let (mut apply, calls) = counting(sheet, fixture.plan.clone());
 
     let outcome = apply
-        .apply(fixture.document_mut(), set_nested(row, column, &edited_json))
+        .apply(
+            fixture.document_mut(),
+            set_nested(row, column, &edited_json),
+        )
         .expect("適合しない入れ子の値でも編集は成功する（編集経路は拒否しない）");
 
     // **違反の総数は報告から来る**（`EditOutcome` が運ぶのは総数だけである）。
-    assert_eq!(1, outcome.violation_total, "内側の違反が 1 件報告されていない");
+    assert_eq!(
+        1, outcome.violation_total,
+        "内側の違反が 1 件報告されていない"
+    );
     assert_eq!(vec![row], outcome.affected, "影響を受けた行");
     // 適合しない値も破棄されず、構造ごとドキュメントに残る（要件 3.5 と同じ規律）。
     assert_eq!(
@@ -709,7 +741,11 @@ fn a_violation_inside_an_array_reports_the_element_position() {
     let violation = &report.violations()[0];
     assert_eq!(Some(row), violation.row(), "違反の行");
     assert_eq!(ColumnIndex::new(column), violation.column(), "違反の列");
-    assert_eq!(fixture.columns()[column], violation.column_name(), "違反の列名");
+    assert_eq!(
+        fixture.columns()[column],
+        violation.column_name(),
+        "違反の列名"
+    );
     // 入れ子の内側の位置は上流の `ValuePath` であり、本クレートの `NestedPath` がその写しである。
     let path = NestedPath::from(violation.path());
     assert_eq!(
@@ -732,7 +768,10 @@ fn a_violation_inside_an_object_reports_the_field_position() {
 
     // 前提: 宣言されたフィールドのうち 1 番目が郵便番号である（書式つき）。
     let fields = fixture.object_fields(column);
-    assert_eq!("郵便番号", fields[0], "届け先の 1 番目のフィールドが前提と違う");
+    assert_eq!(
+        "郵便番号", fields[0],
+        "届け先の 1 番目のフィールドが前提と違う"
+    );
     let before = fixture.value_at(row, column);
     // ハイフンの無い 7 桁（書式だけを外す）。
     let edited = with_field(&before, &fields[0], CellValue::Text("1000001".to_owned()));
@@ -745,7 +784,10 @@ fn a_violation_inside_an_object_reports_the_field_position() {
         )
         .expect("適合しない入れ子の値でも編集は成功する");
 
-    assert_eq!(1, outcome.violation_total, "内側の違反が 1 件報告されていない");
+    assert_eq!(
+        1, outcome.violation_total,
+        "内側の違反が 1 件報告されていない"
+    );
     let report = fixture.column_report(column);
     let violation = &report.violations()[0];
     assert_eq!(Some(row), violation.row(), "違反の行");
@@ -782,10 +824,10 @@ fn input_that_is_not_a_structural_representation_stops_the_edit() {
 
     // 前提: これらの入力が上流の解釈で拒まれること（本層の写しだけを検査しない）。
     let payloads = [
-        "{",                          // JSON として不正
-        "",                           // 空（JSON として不正）
-        "1e999",                      // 非有限になる数値リテラル
-        "9223372036854775808",        // `i64` の範囲外の整数リテラル
+        "{",                   // JSON として不正
+        "",                    // 空（JSON として不正）
+        "1e999",               // 非有限になる数値リテラル
+        "9223372036854775808", // `i64` の範囲外の整数リテラル
     ];
     for payload in payloads {
         assert!(
@@ -840,7 +882,10 @@ fn a_broken_representation_is_reported_before_the_destination_is_checked() {
 
     // 1. 未知の行 + 壊れた表現 → 解釈の誤り（表現の側に**セルの位置を載せて**返る）。
     let error = apply
-        .apply(fixture.document_mut(), set_nested(foreign, DESTINATION, "{"))
+        .apply(
+            fixture.document_mut(),
+            set_nested(foreign, DESTINATION, "{"),
+        )
         .expect_err("壊れた表現は失敗する");
     assert_eq!(
         GridError::NestedDecode {
@@ -865,12 +910,19 @@ fn a_broken_representation_is_reported_before_the_destination_is_checked() {
     // 3. 解釈できる表現なら、宛先の誤りがそのまま返る（順序が両方向で効いている）。
     let payload = json_of(&CellValue::Int(42));
     let error = apply
-        .apply(fixture.document_mut(), set_nested(foreign, DESTINATION, &payload))
+        .apply(
+            fixture.document_mut(),
+            set_nested(foreign, DESTINATION, &payload),
+        )
         .expect_err("未知の行への書き込みは失敗する");
     assert_eq!(GridError::UnknownRow { row: foreign }, error);
 
     assert_eq!(before, fixture.snapshot(), "1 つのセルも書かれない");
-    assert_eq!(Vec::<QueryCall>::new(), recorded(&calls), "判定も呼ばれない");
+    assert_eq!(
+        Vec::<QueryCall>::new(),
+        recorded(&calls),
+        "判定も呼ばれない"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -913,7 +965,10 @@ fn json_that_is_not_nested_is_decided_by_the_type_system() {
         .apply(fixture.document_mut(), set_nested(row, QUANTITY, &json))
         .expect("適合する値の書き込みは成功する");
     assert_eq!(0, outcome.violation_total, "`int` の列では適合する");
-    assert!(outcome.coercions.is_empty(), "`Int` から `int` への変換は無い");
+    assert!(
+        outcome.coercions.is_empty(),
+        "`Int` から `int` への変換は無い"
+    );
     assert_eq!(
         CellValue::Int(42),
         fixture.value_at(row, QUANTITY),
@@ -1053,11 +1108,18 @@ fn an_unknown_row_or_an_out_of_range_column_stops_before_any_write() {
     let before = fixture.snapshot();
 
     let error = apply
-        .apply(fixture.document_mut(), set_nested(foreign, DESTINATION, &payload))
+        .apply(
+            fixture.document_mut(),
+            set_nested(foreign, DESTINATION, &payload),
+        )
         .expect_err("他シートの行への書き込みは失敗する");
     assert_eq!(GridError::UnknownRow { row: foreign }, error);
     assert_eq!(before, fixture.snapshot(), "1 つのセルも書かれない");
-    assert_eq!(Vec::<QueryCall>::new(), recorded(&calls), "判定も呼ばれない");
+    assert_eq!(
+        Vec::<QueryCall>::new(),
+        recorded(&calls),
+        "判定も呼ばれない"
+    );
 
     let error = apply
         .apply(fixture.document_mut(), set_nested(row, outside, &payload))
@@ -1070,7 +1132,11 @@ fn an_unknown_row_or_an_out_of_range_column_stops_before_any_write() {
         error
     );
     assert_eq!(before, fixture.snapshot(), "1 つのセルも書かれない");
-    assert_eq!(Vec::<QueryCall>::new(), recorded(&calls), "判定も呼ばれない");
+    assert_eq!(
+        Vec::<QueryCall>::new(),
+        recorded(&calls),
+        "判定も呼ばれない"
+    );
 }
 
 /// 列が 1 件も宣言されていないシートは入れ子の編集もできない（[`GridError::SchemaUnusable`]）。
@@ -1101,13 +1167,21 @@ fn a_nested_command_on_a_sheet_without_columns_is_unusable() {
     let error = apply
         .apply(
             &mut document,
-            set_nested(row, 0, &json_of(&CellValue::Nested(NestedValue::Array(Vec::new())))),
+            set_nested(
+                row,
+                0,
+                &json_of(&CellValue::Nested(NestedValue::Array(Vec::new()))),
+            ),
         )
         .expect_err("列 0 本のシートは編集できない");
 
     assert_eq!(GridError::SchemaUnusable { sheet }, error);
     assert_eq!(before, snapshot(&document, sheet), "何も変わらない");
-    assert_eq!(Vec::<QueryCall>::new(), recorded(&calls), "判定も呼ばれない");
+    assert_eq!(
+        Vec::<QueryCall>::new(),
+        recorded(&calls),
+        "判定も呼ばれない"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1123,11 +1197,7 @@ fn applying_the_same_nested_command_twice_gives_the_same_outcome() {
     let column = DESTINATION;
     let before = fixture.value_at(row, column);
     let fields = fixture.object_fields(column);
-    let edited = with_field(
-        &before,
-        &fields[3],
-        CellValue::Text("新館".to_owned()),
-    );
+    let edited = with_field(&before, &fields[3], CellValue::Text("新館".to_owned()));
     let command = set_nested(row, column, &json_of(&edited));
     let mut apply = EditApply::new(sheet, fixture.plan.clone());
 

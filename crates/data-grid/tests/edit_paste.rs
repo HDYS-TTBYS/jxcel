@@ -60,13 +60,12 @@ use std::sync::{Arc, Mutex};
 
 use common::sample::{sample, SampleEditParts, SampleOptions};
 use data_grid::{
-    display_text, CellAddress, CoercionNotice, ColumnIndex, EditApply, EditCommand, EditSchemaQuery,
-    FilterSpec, GridError, PasteCodec, RowOrder, RowOrdinal, RowSpan, SchemaEngineQuery, ViewSpec,
+    display_text, CellAddress, CoercionNotice, ColumnIndex, EditApply, EditCommand,
+    EditSchemaQuery, FilterSpec, GridError, PasteCodec, RowOrder, RowOrdinal, RowSpan,
+    SchemaEngineQuery, ViewSpec,
 };
 use document_format::{CellValue, Document, RowId, SheetId};
-use schema_engine::{
-    validate_sheet, CompiledSchema, EditVerdict, SheetReport, ValidationOptions,
-};
+use schema_engine::{validate_sheet, CompiledSchema, EditVerdict, SheetReport, ValidationOptions};
 
 // ---------------------------------------------------------------------------
 // 縫い目へ届いた呼び出しの記録
@@ -435,7 +434,7 @@ fn quoting_covers_separators_newlines_and_escaped_quotes() {
         "`\"\"` は escaped quote"
     );
     assert_eq!(
-        rectangle(&[&[""] ]),
+        rectangle(&[&[""]]),
         PasteCodec::parse("\"\""),
         "空の囲みは空の値"
     );
@@ -476,7 +475,11 @@ fn the_codec_round_trips_values_that_hold_the_separators() {
 
     let text = PasteCodec::write(&value_rows(&expected));
 
-    assert_eq!(expected, PasteCodec::parse(&text), "区切りを含む値が往復する");
+    assert_eq!(
+        expected,
+        PasteCodec::parse(&text),
+        "区切りを含む値が往復する"
+    );
     // 正規化は 1 度で止まる（読み直したものを書き直しても同じテキストになる）。
     assert_eq!(
         text,
@@ -555,7 +558,10 @@ fn a_paste_writes_a_rectangle_of_cells_from_the_anchor() {
         "2 行目の 2 列目"
     );
     assert_eq!(vec![first, second], outcome.affected, "書いた順に並ぶ");
-    assert_eq!(row_count, outcome.row_count, "既存の行数に収まる貼り付けは行を増やさない");
+    assert_eq!(
+        row_count, outcome.row_count,
+        "既存の行数に収まる貼り付けは行を増やさない"
+    );
     assert_eq!(0, outcome.violation_total, "適合する値は違反を生まない");
     assert_eq!(
         vec![
@@ -621,7 +627,11 @@ fn the_paste_starts_at_the_anchor_within_the_displayed_rows() {
         outcome.affected,
         "錨の行とその後ろの行だけが書かれる"
     );
-    assert_eq!(untouched, fixture.value_at(before, 1), "錨より前の行は書かれない");
+    assert_eq!(
+        untouched,
+        fixture.value_at(before, 1),
+        "錨より前の行は書かれない"
+    );
     assert_eq!(CellValue::Int(7), fixture.value_at(middle, 1));
     assert_eq!(CellValue::Int(9), fixture.value_at(after, 1));
 }
@@ -669,7 +679,11 @@ fn a_filtered_paste_touches_only_the_displayed_rows() {
     let outcome = apply
         .apply(
             fixture.document_mut(),
-            paste(CellAddress::new(visible[0], ColumnIndex::new(1)), visible.clone(), &text),
+            paste(
+                CellAddress::new(visible[0], ColumnIndex::new(1)),
+                visible.clone(),
+                &text,
+            ),
         )
         .expect("絞り込み中の貼り付けも成功する");
 
@@ -749,8 +763,15 @@ fn a_paste_anchored_on_a_row_that_is_not_displayed_writes_nothing() {
         .expect("錨が表示されていない貼り付けも成功する");
 
     assert_eq!(Vec::<RowId>::new(), outcome.affected, "1 行も書かれない");
-    assert_eq!(0, outcome.violation_total, "何も変わらないので違反も増えない");
-    assert_eq!(before, fixture.snapshot(), "ドキュメントは 1 セルも変わらない");
+    assert_eq!(
+        0, outcome.violation_total,
+        "何も変わらないので違反も増えない"
+    );
+    assert_eq!(
+        before,
+        fixture.snapshot(),
+        "ドキュメントは 1 セルも変わらない"
+    );
     assert_eq!(
         Vec::<QueryCall>::new(),
         recorded(&calls),
@@ -853,7 +874,11 @@ fn a_paste_with_values_that_do_not_fit_completes_and_reports_them() {
     // 列 1 は範囲つきの `int` である。`abc` と `9999999999999999999999`（範囲外の綴り）は
     // 適合せず、`7` と `9` は適合する。
     let text = "7\nabc\n9\n9999999999999999999999";
-    assert_eq!(0, fixture.sheet_violations(), "前提: 貼り付けの前は違反が無い");
+    assert_eq!(
+        0,
+        fixture.sheet_violations(),
+        "前提: 貼り付けの前は違反が無い"
+    );
     let (mut apply, calls) = counting(sheet, fixture.plan.clone());
 
     let outcome = apply
@@ -867,7 +892,10 @@ fn a_paste_with_values_that_do_not_fit_completes_and_reports_them() {
         )
         .expect("適合しない値があっても貼り付けは完了する");
 
-    assert_eq!(2, outcome.violation_total, "適合しない 2 件が違反として数えられる");
+    assert_eq!(
+        2, outcome.violation_total,
+        "適合しない 2 件が違反として数えられる"
+    );
     assert_eq!(
         CellValue::Int(7),
         fixture.value_at(rows[0], 1),
@@ -1014,7 +1042,10 @@ fn a_ten_thousand_row_paste_judges_once_and_never_per_row() {
     );
     assert_eq!(4, small_shape.1, "行を補充しない（全行を覆う矩形）");
     assert_eq!(10_000, large_shape.1, "行を補充しない");
-    assert_eq!(10_000, large_shape.2, "要件が名指しする規模そのもの（1 万行）");
+    assert_eq!(
+        10_000, large_shape.2,
+        "要件が名指しする規模そのもの（1 万行）"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,7 +1065,11 @@ fn a_broken_paste_writes_nothing_and_calls_no_judgement() {
     let cases: Vec<(EditCommand, GridError)> = vec![
         // 錨の行が文書に無い（他シートの行である）。
         (
-            paste(CellAddress::new(foreign, ColumnIndex::new(1)), vec![first], "7"),
+            paste(
+                CellAddress::new(foreign, ColumnIndex::new(1)),
+                vec![first],
+                "7",
+            ),
             GridError::UnknownRow { row: foreign },
         ),
         // `rows` の中に文書に無い行がある。
@@ -1048,7 +1083,11 @@ fn a_broken_paste_writes_nothing_and_calls_no_judgement() {
         ),
         // 錨の列が範囲外である。
         (
-            paste(CellAddress::new(first, ColumnIndex::new(13)), vec![first], "7"),
+            paste(
+                CellAddress::new(first, ColumnIndex::new(13)),
+                vec![first],
+                "7",
+            ),
             GridError::ColumnOutOfRange {
                 column: ColumnIndex::new(13),
                 count: 13,
@@ -1144,7 +1183,11 @@ fn an_empty_paste_changes_nothing_and_calls_nothing() {
         paste(CellAddress::new(row, ColumnIndex::new(1)), vec![row], ""),
         // 区切りだけのテキストも 1 つの値（空の文字列）を持つ 1 行である — ここでは
         // 貼り付ける列が無い場合として列 0 本を渡せないため、`rows` が空の場合で確かめる。
-        paste(CellAddress::new(row, ColumnIndex::new(1)), Vec::new(), "7\n9"),
+        paste(
+            CellAddress::new(row, ColumnIndex::new(1)),
+            Vec::new(),
+            "7\n9",
+        ),
     ] {
         let (mut apply, calls) = counting(sheet, fixture.plan.clone());
         let outcome = apply
@@ -1174,11 +1217,7 @@ fn pasting_the_same_rectangle_twice_gives_the_same_outcome() {
     let mut fixture = Fixture::clean(8, 13);
     let sheet = fixture.sheet();
     let rows = vec![fixture.row(1), fixture.row(2)];
-    let command = paste(
-        CellAddress::new(rows[0], ColumnIndex::new(1)),
-        rows,
-        "7\n9",
-    );
+    let command = paste(CellAddress::new(rows[0], ColumnIndex::new(1)), rows, "7\n9");
     let mut apply = EditApply::new(sheet, fixture.plan.clone());
 
     let first = apply

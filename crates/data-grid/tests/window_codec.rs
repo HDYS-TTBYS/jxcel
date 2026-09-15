@@ -227,7 +227,10 @@ fn expected_tag(value: &CellValue) -> u8 {
 
 /// `haystack` が `needle` を部分列として含むか（窓に数値が載っていないことの検査に使う）。
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty() && haystack.windows(needle.len()).any(|window| window == needle)
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }
 
 /// その列が宣言するオブジェクトのフィールド名（入れ子でなければ空）。
@@ -294,8 +297,7 @@ fn the_header_carries_the_version_generation_start_row_count_and_column_count() 
         "列数の位置かエンディアンが違う"
     );
     assert_eq!(
-        WINDOW_FORMAT_VERSION,
-        bytes[0],
+        WINDOW_FORMAT_VERSION, bytes[0],
         "版のバイトが定数と食い違う"
     );
 
@@ -363,7 +365,11 @@ fn a_window_round_trips_forward_in_a_single_pass() {
         );
 
         let source = rows.get(&decoded_row.key()).expect("標本の行がある");
-        assert_eq!(prepared.columns(), decoded_row.cells().len(), "セル数が違う");
+        assert_eq!(
+            prepared.columns(),
+            decoded_row.cells().len(),
+            "セル数が違う"
+        );
 
         for (column, cell) in decoded_row.cells().iter().enumerate() {
             let value = source
@@ -393,7 +399,11 @@ fn a_window_round_trips_forward_in_a_single_pass() {
                 .and_then(|entry| entry.cell(ColumnIndex::new(column)))
                 .map(|cell| cell.paths().to_vec())
                 .unwrap_or_default();
-            assert_eq!(expected, cell.marks(), "{offset} 行 {column} 列の違反の札が違う");
+            assert_eq!(
+                expected,
+                cell.marks(),
+                "{offset} 行 {column} 列の違反の札が違う"
+            );
             // **違反の有無のバイトが、索引と突き合わせて正しいこと**を確かめる。
             //
             // `assert_eq!(!cell.marks().is_empty(), cell.violated())` は**恒真である**
@@ -536,10 +546,15 @@ fn int_and_decimal_survive_the_round_trip_as_strings() {
     );
     assert_eq!(LONG_DECIMAL, cells[1].text(), "長い 10 進数が変わっている");
     assert_eq!(
-        VERBATIM_DECIMAL, cells[2].text(),
+        VERBATIM_DECIMAL,
+        cells[2].text(),
         "10 進数が正規化されている（逐語で往復しない）"
     );
-    assert_eq!(i64::MIN.to_string(), cells[3].text(), "i64::MIN が変わっている");
+    assert_eq!(
+        i64::MIN.to_string(),
+        cells[3].text(),
+        "i64::MIN が変わっている"
+    );
 
     // 3. 数値として運ばれていない: 値の 64 ビット表現が窓のどこにも現れない。
     for value in [i64::MAX, i64::MIN] {
@@ -778,7 +793,11 @@ fn a_stale_generation_yields_the_empty_window() {
             &stale,
         )
         .expect("古い世代は失敗ではなく空の窓になる");
-    assert_eq!(EMPTY_WINDOW, stale_bytes.as_slice(), "古い世代が空の窓を返さない");
+    assert_eq!(
+        EMPTY_WINDOW,
+        stale_bytes.as_slice(),
+        "古い世代が空の窓を返さない"
+    );
     assert!(stale_bytes.is_empty(), "空の窓の表現が違う");
 
     // 世代を進めると、進める前の要求が古くなる（5.2 が世代を進める側である）。
@@ -815,7 +834,10 @@ fn a_stale_generation_yields_the_empty_window() {
 #[test]
 fn the_empty_window_is_a_zero_length_byte_string_and_a_zero_row_window_is_not_it() {
     assert!(EMPTY_WINDOW.is_empty(), "空の窓が空でない");
-    assert!(!decode_window(EMPTY_WINDOW).is_ok(), "空の窓が窓として復号できてしまう");
+    assert!(
+        !decode_window(EMPTY_WINDOW).is_ok(),
+        "空の窓が窓として復号できてしまう"
+    );
 
     let prepared = Prepared::new(8, 3, 0.0, &no_view());
     let codec = WindowCodec::new(Generation::new(1));
@@ -993,7 +1015,11 @@ fn a_span_crossing_the_end_is_clamped() {
         decoded
             .rows()
             .iter()
-            .map(|row| row_key_to_id(prepared.sample.document(), prepared.sample.sheet(), row.key()))
+            .map(|row| row_key_to_id(
+                prepared.sample.document(),
+                prepared.sample.sheet(),
+                row.key()
+            ))
             .collect::<Vec<_>>(),
         "切り落とした窓の行が順序の切片と違う"
     );
@@ -1248,7 +1274,11 @@ fn a_row_shorter_than_the_declared_columns_encodes_as_valueless() {
     assert_eq!(3, decoded.columns(), "列数が宣言の列数でない");
     assert_eq!(2, decoded.row_count(), "行数が違う");
     for (offset, row) in decoded.rows().iter().enumerate() {
-        assert_eq!(row_key(ids[offset]), row.key(), "{offset} 行目の識別子が違う");
+        assert_eq!(
+            row_key(ids[offset]),
+            row.key(),
+            "{offset} 行目の識別子が違う"
+        );
         assert_eq!(3, row.cells().len(), "セル数が列数と違う");
         let missing = &row.cells()[2];
         assert_eq!(VariantTag::NULL, missing.tag(), "値なしの札が違う");
@@ -1322,7 +1352,10 @@ fn a_window_follows_the_visible_order_not_the_document_order() {
             prepared.order.row_at(RowOrdinal::new(*position)) != Some(document_ids[*position])
         })
         .count();
-    assert!(moved > 0, "並べ替えが文書の並びを 1 つも動かしていない（前提が崩れている）");
+    assert!(
+        moved > 0,
+        "並べ替えが文書の並びを 1 つも動かしていない（前提が崩れている）"
+    );
 
     let codec = WindowCodec::new(Generation::new(1));
     let span = RowSpan::new(RowOrdinal::new(8), 16);
@@ -1420,7 +1453,11 @@ fn encoding_a_window_asks_the_source_for_exactly_the_window_rows() {
         "順序の切片の長さが窓の行数と違う（前提）"
     );
     for (offset, row) in decoded.rows().iter().enumerate() {
-        assert_eq!(row_key(window_rows[offset]), row.key(), "{offset} 行目が違う");
+        assert_eq!(
+            row_key(window_rows[offset]),
+            row.key(),
+            "{offset} 行目が違う"
+        );
     }
 }
 
@@ -1443,7 +1480,10 @@ fn a_newer_generation_is_also_answered_with_the_empty_window() {
     // 範囲そのものは妥当である（世代だけが一致しない要求を作る。範囲の誤りと混ざらない）。
     let span = RowSpan::new(RowOrdinal::new(0), 4);
     let newer = WindowRequest::new(Generation::new(current.get() + 1), span);
-    assert!(codec.is_stale(&newer), "前提: この要求は現在の世代と一致しない");
+    assert!(
+        codec.is_stale(&newer),
+        "前提: この要求は現在の世代と一致しない"
+    );
     assert!(
         span.start().get() + span.count() <= prepared.order.len(),
         "前提: この要求の範囲は妥当である"

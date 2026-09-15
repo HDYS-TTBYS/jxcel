@@ -626,7 +626,9 @@ impl WindowCodec {
         out.extend_from_slice(&(columns as u64).to_le_bytes());
 
         for (offset, row) in rows.iter().enumerate() {
-            let values = source.values(*row).ok_or(GridError::UnknownRow { row: *row })?;
+            let values = source
+                .values(*row)
+                .ok_or(GridError::UnknownRow { row: *row })?;
             out.extend_from_slice(&row.ulid().to_bytes());
             // 違反は可視行の序数で引く（窓は表示の窓である。索引の鍵は序数である）。
             let ordinal = RowOrdinal::new(span.start().get() + offset);

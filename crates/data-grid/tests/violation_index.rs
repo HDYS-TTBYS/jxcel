@@ -163,17 +163,20 @@ fn contains(column: usize, text: &str) -> ViewSpec {
 
 /// 可視の順序を先頭から走査し、違反を持つ最初の序数を求める（期待値を順序そのものから導く）。
 fn first_violating_ordinal(order: &RowOrder, violating: &BTreeSet<RowId>) -> Option<RowOrdinal> {
-    (0..order.len())
-        .map(RowOrdinal::new)
-        .find(|ordinal| order.row_at(*ordinal).is_some_and(|row| violating.contains(&row)))
+    (0..order.len()).map(RowOrdinal::new).find(|ordinal| {
+        order
+            .row_at(*ordinal)
+            .is_some_and(|row| violating.contains(&row))
+    })
 }
 
 /// 可視の順序を末尾から走査し、違反を持つ最後の序数を求める。
 fn last_violating_ordinal(order: &RowOrder, violating: &BTreeSet<RowId>) -> Option<RowOrdinal> {
-    (0..order.len())
-        .rev()
-        .map(RowOrdinal::new)
-        .find(|ordinal| order.row_at(*ordinal).is_some_and(|row| violating.contains(&row)))
+    (0..order.len()).rev().map(RowOrdinal::new).find(|ordinal| {
+        order
+            .row_at(*ordinal)
+            .is_some_and(|row| violating.contains(&row))
+    })
 }
 
 /// 索引に載っている違反の件数（可視行の序数と、行に属さない列の問題をすべて数える）。
@@ -181,14 +184,19 @@ fn indexed_violations(index: &ViolationIndex, order: &RowOrder) -> usize {
     let mut count = 0;
     for pointer in 0..order.len() {
         if let Some(row) = index.row_violations(RowOrdinal::new(pointer)) {
-            count += row.columns().iter().map(|cell| cell.paths().len()).sum::<usize>();
+            count += row
+                .columns()
+                .iter()
+                .map(|cell| cell.paths().len())
+                .sum::<usize>();
         }
     }
-    count + index
-        .column_violations()
-        .iter()
-        .map(|column| column.paths().len())
-        .sum::<usize>()
+    count
+        + index
+            .column_violations()
+            .iter()
+            .map(|column| column.paths().len())
+            .sum::<usize>()
 }
 
 /// 組み立てた索引と、可視の順序（絞り込みも並べ替えも無し）を組にして返す。
@@ -294,7 +302,9 @@ fn search_reaches_a_violation_outside_the_displayed_range() {
     let cells = scheduled(&sample);
     assert_eq!(2, cells.len(), "違反の件数が 2 でない（前提が崩れている）");
     assert!(
-        cells.iter().all(|(row, column)| *column == 0 && *row >= 100),
+        cells
+            .iter()
+            .all(|(row, column)| *column == 0 && *row >= 100),
         "違反が先頭 100 行の中にある（窓の外という前提が崩れている）: {cells:?}"
     );
     let window = RowSpan::new(RowOrdinal::new(0), 100);
@@ -323,7 +333,11 @@ fn search_reaches_a_violation_outside_the_displayed_range() {
     let from_window = index
         .find(RowOrdinal::new(99), SearchDirection::Forward)
         .expect("窓の内側から違反に到達できない");
-    assert_eq!(address(&sample, 999, 0), from_window, "窓の内側からの到達点が違う");
+    assert_eq!(
+        address(&sample, 999, 0),
+        from_window,
+        "窓の内側からの到達点が違う"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -453,7 +467,10 @@ fn a_nested_violation_keeps_its_inner_path() {
         destination_fields.len() >= 1 && line_fields.len() >= 2,
         "入れ子のフィールドの宣言が前提と違う"
     );
-    assert!(line_fields.len() == 3, "明細の要素のフィールドが 3 つでない");
+    assert!(
+        line_fields.len() == 3,
+        "明細の要素のフィールドが 3 つでない"
+    );
 
     // 届け先: 内側の最初のフィールド（郵便番号）だけが違反である。
     let row = violating_row_for(&sample, DESTINATION);
@@ -536,7 +553,11 @@ fn a_cell_carries_all_of_its_inner_paths() {
     );
     // 同じセルの違反は 1 つの行の 1 つの列にまとまる（列の見出しが重複しない）。
     let found = index.find(RowOrdinal::new(1), SearchDirection::Forward);
-    assert_eq!(Some(CellAddress::new(row, column)), found, "探索の到達点が違う");
+    assert_eq!(
+        Some(CellAddress::new(row, column)),
+        found,
+        "探索の到達点が違う"
+    );
 }
 
 /// 同じ行の違反が**報告の中で飛び飛びに**現れても、その行の違反は 1 つも落ちない。
@@ -560,17 +581,9 @@ fn a_row_appearing_twice_in_the_report_keeps_all_of_its_violations() {
         vec![ValuePathSegment::Field("一度目".into())],
     ));
     // 行 2 の列 0（行 1 を挟んで、行 1 がまた現れる）。
-    report.push(violation_at_path(
-        second,
-        ColumnIndex::new(0),
-        Vec::new(),
-    ));
+    report.push(violation_at_path(second, ColumnIndex::new(0), Vec::new()));
     // 行 1 の列 1。
-    report.push(violation_at_path(
-        first,
-        ColumnIndex::new(1),
-        Vec::new(),
-    ));
+    report.push(violation_at_path(first, ColumnIndex::new(1), Vec::new()));
     let report = report.finish(sample.sheet());
     assert_eq!(3, report.total_violations(), "報告の総数が 3 でない");
 
@@ -657,11 +670,7 @@ fn a_repeated_cell_merges_its_inner_paths_into_one_column() {
         ColumnIndex::new(0),
         vec![ValuePathSegment::Field("一度目".into())],
     ));
-    report.push(violation_at_path(
-        second,
-        ColumnIndex::new(1),
-        Vec::new(),
-    ));
+    report.push(violation_at_path(second, ColumnIndex::new(1), Vec::new()));
     report.push(violation_at_path(
         first,
         ColumnIndex::new(0),
@@ -674,7 +683,11 @@ fn a_repeated_cell_merges_its_inner_paths_into_one_column() {
     assert_order_is_the_document_order(&sample, &order);
 
     // 載せた件数は報告の総数に一致し、セルの見出しは 1 つにまとまる。
-    assert_eq!(report.total_violations(), index.indexed_violations(), "件数が違う");
+    assert_eq!(
+        report.total_violations(),
+        index.indexed_violations(),
+        "件数が違う"
+    );
     assert!(index.is_complete(), "取りこぼしがある");
     let entry = index
         .row_violations(RowOrdinal::new(1))
@@ -805,7 +818,11 @@ fn rekeying_after_a_filter_change_removes_and_restores_reachability() {
         violating, expect_hidden,
         "隠れた行が違反行の集合と一致しない（前提が崩れている）"
     );
-    assert_eq!(None, first_violating_ordinal(&order, &violating), "違反行が可視である");
+    assert_eq!(
+        None,
+        first_violating_ordinal(&order, &violating),
+        "違反行が可視である"
+    );
     assert_eq!(
         None,
         index.find(RowOrdinal::new(0), SearchDirection::Forward),
@@ -888,10 +905,7 @@ fn a_violation_on_a_hidden_row_is_counted_but_has_no_position() {
     // 据え付けには載る（隠れた行の違反も落ちない）。
     let presence = index.presence();
     for row in &violating {
-        assert!(
-            presence.has_any(*row),
-            "隠れた違反行の据え付けが落ちている"
-        );
+        assert!(presence.has_any(*row), "隠れた違反行の据え付けが落ちている");
         assert!(
             presence.has_column(*row, ColumnIndex::new(0)),
             "隠れた違反行の列の印が落ちている"
@@ -942,12 +956,20 @@ fn a_column_level_violation_is_counted_but_cannot_be_located() {
     assert_order_is_the_document_order(&sample, &order);
 
     // 総数は両方を数える（行に属さない違反も「表示中のシートに存在する違反」である）。
-    assert_eq!(2, index.violation_total(), "行に属さない違反が総数から落ちている");
+    assert_eq!(
+        2,
+        index.violation_total(),
+        "行に属さない違反が総数から落ちている"
+    );
     assert!(index.is_complete(), "取りこぼしがある");
     assert_eq!(2, indexed_violations(&index, &order), "索引の件数が違う");
 
     // 別に保持されており、列の添字と内側の位置が読める。
-    assert_eq!(1, index.column_violations().len(), "列の問題が保持されていない");
+    assert_eq!(
+        1,
+        index.column_violations().len(),
+        "列の問題が保持されていない"
+    );
     let column = &index.column_violations()[0];
     assert_eq!(ColumnIndex::new(1), column.column(), "列の添字が違う");
     assert!(
@@ -959,11 +981,18 @@ fn a_column_level_violation_is_counted_but_cannot_be_located() {
     let found = index
         .find(RowOrdinal::new(0), SearchDirection::Forward)
         .expect("行に属する違反に到達できない");
-    assert_eq!(CellAddress::new(row, ColumnIndex::new(1)), found, "到達点が違う");
+    assert_eq!(
+        CellAddress::new(row, ColumnIndex::new(1)),
+        found,
+        "到達点が違う"
+    );
     // 据え付けは行を鍵とするため、行に属さない違反は載せられない。
     let presence = index.presence();
     assert_eq!(1, presence.len(), "行に属さない違反が据え付けに載っている");
-    assert!(presence.has_column(row, ColumnIndex::new(1)), "行の印が落ちている");
+    assert!(
+        presence.has_column(row, ColumnIndex::new(1)),
+        "行の印が落ちている"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,7 +1116,11 @@ fn the_same_report_and_order_build_the_same_index() {
     let (order, first) = indexed(&sample, &report);
     let second = ViolationIndex::build(&report, &order);
 
-    assert_eq!(first.violation_total(), second.violation_total(), "総数が違う");
+    assert_eq!(
+        first.violation_total(),
+        second.violation_total(),
+        "総数が違う"
+    );
     assert_eq!(
         first.column_violations(),
         second.column_violations(),
@@ -1110,7 +1143,8 @@ fn the_same_report_and_order_build_the_same_index() {
     let (other_order, third) = indexed(&other, &other_report);
     assert_eq!(order.len(), other_order.len(), "可視行数が違う");
     let shape = |index: &ViolationIndex, sample: &Sample, order: &RowOrder| {
-        let mut out: BTreeMap<usize, BTreeMap<usize, Vec<Vec<NestedPathSegment>>>> = BTreeMap::new();
+        let mut out: BTreeMap<usize, BTreeMap<usize, Vec<Vec<NestedPathSegment>>>> =
+            BTreeMap::new();
         for ordinal in (0..order.len()).map(RowOrdinal::new) {
             let Some(entry) = index.row_violations(ordinal) else {
                 continue;
@@ -1214,11 +1248,7 @@ fn violating_row_for(sample: &Sample, column: usize) -> usize {
 
 /// 索引から、標本の行添字と列添字のセルの違反を読む（絞り込みも並べ替えも無い順序である
 /// ことを前提とする。行添字がそのまま序数になる）。
-fn cell_at(
-    index: &ViolationIndex,
-    row: usize,
-    column: usize,
-) -> &data_grid::CellViolations {
+fn cell_at(index: &ViolationIndex, row: usize, column: usize) -> &data_grid::CellViolations {
     index
         .row_violations(RowOrdinal::new(row))
         .unwrap_or_else(|| panic!("序数 {row} に違反行が無い"))
@@ -1227,11 +1257,7 @@ fn cell_at(
 }
 
 /// 指定した内側の位置を持つ違反を 1 件組み立てる（行に属する）。
-fn violation_at_path(
-    row: RowId,
-    column: ColumnIndex,
-    path: Vec<ValuePathSegment>,
-) -> Violation {
+fn violation_at_path(row: RowId, column: ColumnIndex, path: Vec<ValuePathSegment>) -> Violation {
     Violation::new(
         Some(row),
         column,
