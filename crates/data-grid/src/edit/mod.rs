@@ -1,5 +1,5 @@
-//! 編集命令の定義と適用: [`EditApply`]（data-grid のタスク 3.1, 3.2, 3.3。要件 3.3, 3.4, 3.5,
-//! 3.7, 5.5, 5.7, 6.1, 6.2, 6.3, 6.4, 11.4）。
+//! 編集命令の定義と適用: [`EditApply`]（data-grid のタスク 3.1, 3.2, 3.3, 3.4。要件 3.3, 3.4,
+//! 3.5, 3.7, 5.5, 5.7, 6.1, 6.2, 6.3, 6.4, 7.3, 7.4, 7.5, 7.7, 8.9, 11.4）。
 //!
 //! # 層の鎖
 //!
@@ -26,7 +26,9 @@
 //!
 //! 本層が列の型を見る箇所は 1 つも無い。`schema-engine` の検証器
 //! （`CompiledSchema::validator`）を引く経路も持たない — 引けば「この列は int だから…」と
-//! いう分岐を書く誘因が生まれ、規則の二重化（遅かれ早かれ食い違う）が始まる。
+//! いう分岐を書く誘因が生まれ、規則の二重化（遅かれ早かれ食い違う）が始まる。貼り付け
+//! （3.4）が値を書く前に引く [`coerce`] も**規則表そのもの**であり、本層が型ごとの場合分けを
+//! 書く箇所は無い（モジュール docs「貼り付け」）。
 //!
 //! # 1 セルの編集の費用の形（要件 11.4）
 //!
@@ -245,8 +247,8 @@
 //! # 群 3 の残りのタスクへの拡張
 //!
 //! [`EditCommand`] は `SetCells`（3.1）と行の構造を変える 3 つ（3.2）を持ち、3.3 が
-//! `SetNested` を足した。3.4（`PasteRange`）は**変種を足す**ことで進み、本モジュールの構造
-//! （事前検査 → 判定 → 1 回の書き込み → 再検証 → 写し）を作り直さない。行を増減する命令は
+//! `SetNested` を足し、3.4 が `PasteRange` を足した。3.1〜3.3 は**判定を呼ぶ形**を
+//! 共有し、3.4 はそれを**呼ばない**（モジュール docs「貼り付け」）。行を増減する命令は
 //! `row_count` が変わり、`affected` に増減した行が加わる。`SetNested` は打たれた文字が
 //! JSON になるが、判定を呼ぶ形は変わらない（design.md「EditApply」の Implementation Notes）。
 //!
@@ -333,6 +335,62 @@
 //! `editing_one_inner_field_leaves_every_other_field_and_the_rest_of_the_document_unchanged`
 //! が固定する。
 //!
+//! # 貼り付け（要件 7.3, 7.4, 7.5, 7.7, 8.9）
+//!
+//! [`EditCommand::PasteRange`] は表形式テキストを矩形として書き込む。テキストの解釈
+//! （区切りの規則・囲み・往復）は [`PasteCodec`]（本層の `paste` モジュール）が唯一の源で
+//! あり、本層はその矩形を**セル値へ写して書く**だけである。値の列は錨の列を起点とする
+//! 相対位置であり、打ち込まれた文字を値へ写す規則は 1 セルの編集と**同じ 1 つ**を使う。
+//!
+//! ## 誰が表示の座標を物理の座標へ写すか（要件 8.6, 8.9）
+//!
+//! 本層は**表示の並びを持たない** — `EditApply` は適用の間 `&mut Document` を握るだけで
+//! あり、可視の順序は `view` 層の [`RowOrder`](crate::view::RowOrder) が `&Document` から
+//! 導く（3.1 の裁定）。したがって**呼び出し側（5.2 の `GridSession`）が両方を渡す**:
+//! `anchor` が起点の**物理の行**（要件 8.6）を、`rows` が**表示されている行の並び**
+//! （要件 8.9）を運ぶ。貼り付けは `rows` の中の錨の行の位置から歩き、矩形の行 *i* を
+//! `rows[錨の位置 + i]` へ書く。**`rows` に現れない行は 1 つも書かれない** — 8.9 の
+//! 「表示されている行にのみ値を反映する」はこの形で満たされる（錨が `rows` に現れなければ
+//! 何も書かない。`tests/edit_paste.rs` が両方を固定する）。
+//!
+//! ## 行ごとの判定を呼ばない（要件 7.7, 11.5）
+//!
+//! 1 セル・1 行の編集は[`EditSchemaQuery::judge_write`] を呼ぶ（上流の判定は 1 行分の値を
+//! 受け取る口しか無い）。貼り付けは**これを 1 回も呼ばない** — 1 万行なら 1 万回になり、
+//! 要件 7.7 の「行ごとの確認を求めることなく完了する」と 11.5 の 3 秒に反する。
+//! 代わりに貼り付けは次の 2 つの形をとる:
+//!
+//! 1. **一括の書き込み 1 回**。矩形の全文をセル値へ写し、行ごとに分けずに
+//!    [`Document::set_cells`] の 1 回の呼び出しで書く（上流の一括経路は行の索引を 1 度だけ
+//!    作り、費用は O(行数 + 変更数) である）。
+//! 2. **再検証 1 回**。書き込みの後に [`EditSchemaQuery::revalidate_columns`] を**1 回**呼び、
+//!    その報告の総数を `violation_total` に写す（要件 7.5 の違反の件数）。**全件検証は
+//!    呼ばない**（要件 11.4）。指定する列は**貼り付けた列**（矩形が覆う列の合併）であり、
+//!    行を補充した場合だけ**全列**にする — 行の集合が変われば行を跨ぐ性質（一意性と参照の
+//!    実在）が変わりうるためであり、3.2 の行の操作が全列を指定するのと同じ理由である。
+//!
+//! 値の**強制**は [`coerce`]（規則表）でセルごとに引く。これは判定を呼ぶことではない —
+//! 縫い目が数えるのは `schema-engine` の 3 つの入口（判定・再検証・全件検証）であり、
+//! 規則表は列の型に応じた写しを返すだけである。強制したうえで書くため、貼り付けのセルの
+//! 意味論は 1 セルの編集（3.1）と一致する（変換の記録も同じ形で載る）。
+//! 適合しない値は**破棄されず**、書かれたまま再検証の違反として報告される（要件 7.5）。
+//! 違反の**位置**は報告が持つ（本層は `EditOutcome` に総数しか載せない。モジュール docs
+//! 「違反の総数の源」）。
+//!
+//! ## 不足する行の補充（要件 7.4）
+//!
+//! 矩形の行数が `rows` の錨から先に残る行数を超えるとき、**不足する行を文書の末尾へ足して**
+//! 貼り付けを完了する（[`EditCommand::InsertRows`] と同じく位置 `== 行数` への追加であり、
+//! 既存の行は 1 つも動かない）。補充した行の値の源は宣言ただ 1 つ
+//! （[`CompiledSchema::default_row`]）であり、矩形が覆わない列はその既定値のまま残る。
+//! 足した行は `rows` の続きとして書かれる（表示されていない行を値の宛先にしない）。
+//!
+//! ## 空の貼り付けと、書くセルが無い場合
+//!
+//! 行 0 件のテキスト（空のテキスト）、`rows` が空（表示されている行が 1 つも無い）、
+//! 錨の行が `rows` に現れない（表示されていない行を錨にした）場合は、**成功し、何も変えず、
+//! 縫い目を 1 回も呼ばない**（3.1 の空の命令と同じ規則）。
+//!
 //! # 履歴（4.x）が逆命令を組み立てるのに要るもの
 //!
 //! design.md「編集命令と逆命令の対応」は `InsertRows` / `DuplicateRows` の逆命令を
@@ -348,6 +406,27 @@
 //!
 //! 位置まで要るのは `RemoveRows` の逆命令だけであり、位置は**適用前の文書の位置**である
 //! （適用後には行が消えているため、後からは導けない）。
+//!
+//! ## `PasteRange` の逆命令（`SetCells` + `RemoveRows`）が要るもの
+//!
+//! design.md「編集命令と逆命令の対応」は `PasteRange` の逆命令を `SetCells` + `RemoveRows` と
+//! し、保持するものを「**変更前の値**と、**補充された行の `RowId`**」とする。
+//!
+//! **補充された行の `RowId`** は `affected` から取り出せる: `affected` は矩形の行
+//! （表示の並びの錨から先）と補充した行を**書いた順**に持ち、呼び出し側が知っている `rows` に
+//! 現れないものが補充された行である（`tests/edit_paste.rs` の
+//! `a_paste_beyond_the_last_row_appends_the_missing_rows` がこの取り出しを固定する。
+//! `RemoveRows`（補充した行を取り除く）はその識別子だけで足りる）。
+//!
+//! **変更前の値** は本層に残らない（`SetCells` の逆命令が要る「変更前の表示文字列」と同じ
+//! 事情である）。捨てるのではなく、**適用の前に呼び出し側が既存の口から読み出す** —
+//! 矩形が覆うセルは `anchor` の列と `rows` の錨の位置から導ける（`PasteRange` 自身が運ぶ
+//! 2 つの成分から決まる）ため、4.1 は適用の前にその範囲の値を読んでおけばよい。本層の seam も
+//! `EditOutcome` の形も変えずに済む（3.1 / 3.3 と同じ規律）。
+//!
+//! **矩形が覆わない列を触らない**（モジュール docs「貼り付け」）ことも 4.1 の材料の形を
+//! 決める: 逆命令の `SetCells` が保持すべきセルは**矩形の内側だけ**であり、矩形の行が短い
+//! 場合に「値なしを書いて戻す」必要が生じない。
 
 use std::collections::{HashMap, HashSet};
 
@@ -359,25 +438,35 @@ use schema_engine::{
     validate_columns, validate_sheet, validate_write, Coercion, ColumnIndex, CompiledSchema,
     EditVerdict, SheetReport, ValidationOptions, WriteOrigin, WriteVerdict,
 };
+// 貼り付けは**判定を呼ばず**、強制の規則表だけをセルごとに引く（モジュール docs「貼り付け」）。
+// `coerce` は縫い目の 3 つの口（判定・再検証・全件検証）のいずれでもない — 縫い目が数えるのは
+// **判定の呼び出しの形**であり、規則表は判定の分岐を持たない写しである。
+use schema_engine::coerce::coerce;
 
 use crate::error::GridError;
 use crate::types::{CellAddress, RowOrdinal, RowSpan};
 use crate::view::display_text;
 
-/// 編集命令（design.md「EditApply」の Service Interface。要件 3.3, 5.5, 6.1, 6.2, 6.3）。
+pub mod paste;
+
+use self::paste::PasteCodec;
+
+/// 編集命令（design.md「EditApply」の Service Interface。要件 3.3, 5.5, 6.1, 6.2, 6.3, 7.3,
+/// 7.4, 8.9）。
 ///
 /// 本タスクが持つのは `SetCells`（3.1）と、行の構造を変える 3 つ（3.2）、入れ子の値を
-/// 構造表現で書く `SetNested`（3.3）である。`PasteRange`（3.4）は後続のタスクが**変種として
-/// 足す** — 既存の変種の形（セルの位置と打たれた文字の対、セルの位置と構造表現の対、行の
-/// 識別子の並び、挿入位置と件数）を変えないため、適用の経路（事前検査 → 判定 → 書き込み →
-/// 再検証）も作り直しにならない。
+/// 構造表現で書く `SetNested`（3.3）、表形式テキストを貼り付ける `PasteRange`（3.4）である。
+/// `PasteRange` は design.md の Service Interface の `PasteRange { anchor, text }` へ
+/// **`rows`（表示されている行の並び）を足した形**をとる — 理由は本層が表示の並びを持たない
+/// ことにあり、同変種の docs が唯一の説明である（要件 8.9）。
 ///
 /// `SetCells` の値は**打たれた文字**として運ぶ。数値・真偽・日付として解釈するのは
 /// `schema-engine` であり、本層もフロントエンドも値を型として扱わない（design.md 同節の
-/// Implementation Notes）。`SetNested` だけは文字列が**セル値の構造表現（JSON）**になる —
-/// それでも判定を呼ぶ形は変わらない（モジュール docs「入れ子の値の編集」）。**行の構造を
-/// 変える 3 つは値を運ばない** — 挿入する行の値は宣言が供給し、複製する行の値は
-/// ドキュメントから写す（モジュール docs「行の構造を変える命令」）。
+/// Implementation Notes）。`SetNested` だけは文字列が**セル値の構造表現（JSON）**になり、
+/// `PasteRange` は文字列が**表形式テキスト**になる — それでも判定を呼ぶ形は変わらない
+/// （モジュール docs「入れ子の値の編集」「貼り付け」）。**行の構造を変える 3 つは値を運ばない**
+/// — 挿入する行の値は宣言が供給し、複製する行の値はドキュメントから写す（モジュール docs
+/// 「行の構造を変える命令」）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditCommand {
     /// 指定したセルへ打たれた文字を書く。
@@ -442,6 +531,79 @@ pub enum EditCommand {
         /// 複製する元の行。空なら何も変えない。
         rows: Vec<RowId>,
     },
+
+    /// 表形式テキストを、錨のセルから始まる矩形として貼り付ける（要件 7.3, 7.4, 7.5, 7.7,
+    /// 8.9）。
+    ///
+    /// `text` の解釈は [`PasteCodec`] が唯一の源であり（列の区切りは TAB、行の区切りは LF と
+    /// CRLF、値は `"` で囲み、中の `""` は `"` 1 つ）、**値は打ち込まれた文字として書き、
+    /// 型の解釈は `schema-engine` に委ねる**（design.md「EditApply」の Implementation Notes:
+    /// 「打たれた文字は `String` として受け取り、型解釈は `schema-engine` に委ねる」）。
+    /// 矩形の列は `anchor` の列を起点とする相対位置であり、打ち込まれた文字を値へ写す規則は
+    /// 1 セルの編集と**同じ 1 つ**を使う。
+    ///
+    /// # 2 つの成分が宛先を決める（要件 8.6, 8.9）
+    ///
+    /// 本層は**表示の並びを持たない**（`EditApply` は適用の間 `&mut Document` を握るだけで
+    /// あり、可視の順序は `view` 層の [`RowOrder`](crate::view::RowOrder) が `&Document` から
+    /// 導く。3.1 の裁定）。したがって**表示の座標を物理の座標へ写すのは表示を持っている側の
+    /// 仕事**であり、呼び出し側（5.2 の `GridSession`）が次を渡す:
+    ///
+    /// - `anchor` — 貼り付けの起点（列と、**物理の行**）。要件 8.6 の「画面上の位置ではなく
+    ///   対象の行そのものへ届く」は、錨が [`RowId`] を運ぶことで満たされる。
+    /// - `rows` — **表示されている行の並び**（呼び出し側が `RowOrder` から取り出したもの）。
+    ///   貼り付けはこの並びの中の**錨の行の位置**から歩き、矩形の行 *i* を `rows[錨の位置 + i]`
+    ///   へ書く。
+    ///
+    /// **`rows` は絞り込みの結果そのものである**（要件 8.9）。隠れている行は並びに現れない
+    /// ため、**1 つのセルも書かれない** — 文書順に歩く実装へ静かに落ちる余地は無い
+    /// （`tests/edit_paste.rs` の `a_filtered_paste_touches_only_the_displayed_rows` が、
+    /// 隠れた行の値が変わらないことと、可視の行が矩形の**対応する行**を受けることを固定する）。
+    /// 錨の行が `rows` に現れない場合（表示されていない行を錨にした場合）は**何も書かない**。
+    /// これも「表示されていない行へ値が届く」経路を残さないためである。
+    ///
+    /// **`rows` が空の場合は何も書かない**（表示されている行が 1 つも無い。0 件の命令と
+    /// 同じ扱いであり、絞り込みで全行が隠れているときに値を書く宛先は無い）。
+    ///
+    /// # 行の補充（要件 7.4）
+    ///
+    /// 矩形の行数が `rows` に残る行数を超えるとき、**不足する行を文書の末尾へ足してから**
+    /// 貼り付けを完了する（[`EditCommand::InsertRows`] と同じく文書の位置 `== 行数` への追加で
+    /// あり、既存の行は 1 つも動かない）。補充した行の値の源は宣言ただ 1 つ
+    /// （[`CompiledSchema::default_row`]）であり、矩形が覆わない列はその既定値のまま残る。
+    /// **足りない行が 1 つでもあれば、貼り付けは 1 セルも書かずに止まる** — 補充してから
+    /// 途中で誤りを見つける経路を作らない（モジュール docs「ドキュメントへの書き込みは 1 回で
+    /// あり、部分適用が無い」）。
+    ///
+    /// 補充する行の数は**矩形の行数から `rows` の残りを引いた数**である。絞り込みが効いて
+    /// いるときに「隠れた行を補充で作る」ことはない — 補充は**表示されていない行を値の
+    /// 宛先にしない**という 8.9 の要請と両立する（足した行は文書の末尾にでき、`rows` の
+    /// 続きとして書かれる）。
+    ///
+    /// # 矩形の行が短い場合
+    ///
+    /// 矩形の行が覆わない列は**そのまま残す**（値なしで埋めない）。理由は 2 つある。第 1 に、
+    /// 他のアプリケーションのコピーは行ごとに値の個数が同じとは限らず、短い行の残りを消すと
+    /// **貼り付けていないセルの値が失われる**。第 2 に、値なしで埋めると、貼り付けの前後で
+    /// 変わったセルの集合が「矩形の内側」より広くなり、取り消し（4.1）が保持すべき範囲が
+    /// 矩形から導けなくなる。
+    ///
+    /// # 判定（要件 7.3, 7.5, 7.7）
+    ///
+    /// 貼り付けは**行ごとの判定を 1 回も呼ばない**（[`EditSchemaQuery::judge_write`] は
+    /// 1 セル・1 行の編集の経路である）。矩形の全文をセル値へ写してから**1 回の一括書き込み**を
+    /// 行い、その後に**貼り付けた列に限定した再検証を 1 回**呼ぶ（要件 11.4。全件検証は
+    /// 呼ばない）。違反の総数はその報告から写す（モジュール docs「貼り付け」）。
+    PasteRange {
+        /// 貼り付けの起点（**物理の行**と列。要件 8.6）。
+        anchor: CellAddress,
+        /// **表示されている行の並び**（呼び出し側が `RowOrder` から取り出したもの）。
+        ///
+        /// 貼り付けは錨の行がこの並びに現れる位置から歩く。空なら何も書かない。
+        rows: Vec<RowId>,
+        /// 貼り付ける表形式テキスト（行の区切りと列の区切りを持つ）。
+        text: String,
+    },
 }
 
 /// 編集を適用した結果（design.md「EditApply」の Service Interface。要件 3.4, 6.2）。
@@ -455,23 +617,31 @@ pub struct EditOutcome {
     ///
     /// `SetCells` では**編集したセルの行**である（行の増減は無い）。行の構造を変える命令では
     /// **増減した行そのもの**である（`InsertRows` は挿入された行を文書の順に、`RemoveRows` は
-    /// 取り除かれた行をシート順に、`DuplicateRows` は複製をシート順に）。design.md の
+    /// 取り除かれた行をシート順に、`DuplicateRows` は複製をシート順に）。`PasteRange` では
+    /// **矩形の行を書いた順**であり、補充した行がその末尾に加わる（行は増える）。design.md の
     /// Postconditions は `apply` がこれを必ず含むことを求める。
     ///
     /// design.md「編集命令と逆命令の対応」が `InsertRows` / `DuplicateRows` の逆命令
-    /// （`RemoveRows`）へ渡す「追加された `RowId`」はこの欄である。
+    /// （`RemoveRows`）へ渡す「追加された `RowId`」はこの欄である。`PasteRange` の逆命令が
+    /// 要る「補充された行の `RowId`」も同じ欄である（モジュール docs「`PasteRange` の逆命令
+    /// （`SetCells` + `RemoveRows`）が要るもの」）。
     pub affected: Vec<RowId>,
     /// 型強制によって値が変換されたセル（要件 3.4）。変換が起きなければ空である。
     ///
     /// 行の構造を変える命令では**つねに空**である — この経路へ届く値は打たれた文字ではなく、
     /// 判定を通さないため変換も起きない（モジュール docs「行の構造を変える命令の再検証」）。
+    /// `PasteRange` では**矩形の順**（行ごと、行の中は列の順）に載る — 値は判定を経ずに規則表
+    /// （[`coerce`]）で変換されるため、1 セルの編集と同じ形で変換が記録される。
     pub coercions: Vec<CoercionNotice>,
     /// 違反の総数（本タスクでは**再検証した列に閉じた総数**。モジュール docs
     /// 「違反の総数の源」）。行の構造を変える命令は**すべての列**を再検証するため、適用後の
-    /// シートの違反の総数と一致する（同「行の構造を変える命令の再検証」）。
+    /// シートの違反の総数と一致する（同「行の構造を変える命令の再検証」）。`PasteRange` は
+    /// 貼り付けた列だけを再検証するため（行を補充したときを除く）、**貼り付けた列に閉じた**
+    /// 総数である（要件 7.5 の違反の件数。モジュール docs「貼り付け」）。
     pub violation_total: usize,
-    /// 適用の**後**のシートの行数。`SetCells` は行を増減しないため、適用の前後で変わらない
-    /// （行を増減する命令（3.2）がこの欄に変化を載せる）。
+    /// 適用の**後**のシートの行数。`SetCells` と `PasteRange` は行を増減しない限り前後で
+    /// 変わらない（`PasteRange` は矩形が既存の行数を超えるときに増える。要件 7.4。行を増減する
+    /// 命令（3.2）がこの欄に変化を載せる）。
     pub row_count: usize,
 }
 
@@ -642,6 +812,11 @@ impl EditApply {
             EditCommand::InsertRows { at, count } => self.insert_rows(doc, at, count),
             EditCommand::RemoveRows { rows } => self.remove_rows(doc, rows),
             EditCommand::DuplicateRows { rows } => self.duplicate_rows(doc, rows),
+            EditCommand::PasteRange {
+                anchor,
+                rows,
+                text,
+            } => self.paste_range(doc, anchor, rows, text),
         }
     }
 
@@ -839,6 +1014,205 @@ impl EditApply {
         }
 
         self.changed_rows(doc, copies)
+    }
+
+    /// `PasteRange` の適用（[`EditApply::apply`] の本体。要件 7.3, 7.4, 7.5, 7.7, 8.9）。
+    ///
+    /// 段の順は 3.1 の経路と同じ「事前検査 → 書き込み → 再検証」であり、**判定（1 行分の
+    /// 書き込み判定）を挟まない**。理由はモジュール docs「貼り付け」にある — 上流の判定は
+    /// 1 行分の値を受け取る口であり、1 万行の貼り付けで行数だけ呼ぶと要件 7.7 / 11.5 の
+    /// 費用の形に反する。代わりに**一括の書き込み**と**再検証 1 回**で完了する（違反の件数は
+    /// その報告が持つ。要件 7.5）。再検証の列は貼り付けた列であり、行を補充したときだけ全列に
+    /// 広がる（[`EditApply::pasted_columns`]）。
+    ///
+    /// 値の強制は [`coerce`]（規則表）でセルごとに引く。これは**判定を呼ぶことではない** —
+    /// 縫い目が数えるのは `schema-engine` の 3 つの入口（判定・再検証・全件検証）であり、
+    /// 規則表は列の型に応じた写しを返すだけである。強制したうえで書くため、貼り付けの
+    /// セルの意味論は 1 セルの編集（3.1）と一致する。
+    fn paste_range(
+        &mut self,
+        doc: &mut Document,
+        anchor: CellAddress,
+        rows: Vec<RowId>,
+        text: String,
+    ) -> Result<EditOutcome, GridError> {
+        let columns = self.usable_columns(doc)?;
+        let rectangle = PasteCodec::parse(&text);
+        // 書くセルが 1 つも無い場合（行 0 件のテキスト、または表示されている行が 1 つも無い）は、
+        // 空の命令と同じく**成功し、何も変えず、縫い目を 1 回も呼ばない**（モジュール docs
+        // 「空の貼り付けと、書くセルが無い場合」）。
+        let column = anchor.column();
+        if rectangle.is_empty() || rows.is_empty() {
+            return self.unchanged(doc);
+        }
+        // 錨の列は範囲内でなければならない（矩形の列はここを起点とする相対位置である）。
+        if column.index() >= columns {
+            return Err(GridError::ColumnOutOfRange {
+                column,
+                count: columns,
+            });
+        }
+
+        // 事前検査（読み）。**1 つのセルも書く前に**、錨の行・`rows` の並び・矩形の列の範囲・
+        // 補充する行数を決める。1 つでも不正なら止まる（モジュール docs「誤りの経路と部分適用の
+        // 不在」）。
+        let start = {
+            let sheet = self.target_sheet(doc)?;
+            let positions: HashMap<RowId, usize> = sheet
+                .rows()
+                .iter()
+                .enumerate()
+                .map(|(position, row)| (row.id(), position))
+                .collect();
+            // 錨の行は**文書に属していなければならない**（物理の行である。要件 8.6）。
+            if !positions.contains_key(&anchor.row()) {
+                return Err(GridError::UnknownRow { row: anchor.row() });
+            }
+            // `rows` は表示されている行の並びである（要件 8.9）。すべての行が対象シートに
+            // 属することを先に確かめる — 属さない行があれば 1 つのセルも書かない。
+            let mut seen: HashSet<RowId> = HashSet::with_capacity(rows.len());
+            let mut displayed: Vec<RowId> = Vec::with_capacity(rows.len());
+            for row in &rows {
+                if !positions.contains_key(row) {
+                    return Err(GridError::UnknownRow { row: *row });
+                }
+                // 同じ行が 2 度現れる並びは、後ろを残す 1 つの指定へ畳む（`SetCells` の
+                // 「同じセルを 2 度書く命令」と同じ規則）。表示の並びは重複を含まないが、
+                // 畳んでも意味が変わらないことを型の上で保証しておく。
+                if seen.insert(*row) {
+                    displayed.push(*row);
+                }
+            }
+            // 錨の行が表示の並びに現れる位置から歩く（要件 8.6: 錨は物理の行であり、歩く
+            // 順序は表示の並びである）。錨が表示されていなければ**何も書かない**（表示されて
+            // いない行へ値を届ける経路を残さない）。
+            displayed
+                .iter()
+                .position(|row| *row == anchor.row())
+                .map(|position| (displayed, position))
+        };
+        let Some((displayed, start)) = start else {
+            return self.unchanged(doc);
+        };
+
+        // 矩形が覆う行と列の範囲を確かめる。列は錨の列から右へ、行は表示の並びの錨の位置から
+        // 下へ進む。**はみ出す列が 1 つでもあれば 1 つのセルも書かない**（最初に外れる列は
+        // つねに列数の位置である。[`check_paste_columns`]）。
+        let mut widest = 0usize;
+        for row in &rectangle {
+            check_paste_columns(column, row.len(), columns)?;
+            widest = widest.max(row.len());
+        }
+        // 補充する行数は「矩形の行数から、表示の並びの錨から先に残る行数を引いたもの」である
+        // （要件 7.4）。`rows` の残りで足りるなら 0 である。
+        let available = displayed.len() - start;
+        let appended = rectangle.len().saturating_sub(available);
+
+        // 不足する行を文書の**末尾**へ足す（`InsertRows` と同じ位置であり、既存の行は 1 つも
+        // 動かない。モジュール docs「複製は末尾へ足し」と同じ規律）。既定値の源は宣言ただ 1 つ。
+        let defaults = self.schema.default_row();
+        let mut targets: Vec<RowId> = Vec::with_capacity(rectangle.len());
+        if appended > 0 {
+            let mut index = self.target_sheet(doc)?.rows().len();
+            for _ in 0..appended {
+                let row = doc
+                    .insert_row_at(self.sheet, index)
+                    .map_err(|error| row_insertion_error(error, RowOrdinal::new(index), 1))?;
+                doc.set_row_values(self.sheet, row, defaults.clone())
+                    .map_err(|error| GridError::UnknownRow { row: error.row })?;
+                index += 1;
+                targets.push(row);
+            }
+        }
+        // 表示の並びの残りを先に、補充した行を後ろに並べる（矩形の行 *i* はこの並びの *i* 番目
+        // へ書かれる）。補充した行を末尾へ足したため、順序は「表示の並びの錨から先」＋
+        // 「足した行」である。矩形が表示の並びより短ければ、残りの行は**書かれない**
+        // （`take` がその上限そのものであり、覆わない行の値は変わらない）。
+        let mut destination: Vec<RowId> = displayed[start..]
+            .iter()
+            .copied()
+            .take(rectangle.len())
+            .collect();
+        destination.extend(targets.iter().copied());
+
+        // 全セルの値と宛先を 1 回の走査で組み立てる（強制もここで一度きりである）。
+        let mut writes: Vec<(RowId, usize, CellValue)> = Vec::new();
+        let mut coercions: Vec<CoercionNotice> = Vec::new();
+        for (row_index, values) in rectangle.iter().enumerate() {
+            let row = destination[row_index];
+            for (offset, text) in values.iter().enumerate() {
+                // 矩形の列は錨の列を起点とする相対位置である。
+                let target = ColumnIndex::new(column.index() + offset);
+                let written = coerce(&self.schema, target, edited_value(text));
+                if let Coercion::Converted { from } = &written.coercion {
+                    coercions.push(CoercionNotice {
+                        cell: CellAddress::new(row, target),
+                        before: display_text(from).into_owned(),
+                        after: display_text(&written.value).into_owned(),
+                    });
+                }
+                writes.push((row, target.index(), written.value));
+            }
+        }
+        // `affected` は**書いた行**（補充した行を含む）であり、矩形の行ごとに 1 つである。
+        // `destination` は重複しない（表示の並びは畳んであり、補充した行は新しい）ため、
+        // そのまま使える。「矩形の行が短い」場合も行そのものは値の在否が変わる（覆わない列が
+        // 0 個になる行は無い — 矩形の行は必ず値 1 つ以上を持つ）。
+        let affected = destination;
+
+        // 書き込みは 1 回（`Document::set_cells` の一括経路。行の集合・並びは変わらない）。
+        doc.set_cells(self.sheet, &writes).map_err(write_error)?;
+
+        // 再検証は**1 回**だけ呼ぶ（要件 11.4。全件検証は呼ばない）。
+        let revalidated = self.pasted_columns(column, widest, appended);
+        let report = self.query.revalidate_columns(
+            doc,
+            self.sheet,
+            &self.schema,
+            &revalidated,
+            &ValidationOptions::capped(0),
+        );
+
+        Ok(EditOutcome {
+            affected,
+            coercions,
+            violation_total: report.total_violations(),
+            row_count: self.target_sheet(doc)?.rows().len(),
+        })
+    }
+
+    /// 貼り付けの後に再検証する列の集合（貼り付けの列、または行を補充した場合は全列）。
+    ///
+    /// `widest` は矩形が実際に覆う最大の列数である（行ごとに値の個数が違ってよいため、
+    /// **覆った列の合併**をそのまま指定する）。
+    ///
+    /// # 行を補充したときだけ列を絞らない理由
+    ///
+    /// 補充は**行の集合を変える**。挿入された行はあらゆる列で値なし／既定値になり、行を跨ぐ
+    /// 性質（一意性と参照の実在）は行が増えるだけで変わりうる（[`CompiledSchema::unique_columns`]
+    /// を列の型ごとの走査からは導けない）。貼り付けた列だけを見れば静かに過少報告になる列が
+    /// 生まれるため、この経路は [`EditApply::revalidate_every_column`] と同じ**全列の指定**を
+    /// 使う — 行の構造を変える命令（3.2）が全列を指定するのと**同じ理由**である。
+    ///
+    /// 行を補充しなかった貼り付けでは、**貼り付けた列の外の値は 1 つも変わらない**。したがって
+    /// 貼り付けた列の合併だけで足り、その外の列の違反は適用の前後で同じである（絞ることは
+    /// 過少報告にならない）。この 2 つの形は `tests/edit_paste.rs` が**それぞれ別の検査**で
+    /// 固定する（`a_paste_beyond_the_last_row_appends_the_missing_rows` と
+    /// `a_filtered_paste_touches_only_the_displayed_rows`）。
+    fn pasted_columns(
+        &self,
+        start: ColumnIndex,
+        widest: usize,
+        appended: usize,
+    ) -> Vec<ColumnIndex> {
+        if appended > 0 {
+            return (0..self.schema.column_count())
+                .map(ColumnIndex::new)
+                .collect();
+        }
+        (0..widest)
+            .map(|offset| ColumnIndex::new(start.index() + offset))
+            .collect()
     }
 
     /// `SetCells` の適用（[`EditApply::apply`] の本体）。
@@ -1143,6 +1517,21 @@ impl RowEdit {
         }
         values
     }
+}
+
+/// 貼り付けの 1 行が覆う列がシートの範囲に収まることを確かめる。
+///
+/// 矩形の列は錨の列を起点とする相対位置であり、覆う列は `start .. start + count` である。
+/// 呼び出し元が錨の列そのものを先に検査しているため、はみ出す場合の**最初の範囲外の列は
+/// つねに列数そのもの**である（錨が範囲内なら、その先で最初に外れるのは列数の位置である）。
+fn check_paste_columns(start: ColumnIndex, count: usize, columns: usize) -> Result<(), GridError> {
+    if start.index() + count > columns {
+        return Err(GridError::ColumnOutOfRange {
+            column: ColumnIndex::new(columns),
+            count: columns,
+        });
+    }
+    Ok(())
 }
 
 /// `document-format` の書き込みの誤りを本クレートの誤り型へ写す。
