@@ -659,6 +659,63 @@ impl<'a> UndoRedo<'a> {
 - **値は打たれた文字として運ぶ。** 境界にセル値の型を置かない（窓の二進形式も「数値としての
   値を一切含まない」）。`SetNested` の構造表現と `PasteRange` の表形式テキストは文字列である
 
+##### 封筒の形（6.2 が確定させたもの）
+
+タスク 6.2 が 5 つのコマンドの要求と応答を `crates/app-shell/src/ipc/grid.rs` に置き、
+`src-tauri/src/commands/grid.rs` の適応層と結線した。設計が名指ししていた型の**中身**は
+次のとおりである（荷は 6.1 の型をそのまま使う）。
+
+| コマンド | 要求の中身 | 応答の中身 |
+|---|---|---|
+| `grid_open_sheet` | `sheet`（**シートの識別子の文字列**。`DocumentSheet.id` をそのまま渡す） | `context` と `GridSheetSummary` |
+| `grid_set_view` | `view: GridViewSpec`（並べ替え・絞り込み・展開の**完全な記述**） | `context`、可視行数、隠された行数、違反の総数 |
+| `grid_apply_edit` | `command: GridEditCommand` | `context` と `GridEditOutcome`（`null` は取り得ない） |
+| `grid_history` | `direction`（`undo` / `redo` の閉じた列挙） | `context` と `GridEditOutcome \| null`（`null` は「進める履歴が無い」） |
+| `grid_find_violation` | `from`（可視行の序数）と `direction`（`forward` / `backward`） | `context` と、見つかった違反（位置と理由）または `null` |
+
+6.2 が決めた点と、その根拠:
+
+- **シートは識別子の文字列で選ぶ。** 1 つのドキュメントは複数のシートを持ちうるが、表示する
+  シートを選ぶ手段は本機能の外にあり（Out of Boundary）、境界を越える識別子は文字列である
+  （64 ビット整数を出さない規約）。`grid_open_sheet` を同じウィンドウで 2 度呼ぶと**前の保持を
+  置き換える**（シートの切り替えである）
+- **`grid_history` の応答は `grid_apply_edit` と同じ型である**（設計の API Contract の
+  とおり）。「進める履歴が無い」ことは `outcome: null` という**成功腕の結果**であり、封筒の
+  失敗腕へは載せない（利用者の操作が失敗したことではない）
+- **違反の理由は `GridViolation`（位置と理由の対）にまとめる。** 位置だけを `location`、
+  理由だけを `reason` という 2 つの `null` 許容の欄に分けると、「位置はあるが理由が無い」という
+  状態が型の上で表現できてしまう。理由の文言は**適応層が組み立てる**（`ViolationReason` の
+  12 変種と `Expected` の 11 変種を書き分ける。ドメインは表示用の文言を持たない）
+- **`GridViolationResponse` 以外は空の結果を持たない。** 「これ以上違反が無い」だけが
+  `null` であり、`grid_open_sheet` の 2 つの空の状態（列が無い・行が無い）は
+  `GridSheetSummary` の形が表す（要件 1.5、1.6）
+
+##### 適応層が担う 5 つの仕事（6.2）
+
+1. **違反の総数をシート全体へ閉じる。** `EditOutcome::violation_total` は再検証した列に
+   閉じた数であるため、境界へ載せるのは `GridSession::violation_total()` の値である
+   （差分で最新に保たれている。**検証を呼び直さない** — 要件 11.4）
+2. **型の種別の札の一致検査。** `TypeKindTag`（`app-shell`）と `TypeKind::ALL`
+   （`schema-engine`）の双方を見られる唯一のクレートが `src-tauri` である。写像は
+   ワイルドカードの無い `match`（総関数 ＝ `TypeKind` に変種が増えればコンパイルが壊れる）であり、
+   像が `TypeKindTag::ALL` と綴り・件数・並びの 3 点で一致することを 1 つのテストが固定する
+   （境界にだけ札が増えた場合も落ちる）
+3. **ウィンドウごとの `GridSession` の保持と破棄。** 表はラベル → `GridSession` の写像であり、
+   ロックは参照と挿入・除去のためだけに取る（10 万行の適用が他のウィンドウを待たせない）。
+   破棄の購読はセッションの層と同じ縫い目（`WindowDestroyEvents`）を通し、
+   **登録できないときは保持を置かない**。**起動時の `manage` は行わない** — `lifecycle::run` は
+   6.2 の境界の外にあるため、最初のコマンドが管理状態を作る（`Mutex` で直列化する）
+4. **`document-format` の名前を書かない。** `src-tauri` は `document-format` を通常依存に
+   持たない（`session/verification.rs` と同じ規律）ため、シート・行数・識別子は
+   `document-session` の公開面（`read` / `edit` の閉包）と推論だけで扱う。計画
+   （`CompiledSchema`）は `schema-engine` のものであり、通常依存に足した
+5. **5 つとも `#[tauri::command(async)]` である**（同期の本体を主スレッドの外で走らせる印）。
+   設計はグリッドのコマンドの実行モデルを定めていないが、`grid_set_view` の初回は
+   シート全体の検証（10 万行 × 30 列で約 255 ミリ秒）を、`grid_apply_edit` と `grid_history` は
+   1 万行の貼り付けとその取り消し（要件 11.5 の予算 3 秒）を運びうる。**主スレッドをその間
+   占めると、要件 11 の目的（どの操作でも待たされない）が壊れる。** `State` を引数に取らない
+   のはこのためである（借用はスレッドを跨げない）— 管理状態は本体の中で `app.state` から取る
+
 #### EditorRegistry（拡張点の所有者）
 
 | Field | Detail |

@@ -57,6 +57,24 @@ app-shell = { path = "../crates/app-shell" }
 # 下の `[dev-dependencies]` にだけ置く）。
 document-session = { path = "../crates/document-session" }
 
+# グリッドのドメイン（タスク 6.2 のコマンド面が使う。design.md「GridCommands」の
+# Allowed Dependencies）。**表示状態・編集の適用・取り消し履歴・違反の索引を所有する側**で
+# あり、本クレートはその公開面（`GridSession`）をウィンドウごとに 1 つ保持して境界へ写す
+# （`src-tauri/src/commands/grid.rs`）。**判定の分岐を持たない** — 判定は `schema-engine` の
+# ままである。
+data-grid = { path = "../crates/data-grid" }
+
+# 型のカタログと判定の唯一の源（design.md「Allowed Dependencies」）。
+#
+# 2 つの理由で通常依存に要る。第 1 に、`GridSession::open` が要求する `CompiledSchema` を
+# 作るのはこのクレートだけである（`SchemaEngineApi::compile`。事前条件は「同じシートから
+# 落とすこと」であり、本クレートは文書のシートから落とす）。第 2 に、**境界の札
+# `TypeKindTag`（`app-shell`）と `TypeKind::ALL`（本クレート）の一致を検査できる唯一の場所が
+# `src-tauri` である** — `app-shell` は他のドメインクレートに依存できないため、片方だけに
+# 種別が増えたときに気づける検査はここにしか置けない（tasks.md 6.1 の申し送り。検査は
+# `commands/grid.rs` の `type_kind_tag_covers_every_type_kind`）。
+schema-engine = { path = "../crates/schema-engine" }
+
 # 設定値の形の直列化（タスク 6.3）。`window.geometry` は design.md「Logical Data Model」が
 # **オブジェクト**と定めているため、位置とサイズの 4 フィールドを持つ構造体を derive で
 # そのまま載せる（`SettingsStore::get/set` は `serde` の型を要求する）。**新しいクレートでは

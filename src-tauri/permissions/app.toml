@@ -107,7 +107,32 @@ identifier = "allow-document-discard"
 description = "呼び出し元ウィンドウの未保存の印を落とすコマンド（document_discard）を許可する。保存は行わず、利用者の明示の指示（変更を破棄して閉じる）によってだけ呼ばれる（要件 6.5）。"
 commands.allow = ["document_discard"]
 
+[[permission]]
+identifier = "allow-grid-open-sheet"
+description = "呼び出し元ウィンドウに表示するシートを開くコマンド（grid_open_sheet）を許可する。呼び出し元ウィンドウは基盤が注入する引数から取るため偽装できず、返るのは列の構成と行数だけである（要件 1.1、1.5、1.6、4.6）。"
+commands.allow = ["grid_open_sheet"]
+
+[[permission]]
+identifier = "allow-grid-set-view"
+description = "呼び出し元ウィンドウのグリッドの表示の指定（並べ替え・絞り込み・入れ子の展開）を変えるコマンド（grid_set_view）を許可する。ドキュメントは変更せず、表示の指定はセッションが保持する（要件 8.3、8.4、8.5）。"
+commands.allow = ["grid_set_view"]
+
+[[permission]]
+identifier = "allow-grid-apply-edit"
+description = "呼び出し元ウィンドウのグリッドへ編集命令を適用するコマンド（grid_apply_edit）を許可する。適合しない値も破棄せず違反として成功の応答に載せ、判定は schema-engine が行う（要件 3.3、3.4、3.5）。"
+commands.allow = ["grid_apply_edit"]
+
+[[permission]]
+identifier = "allow-grid-history"
+description = "呼び出し元ウィンドウのグリッドの履歴を進めるコマンド（grid_history）を許可する。進める向きは要求が言い、取り消し・やり直しの対象が無ければ何も変えずに正常な結果を返す（要件 9.2、9.3）。"
+commands.allow = ["grid_history"]
+
+[[permission]]
+identifier = "allow-grid-find-violation"
+description = "呼び出し元ウィンドウのグリッドで次の違反を探すコマンド（grid_find_violation）を許可する。表示範囲の外にある違反にも到達し、見つかった違反の位置と理由を返す（要件 4.2、4.4、4.5）。"
+commands.allow = ["grid_find_violation"]
+
 [[set]]
 identifier = "app-shell"
 description = "app-shell が登録する自前コマンドの集合。capability はこの集合名だけを参照する。ファイルシステム系・シェル系の権限はここにも含めない（要件 4.7）。"
-permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file", "allow-render-heartbeat", "allow-diagnostics-log-location", "allow-diagnostics-export", "allow-diagnostics-verbosity-get", "allow-diagnostics-verbosity-set", "allow-window-document-state", "allow-document-state", "allow-document-save", "allow-document-new", "allow-document-discard"]
+permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file", "allow-render-heartbeat", "allow-diagnostics-log-location", "allow-diagnostics-export", "allow-diagnostics-verbosity-get", "allow-diagnostics-verbosity-set", "allow-window-document-state", "allow-document-state", "allow-document-save", "allow-document-new", "allow-document-discard", "allow-grid-open-sheet", "allow-grid-set-view", "allow-grid-apply-edit", "allow-grid-history", "allow-grid-find-violation"]

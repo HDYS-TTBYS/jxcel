@@ -28,14 +28,22 @@
 //!    列はあるが行が無いこと（要件 1.5）は別であり、区別するのは**列の数**である
 //!    （[`GridSheetSummary`]）。
 //!
-//! **本モジュールが持たないもの**: 封筒を運ぶ 5 つのコマンドの要求と応答の型
-//! （`GridOpenRequest` / `GridOpenResponse` / `GridViewRequest` / `GridViewResponse` /
-//! `GridEditRequest` / `GridEditResponse` / `GridHistoryRequest` / `GridViolationRequest` /
-//! `GridViolationResponse`）と、生バイト経路（`grid_rows_window`）の引数の型である。
-//! 前者は 6.2 / 6.3 が組み立て、**その荷として本モジュールの型を使う**。後者は二進の窓を
-//! 要求するための型であり、封筒を運べない経路のものである（`design.md`「WindowCodec」）。
+//! タスク 6.2 が**封筒つきの 5 つのコマンドの要求と応答**を足した（[`GridOpenRequest`] /
+//! [`GridOpenResponse`] / [`GridViewRequest`] / [`GridViewResponse`] / [`GridEditRequest`] /
+//! [`GridEditResponse`] / [`GridHistoryRequest`] / [`GridHistoryDirection`] /
+//! [`GridViolationRequest`] / [`GridViolationResponse`] / [`GridSearchDirection`]）。
+//! これらは**荷として本モジュールの型を使うだけ**であり、載せるのは呼び出し元ウィンドウの
+//! 文脈（[`super::WindowContext`]）と、上の表の荷である。要求の型はどれも
+//! **ウィンドウを運ばない** — 呼び出し元は基盤が注入する `WebviewWindow` から取り、ペイロード
+//! で受け取らない（偽装できない。要件 4.6、`ipc-contract.md`）。
+//!
+//! **本モジュールが持たないもの**: 生バイト経路（`grid_rows_window`）の引数の型である。
+//! あれは二進の窓を要求するための型であり、封筒を運べない経路のものである（`design.md`
+//! 「WindowCodec」。タスク 6.3）。
 
 use serde::{Deserialize, Serialize};
+
+use super::WindowContext;
 
 /// セルの型の種別を表す札（タスク 6.1。要件 3.1、3.2、3.8、10.1〜10.4）。
 ///
@@ -494,7 +502,7 @@ pub struct GridCoercionNotice {
 /// `schema-engine` の `Violation` と `data-grid` の `CellViolations` / `NestedPath` が持つ
 /// **位置だけ**を写したものである — 行の識別子（文字列）・列の添字（`u32`）・入れ子の内側の
 /// 位置である。**理由（`ViolationReason`）は本型に無い** — 違反の理由を提示する経路
-/// （要件 4.2 の `GridViolationResponse.reason`）は 6.2 / 6.3 の適応層が組み立てる。
+/// （要件 4.2）は 6.2 が [`GridViolation`] として定め、文言を組み立てるのは適応層である。
 ///
 /// **行を持たない違反がある。** ドメインの `Violation::row` は `Option<RowId>` であり、
 /// 列そのものの問題は行を持たない。したがって `row` は `Option<String>` である
@@ -546,4 +554,189 @@ pub struct GridEditOutcome {
     pub revalidated_columns: Vec<u32>,
     /// 適用の後のシートの行数。
     pub row_count: u32,
+}
+
+// ---------------------------------------------------------------------------
+// 封筒（タスク 6.2。要件 3.3、4.4、8.3、8.4、9.2、9.3）
+//
+// 5 つのコマンドの要求と応答である。**荷は上の型をそのまま使う** — ここが載せるのは
+// 呼び出し元ウィンドウの文脈と、上の表の結果だけである。要求の型はどれもウィンドウを
+// 運ばない（呼び出し元は基盤が注入する `WebviewWindow` から取る。要件 4.6）。
+//
+// **ドメインの失敗は封筒の成功腕に載る。** 見つからなかった違反（[`GridViolationResponse`]）
+// と、進める履歴が無かったこと（[`GridEditResponse`]）は**正常な結果**であり、
+// `design.md`「Error Handling」の表の「利用者の入力」の行である。封筒の失敗腕へ落ちるのは
+// 操作の誤り（`data-grid` の `GridError`。範囲外のセル・解釈できない入れ子の表現）と、
+// 経路そのものが成立しない場合（そのウィンドウにドキュメントが無い・シートが引けない・
+// グリッドがまだ開かれていない）だけである。
+// ---------------------------------------------------------------------------
+
+/// 表示するシートを開く要求（タスク 6.2。要件 1.1、1.5、1.6）。
+///
+/// **シートは識別子の文字列で選ぶ。** 1 つのドキュメントは複数のシートを持ちうるが
+/// （要件 1.7 の [`super::DocumentSheet`]）、表示する対象を選ぶ手段は本機能の外にあり
+/// （`design.md`「Out of Boundary」）、境界を越える識別子は文字列である（64 ビット整数を
+/// 出さない規約）。呼び出し側は [`super::DocumentStateResponse`] が運ぶシートの一覧の
+/// `id` をそのまま渡す。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridOpenRequest {
+    /// 表示するシートの識別子（[`super::DocumentSheet::id`] の文字列そのもの）。
+    pub sheet: String,
+}
+
+/// シートを開いた応答（タスク 6.2。要件 1.1、1.5、1.6、4.6）。
+///
+/// **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。`sheet` は窓が運ぶ列の構成と
+/// シートの行数であり、**2 つの空の状態（列が 1 本も無い・列はあるが行が無い）を形の上で
+/// 区別する**（[`GridSheetSummary`] の doc を参照）。
+///
+/// **表示の指定はここに無い。** 絞り込み・並べ替え・展開は [`GridViewResponse`] が運ぶ。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridOpenResponse {
+    /// 呼び出し元ウィンドウの文脈。
+    pub context: WindowContext,
+    /// 開いたシートの要約（列の構成と行数）。
+    pub sheet: GridSheetSummary,
+}
+
+/// 表示の指定を変える要求（タスク 6.2。要件 8.3、8.4）。
+///
+/// **指定は完全な記述である。** 空の [`GridViewSpec`] は「絞り込み無し・並べ替え無し・
+/// 展開無し」を意味する（6.1 の doc と同じ規約）ので、前の指定のうちここに現れないものは
+/// 適用されない。ウィンドウは要求の型に現れない（呼び出し元は基盤が注入する。
+/// 要件 4.6）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridViewRequest {
+    /// 適用する表示の指定。
+    pub view: GridViewSpec,
+}
+
+/// 表示の指定を変えた応答（タスク 6.2。要件 8.5、8.7、4.3、4.6）。
+///
+/// **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。可視行数と隠された行数を運ぶのは
+/// 要件 8.7（絞り込みで表示されていない行の数を提示する）である。**要件 1.5 の「行が無い」
+/// とは別である** — あちらは行そのものが無い状態であり、[`GridOpenResponse::sheet`] の
+/// `row_count` が表す。ここが運ぶのは**行が在って隠れている**数である。
+///
+/// `violation_total` は**シート全体の違反の総数**である（要件 4.3。絞り込みに依らない）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridViewResponse {
+    /// 呼び出し元ウィンドウの文脈。
+    pub context: WindowContext,
+    /// 表示の指定を適用したあとの可視行数（要件 8.7）。
+    pub visible_rows: u32,
+    /// 絞り込みによって表示されていない行数（要件 8.7）。
+    pub hidden_rows: u32,
+    /// 表示中のシートに存在する違反の総数（要件 4.3）。
+    pub violation_total: u32,
+}
+
+/// 編集を適用する要求（タスク 6.2。要件 3.3、5.7、6.1、7.3）。
+///
+/// 運ぶのは編集命令 1 つである（[`GridEditCommand`] の 6 つの命令）。**値を型付きで運ばない**
+/// 規約は 6.1 の型が既に守っている。ウィンドウは要求の型に現れない（要件 4.6）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridEditRequest {
+    /// 適用する編集命令。
+    pub command: GridEditCommand,
+}
+
+/// 編集の結果の要約を運ぶ応答（タスク 6.2。要件 3.4、4.6、9.2、9.3）。
+///
+/// **適用（[`GridEditRequest`]）と履歴（[`GridHistoryRequest`]）が同じ形を返す。**
+/// 履歴を進めることも「1 つの命令がドキュメントへ適用された」ことであり、画面が要るもの
+/// （影響範囲・変換・違反・行数）は同じだからである（`design.md`「GridCommands」の API
+/// Contract が `grid_apply_edit` と `grid_history` の応答を同じ型と定めている）。
+///
+/// **`outcome` が `None` であるのは「進める履歴が無かった」場合だけである**（要件 9.2、9.3）。
+/// 取り消し・やり直しの対象が空のときに何も変えずに答える正常な結果であり、封筒の失敗腕には
+/// 載せない — 「直前の操作が無い」ことは利用者の操作が失敗したことではない。適用
+/// （[`GridEditRequest`]）ではつねに `Some` である。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridEditResponse {
+    /// 呼び出し元ウィンドウの文脈。
+    pub context: WindowContext,
+    /// 適用された操作の要約。`None` は「進める履歴が無く、何も変わらなかった」（要件 9.2、9.3）。
+    pub outcome: Option<GridEditOutcome>,
+}
+
+/// 履歴を進める向き（タスク 6.2。要件 9.2、9.3）。**閉じた列挙である。**
+///
+/// 「取り消し」と「やり直し」は利用者の別々の指示であり、1 つの真偽へ潰さない
+/// （潰すと生成物のフロントエンドで意味が読めない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+pub enum GridHistoryDirection {
+    /// 直前の操作が行われる前の状態を復元する（要件 9.2）。
+    Undo,
+    /// 取り消した操作を再び適用する（要件 9.3）。
+    Redo,
+}
+
+/// 履歴を進める要求（タスク 6.2。要件 9.2、9.3）。
+///
+/// **どちらへ進めるかを要求が言う。** 取り消しとやり直しは同じ経路（履歴と適用を束ねた口）
+/// を通るが、進める向きは要求が決める。ウィンドウは要求の型に現れない（要件 4.6）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridHistoryRequest {
+    /// 進める向き。
+    pub direction: GridHistoryDirection,
+}
+
+/// 違反を探す向き（タスク 6.2。要件 4.4）。**閉じた列挙である。**
+///
+/// **可視行の序数が増える向き**が [`GridSearchDirection::Forward`] である（`data-grid` の
+/// `SearchDirection` と同じ意味）。名前を `prev` / `next` にしないのは、向きが可視の順序に
+/// 対して定義されており、画面の「前へ」が文書の順序と一致しないためである。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+pub enum GridSearchDirection {
+    /// 可視行の序数が増える向き（指定した位置より後ろの行へ）。
+    Forward,
+    /// 可視行の序数が減る向き（指定した位置より前の行へ）。
+    Backward,
+}
+
+/// 次の違反を探す要求（タスク 6.2。要件 4.4）。
+///
+/// **起点は可視行の序数である**（行そのものではない）。可視の序数から行への写像を持つのは
+/// 順序を持つ側（`data-grid` の `RowOrder`）であり、写しは要求を通さない。ウィンドウは要求の
+/// 型に現れない（要件 4.6）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridViolationRequest {
+    /// 探索の起点（**可視行の 0 起点の序数**）。
+    pub from: u32,
+    /// 探索の向き。
+    pub direction: GridSearchDirection,
+}
+
+/// 見つかった違反（タスク 6.2。要件 4.2、4.5）。
+///
+/// 位置（[`GridViolationLocation`]。入れ子の内側の位置を含む）と、**利用者へ伝えるための
+/// 理由の文言**を対で運ぶ。理由はドメインの側の語（`schema-engine` の `ViolationReason`）を
+/// そのまま出さず、適応層が組み立てた文言を載せる（理由の写像を持たない境界の型に
+/// 当たる。`design.md`「GridCommands」の Implementation Notes）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridViolation {
+    /// 違反の位置（要件 4.5 の入れ子の内側の位置を含む）。
+    pub location: GridViolationLocation,
+    /// 違反の理由を利用者へ伝える文言（要件 4.2）。
+    pub reason: String,
+}
+
+/// 次の違反を探した結果（タスク 6.2。要件 4.2、4.4、4.5、4.6）。
+///
+/// **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。`violation` が `None` であるのは
+/// 「その向きにこれ以上違反が無い」場合であり、**正常な結果である**（封筒の失敗腕には
+/// 載せない）。画面は「見つからなかった」を日付の変更ではなく、これ以上無いこととして扱う。
+///
+/// 位置と理由の両方を 1 つの型（[`GridViolation`]）にまとめるのは、**見つかった違反にだけ
+/// 両方が存在する**ためである（`location` と `reason` を別々の [`Option`] にすると、
+/// 「位置はあるが理由が無い」という状態が型の上で表現できてしまう）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridViolationResponse {
+    /// 呼び出し元ウィンドウの文脈。
+    pub context: WindowContext,
+    /// 見つかった違反（位置と理由）。見つからなければ `None`。
+    pub violation: Option<GridViolation>,
 }

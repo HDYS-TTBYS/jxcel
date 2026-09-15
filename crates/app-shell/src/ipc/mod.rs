@@ -40,8 +40,17 @@
 //!   [`GridExpansionState`]、編集命令 [`GridEditCommand`] / [`GridCellEdit`] /
 //!   [`GridCellAddress`]、判定の要約 [`GridEditOutcome`] / [`GridCoercionNotice`]、
 //!   違反の位置 [`GridViolationLocation`]、および型の種別の札 [`TypeKindTag`]）。
-//!   **実体は `data-grid` にあり、ここは境界の形だけを持つ**（`crate::ipc::grid`）。
-//!   6 つのコマンドの封筒は 6.2 / 6.3 が組み立て、その荷としてこれらの型を使う
+//!   **実体は `data-grid` にあり、ここは境界の形だけを持つ**（`crate::ipc::grid`）
+//! - 6.2: グリッドの 5 つのコマンドの封筒（要求 [`GridOpenRequest`] / [`GridViewRequest`] /
+//!   [`GridEditRequest`] / [`GridHistoryRequest`] / [`GridViolationRequest`] と、応答
+//!   [`GridOpenResponse`] / [`GridViewResponse`] / [`GridEditResponse`] /
+//!   [`GridViolationResponse`]、および向きの閉じた列挙 [`GridHistoryDirection`] /
+//!   [`GridSearchDirection`] / [`GridViolation`]）。**荷は 6.1 の型をそのまま使い、写すのは
+//!   `src-tauri` の適応層である**（`crate::ipc::grid`）。要求はどれもウィンドウを運ばない —
+//!   呼び出し元は基盤が注入する引数から取る（偽装できない。要件 4.6）
+//! - 6.3: 生バイト経路（`grid_rows_window`）の引数の型は**ここに無い** — 封筒を運べない
+//!   経路のものであり、境界の型（`ts-rs` の derive を持つ型）として表せない
+//!   （`design.md`「WindowCodec」）
 
 use serde::{Deserialize, Serialize};
 
@@ -59,9 +68,11 @@ pub use document::{
 pub use error::IpcError;
 pub use grid::{
     ColumnDescriptor, ColumnElementCount, ColumnExpandability, GridCellAddress, GridCellEdit,
-    GridCoercionNotice, GridEditCommand, GridEditOutcome, GridExpansionState, GridFilterSpec,
-    GridPathSegment, GridSheetSummary, GridSortKey, GridViewSpec, GridViolationLocation,
-    TypeKindTag,
+    GridCoercionNotice, GridEditCommand, GridEditOutcome, GridEditRequest, GridEditResponse,
+    GridExpansionState, GridFilterSpec, GridHistoryDirection, GridHistoryRequest, GridOpenRequest,
+    GridOpenResponse, GridPathSegment, GridSearchDirection, GridSheetSummary, GridSortKey,
+    GridViewRequest, GridViewResponse, GridViewSpec, GridViolation, GridViolationLocation,
+    GridViolationRequest, GridViolationResponse, TypeKindTag,
 };
 
 /// 境界を越えるすべてのコマンドが返す封筒（要件 4.2、4.4）。
@@ -874,6 +885,67 @@ fn concrete_document_discard_result(cfg: &ts_rs::Config) -> (String, String) {
     (NAME.to_owned(), text)
 }
 
+/// シートを開いた応答の具体形（タスク 6.2）。 [`concrete_window_context_result`] と同じ理由で
+/// 置く。ペイロード型は [`GridOpenResponse`] である。
+fn concrete_grid_open_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "GridOpenResult";
+    let mut text = String::from(
+        "// シートを開いた応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を\n\
+         // 名指ししないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<GridOpenResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
+/// 表示の指定を変えた応答の具体形（タスク 6.2）。 [`concrete_window_context_result`] と同じ
+/// 理由で置く。ペイロード型は [`GridViewResponse`] である。
+fn concrete_grid_view_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "GridViewResult";
+    let mut text = String::from(
+        "// 表示の指定を変えた応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を\n\
+         // 名指ししないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<GridViewResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
+/// 編集の結果の応答の具体形（タスク 6.2）。 [`concrete_window_context_result`] と同じ理由で
+/// 置く。ペイロード型は [`GridEditResponse`] であり、**適用と履歴の 2 つのコマンドが同じ形を
+/// 返す**（`design.md`「GridCommands」の API Contract）ため、具体形も 1 つで足りる。
+fn concrete_grid_edit_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "GridEditResult";
+    let mut text = String::from(
+        "// 編集の結果の応答の具体形（適用と履歴で同じ形）。ジェネリックな `IpcResult` の宣言は\n\
+         // ペイロード型を名指ししないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<GridEditResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
+/// 次の違反を探した結果の具体形（タスク 6.2）。 [`concrete_window_context_result`] と同じ理由で
+/// 置く。ペイロード型は [`GridViolationResponse`] である。
+fn concrete_grid_violation_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "GridViolationResult";
+    let mut text = String::from(
+        "// 次の違反を探した結果の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を\n\
+         // 名指ししないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<GridViolationResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
 /// 境界を越える型とコマンド名から、追跡対象の TypeScript（`src/ipc/bindings.ts`）を生成する
 /// （tasks.md 2.2、design.md「IpcContract」の Service Interface）。
 ///
@@ -937,6 +1009,18 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<GridCoercionNotice>(&cfg),
         declared::<GridViolationLocation>(&cfg),
         declared::<GridEditOutcome>(&cfg),
+        declared::<GridOpenRequest>(&cfg),
+        declared::<GridOpenResponse>(&cfg),
+        declared::<GridViewRequest>(&cfg),
+        declared::<GridViewResponse>(&cfg),
+        declared::<GridEditRequest>(&cfg),
+        declared::<GridEditResponse>(&cfg),
+        declared::<GridHistoryDirection>(&cfg),
+        declared::<GridHistoryRequest>(&cfg),
+        declared::<GridSearchDirection>(&cfg),
+        declared::<GridViolationRequest>(&cfg),
+        declared::<GridViolation>(&cfg),
+        declared::<GridViolationResponse>(&cfg),
         declared::<IpcError>(&cfg),
         declared::<IpcResult<WindowContext, IpcError>>(&cfg),
         concrete_window_context_result(&cfg),
@@ -952,6 +1036,10 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         concrete_document_save_result(&cfg),
         concrete_document_new_result(&cfg),
         concrete_document_discard_result(&cfg),
+        concrete_grid_open_result(&cfg),
+        concrete_grid_view_result(&cfg),
+        concrete_grid_edit_result(&cfg),
+        concrete_grid_violation_result(&cfg),
     ];
     declarations.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -1874,6 +1962,18 @@ mod tests {
             generated::<GridCoercionNotice>(),
             generated::<GridViolationLocation>(),
             generated::<GridEditOutcome>(),
+            generated::<GridOpenRequest>(),
+            generated::<GridOpenResponse>(),
+            generated::<GridViewRequest>(),
+            generated::<GridViewResponse>(),
+            generated::<GridEditRequest>(),
+            generated::<GridEditResponse>(),
+            generated::<GridHistoryDirection>(),
+            generated::<GridHistoryRequest>(),
+            generated::<GridSearchDirection>(),
+            generated::<GridViolationRequest>(),
+            generated::<GridViolation>(),
+            generated::<GridViolationResponse>(),
         ];
         for ts in declarations {
             assert_no_any(&ts);

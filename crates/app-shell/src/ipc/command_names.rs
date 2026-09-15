@@ -98,6 +98,35 @@ pub const DOCUMENT_NEW: &str = "document_new";
 /// **保存しない。** 利用者が「変更を破棄して閉じる」を選んだときの明示の指示である。
 pub const DOCUMENT_DISCARD: &str = "document_discard";
 
+/// 呼び出し元ウィンドウに表示するシートを開く（タスク 6.2。要件 1.1、1.5、1.6）。
+///
+/// 開いたセッションは**ウィンドウごとに 1 つ**保持され、ウィンドウが閉じたら破棄される
+/// （`design.md`「GridCommands」）。呼び出し元ウィンドウは基盤が注入する引数から取るため、
+/// フロントエンドはウィンドウを偽装できない（要件 4.6）。
+pub const GRID_OPEN_SHEET: &str = "grid_open_sheet";
+
+/// 呼び出し元ウィンドウのグリッドの表示の指定を変える（タスク 6.2。要件 8.3、8.4）。
+///
+/// 並べ替え・絞り込み・入れ子の展開を 1 つの要求として受け取る。**ドキュメントは変わらない**
+/// （要件 8.5）。
+pub const GRID_SET_VIEW: &str = "grid_set_view";
+
+/// 呼び出し元ウィンドウのグリッドへ編集命令を 1 つ適用する（タスク 6.2。要件 3.3）。
+///
+/// 判定は `schema-engine` が行い、適合しない値も破棄せず違反として返す（要件 3.5）。
+pub const GRID_APPLY_EDIT: &str = "grid_apply_edit";
+
+/// 呼び出し元ウィンドウのグリッドの履歴を進める（タスク 6.2。要件 9.2、9.3）。
+///
+/// どちらへ進めるかは要求が言う（取り消し / やり直し）。
+pub const GRID_HISTORY: &str = "grid_history";
+
+/// 呼び出し元ウィンドウのグリッドで、指定した位置から次の違反を探す（タスク 6.2。要件 4.4）。
+///
+/// **表示範囲の外にある違反にも到達する**（要件 4.4）。見つからなければ「これ以上無い」を
+/// 正常な結果として返す。
+pub const GRID_FIND_VIOLATION: &str = "grid_find_violation";
+
 /// フロントエンドから呼び出せるコマンド名の一覧（要件 4.1、4.2）。
 ///
 /// `src-tauri` のハンドラ登録（タスク 7.1）と TypeScript の生成物（タスク 2.2）の**両方**が
@@ -118,4 +147,9 @@ pub const COMMAND_NAMES: &[&str] = &[
     DOCUMENT_SAVE,
     DOCUMENT_NEW,
     DOCUMENT_DISCARD,
+    GRID_OPEN_SHEET,
+    GRID_SET_VIEW,
+    GRID_APPLY_EDIT,
+    GRID_HISTORY,
+    GRID_FIND_VIOLATION,
 ];

@@ -2198,10 +2198,12 @@ name = "jxcel"
 version = "0.1.0"
 dependencies = [
  "app-shell",
+ "data-grid",
  "document-format",
  "document-session",
  "gtk",
  "rfd",
+ "schema-engine",
  "serde",
  "tauri",
  "tauri-build",

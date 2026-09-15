@@ -163,7 +163,7 @@
   - 生成物のドリフト検査とフロントエンドの型検査の双方が通る
   - _Requirements: 1.1, 1.5, 1.6, 3.2_
 
-- [ ] 6.2 封筒つきのコマンドを登録し、権限を与える
+- [x] 6.2 封筒つきのコマンドを登録し、権限を与える
   - シートを開く・表示の指定を変える・編集を適用する・履歴を進める・次の違反を探す、の 5 つを登録する
   - コマンド名を定数として単一の源に置き、文字列リテラルで書かない
   - 各コマンドに権限ブロックを定義し、与える集合へ所属させる。**片方だけでは配布物から静かに消える**
@@ -357,3 +357,7 @@
 - **世代は窓が変わりうるときだけ進める**: `apply` は `affected` が空でないときだけ世代を進める。窓の世代と `session.generation()` の一致だけを見る検査は**定数の世代でも緑になる**ので、`apply`/`undo`/`redo` で**厳密に増えること**と、影響の無い命令で**変わらないこと**を別々に検査する。
 - **`TypeKindTag` と `TypeKind::ALL` の一致検査は `src-tauri` に置く（6.1 のレビューで確認）**: `app-shell` は**他のドメインクレートに依存できない**（`crates/app-shell/Cargo.toml` の依存方針）ため、`schema-engine` の `TypeKind::ALL`（14 種）と生成された `TypeKindTag` を突き合わせられない。両方を見られる唯一のクレートは `src-tauri`（適応層）である。**6.2/6.3 が適応層を書くときに、この一致検査（綴りと件数の総当たり）を `src-tauri` に足すこと** — 片方だけが増えたときに気づけるようにするのが design.md の Risk の主旨である。6.1 時点では `src-tauri` に `TypeKindTag` の参照も `schema-engine` の依存も無いので、**まだ誰も検査していない**。
 - **境界の型は `app-shell` が単一の源**: フロントエンドは `src/ipc/bindings.ts`（`cargo run -p app-shell --bin generate-bindings` の生成物）から取り込み、**独自に定義しない**。`src/` の下に 14 種の札を手書きした写しを作ってはならない（7.1 の描画側と 7.4 の登録簿が対象）。生成物は手で編集せず、`crates/app-shell/tests/bindings_drift.rs` のドリフト検査が「生成物＝生成器の出力」を固定する（変異試験で検査が生きていることを実測済み）。
+- **6.2 のレビューが残した非阻害の 2 件（6.3 が同じモジュールを触るので引き継ぐ）**:
+  1. **`grid_find_violation` だけ写像が食い違う**（`src-tauri/src/commands/grid.rs:1071-1112`）。ウィンドウの文書が差し替わると（メニュー「開く…」/ `pick_document_file` → `dialog::hand_off` → `DocumentSessions::attach`。未保存でなければ同じウィンドウへ再引き渡しできる）、保持している `entry.sheet` は文書に存在しなくなる。この状態で `grid_find_violation` は `IpcResult::Ok { violation: None }` を返す（レビューの実測: 違反 1 件の文書 A で `Ok(Some(..))`、同一ウィンドウを文書 B へ attach した後 `Ok(None)`）一方、同じ状態で `grid_set_view` / `grid_apply_edit` は**失敗腕**（`SchemaUnusable`）を返す。モジュール doc と `answer_open` は「要求されたシートが文書に無い」を経路の失敗と定めているので、**6 つの写像を揃えること**（「違反が無い」と「シートが無い」を混同させない）。
+  2. **失敗した適用でも未保存の印が立つ**（`grid.rs:931-986`、`column_index` は `grid.rs:442`）。`column_index` は範囲検査をせずドメインの判定に委ねるため、`ColumnOutOfRange`（例: 列 999）が閉包の内側で到達しうる。文書の本体は変わらない（`data-grid` は書き込み前に検査する: `crates/data-grid/src/edit/mod.rs:1702-1704`）が、`SessionState::Open { unsaved: true }` だけが立つ。**変換を閉包の外へ出す**（`a_malformed_row_identifier_does_not_touch_the_document` が既に採った回避と同じ形）こと。
+  どちらも `src-tauri/src/commands/grid.rs` の中であり、**6.3 が 6 本目を足すときに同じ検査（6 本の写像の一致・失敗時に状態を動かさない）で固定すること。**

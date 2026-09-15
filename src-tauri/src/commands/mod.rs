@@ -55,13 +55,19 @@
 //!   （`app_shell::diagnostics`。タスク 4.4 / 4.5）へ委ねる。あわせて 7.4 の登録口へ
 //!   3 つのメニュー項目（診断の部分メニュー）を足し、選択を
 //!   `DIAGNOSTICS_REQUESTED_EVENT` として対象ウィンドウへ送る。
-//! - ウィンドウの関連付けを問い合わせる [`crate::window::association`]（タスク 9.6）は、
+//! - [`crate::window::association`]: ウィンドウの関連付けを問い合わせる（タスク 9.6）。
 //!   ドキュメントを関連付けていないウィンドウに操作の導線を提示するための判定材料である。
 //!   呼び出し元ウィンドウの関連付けを 6.1 のレジストリから読む `window_document_state` を
 //!   持ち、**実体がウィンドウのライフサイクル側にある**ためコマンド関数もそこに置く。
+//! - [`grid`]: グリッドのコマンド面（タスク 6.2）。シートを開く・表示の指定を変える・
+//!   編集を適用する・履歴を進める・次の違反を探す、の 5 つを持ち、**ドメイン型と境界用の型の
+//!   変換を行う唯一の場所**である（design.md「GridCommands」）。ウィンドウごとの `GridSession`
+//!   もこの機能が保持する（表の実体は `commands/grid.rs` の `GridSessions`）。
+//!   呼び出し元ウィンドウは基盤が注入する引数から取る（要件 4.6）。
 
 mod bulk;
 mod diagnostics_cmds;
+mod grid;
 mod shell_cmds;
 
 use app_shell::ipc::command_names;
@@ -120,6 +126,11 @@ command_root! {
     command_names::DOCUMENT_SAVE => crate::session::commands::document_save,
     command_names::DOCUMENT_NEW => crate::session::commands::document_new,
     command_names::DOCUMENT_DISCARD => crate::session::commands::document_discard,
+    command_names::GRID_OPEN_SHEET => grid::grid_open_sheet,
+    command_names::GRID_SET_VIEW => grid::grid_set_view,
+    command_names::GRID_APPLY_EDIT => grid::grid_apply_edit,
+    command_names::GRID_HISTORY => grid::grid_history,
+    command_names::GRID_FIND_VIOLATION => grid::grid_find_violation,
 }
 
 #[cfg(test)]

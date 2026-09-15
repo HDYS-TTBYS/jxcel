@@ -26,6 +26,11 @@ export const COMMAND_NAMES = [
   "document_save",
   "document_new",
   "document_discard",
+  "grid_open_sheet",
+  "grid_set_view",
+  "grid_apply_edit",
+  "grid_history",
+  "grid_find_violation",
 ] as const;
 
 /**
@@ -640,6 +645,42 @@ revalidated_columns: Array<number>,
  */
 row_count: number, };
 /**
+ * 編集を適用する要求（タスク 6.2。要件 3.3、5.7、6.1、7.3）。
+ *
+ * 運ぶのは編集命令 1 つである（[`GridEditCommand`] の 6 つの命令）。**値を型付きで運ばない**
+ * 規約は 6.1 の型が既に守っている。ウィンドウは要求の型に現れない（要件 4.6）。
+ */
+export type GridEditRequest = { 
+/**
+ * 適用する編集命令。
+ */
+command: GridEditCommand, };
+/**
+ * 編集の結果の要約を運ぶ応答（タスク 6.2。要件 3.4、4.6、9.2、9.3）。
+ *
+ * **適用（[`GridEditRequest`]）と履歴（[`GridHistoryRequest`]）が同じ形を返す。**
+ * 履歴を進めることも「1 つの命令がドキュメントへ適用された」ことであり、画面が要るもの
+ * （影響範囲・変換・違反・行数）は同じだからである（`design.md`「GridCommands」の API
+ * Contract が `grid_apply_edit` と `grid_history` の応答を同じ型と定めている）。
+ *
+ * **`outcome` が `None` であるのは「進める履歴が無かった」場合だけである**（要件 9.2、9.3）。
+ * 取り消し・やり直しの対象が空のときに何も変えずに答える正常な結果であり、封筒の失敗腕には
+ * 載せない — 「直前の操作が無い」ことは利用者の操作が失敗したことではない。適用
+ * （[`GridEditRequest`]）ではつねに `Some` である。
+ */
+export type GridEditResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈。
+ */
+context: WindowContext, 
+/**
+ * 適用された操作の要約。`None` は「進める履歴が無く、何も変わらなかった」（要件 9.2、9.3）。
+ */
+outcome: GridEditOutcome | null, };
+// 編集の結果の応答の具体形（適用と履歴で同じ形）。ジェネリックな `IpcResult` の宣言は
+// ペイロード型を名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type GridEditResult = IpcResult<GridEditResponse, IpcError>;
+/**
  * 入れ子の展開の状態 1 列ぶん（タスク 6.1。要件 5.1、5.2、5.3、5.4）。
  *
  * `view` 層の `ExpansionState` を写したものである。展開は**表示状態の一部**であり
@@ -707,6 +748,59 @@ column: number, } | { "filter": "HasViolation",
  */
 column: number | null, };
 /**
+ * 履歴を進める向き（タスク 6.2。要件 9.2、9.3）。**閉じた列挙である。**
+ *
+ * 「取り消し」と「やり直し」は利用者の別々の指示であり、1 つの真偽へ潰さない
+ * （潰すと生成物のフロントエンドで意味が読めない）。
+ */
+export type GridHistoryDirection = "undo" | "redo";
+/**
+ * 履歴を進める要求（タスク 6.2。要件 9.2、9.3）。
+ *
+ * **どちらへ進めるかを要求が言う。** 取り消しとやり直しは同じ経路（履歴と適用を束ねた口）
+ * を通るが、進める向きは要求が決める。ウィンドウは要求の型に現れない（要件 4.6）。
+ */
+export type GridHistoryRequest = { 
+/**
+ * 進める向き。
+ */
+direction: GridHistoryDirection, };
+/**
+ * 表示するシートを開く要求（タスク 6.2。要件 1.1、1.5、1.6）。
+ *
+ * **シートは識別子の文字列で選ぶ。** 1 つのドキュメントは複数のシートを持ちうるが
+ * （要件 1.7 の [`super::DocumentSheet`]）、表示する対象を選ぶ手段は本機能の外にあり
+ * （`design.md`「Out of Boundary」）、境界を越える識別子は文字列である（64 ビット整数を
+ * 出さない規約）。呼び出し側は [`super::DocumentStateResponse`] が運ぶシートの一覧の
+ * `id` をそのまま渡す。
+ */
+export type GridOpenRequest = { 
+/**
+ * 表示するシートの識別子（[`super::DocumentSheet::id`] の文字列そのもの）。
+ */
+sheet: string, };
+/**
+ * シートを開いた応答（タスク 6.2。要件 1.1、1.5、1.6、4.6）。
+ *
+ * **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。`sheet` は窓が運ぶ列の構成と
+ * シートの行数であり、**2 つの空の状態（列が 1 本も無い・列はあるが行が無い）を形の上で
+ * 区別する**（[`GridSheetSummary`] の doc を参照）。
+ *
+ * **表示の指定はここに無い。** 絞り込み・並べ替え・展開は [`GridViewResponse`] が運ぶ。
+ */
+export type GridOpenResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈。
+ */
+context: WindowContext, 
+/**
+ * 開いたシートの要約（列の構成と行数）。
+ */
+sheet: GridSheetSummary, };
+// シートを開いた応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を
+// 名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type GridOpenResult = IpcResult<GridOpenResponse, IpcError>;
+/**
  * 入れ子の内側の位置の 1 段（タスク 6.1。要件 4.5、5.5）。
  *
  * `types` 層の `NestedPathSegment` を写したもので、**フィールド名と配列の位置を区別する**。
@@ -726,6 +820,14 @@ name: string, } | { "segment": "Index",
  * 要素の位置。
  */
 position: number, };
+/**
+ * 違反を探す向き（タスク 6.2。要件 4.4）。**閉じた列挙である。**
+ *
+ * **可視行の序数が増える向き**が [`GridSearchDirection::Forward`] である（`data-grid` の
+ * `SearchDirection` と同じ意味）。名前を `prev` / `next` にしないのは、向きが可視の順序に
+ * 対して定義されており、画面の「前へ」が文書の順序と一致しないためである。
+ */
+export type GridSearchDirection = "forward" | "backward";
 /**
  * シートの要約: 窓が運ぶ列の構成と、シートの行数（タスク 6.1。要件 1.1、1.5、1.6）。
  *
@@ -781,6 +883,49 @@ column: number,
  */
 descending: boolean, };
 /**
+ * 表示の指定を変える要求（タスク 6.2。要件 8.3、8.4）。
+ *
+ * **指定は完全な記述である。** 空の [`GridViewSpec`] は「絞り込み無し・並べ替え無し・
+ * 展開無し」を意味する（6.1 の doc と同じ規約）ので、前の指定のうちここに現れないものは
+ * 適用されない。ウィンドウは要求の型に現れない（呼び出し元は基盤が注入する。
+ * 要件 4.6）。
+ */
+export type GridViewRequest = { 
+/**
+ * 適用する表示の指定。
+ */
+view: GridViewSpec, };
+/**
+ * 表示の指定を変えた応答（タスク 6.2。要件 8.5、8.7、4.3、4.6）。
+ *
+ * **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。可視行数と隠された行数を運ぶのは
+ * 要件 8.7（絞り込みで表示されていない行の数を提示する）である。**要件 1.5 の「行が無い」
+ * とは別である** — あちらは行そのものが無い状態であり、[`GridOpenResponse::sheet`] の
+ * `row_count` が表す。ここが運ぶのは**行が在って隠れている**数である。
+ *
+ * `violation_total` は**シート全体の違反の総数**である（要件 4.3。絞り込みに依らない）。
+ */
+export type GridViewResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈。
+ */
+context: WindowContext, 
+/**
+ * 表示の指定を適用したあとの可視行数（要件 8.7）。
+ */
+visible_rows: number, 
+/**
+ * 絞り込みによって表示されていない行数（要件 8.7）。
+ */
+hidden_rows: number, 
+/**
+ * 表示中のシートに存在する違反の総数（要件 4.3）。
+ */
+violation_total: number, };
+// 表示の指定を変えた応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を
+// 名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type GridViewResult = IpcResult<GridViewResponse, IpcError>;
+/**
  * 表示の指定: 行の並びと列の構成をどう導出するか（タスク 6.1。要件 5.3、8.3、8.4）。
  *
  * **並べ替え・絞り込み・展開を 1 つの形にまとめる。** `view` 層では表示状態が
@@ -807,12 +952,29 @@ filters: Array<GridFilterSpec>,
  */
 expansion: Array<GridExpansionState>, };
 /**
+ * 見つかった違反（タスク 6.2。要件 4.2、4.5）。
+ *
+ * 位置（[`GridViolationLocation`]。入れ子の内側の位置を含む）と、**利用者へ伝えるための
+ * 理由の文言**を対で運ぶ。理由はドメインの側の語（`schema-engine` の `ViolationReason`）を
+ * そのまま出さず、適応層が組み立てた文言を載せる（理由の写像を持たない境界の型に
+ * 当たる。`design.md`「GridCommands」の Implementation Notes）。
+ */
+export type GridViolation = { 
+/**
+ * 違反の位置（要件 4.5 の入れ子の内側の位置を含む）。
+ */
+location: GridViolationLocation, 
+/**
+ * 違反の理由を利用者へ伝える文言（要件 4.2）。
+ */
+reason: string, };
+/**
  * 違反の位置（タスク 6.1。要件 4.2、4.5、6.4、7.5）。
  *
  * `schema-engine` の `Violation` と `data-grid` の `CellViolations` / `NestedPath` が持つ
  * **位置だけ**を写したものである — 行の識別子（文字列）・列の添字（`u32`）・入れ子の内側の
  * 位置である。**理由（`ViolationReason`）は本型に無い** — 違反の理由を提示する経路
- * （要件 4.2 の `GridViolationResponse.reason`）は 6.2 / 6.3 の適応層が組み立てる。
+ * （要件 4.2）は 6.2 が [`GridViolation`] として定め、文言を組み立てるのは適応層である。
  *
  * **行を持たない違反がある。** ドメインの `Violation::row` は `Option<RowId>` であり、
  * 列そのものの問題は行を持たない。したがって `row` は `Option<String>` である
@@ -834,6 +996,45 @@ column: number,
  * 違反している内側の位置（空 = セル直下。要件 4.5）。
  */
 path: Array<GridPathSegment>, };
+/**
+ * 次の違反を探す要求（タスク 6.2。要件 4.4）。
+ *
+ * **起点は可視行の序数である**（行そのものではない）。可視の序数から行への写像を持つのは
+ * 順序を持つ側（`data-grid` の `RowOrder`）であり、写しは要求を通さない。ウィンドウは要求の
+ * 型に現れない（要件 4.6）。
+ */
+export type GridViolationRequest = { 
+/**
+ * 探索の起点（**可視行の 0 起点の序数**）。
+ */
+from: number, 
+/**
+ * 探索の向き。
+ */
+direction: GridSearchDirection, };
+/**
+ * 次の違反を探した結果（タスク 6.2。要件 4.2、4.4、4.5、4.6）。
+ *
+ * **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。`violation` が `None` であるのは
+ * 「その向きにこれ以上違反が無い」場合であり、**正常な結果である**（封筒の失敗腕には
+ * 載せない）。画面は「見つからなかった」を日付の変更ではなく、これ以上無いこととして扱う。
+ *
+ * 位置と理由の両方を 1 つの型（[`GridViolation`]）にまとめるのは、**見つかった違反にだけ
+ * 両方が存在する**ためである（`location` と `reason` を別々の [`Option`] にすると、
+ * 「位置はあるが理由が無い」という状態が型の上で表現できてしまう）。
+ */
+export type GridViolationResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈。
+ */
+context: WindowContext, 
+/**
+ * 見つかった違反（位置と理由）。見つからなければ `None`。
+ */
+violation: GridViolation | null, };
+// 次の違反を探した結果の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を
+// 名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type GridViolationResult = IpcResult<GridViolationResponse, IpcError>;
 /**
  * 失敗の原因を区別できる列挙（要件 4.4）。文字列だけのエラーにしない。
  *
