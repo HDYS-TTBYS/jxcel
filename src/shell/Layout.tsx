@@ -139,6 +139,7 @@ import {
   TableSmoke,
 } from "../features/smoke/TableSmoke";
 import { GLIDE_PROBE_SCREEN_ID, GlideProbe } from "../features/smoke/glideProbe";
+import { PORT_PROBE_SCREEN_ID, PortProbe } from "../features/smoke/portProbe";
 import { resolveVerificationInitialScreen } from "./verificationScreen";
 import { SessionClosePrompt } from "./sessionClose";
 
@@ -249,6 +250,23 @@ const GLIDE_PROBE_SCREEN_DEFINITION: ScreenDefinition = {
   id: GLIDE_PROBE_SCREEN_ID,
   title: "描画確認: グリッド（10 万行）",
   component: GlideProbe,
+};
+
+/**
+ * 検証専用: 移植口の操作を確かめる**使い捨ての画面**（`src/features/smoke/portProbe.tsx`。
+ * tasks.md 7.2、要件 1.2, 1.3, 2.4, 7.1, 7.2）。
+ *
+ * 1.6 の `GLIDE_PROBE_SCREEN_DEFINITION` と同じ理由で**`SHELL_SCREEN_REGISTRY` へは直接足さず**、
+ * 本定義も `Layout` の `__JXCEL_VERIFICATION__` の分岐の中だけで参照する。既定のビルド（`false`）で
+ * は定数畳み込みで参照ごと消える（`scripts/check-shipping-bundle.sh` が機械検査する）。
+ *
+ * **移植口の実装（`glideAdapter.tsx`）は配布物へ入ってよい** — それが製品の描画層である。
+ * 検証専用の面（`portProbe*`）だけを配布物から締め出す。
+ */
+const PORT_PROBE_SCREEN_DEFINITION: ScreenDefinition = {
+  id: PORT_PROBE_SCREEN_ID,
+  title: "描画確認: 移植口の操作",
+  component: PortProbe,
 };
 
 /** 外観を選ぶ操作の 1 項目。 */
@@ -440,6 +458,7 @@ export function Layout(): ReactElement {
           screens: [
             ...SHELL_SCREEN_REGISTRY.screens,
             GLIDE_PROBE_SCREEN_DEFINITION,
+            PORT_PROBE_SCREEN_DEFINITION,
           ],
         }
       : SHELL_SCREEN_REGISTRY;

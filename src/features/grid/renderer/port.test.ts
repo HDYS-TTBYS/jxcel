@@ -31,12 +31,14 @@
 import { describe, expect, it } from "vitest";
 
 import { createEagerFakeRenderer, createLazyFakeRenderer } from "./fakeRenderer";
+import { createGlideWiring } from "./glideAdapter";
 import {
   DRIVE_COLUMNS,
   DRIVE_ROW_COUNT,
   arrayRowSource,
   createRendererSpec,
   driveCanonicalSequence,
+  glideDrivableRenderer,
   lazyRowSource,
 } from "./interactionDriver";
 import type { DrivableRenderer, DrivenRun, PortCall, RecordedCall, RowSource } from "./interactionDriver";
@@ -180,15 +182,21 @@ describe("外向きの知らせと呼び出し側の口の並び", () => {
 
 describe("実装の差し替え（呼び出しの並びが変わらない）", () => {
   /**
-   * 4 通りを駆動し、記録された並びと、描画のために引いたセルの数を返す。
+   * 5 通りを駆動し、記録された並びと、描画のために引いたセルの数を返す。
    *
-   * 2 つの軸を掛け合わせる:
+   * 3 つの軸を掛け合わせる:
    *   - **移植口の実装**: マウントの時に可視の窓をまとめて引く実装と、操作に応じて必要な行だけを
-   *     引き、知らせを次の微小タスクまで遅らせる実装（`fakeRenderer.ts`）。
+   *     引き、知らせを次の微小タスクまで遅らせる実装（`fakeRenderer.ts`）、そして**実物**
+   *     （`glideAdapter.tsx` の Glide の写し。7.1 の申し送り）。
    *   - **行の出所**: 行を配列として持つ模型と、序数からその場で作る模型（`interactionDriver.ts`）。
    *
-   * 「差し替えても呼び出しの並びが変わらない」の実測はこの 4 通りの一致である。**実物の実装
-   * （7.2 の Glide）を足すのは、この一致に 1 行を加えるだけでよい**（ヘッダの申し送りを参照）。
+   * 「差し替えても呼び出しの並びが変わらない」の実測はこの一致である。**実物を足した行が
+   * 7.1 の申し送りの答えである** — 上流（Glide）が止まっても移植口の契約が保たれることは、
+   * 実物が同じ並びを出すことでしか示せない。
+   *
+   * **実物は canvas を要するので、この比較は実物の「配線」（`createGlideWiring`）を通す。**
+   * 配線は DOM に触れない（`glideAdapter.tsx` のモジュール doc の層の分け方）。実物の見え方は
+   * 起動して観測する（`src/features/smoke/portProbe*`）— 単体テストは受入の証明ではない。
    */
   const drive = async (
     renderer: DrivableRenderer,
@@ -198,21 +206,36 @@ describe("実装の差し替え（呼び出しの並びが変わらない）", (
     return { run, asked: source.asked.length };
   };
 
-  it("内部の作りも行の出所も違う 4 通りで、同じ並びが観測される", async () => {
+  it("内部の作りも行の出所も違う 5 通りで、同じ並びが観測される", async () => {
     const eagerWithArray = await drive(createEagerFakeRenderer(), arrayRowSource());
     const eagerWithComputed = await drive(createEagerFakeRenderer(), lazyRowSource());
     const lazyWithArray = await drive(createLazyFakeRenderer(), arrayRowSource());
     const lazyWithComputed = await drive(createLazyFakeRenderer(), lazyRowSource());
+    // **実物（Glide の写し）**。行の出所は配列の模型を使う（実物は `getCell` を引かないので
+    // どちらでも同じである — 引かないことは下の比較で見える）。
+    const adapter = await drive(glideDrivableRenderer(createGlideWiring), arrayRowSource());
 
-    for (const { run } of [eagerWithArray, eagerWithComputed, lazyWithArray, lazyWithComputed]) {
+    for (const { run } of [
+      eagerWithArray,
+      eagerWithComputed,
+      lazyWithArray,
+      lazyWithComputed,
+      adapter,
+    ]) {
       expect(run.calls).toEqual(CANONICAL_SEQUENCE);
     }
 
-    // **これが無いと上の一致は弱い**: 同じ実装を 4 回走らせて同じ並びになっただけでも緑になる。
+    // **これが無いと上の一致は弱い**: 同じ実装を 5 回走らせて同じ並びになっただけでも緑になる。
     // 実装が違う 2 つは、描画のために引くセルの数が実際に違う（窓をまとめて引く側の方が多い）。
     // 作りが違い、行の読み方が違い、知らせの時機も違うのに、外へ出る並びは同じである。
     expect(eagerWithArray.asked).toBeGreaterThan(lazyWithArray.asked);
     expect(lazyWithArray.asked).toBeGreaterThan(0);
+
+    // 実物は**ここでは描画のための引きを行わない**（canvas を持たないので描く当てが無い）。
+    // したがって引かれたセルは駆動器自身の複製（範囲を出所から引いて表形式を組み立てる）ぶん
+    // だけであり、**操作に応じて描く 2 つの偽の実装より少ない**。引きの数は実装の自由であり、
+    // 並びの比較には載らない（`driveCanonicalSequence` の docs）。
+    expect(adapter.asked).toBeLessThan(lazyWithArray.asked);
   });
 
   it("描画の引きは未取得の行にも及び、そこで例外を投げない", async () => {

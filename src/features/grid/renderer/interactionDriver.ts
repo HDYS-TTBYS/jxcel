@@ -11,14 +11,17 @@
  *      callback の引数をそのままの形で持つので、余計な材料が載れば比較で見える。
  *   3. セルの出所（窓の記憶の模型。[`RowSource`]）を 2 通り用意し、行の持ち方が違っても
  *      呼び出しの並びが変わらないことを示せるようにする。
+ *   4. **実物の配線へ面をかぶせる薄い層**（[`glideDrivableRenderer`]。タスク 7.2 が足した）を
+ *      置き、7.1 の申し送り（実物でも同じ並びが観測されること）を 1 つの場所で満たす。
  *
  * # 移植口そのものには「利用者の操作」を注ぐ口が無い
  *
  * `GridRendererPort` が持つのは `mount` だけで、外向きの知らせは `RendererSpec` の callback で
  * ある。したがって駆動器は、移植口に**操作を起こす面**（[`RendererEventSource`]）を足した
- * [`DrivableRenderer`] を要求する。**この面は移植口の一部ではない** — 本物の実装（7.2 の Glide の
+ * [`DrivableRenderer`] を要求する。**この面は移植口の一部ではない** — 実物の実装（7.2 の Glide の
  * 写し）が実装すべきものではなく、テストの側が実物の通知（選択・起動・列幅・列の移動・複製・
- * 貼り付け）に 1 枚かぶせる薄い層である。
+ * 貼り付け）に 1 枚かぶせる薄い層である。実物に対するその層は
+ * [`glideDrivableRenderer`] にある。
  *
  * # 何を記録し、何を記録しないか
  *
@@ -28,7 +31,7 @@
  * **`getCell` は記録しない。**セルをいつ何回引くかは実装の作りそのもの（窓をまとめて引くか、
  * 必要になった行だけ引くか）であり、並びの比較に持ち込むと「実装を差し替えても並びが変わらない」
  * という主張が崩れる（実装ごとに違ってよいものを比較対象に入れてしまう）。**この線引きが
- * `port.test.ts` の 4 通りの比較を意味のあるものにしている。**
+ * `port.test.ts` の比較を意味のあるものにしている。**
  *
  * `mount` の引数も記録しない（`[]` とする）。器は実装ごとに別の物であり、並びの比較に持ち込むと
  * 比較そのものが成立しない。
@@ -39,10 +42,19 @@
  * 本課題の面は純粋な論理であり DOM を要しない。そこで [`standInContainer`] が**どの属性を読んでも
  * 投げる**代役を返す。**「偽の実装は器に触れない」という前提を、確かめられる性質に変える**のが
  * 狙いである（触れば落ちる）。したがって `jsdom` / `happy-dom` を足す必要が無い。
- * 7.2 の Glide の実装は実物の canvas を要するので、環境はそこで選び直す（`vitest.config.ts`）。
+ *
+ * **7.2 の実物もこの規律の内側にある。**移植口が運ぶのは座標・文字・見出しだけであり、
+ * Glide の**配線**（`./glideAdapter` の `createGlideWiring`）も DOM に触れない。DOM を要するのは
+ * 配線を `DataEditor` へ繋ぐ面（`GlideSurface`）だけであり、**そちらは実物を起動して観測する**
+ * （`src/features/smoke/portProbe*`。canvas を模した DOM では見え方の主張を何も裏付けられない）。
+ * したがって `vitest.config.ts` の環境は `node` のままである（`jsdom` を足していない）。
  */
 // **型だけの取り込みである**（`verbatimModuleSyntax` により `import type` が要る）。
 import type { TypeKindTag } from "../../../ipc/bindings";
+// 実物の配線へ面をかぶせる薄い層（下の `glideDrivableRenderer`）が使う。**値として要るのは
+// `CompactSelection` と `emptyGridSelection` だけ**であり、Glide の部品そのものは読み込まない。
+import { CompactSelection, emptyGridSelection, type GridSelection, type Item } from "@glideapps/glide-data-grid";
+import type { GlideWiring } from "./glideAdapter";
 import type {
   CellPosition,
   CellRange,
@@ -369,4 +381,105 @@ export async function driveCanonicalSequence(
   handle.destroy();
 
   return { renderer, container, spec, handle, calls };
+}
+
+/** 移植口の範囲（矩形）を Glide の選択へ写す。**錨は左上**である（貼り付けの宛先になる）。 */
+function selectionOfRange(range: CellRange | null): GridSelection {
+  if (range === null) {
+    return emptyGridSelection;
+  }
+  return {
+    columns: CompactSelection.empty(),
+    rows: CompactSelection.empty(),
+    current: {
+      cell: [range.start.column, range.start.row],
+      range: {
+        x: range.start.column,
+        y: range.start.row,
+        width: range.end.column - range.start.column + 1,
+        height: range.end.row - range.start.row + 1,
+      },
+      rangeStack: [],
+    },
+  };
+}
+
+/**
+ * **実物の配線**（`./glideAdapter` の [`GlideWiring`]）へ [`RendererEventSource`] をかぶせた
+ * 薄い層（tasks.md 7.2。`fakeRenderer.ts` のヘッダの申し送り）。
+ *
+ * 7.1 が残した課題はこれである: 移植口には「利用者の操作」を注ぐ口が無いので、**実物の通知**
+ * （選択・起動・列幅・列の移動・複製・貼り付け）にテスト専用の面を 1 枚かぶせ、`port.test.ts` の
+ * 比較表と同じ並びが実物でも観測されることを示す。**この層は移植口の一部ではない** —
+ * `GlideWiring` が実装すべきものではなく、Glide の引数の形と移植口の引数の形の**間の写し**を
+ * テストの側が持つだけである。
+ *
+ * # 何を写し、何を写さないか
+ *
+ * | 注入する操作 | Glide の通知（`GlideWiringProps`） | 移植口 |
+ * |---|---|---|
+ * | `emitSelectionChange` | `onGridSelectionChange`（`GridSelection`） | `onSelectionChange`（矩形） |
+ * | `emitActivateEditor` | `onCellActivated`（`Item` = 列, 行） | `onActivateEditor`（位置） |
+ * | `emitColumnResize` | `onColumnResize`（列, 幅, 添字, grow 込み） | `onColumnResize`（添字, 幅） |
+ * | `emitColumnMove` | `onColumnMoved`（from, to） | `onColumnMove`（from, to） |
+ * | `emitCopy` | DOM の `copy`（本物は `GlideSurface` が受ける） | `onCopy`（範囲） |
+ * | `emitPaste` | DOM の `paste`（同じ） | `onPaste`（錨, 文字列） |
+ *
+ * **複製と貼り付けだけは Glide の props を通らない。** 本物の経路は DOM の `copy` / `paste` を
+ * `GlideSurface` が自分で受けて配線へ渡す（Glide 自身のクリップボードの経路は移植口を通らない
+ * ので止めてある。`glideAdapter.tsx` のモジュール doc）。したがってこの層も `copyRange` /
+ * `pasteAt` を直接叩く — **錨を選択から決める部分（`currentAnchor`）は本物と同じ関数である**
+ * が、ここでは呼ばない（選択を動かすと並びに余計な `onSelectionChange` が載るためである。
+ * 錨の決定は `glideAdapter.test.ts` が名指しで固定している）。
+ *
+ * # 器は使わない
+ *
+ * 配線は DOM を持たないので、この層は `mount` へ渡された器に触れない（`fakeRenderer.ts` の
+ * 2 つの実装と同じである — 触れないことは駆動器が確かめる）。
+ */
+export function glideDrivableRenderer(
+  createWiring: (spec: RendererSpec) => GlideWiring,
+): DrivableRenderer {
+  let mounted: { readonly spec: RendererSpec; readonly wiring: GlideWiring } | null = null;
+  let clipboard: string | null = null;
+
+  const wiringOf = (operation: string): GlideWiring => {
+    if (mounted === null) {
+      throw new Error(`移植口がマウントされていない（または破棄された）のに ${operation} が起きた`);
+    }
+    return mounted.wiring;
+  };
+
+  return {
+    mount(_container, initial) {
+      mounted = { spec: initial, wiring: createWiring(initial) };
+      return mounted.wiring.handle;
+    },
+    async emitSelectionChange(range) {
+      wiringOf("emitSelectionChange").props.onGridSelectionChange(selectionOfRange(range));
+    },
+    async emitActivateEditor(position) {
+      const item: Item = [position.column, position.row];
+      wiringOf("emitActivateEditor").props.onCellActivated(item);
+    },
+    async emitColumnResize(column, width) {
+      const wiring = wiringOf("emitColumnResize");
+      const target = wiring.props.columns[column] ?? { title: "", width };
+      // Glide の第 2 引数は変更後の幅、第 3 引数は列の添字、第 4 引数は grow 込みの幅である
+      // （写しは第 4 引数を使わない — 渡しているのは signature を合わせるためである）。
+      wiring.props.onColumnResize(target, width, column, width);
+    },
+    async emitColumnMove(from, to) {
+      wiringOf("emitColumnMove").props.onColumnMoved(from, to);
+    },
+    async emitCopy(range) {
+      clipboard = await wiringOf("emitCopy").copyRange(range);
+    },
+    async emitPaste(anchor, text) {
+      await wiringOf("emitPaste").pasteAt(anchor, text);
+    },
+    get clipboard() {
+      return clipboard;
+    },
+  };
 }

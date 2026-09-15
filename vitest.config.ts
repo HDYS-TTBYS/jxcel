@@ -15,6 +15,18 @@
 // よう、ここに明記しておく（`scripts/check-shipping-bundle.sh` が配布物から検証専用の
 // 識別子を締め出しているので、テストの側の構成が配布物へ混ざる経路は無い）。
 //
+// **7.2 の結論: 環境は `node` のままである（`jsdom` を足していない）。** 7.2 の実物
+// （`src/features/grid/renderer/glideAdapter.tsx`）は 2 層に分かれている。移植口の意味論
+// （仕様 → Glide の props、Glide の通知 → 移植口の callback、選択の所有）は **DOM を持たない
+// 配線**（`createGlideWiring`）であり、`node` 環境でそのまま検査できる（`glideAdapter.test.ts`。
+// `.tsx` を読み込むが、react プラグインを要する JSX はテストの側に無い — esbuild が tsconfig の
+// `jsx: "react-jsx"` で `.tsx` を変換し、CSS の取り込みは vitest が空の module にする）。
+// 実物の canvas を要するのは `DataEditor` を描く面（`GlideSurface`）だけで、**そちらは実物を
+// 起動して観測する**（`src/features/smoke/portProbe*` と `scripts/check-port-interaction.sh`）。
+// **`jsdom` は足さない** — 模した DOM には canvas が無く、見え方の主張（10 万行の走査・選択の
+// 区別・列幅と列の位置の操作）を何も裏付けられないためである。ライブラリ自体の取り込みは
+// `node` でも成功する（実測: `import("@glideapps/glide-data-grid")` が 58 の輸出を返す）。
+//
 // # 環境が `node` であること
 //
 // 描画層の移植口（`./port`）が扱うのは座標・文字・列の見出しだけであり、DOM を触らない。
