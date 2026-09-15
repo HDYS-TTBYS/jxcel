@@ -66,6 +66,8 @@
 |---|---|
 | 取り消し履歴の命令の形（何が 1 操作か、何を復元するか） | `formula-engine`, `macro-runtime` |
 | セル入力手段の登録簿の登録インターフェース | `custom-types` |
+| **境界に選択肢・参照先・ユーザー定義型の識別子を足す**（7.4 が記録した隙間 1〜3） | 8.3 の画面（`ColumnConstraints` の組み立て）と 7.4 の面 |
+| **確定の文字の運び手を登録に足す設計の改訂**（7.4 が記録した隙間 4。入れ子は `SetNested` でなければ適合しない） | 8.3 の画面、`custom-types`、7.4 の面 |
 | 窓の転送単位・符号化の形 | 要件 11 の予算の再測定 |
 | `schema-engine` の判定 API の形 | 本機能の編集経路 |
 | **`document-session` の design 確定** | **本設計（能力の水準で依存しているため、API の形が決まった時点で整合を取り直す）** — **2026-09-14 に実施済み**（`document-session` が実装完了。確定した公開面は「Allowed Dependencies」の `document-session` の項に記録した。想定と一致し、設計の変更は要らなかった） |
@@ -852,6 +854,38 @@ export interface CellEditorRegistry {
 **Implementation Notes**
 - Integration: 組込の 10 種は `editors/index.ts` が登録する。**グリッド側に型ごとの分岐を書かない**（要件 10.3、`structure.md`「拡張点は所有者と実装者を分ける」）
 - Risks: `TypeKindTag` は `schema-engine` の `TypeKind::ALL`（14 種）と対応する。片方が増えたときに気づけるよう、生成された境界用の型から導く
+
+**7.4 が定めた `ColumnConstraints`（本設計では名前だけだった型）**
+
+`CellEditorProps.constraints` の型は本設計に定義が無かったため、7.4 が**面が必要とする最小**を定めた
+（実装は `src/features/grid/editorRegistry.ts`）。
+
+```typescript
+export interface ColumnConstraints {
+  readonly kind: TypeKindTag;              // 葉の型の札（同じ面が札で振る舞いを変える）
+  readonly nullable: boolean;              // 値なしを許すか（3.7）
+  readonly choices?: readonly EnumChoice[];    // { value, label }（3.2）
+  readonly reference?: ReferenceSource;        // { sheet, rows: { id, label }[] }（3.8）
+  readonly members?: readonly ColumnMember[];  // 入れ子の位置ごとの宣言（5.1、5.5）
+}
+```
+
+`kind` が要るのは、`CellEditorProps` が札を別に持たないためである（`Int` と `Float` が数値の面を
+共有し、刻みだけが違う）。`nullable` が要るのは、キーだけで取り消せない面（暦・一覧・二値・参照）が
+値なしへ戻る道を持てるようにするためである（空の文字列が値なしである — `data-grid` の `edited_value`）。
+**どの欄も渡されないことは誤りではなく**、面はそのとき値をそのまま扱う既定へ落ちる（要件 10.4）。
+
+**申し送り（境界と設計に足りないもの。7.4 の時点で判明）**
+
+| # | 足りないもの | 要件 | どこへ |
+|---|---|---|---|
+| 1 | 選択肢の一覧（`Enum`）。`ColumnDescriptor` は `kind` しか運ばない | 3.2 | 境界用の型に欄を足す（`crates/app-shell/src/ipc/grid.rs` → 生成物を再生成） |
+| 2 | 参照先のシートと、その行を一覧する経路（`Ref`）。6.1 のコマンド 6 本に無い | 3.8 | 欄 1 つと**コマンド 1 本** |
+| 3 | ユーザー定義型の識別子。`kind` は `"Custom"` しか運ばないため `resolve` の `customTypeId` の出所が無い | 10.1, 10.4 | 境界用の型に `custom_type_id` |
+| 4 | **確定の文字の運び手。**`commit(text)` は経路を 1 本しか持たないのに、入れ子の列は `SetNested`（構造表現）でなければ適合しない（`Text` → `object` / `array` の変換の行が無い）。このままだと画面が**列の札で経路を選ぶ**ことになり、要件 10.3 と衝突する | 5.5, 10.3 | **本設計の改訂**（登録に経路の札を足すなど） |
+
+1〜3 は境界の追加、4 は設計の改訂である。**4 は 8.3 の実装時に必ず突き当たる**（詳細と実測は
+`research.md` の「7.4 が記録した隙間」）。
 
 #### RendererPort と GlideAdapter
 
