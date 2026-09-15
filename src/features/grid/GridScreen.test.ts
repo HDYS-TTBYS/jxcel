@@ -60,12 +60,15 @@ import {
   gridScreenLoaded,
   gridScreenNoticeDismissed,
   gridScreenRetried,
+  gridScreenSelectionChanged,
   initialGridScreenModel,
   loadGridScreenState,
   type GridScreenModel,
   type GridScreenState,
 } from "./GridScreen";
+import { initialSelection } from "./selection";
 import type { GridClient } from "./gridClient";
+import type { RendererSelection, VisibleSpan } from "./renderer/port";
 
 // ===========================================================================
 // 検査の道具（偽の境界と、状態からの描画）
@@ -157,6 +160,7 @@ function markOf(model: GridScreenModel): string {
       onRetry: () => undefined,
       onDismissNotice: () => undefined,
       onUnavailable: () => undefined,
+      onSelectionChange: () => undefined,
     }),
   );
 }
@@ -324,6 +328,7 @@ describe("画面内の失敗の経路（器に届かない失敗）", () => {
       sheet: "s1",
       summary: { columns: [descriptor(0, "名前")], row_count: 3 },
       visibleRows: 3,
+      selection: initialSelection(),
     });
 
     const withNotice = gridScreenFailed(ready, "この操作はまだ結線されていない: 列の幅");
@@ -374,8 +379,12 @@ describe("移植口の操作（8.2〜8.9 が結線する）", () => {
     const spec = createGridRendererSpec({
       columns: [{ title: "名前", width: 120 }],
       rowCount: 3,
+      selection: initialSelection(),
+      rowMarkers: "clickable-number",
       // 引く口は移植口へそのまま渡る（表を描く経路である）。
       getCell: () => ({ text: "標本", variant: "Text", violated: false, loading: false }),
+      onSelectionChange: () => undefined,
+      onVisibleSpanChange: () => undefined,
       onUnavailable: (operation) => {
         unavailable.push(operation);
       },
@@ -410,9 +419,240 @@ describe("移植口の操作（8.2〜8.9 が結線する）", () => {
       "表形式のテキストの貼り付け",
     ]);
 
-    // 選択の知らせは**操作ではない**（選択は移植口の実装が持ち、8.2 が消費する）。
+    // 選択の知らせは**操作ではない**（8.2 が消費する。告知へは流さない）。
     spec.onSelectionChange(null);
     expect(unavailable).toHaveLength(5);
+  });
+});
+
+// ===========================================================================
+// 2.5 現在位置と選択（要件 2.1、2.2、2.3、2.5、2.6。8.2）
+// ===========================================================================
+
+/** 標本の列 3 本（数え上げの検査に要る。行数は 20 件）。 */
+const SAMPLE_COLUMNS: readonly ColumnDescriptor[] = [
+  descriptor(0, "名前"),
+  descriptor(1, "数量"),
+  descriptor(2, "提供元"),
+];
+const SAMPLE_ROWS = 20;
+
+/** 表を描いている状態（選択を指定して組む）。 */
+function readyModel(selection: RendererSelection): GridScreenModel {
+  return gridScreenLoaded(initialGridScreenModel(), {
+    status: "ready",
+    sheet: "s1",
+    summary: { columns: [...SAMPLE_COLUMNS], row_count: SAMPLE_ROWS },
+    visibleRows: SAMPLE_ROWS,
+    selection,
+  });
+}
+
+/** マーク付けから数え上げを読む（**文字ではなく属性の数を読む**）。 */
+function countsIn(markup: string): {
+  readonly rows: number;
+  readonly columns: number;
+  readonly cells: number;
+  readonly currentRow: number;
+  readonly currentColumn: number;
+} {
+  const attribute = (name: string): number => {
+    const match = new RegExp(`${name}="(-?[0-9]+)"`).exec(markup);
+    if (match === null) {
+      throw new Error(`数え上げの属性 ${name} が画面に出ていない`);
+    }
+    return Number(match[1]);
+  };
+  return {
+    rows: attribute("data-selection-rows"),
+    columns: attribute("data-selection-columns"),
+    cells: attribute("data-selection-cells"),
+    currentRow: attribute("data-current-row"),
+    currentColumn: attribute("data-current-column"),
+  };
+}
+
+describe("現在位置と選択（8.2。要件 2.1、2.3、2.5）", () => {
+  it("表を描く状態は、現在位置を 1 つ持って始まる（先頭のセル）", async () => {
+    const client = fakeClient({
+      state: ok(openDocument([sheetOf("s1", "標本シート", 3, SAMPLE_ROWS)])),
+      open: ok(openedSheet({ columns: [...SAMPLE_COLUMNS], row_count: SAMPLE_ROWS })),
+      view: ok(derivedView(SAMPLE_ROWS)),
+    });
+
+    const state = await loadGridScreenState(client);
+
+    // **現在位置は開いた時点で 1 つある**（要件 2.1）。表を描かない状態は選択を持たない
+    // （型がそれを表している — `ready` の腕だけが `selection` を持つ）。
+    expect(state.status).toBe("ready");
+    if (state.status !== "ready") {
+      throw new Error("表を描く状態にならなかった");
+    }
+    expect(state.selection).toEqual(initialSelection());
+    expect(state.selection.current).toEqual({ row: 0, column: 0 });
+  });
+
+  it("1 つのセルの選択は 1 行 × 1 列 = 1 セルとして画面に出る（退化した場合）", () => {
+    const markup = markOf(
+      readyModel({ current: { row: 0, column: 0 }, range: { start: { row: 0, column: 0 }, end: { row: 0, column: 0 } } }),
+    );
+
+    expect(countsIn(markup)).toEqual({
+      rows: 1,
+      columns: 1,
+      cells: 1,
+      currentRow: 0,
+      currentColumn: 0,
+    });
+    expect(markup).toContain("jxcel-grid-table");
+    expect(markup).toContain("jxcel-grid-selection-counts");
+  });
+
+  it("矩形の選択は行数 × 列数 = セル数として画面に出る", () => {
+    const markup = markOf(
+      readyModel({
+        current: { row: 1, column: 0 },
+        range: { start: { row: 1, column: 0 }, end: { row: 3, column: 1 } },
+      }),
+    );
+
+    expect(countsIn(markup)).toEqual({
+      rows: 3,
+      columns: 2,
+      cells: 6,
+      currentRow: 1,
+      currentColumn: 0,
+    });
+  });
+
+  it("行の全体と列の全体でも、行数・列数・セル数が画面に出る", () => {
+    // 行の全体（列 3 本のシート）: 1 行 × 3 列 = 3 セル。
+    const wholeRow = markOf(
+      readyModel({
+        current: { row: 5, column: 1 },
+        range: { start: { row: 5, column: 0 }, end: { row: 5, column: 2 } },
+      }),
+    );
+    expect(countsIn(wholeRow)).toEqual({
+      rows: 1,
+      columns: 3,
+      cells: 3,
+      currentRow: 5,
+      currentColumn: 1,
+    });
+
+    // 列の全体（可視行 20 件）: 20 行 × 1 列 = 20 セル。
+    const wholeColumn = markOf(
+      readyModel({
+        current: { row: 5, column: 1 },
+        range: { start: { row: 0, column: 1 }, end: { row: SAMPLE_ROWS - 1, column: 1 } },
+      }),
+    );
+    expect(countsIn(wholeColumn)).toEqual({
+      rows: SAMPLE_ROWS,
+      columns: 1,
+      cells: SAMPLE_ROWS,
+      currentRow: 5,
+      currentColumn: 1,
+    });
+  });
+
+  it("利用者に見える現在位置は 1 起点である（内部の序数は 0 起点である）", () => {
+    const markup = markOf(
+      readyModel({
+        current: { row: 4, column: 2 },
+        range: { start: { row: 4, column: 2 }, end: { row: 4, column: 2 } },
+      }),
+    );
+
+    // 属性は**内部の序数**（0 起点）、画面の文字は**利用者に見える数**（1 起点）である。
+    expect(countsIn(markup).currentRow).toBe(4);
+    expect(markup).toContain("現在位置 5 行 3 列");
+  });
+
+  it("移植口へ渡す仕様に、選択・行見出し・知らせの口が載る（欄の素通し）", () => {
+    const selection: RendererSelection = {
+      current: { row: 2, column: 1 },
+      range: { start: { row: 1, column: 0 }, end: { row: 2, column: 1 } },
+    };
+    const observed: (RendererSelection | null)[] = [];
+    const spans: VisibleSpan[] = [];
+    const spec = createGridRendererSpec({
+      columns: [{ title: "名前", width: 120 }],
+      rowCount: SAMPLE_ROWS,
+      selection,
+      rowMarkers: "clickable-number",
+      getCell: () => ({ text: "", variant: "Text", violated: false, loading: false }),
+      onSelectionChange: (next) => {
+        observed.push(next);
+      },
+      onVisibleSpanChange: (span) => {
+        spans.push(span);
+      },
+      onUnavailable: () => undefined,
+    });
+
+    // マウントの時点の選択がそのまま渡る（要件 2.1）。
+    expect(spec.selection).toEqual(selection);
+    // **行見出しを出す**（行の全体をポインタで選ぶ操作はこれで成立する。要件 2.3）。
+    expect(spec.rowMarkers).toBe("clickable-number");
+    // 実装の知らせは画面の口へそのまま流れる（**現在位置を含む**）。
+    const reported: RendererSelection = {
+      current: { row: 7, column: 2 },
+      range: { start: { row: 5, column: 0 }, end: { row: 7, column: 2 } },
+    };
+    spec.onSelectionChange(reported);
+    spec.onSelectionChange(null);
+    expect(observed).toEqual([reported, null]);
+    // 見えている区間も同じである（追随の判断と窓の先読みの材料。要件 2.4）。
+    const span = { rows: { start: 0, count: 24 }, columns: { start: 0, count: 3 } };
+    spec.onVisibleSpanChange(span);
+    expect(spans).toEqual([span]);
+  });
+});
+
+describe("選択の遷移（8.2。要件 2.1）", () => {
+  it("表を描いていないときは選択を入れ替えない（描いていない表に現在位置は無い）", () => {
+    const loading = initialGridScreenModel();
+
+    expect(gridScreenSelectionChanged(loading, initialSelection())).toBe(loading);
+
+    const failed = gridScreenLoaded(loading, { status: "failed", message: "だめ", canRetry: true });
+    expect(gridScreenSelectionChanged(failed, initialSelection())).toBe(failed);
+  });
+
+  it("選択を入れ替えても、内容の領域と告知は動かない", () => {
+    const before = readyModel(initialSelection());
+    const next: RendererSelection = {
+      current: { row: 9, column: 2 },
+      range: { start: { row: 9, column: 2 }, end: { row: 9, column: 2 } },
+    };
+
+    const after = gridScreenSelectionChanged(before, next);
+
+    expect(after.state).toEqual({ ...before.state, selection: next });
+    expect(after.attempt).toBe(before.attempt);
+    expect(after.notice).toBe(before.notice);
+  });
+
+  it("解除の知らせでは、いまの選択を置き直す（描かれている選択と写しがずれない）", () => {
+    // Glide の Escape は選択の解除を報せてくる。**それを受け取って取り下げると、器に解除が
+    // 描かれたまま画面の写しだけが残る**（現在位置が 0 つになる。要件 2.1 に反する）。
+    const before = readyModel({
+      current: { row: 3, column: 1 },
+      range: { start: { row: 3, column: 1 }, end: { row: 3, column: 1 } },
+    });
+
+    const after = gridScreenSelectionChanged(before, null);
+
+    if (after.state.status !== "ready" || before.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // 値は同じであり、**同一の値ではない**（新しい値なので、移植口へもう一度下ろされる）。
+    expect(after.state.selection).toEqual(before.state.selection);
+    expect(after.state.selection).not.toBe(before.state.selection);
+    // 画面の数え上げも変わらない（写しは 1 つである）。
+    expect(countsIn(markOf(after))).toEqual(countsIn(markOf(before)));
   });
 });
 

@@ -44,22 +44,39 @@
  *     `src/features/smoke/portProbe*` と `scripts/check-port-interaction.sh` に置いた
  *     （1.6 の使い捨ての段と同じ形。**新しい系統は作らない**）。
  *
- * # 選択は実装が持ち、外へ報せる一方通行である（7.1 の申し送り）
+ * # 選択は画面が持ち、この写しは指示されたとおりに描く（8.2 が向きを決めた）
  *
- * `RendererSpec` には**選択を下ろす欄が無い**（`onSelectionChange` は外向きの知らせだけである）。
- * したがって列幅・列順のように「次の `mount` の仕様で押し戻す」ことができず、**選択と現在位置は
- * 実装が持つ**。本実装では [`GlideWiring`] が唯一の持ち主であり、`GlideSurface` はそれを
- * `useSyncExternalStore` で購読して `DataEditor` の制御選択の props へ渡す（**写しを 2 つ
- * 持たない**）。現在位置（`selection.current`）も同じ 1 つの状態の一部である。
+ * 7.1 と 7.2 は「選択は実装が持ち、外へ報せる一方通行」としていた（`RendererSpec` に下ろす欄が
+ * 無かったためである）。**8.2 が向きを変えた**: 選択と現在位置は画面が持ち、仕様
+ * （[`RendererSpec.selection`]。マウントの時点の値）と [`RendererHandle.setSelection`]（以後の
+ * 更新）で下ろす。理由は `selection.ts` の module doc にある（移動の意味論が製品の要件であり、
+ * ライブラリの中に置けない）。
  *
- * 選択と現在位置を画面（8.1）が知るには `onSelectionChange` の範囲しか無い。要件 2.1 の
- * 「現在位置を他のセルと区別して提示する」をどこが持つかは 8.1 / 8.8 が明示に決めることである
- * （design.md「Implementation Notes（7.2 / 8.x への申し送り）」が同じ穴を名指ししている）。
+ * それでも**写しは 1 つ**である。[`GlideWiring`] の `selection` は「いま描いている選択」そのもの
+ * であり、`GlideSurface` はそれを `useSyncExternalStore` で購読して `DataEditor` の制御選択の
+ * props へ渡す。外へ報せる値（`onSelectionChange`）は**その同じ 1 つの値から導く** — 画面の写しと
+ * 描かれているものがずれる余地を作らない。
+ *
+ * 下ろされた選択は**報せ返さない**（報せ返すと往復し、ずれの種になる）。報せるのは**実装が
+ * 起こした**変化だけである: 利用者のポインタ、行見出しの操作、Glide の側に残した打鍵の束縛
+ * （端への移動など）。
+ *
+ * # 打鍵の束縛のうち、どれをこの写しが止めるか
+ *
+ * 止めるのは [`GLIDE_KEYBINDINGS`] にある 3 種類（クリップボード・移動と範囲の広げ・行/列の
+ * 全体）である。**移動を止めるのは、要件 2.2 の「隣接するセルへ移る」と端の扱いが製品の要件
+ * だからである** — ライブラリの打鍵処理に置くと、移植口を差し替えたときに要件が消える
+ * （`selection.ts` の module doc）。止めないもの（端への移動・ページ・表の全体・Tab・編集の起動）
+ * は画面が引き受けないので、そのまま働かせる。
+ *
+ * 行見出し列（`rowMarkers`）は**画面が決める**（`RendererSpec.rowMarkers`）。Glide は行見出しの
+ * ぶんの添字を内部で補正する（`getCellContent` / `onColumnResize` / `onSelectionChange` の
+ * 正規化 / `onVisibleRegionChanged` / `scrollTo` のいずれも）ので、写しは値を渡すだけでよい。
  *
  * # 列幅・列順は次の `mount` でしか表示へ反映できない
  *
- * `RendererHandle` は `scrollTo` / `invalidate` / `destroy` しか持たないので、列幅・列順の変化は
- * **次に渡される仕様**に載るほかない。本実装は「マウントのたびに仕様を受け取り、そのとおりに
+ * `RendererHandle` が選択のための口を 1 つ持つ（`setSelection`）以外は変わらない。列幅・列順の
+ * 変化は**次に渡される仕様**に載るほかない。本実装は「マウントのたびに仕様を受け取り、そのとおりに
  * 描く」だけであり、`onColumnResize` / `onColumnMove` は外向きの知らせに徹する（移植口を
  * 使う側が、新しい仕様で `mount` し直すかどうかを決める）。**8.8 が列幅・列順の操作を結線する
  * ときに効いてくる**（design.md の同じ申し送り）。
@@ -105,6 +122,7 @@
  *     型の札は**右寄せの判断にだけ**使う。
  */
 import {
+  CompactSelection,
   DataEditor,
   GridCellKind,
   emptyGridSelection,
@@ -113,6 +131,7 @@ import {
   type GridColumn,
   type GridSelection,
   type Item,
+  type Rectangle,
   type Theme,
 } from "@glideapps/glide-data-grid";
 // ライブラリのスタイル。**スクロールの成立そのものがこの CSS に依る**（`.dvn-scroller` の
@@ -142,7 +161,9 @@ import type {
   GridRendererPort,
   RenderCell,
   RendererHandle,
+  RendererSelection,
   RendererSpec,
+  RowMarkerMode,
   RowSpan,
 } from "./port";
 
@@ -179,6 +200,49 @@ const RIGHT_ALIGNED_KINDS: Partial<Record<TypeKindTag, true>> = {
 };
 
 /**
+ * Glide へ渡す打鍵の束縛のうち、**この写しが止めるもの**（8.2）。
+ *
+ * 止めるのは 3 種類である。
+ *
+ *   1. **複製・切り取り・貼り付け**（7.2）。Glide の経路は移植口を通らない（モジュール doc）。
+ *   2. **移動と範囲の広げ**（`go*Cell` / `selectGrow*` / `*RetainSelection`）。要件 2.2 の
+ *      「隣接するセルへ移る」と端の扱いは**製品の要件であり、ライブラリの打鍵処理の中に
+ *      置けない**（移植口を挟んだ理由は差し替え可能性である。`selection.ts` の module doc）。
+ *      画面（`selection.ts`）が扱い、この写しは Glide の側の経路を閉じる。
+ *   3. **行の全体・列の全体**（`selectRow` / `selectColumn`）。同じ理由で画面が扱う。
+ *
+ * **止めないもの（そのまま働かせる）**: 先頭・末尾への移動（`goToFirst*` / `goToLast*`。
+ * 要件 1.3、1.4）、ページの移動（`goToNextPage` / `goToPreviousPage`）、表の全体（`selectAll`）、
+ * 端までの範囲の選択（`selectToFirst*` / `selectToLast*`）、編集の起動（`activateCell`）。
+ * これらは**画面が引き受けない**ので、止めれば機能が黙って消える。
+ *
+ * `goLeftCell` / `goRightCell` を `false` にせず Tab だけを残してあるのは、**Tab が器の焦点の
+ * 移動でもある**ためである（止めると Tab がグリッドの外へ逃げ、見えている表を離れる）。
+ */
+const GLIDE_KEYBINDINGS = {
+  copy: false,
+  cut: false,
+  paste: false,
+  goUpCell: false,
+  goDownCell: false,
+  goLeftCell: "shift+Tab",
+  goRightCell: "Tab",
+  goUpCellRetainSelection: false,
+  goDownCellRetainSelection: false,
+  goLeftCellRetainSelection: false,
+  goRightCellRetainSelection: false,
+  selectGrowUp: false,
+  selectGrowDown: false,
+  selectGrowLeft: false,
+  selectGrowRight: false,
+  selectRow: false,
+  selectColumn: false,
+} as const;
+
+/** 上の束縛の型（配線の props が名指しする）。**値は Glide が解釈する綴りである。** */
+export type GlideKeybindings = typeof GLIDE_KEYBINDINGS;
+
+/**
  * `DataEditor` へ渡すもの。**Glide の props の signature そのまま**である（写像を薄く保つ —
  * 上流が止まっても差し替えられる面積を最小にするのが移植口を挟んだ理由である）。
  *
@@ -190,19 +254,28 @@ export interface GlideWiringProps {
   readonly columns: readonly GridColumn[];
   /** 可視行の総数。 */
   readonly rows: number;
+  /** 行見出し列の出し方（`RendererSpec.rowMarkers` の写し）。要件 2.3。 */
+  readonly rowMarkers: RowMarkerMode;
   /** セルを引く。**同期であり、例外を投げない**（移植口の不変条件に乗る）。 */
   readonly getCellContent: (item: Item) => GridCell;
   readonly rowHeight: number;
   readonly headerHeight: number;
   /**
    * Glide 自身のクリップボードの操作を止める。**この写しが DOM の `copy` / `paste` を受ける**
-   * （モジュール doc「クリップボードは移植口を唯一の経路にする」）。
+   * （モジュール doc「クリップボードは移植口を唯一の経路にする」）。8.2 はこれに加えて
+   * **移動・範囲の広げ・行/列の全体の打鍵の束縛も止める**（[`GLIDE_KEYBINDINGS`]）。
    */
-  readonly keybindings: {
-    readonly copy: false;
-    readonly cut: false;
-    readonly paste: false;
-  };
+  readonly keybindings: GlideKeybindings;
+  /**
+   * 見えている区間が変わった。**Glide の `Rectangle` はデータの座標である**（行見出しのぶんは
+   * Glide が内部で補正する）。移植口へは行と列の区間として渡す（要件 2.4）。
+   */
+  readonly onVisibleRegionChanged: (
+    range: Rectangle,
+    tx: number,
+    ty: number,
+    extras: { readonly selected?: Item; readonly freezeRegion?: Rectangle },
+  ) => void;
   /** 編集の起動（打鍵または二度打ち）。**編集の中身は運ばない。** */
   readonly onCellActivated: (item: Item) => void;
   /**
@@ -239,7 +312,7 @@ export interface GlideSurfaceRef {
 export interface GlideWiring {
   /** `DataEditor` へ渡す props（選択の 2 つを除く。上の docs）。 */
   readonly props: GlideWiringProps;
-  /** いまの選択。**配線が持つ唯一の写しである**（面はこれを描くだけである）。 */
+  /** いまの選択。**配線が保持する唯一の写しである**（面はこれを描くだけである）。 */
   readonly selection: GridSelection;
   /** 選択の変化の購読（React の面が `useSyncExternalStore` で使う）。解除の関数を返す。 */
   subscribeSelection(listener: () => void): () => void;
@@ -263,7 +336,7 @@ export interface GlideWiring {
 const NO_SELECTION = emptyGridSelection;
 
 /**
- * Glide の選択を移植口の範囲へ正規化する。**移植口は矩形しか運べない**（`CellRange`）ので、
+ * Glide の選択を移植口の範囲へ正規化する。**移植口の矩形は 1 つである**（`CellRange`）ので、
  * 行の全体・列の全体も同じ形（矩形）に写す。数えるのは写す側である。
  *
  *   - `current`（矩形）があればそれを使う。
@@ -323,14 +396,71 @@ function anchorOfSelection(selection: GridSelection): CellPosition | null {
   return null;
 }
 
-/** 2 つの範囲が同じかを比べる（知らせは**変化のときだけ**出す。下の `selectionChanged`）。 */
-function sameRange(a: CellRange | null, b: CellRange | null): boolean {
-  if (a === null || b === null) return a === b;
+/**
+ * Glide の選択を移植口の選択（**現在位置と矩形**）へ写す。要件 2.1 の「現在位置を他のセルと
+ * 区別して提示する」は、描き手にとっては `current` の有無である。
+ *
+ * **現在位置は `current.cell` から取る**（矩形の左上ではない）。右下から左上へ引いた選択では
+ * 錨が右下にあり、左上へ潰すと利用者が動かしていたセルが別のセルになる。`current` が無い選択
+ * （行見出しで行の全体を選んだときなど）に限り矩形の始点を現在位置にする — 画面は「表を描くときは
+ * 現在位置が 1 つある」を保つので、`null` を返すのは選択が解除されたときだけである。
+ */
+function selectionOf(
+  selection: GridSelection,
+  rowCount: number,
+  columnCount: number,
+): RendererSelection | null {
+  const range = rangeOfSelection(selection, rowCount, columnCount);
+  if (range === null) {
+    return null;
+  }
+  const cell = selection.current?.cell;
+  return {
+    current: cell === undefined ? range.start : { row: cell[1], column: cell[0] },
+    range,
+  };
+}
+
+/**
+ * 移植口の選択を Glide の選択へ写す（**下ろす向き**。要件 2.1、2.2、2.3）。
+ *
+ * 行の全体・列の全体も矩形 + 現在位置として渡すので、Glide は同じ 1 つの形として描く
+ * （数えるのは画面の側である — `selection.ts`）。行と列の集合（`rows` / `columns`）は使わない:
+ * **矩形 1 つと現在位置 1 つで表せる**ためである。
+ */
+function glideSelectionFor(selection: RendererSelection | null): GridSelection {
+  if (selection === null) {
+    return NO_SELECTION;
+  }
+  const { current, range } = selection;
+  return {
+    columns: CompactSelection.empty(),
+    rows: CompactSelection.empty(),
+    current: {
+      cell: [current.column, current.row],
+      range: {
+        x: range.start.column,
+        y: range.start.row,
+        width: range.end.column - range.start.column + 1,
+        height: range.end.row - range.start.row + 1,
+      },
+      rangeStack: [],
+    },
+  };
+}
+
+/** 2 つの選択が同じかを比べる（知らせは**変化のときだけ**出す。下の `selectionChanged`）。 */
+function sameSelection(a: RendererSelection | null, b: RendererSelection | null): boolean {
+  if (a === null || b === null) {
+    return a === b;
+  }
   return (
-    a.start.row === b.start.row &&
-    a.start.column === b.start.column &&
-    a.end.row === b.end.row &&
-    a.end.column === b.end.column
+    a.current.row === b.current.row &&
+    a.current.column === b.current.column &&
+    a.range.start.row === b.range.start.row &&
+    a.range.start.column === b.range.start.column &&
+    a.range.end.row === b.range.end.row &&
+    a.range.end.column === b.range.end.column
   );
 }
 
@@ -385,6 +515,10 @@ function damageForSpan(span: RowSpan, columnCount: number): readonly { readonly 
 /**
  * 移植口の実装の DOM を持たない部分を組み立てる（上の [`GlideWiring`]）。**仕様はマウントの
  * たびに 1 つ受け取る**（変化は次の `mount` の仕様に載る。モジュール doc を参照）。
+ *
+ * **選択だけは仕様の外からも動く**（8.2）: 仕様の [`RendererSpec.selection`] はマウントの時点の
+ * 値であり、以後は呼び出し側が [`RendererHandle.setSelection`] で下ろす。下ろされた選択は
+ * **外へ報せ返さない**（報せ返すと、画面の状態と実装の状態が往復して食い違いの種になる）。
  */
 export function createGlideWiring(spec: RendererSpec): GlideWiring {
   // 列は**見出しと幅だけ**を写す（`RenderColumn` の面そのままである）。
@@ -395,10 +529,11 @@ export function createGlideWiring(spec: RendererSpec): GlideWiring {
   const surfaceRef: GlideSurfaceRef = { current: null };
   const listeners = new Set<() => void>();
 
-  let selection: GridSelection = NO_SELECTION;
-  // 直近に**外へ報せた**範囲。同じ選択の再通知を外へ出さないために持つ（知らせは変化のときだけ
-  // である。Glide は同じ選択を何度も通知しうる）。
-  let reported: CellRange | null = null;
+  // マウントの時点の選択は**仕様が持っている**（要件 2.1: 表を描くときは現在位置が 1 つある）。
+  let selection: GridSelection = glideSelectionFor(spec.selection);
+  // 直近に**外へ報せた**（または画面が最初から知っている）選択。同じ選択の再通知を外へ出さない
+  // ために持つ（知らせは変化のときだけである。Glide は同じ選択を何度も通知しうる）。
+  let reported: RendererSelection | null = spec.selection;
   let released = false;
 
   /**
@@ -413,33 +548,51 @@ export function createGlideWiring(spec: RendererSpec): GlideWiring {
     return spec;
   };
 
-  const selectionChanged = (next: GridSelection): void => {
-    // 破棄の後は知らせの経路を閉じる（同じ選択かどうかを見る前に閉じる — 破棄そのものが
-    // 画面の消滅であり、以後の通知はすべて実装の誤りである）。
-    liveSpec("onSelectionChange");
+  /** 描くものを差し替え、面を描き直させる（React の面が `useSyncExternalStore` で読む）。 */
+  const drawSelection = (next: GridSelection): void => {
     selection = next;
     for (const listener of listeners) {
       listener();
     }
-    const range = rangeOfSelection(next, spec.rowCount, columns.length);
-    if (sameRange(range, reported)) {
+  };
+
+  /**
+   * **実装が起こした**選択の変化（利用者のポインタ・行見出し・Glide の打鍵の束縛）を外へ報せる。
+   * 画面が下ろした選択（[`RendererHandle.setSelection`]）はここを通らない — 通すと往復する。
+   */
+  const selectionChanged = (next: GridSelection): void => {
+    // 破棄の後は知らせの経路を閉じる（同じ選択かどうかを見る前に閉じる — 破棄そのものが
+    // 画面の消滅であり、以後の通知はすべて実装の誤りである）。
+    liveSpec("onSelectionChange");
+    drawSelection(next);
+    const observed = selectionOf(next, spec.rowCount, columns.length);
+    if (sameSelection(observed, reported)) {
       return;
     }
-    reported = range;
-    liveSpec("onSelectionChange").onSelectionChange(range);
+    reported = observed;
+    liveSpec("onSelectionChange").onSelectionChange(observed);
   };
 
   return {
     props: {
       columns,
       rows: spec.rowCount,
+      rowMarkers: spec.rowMarkers,
+      keybindings: GLIDE_KEYBINDINGS,
       // **列と行を取り違えない**（Glide の `Item` は `[列, 行]` である）。幅は骨組みの棒の
       // ためだけに使う（列が範囲の外である場合も `RenderCell` の契約どおり読み込み中が返る）。
       getCellContent: (item) =>
         glideCellFor(spec.getCell({ row: item[1], column: item[0] }), widths[item[0]] ?? 0),
       rowHeight: GLIDE_ADAPTER_ROW_HEIGHT,
       headerHeight: GLIDE_ADAPTER_HEADER_HEIGHT,
-      keybindings: { copy: false, cut: false, paste: false },
+      onVisibleRegionChanged: (range) => {
+        // Glide の `Rectangle` は**データの座標である**（行見出しのぶんは Glide が内部で補正
+        // する）。行と列の区間としてそのまま移植口へ渡す（要件 2.4）。
+        liveSpec("onVisibleSpanChange").onVisibleSpanChange({
+          rows: { start: range.y, count: range.height },
+          columns: { start: range.x, count: range.width },
+        });
+      },
       onCellActivated: (item) => {
         liveSpec("onActivateEditor").onActivateEditor({ row: item[1], column: item[0] });
       },
@@ -471,6 +624,16 @@ export function createGlideWiring(spec: RendererSpec): GlideWiring {
     },
     surfaceRef,
     handle: {
+      setSelection(next) {
+        liveSpec("setSelection");
+        drawSelection(glideSelectionFor(next));
+        // **下ろした値も「実装が最後に知っている選択」として覚える。**覚えないと、利用者が
+        // その値と一致する位置をポインタで指したとき `selectionChanged` の同一判定で飲み込まれ、
+        // **描かれている選択と画面の写しが食い違う**（8.2 のレビューが実測: 画面が (0,1) を
+        // 下ろした後に利用者が (0,0) をクリックすると、外へ報せず写しは (0,1) のまま残る）。
+        // **報せ返さない**こと自体は変わらない（画面は自分が決めた選択を知っている）。
+        reported = next;
+      },
       scrollTo(position) {
         // Glide の `scrollTo` は `(列, 行, 方向)` である。**列と行を取り違えない。**
         // 両軸を動かす（移植口の契約は「その位置が見えるところまで」であり、軸を選ばない）。
@@ -491,6 +654,7 @@ export function createGlideWiring(spec: RendererSpec): GlideWiring {
         // （`DataEditor` の unmount で `ref.current` が `null` になる）。
         listeners.clear();
         selection = NO_SELECTION;
+        reported = null;
       },
     },
   };
@@ -632,7 +796,10 @@ export function createGlideAdapter(): GridRendererPort {
       const root = createRoot(container);
       root.render(<GlideSurface wiring={wiring} />);
       return {
-        // 3 つの写しは配線のものをそのまま使う（意味論は配線の側にある）。
+        // 写しは配線のものをそのまま使う（意味論は配線の側にある）。
+        setSelection: (selection) => {
+          wiring.handle.setSelection(selection);
+        },
         scrollTo: (position) => {
           wiring.handle.scrollTo(position);
         },

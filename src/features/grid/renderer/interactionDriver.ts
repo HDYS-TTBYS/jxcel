@@ -1,12 +1,12 @@
 /**
- * 描画層の移植口（`./port`）の駆動器（tasks.md 7.1。要件 2.1, 2.2, 2.3）。
+ * 描画層の移植口（`./port`）の駆動器（tasks.md 7.1 / 8.2。要件 2.1, 2.2, 2.3）。
  *
  * **テスト専用の道具である**（配布物へ入る経路は無い。`src/` のどの入口からも取り込まれない）。
  * 役割は 3 つある。
  *
- *   1. **決められた操作の並び**（マウント → 選択の変化 → 編集の起動 → 列幅の変更 → 列の移動 →
- *      複製 → 貼り付け → `scrollTo` → `invalidate` → `destroy`）を、どの実装にも同じように
- *      注ぎ込む（[`driveCanonicalSequence`]）。
+ *   1. **決められた操作の並び**（マウント → 選択の変化 → 見えている区間の変化 → 選択の指示
+ *      （`setSelection`）→ 編集の起動 → 列幅の変更 → 列の移動 → 複製 → 貼り付け → `scrollTo` →
+ *      `invalidate` → `destroy`）を、どの実装にも同じように注ぎ込む（[`driveCanonicalSequence`]）。
  *   2. 移植口が**外へ出した呼び出しを順に記録する**（[`RecordedCall`]）。記録は移植口の
  *      callback の引数をそのままの形で持つので、余計な材料が載れば比較で見える。
  *   3. セルの出所（窓の記憶の模型。[`RowSource`]）を 2 通り用意し、行の持ち方が違っても
@@ -19,14 +19,15 @@
  * `GridRendererPort` が持つのは `mount` だけで、外向きの知らせは `RendererSpec` の callback で
  * ある。したがって駆動器は、移植口に**操作を起こす面**（[`RendererEventSource`]）を足した
  * [`DrivableRenderer`] を要求する。**この面は移植口の一部ではない** — 実物の実装（7.2 の Glide の
- * 写し）が実装すべきものではなく、テストの側が実物の通知（選択・起動・列幅・列の移動・複製・
- * 貼り付け）に 1 枚かぶせる薄い層である。実物に対するその層は
+ * 写し）が実装すべきものではなく、テストの側が実物の通知（選択・走査・起動・列幅・列の移動・
+ * 複製・貼り付け）に 1 枚かぶせる薄い層である。実物に対するその層は
  * [`glideDrivableRenderer`] にある。
  *
  * # 何を記録し、何を記録しないか
  *
  * 記録するのは**移植口の契約に属する呼び出し**である: 呼び出し側が入る唯一の口（`mount`）、
- * 外向きの知らせ 6 つ、呼び出し側が使う口 3 つ（`scrollTo` / `invalidate` / `destroy`）。
+ * 外向きの知らせ 7 つ（選択・見えている区間・起動・列幅・列の移動・複製・貼り付け）、
+ * 呼び出し側が使う口 4 つ（`setSelection` / `scrollTo` / `invalidate` / `destroy`）。
  *
  * **`getCell` は記録しない。**セルをいつ何回引くかは実装の作りそのもの（窓をまとめて引くか、
  * 必要になった行だけ引くか）であり、並びの比較に持ち込むと「実装を差し替えても並びが変わらない」
@@ -62,9 +63,11 @@ import type {
   RenderCell,
   RenderColumn,
   RendererHandle,
+  RendererSelection,
   RendererSpec,
   RowOrdinal,
   RowSpan,
+  VisibleSpan,
 } from "./port";
 
 /** 標本の可視行数。 */
@@ -87,10 +90,21 @@ const DRIVE_KINDS: readonly TypeKindTag[] = ["Text", "Int", "Ref"];
 const VIOLATION_PERIOD = 7;
 const VIOLATION_OFFSET = 3;
 
+/**
+ * マウントの時点の選択（先頭のセル 1 つ）。**画面（8.2）は表を描くときつねに現在位置を 1 つ
+ * 渡す**ので、駆動の標本も同じ形にする（要件 2.1）。
+ */
+const INITIAL_SELECTION: RendererSelection = {
+  current: { row: 0, column: 0 },
+  range: { start: { row: 0, column: 0 }, end: { row: 0, column: 0 } },
+};
+
 /** 移植口の呼び出しの名前。記録の並びを比較する単位である。 */
 export type PortCall =
   | "mount"
+  | "setSelection"
   | "onSelectionChange"
+  | "onVisibleSpanChange"
   | "onActivateEditor"
   | "onColumnResize"
   | "onColumnMove"
@@ -114,8 +128,13 @@ export interface RecordedCall {
  * 並びが時機に依存しないことが、`port.test.ts` の比較で確かめられる。
  */
 export interface RendererEventSource {
-  /** 選択が変わった（解除は `null`）。 */
-  emitSelectionChange(range: CellRange | null): Promise<void>;
+  /** 選択が変わった（解除は `null`）。**現在位置を含む**（要件 2.1、2.2）。 */
+  emitSelectionChange(selection: RendererSelection | null): Promise<void>;
+  /**
+   * 見えている区間が変わった（走査）。**利用者の操作（走査）であり、実装の通知である**
+   * （要件 2.4 の追随と、7.3 の先読みの材料。8.2 が足した面）。
+   */
+  emitVisibleSpanChange(span: VisibleSpan): Promise<void>;
   /** 編集の起動が指示された。 */
   emitActivateEditor(position: CellPosition): Promise<void>;
   /** 列の幅が変更された。 */
@@ -235,6 +254,11 @@ export interface SpecOptions {
    * 駆動器はこれを使って、**貼り付けへ渡す文字列を複製の戻り値そのものにする**（作り直さない）。
    */
   readonly copyText?: (range: CellRange) => string;
+  /**
+   * マウントの時点の選択（既定は {@link INITIAL_SELECTION} ＝先頭のセル 1 つ）。
+   * `null` は「表を描かない」経路の標本である。
+   */
+  readonly selection?: RendererSelection | null;
 }
 
 /**
@@ -263,9 +287,16 @@ export function createRendererSpec(options: SpecOptions): RendererSpec {
   return {
     columns: DRIVE_COLUMNS,
     rowCount: DRIVE_ROW_COUNT,
+    // 画面（8.2）が下ろす 2 つ。**表を描くときは現在位置が 1 つある**（要件 2.1）ので、
+    // 駆動でもマウントの時点で先頭のセルを現在位置にする。
+    selection: options.selection === undefined ? INITIAL_SELECTION : options.selection,
+    rowMarkers: "clickable-number",
     getCell: (position) => options.source.cell(position),
-    onSelectionChange: (range) => {
-      options.record?.("onSelectionChange", [range]);
+    onSelectionChange: (selection) => {
+      options.record?.("onSelectionChange", [selection]);
+    },
+    onVisibleSpanChange: (span) => {
+      options.record?.("onVisibleSpanChange", [span]);
     },
     onActivateEditor: (position) => {
       options.record?.("onActivateEditor", [position]);
@@ -321,7 +352,20 @@ export interface DrivenRun {
 // 決められた操作の並び（駆動器が持つ台本）。**この値そのものが契約であり、期待する並びを
 // 確かめる側（`port.test.ts`）はここから読まずに逐語で書く**（台本ごと書き換えたときに
 // 気づけるようにするためである）。
-const SELECTION: CellRange = { start: { row: 1, column: 0 }, end: { row: 3, column: 1 } };
+//
+// `SELECTION` の現在位置は**矩形の右下**である（左上ではない）。画面が持ち込みうる選択のうち
+// 最も取り違えやすい形であり、現在位置を矩形の左上へ潰す実装は、この台本で並びの比較に落ちる
+// （`port.ts` の `RendererSelection` の docs）。
+const SELECTION: RendererSelection = {
+  current: { row: 3, column: 1 },
+  range: { start: { row: 1, column: 0 }, end: { row: 3, column: 1 } },
+};
+const VISIBLE: VisibleSpan = { rows: { start: 0, count: 24 }, columns: { start: 0, count: 3 } };
+/** 画面が下ろす選択（移動の結果。要件 2.2）。**実装はこれを報せ返してはならない。** */
+const PUSHED_SELECTION: RendererSelection = {
+  current: { row: 5, column: 2 },
+  range: { start: { row: 5, column: 2 }, end: { row: 5, column: 2 } },
+};
 const ACTIVATION: CellPosition = { row: 2, column: 1 };
 const RESIZE_COLUMN = 1;
 const RESIZE_WIDTH = 144;
@@ -335,9 +379,18 @@ const INVALIDATE: RowSpan = { start: 8, count: 4 };
 /**
  * 決められた操作の並びを 1 回注ぎ、観測された呼び出しの並びを返す。
  *
- * 順は マウント → 選択の変化 → 編集の起動 → 列幅の変更 → 列の移動 → 複製 → 貼り付け →
- * `scrollTo` → `invalidate` → `destroy` である。複製で返った文字列は**そのまま貼り付けの入力に
- * 使う** — 移植口が中身を解釈しないこと（素通しであること）を、同じバイトが往復することで示す。
+ * 順は マウント → 選択の変化 → 見えている区間の変化 → **選択の指示**（`setSelection`）→
+ * 編集の起動 → 列幅の変更 → 列の移動 → 複製 → 貼り付け → `scrollTo` → `invalidate` →
+ * `destroy` である。
+ *
+ * 2 つの意味を持つ段が混ざっている。**利用者の操作は `emit*`**（実装が受け取り、callback として
+ * 外へ出る）であり、**呼び出し側の指示は `handle` の口**（`setSelection` / `scrollTo` /
+ * `invalidate` / `destroy`）である。選択は両方から来る — ポインタの操作（`emitSelectionChange`）
+ * と、画面が決めた選択を下ろす指示（`setSelection`）である。**下ろした指示が報せ返らないこと**を
+ * 並びの比較が固定する（返せば `onSelectionChange` がもう 1 つ現れる）。
+ *
+ * 複製で返った文字列は**そのまま貼り付けの入力に使う** — 移植口が中身を解釈しないこと
+ * （素通しであること）を、同じバイトが往復することで示す。
  *
  * 知らせは 1 つずつ待ってから次へ進む。したがって**同期に通知する実装と、遅らせて通知する
  * 実装のどちらでも並びは同じ**になる（時機は実装の自由であり、契約ではない）。
@@ -367,6 +420,9 @@ export async function driveCanonicalSequence(
   const handle = renderer.mount(container, spec);
 
   await renderer.emitSelectionChange(SELECTION);
+  await renderer.emitVisibleSpanChange(VISIBLE);
+  record("setSelection", [PUSHED_SELECTION]);
+  handle.setSelection(PUSHED_SELECTION);
   await renderer.emitActivateEditor(ACTIVATION);
   await renderer.emitColumnResize(RESIZE_COLUMN, RESIZE_WIDTH);
   await renderer.emitColumnMove(MOVE_FROM, MOVE_TO);
@@ -383,16 +439,21 @@ export async function driveCanonicalSequence(
   return { renderer, container, spec, handle, calls };
 }
 
-/** 移植口の範囲（矩形）を Glide の選択へ写す。**錨は左上**である（貼り付けの宛先になる）。 */
-function selectionOfRange(range: CellRange | null): GridSelection {
-  if (range === null) {
+/**
+ * 選択を Glide の選択へ写す。**矩形と現在位置の両方を渡す**（`current` を落とすと、矩形の左上が
+ * 現在位置になってしまう）。範囲の選択（行の全体・列の全体）は矩形だけを持たないので、
+ * 現在位置は `current` が無いときに限り矩形の始点へ落とす（`glideAdapter.tsx` の正規化と同じ規則）。
+ */
+function selectionOf(selection: RendererSelection | null): GridSelection {
+  if (selection === null) {
     return emptyGridSelection;
   }
+  const { current, range } = selection;
   return {
     columns: CompactSelection.empty(),
     rows: CompactSelection.empty(),
     current: {
-      cell: [range.start.column, range.start.row],
+      cell: [current.column, current.row],
       range: {
         x: range.start.column,
         y: range.start.row,
@@ -409,7 +470,7 @@ function selectionOfRange(range: CellRange | null): GridSelection {
  * 薄い層（tasks.md 7.2。`fakeRenderer.ts` のヘッダの申し送り）。
  *
  * 7.1 が残した課題はこれである: 移植口には「利用者の操作」を注ぐ口が無いので、**実物の通知**
- * （選択・起動・列幅・列の移動・複製・貼り付け）にテスト専用の面を 1 枚かぶせ、`port.test.ts` の
+ * （選択・走査・起動・列幅・列の移動・複製・貼り付け）にテスト専用の面を 1 枚かぶせ、`port.test.ts` の
  * 比較表と同じ並びが実物でも観測されることを示す。**この層は移植口の一部ではない** —
  * `GlideWiring` が実装すべきものではなく、Glide の引数の形と移植口の引数の形の**間の写し**を
  * テストの側が持つだけである。
@@ -418,7 +479,8 @@ function selectionOfRange(range: CellRange | null): GridSelection {
  *
  * | 注入する操作 | Glide の通知（`GlideWiringProps`） | 移植口 |
  * |---|---|---|
- * | `emitSelectionChange` | `onGridSelectionChange`（`GridSelection`） | `onSelectionChange`（矩形） |
+ * | `emitSelectionChange` | `onGridSelectionChange`（`GridSelection`） | `onSelectionChange`（現在位置と矩形） |
+ * | `emitVisibleSpanChange` | `onVisibleRegionChanged`（`Rectangle`） | `onVisibleSpanChange`（行と列の区間） |
  * | `emitActivateEditor` | `onCellActivated`（`Item` = 列, 行） | `onActivateEditor`（位置） |
  * | `emitColumnResize` | `onColumnResize`（列, 幅, 添字, grow 込み） | `onColumnResize`（添字, 幅） |
  * | `emitColumnMove` | `onColumnMoved`（from, to） | `onColumnMove`（from, to） |
@@ -455,8 +517,23 @@ export function glideDrivableRenderer(
       mounted = { spec: initial, wiring: createWiring(initial) };
       return mounted.wiring.handle;
     },
-    async emitSelectionChange(range) {
-      wiringOf("emitSelectionChange").props.onGridSelectionChange(selectionOfRange(range));
+    async emitSelectionChange(selection) {
+      wiringOf("emitSelectionChange").props.onGridSelectionChange(selectionOf(selection));
+    },
+    async emitVisibleSpanChange(span) {
+      // 実物の通知は Glide の `Rectangle`（**データの座標である**。行見出しのぶんは Glide が
+      // 内部で補正する — `glideAdapter.tsx` の `rowMarkers` の節）である。
+      wiringOf("emitVisibleSpanChange").props.onVisibleRegionChanged?.(
+        {
+          x: span.columns.start,
+          y: span.rows.start,
+          width: span.columns.count,
+          height: span.rows.count,
+        },
+        0,
+        0,
+        {},
+      );
     },
     async emitActivateEditor(position) {
       const item: Item = [position.column, position.row];

@@ -51,8 +51,14 @@ import {
   lazyRowSource,
   type PortCall,
   type RecordedCall,
+  type RowSource,
 } from "./interactionDriver";
-import type { CellPosition, CellRange, RendererSpec } from "./port";
+import type {
+  CellPosition,
+  CellRange,
+  RendererSelection,
+  RendererSpec,
+} from "./port";
 
 /** 記録の控え。**移植口の callback が受け取った引数をそのまま**溜める。 */
 function recorder(): {
@@ -113,15 +119,32 @@ const NO_SELECTION: GridSelection = {
   rows: CompactSelection.empty(),
 };
 
-/** 標本の仕様から組んだ配線と、移植口が受け取った引数の記録。 */
-function wiringFor(source = arrayRowSource()): {
+/**
+ * 標本の仕様から組んだ配線と、移植口が受け取った引数の記録。
+ *
+ * `selection` はマウントの時点の選択である（既定は駆動器の標本＝先頭のセル 1 つ。要件 2.1）。
+ */
+function wiringFor(options: {
+  readonly source?: RowSource;
+  readonly selection?: RendererSelection | null;
+} = {}): {
   readonly wiring: GlideWiring;
   readonly calls: RecordedCall[];
 } {
   const log = recorder();
-  const spec: RendererSpec = createRendererSpec({ source, record: log.record });
+  const spec: RendererSpec = createRendererSpec({
+    source: options.source ?? arrayRowSource(),
+    record: log.record,
+    selection: options.selection === undefined ? INITIAL_SELECTION : options.selection,
+  });
   return { wiring: createGlideWiring(spec), calls: log.calls };
 }
+
+/** マウントの時点の選択（画面は表を描くときつねに現在位置を 1 つ渡す。要件 2.1）。 */
+const INITIAL_SELECTION: RendererSelection = {
+  current: { row: 0, column: 0 },
+  range: { start: { row: 0, column: 0 }, end: { row: 0, column: 0 } },
+};
 
 describe("仕様 → Glide の props（描き手が引く形へ写す）", () => {
   it("列は見出しと幅のまま渡り、行数と行の高さ・見出しの高さが定まる", () => {
@@ -145,7 +168,7 @@ describe("仕様 → Glide の props（描き手が引く形へ写す）", () =>
 
   it("セルの引きは位置を取り違えず、値の文字列をそのまま運ぶ", () => {
     const source = arrayRowSource();
-    const { wiring } = wiringFor(source);
+    const { wiring } = wiringFor({ source });
 
     // **Glide の `Item` は `[列, 行]` である**（移植口の `CellPosition` は `{row, column}`）。
     // 取り違えると別のセルを描くので、ここは名指しで固定する。
@@ -178,7 +201,7 @@ describe("仕様 → Glide の props（描き手が引く形へ写す）", () =>
 
   it("未取得の行は読み込み中として描かれ、空白とは区別される", () => {
     // 取得済みを 2 行に限る。3 行目は未取得である（`lazyRowSource` の契約）。
-    const { wiring } = wiringFor(lazyRowSource(2));
+    const { wiring } = wiringFor({ source: lazyRowSource(2) });
 
     const fetched = wiring.props.getCellContent([0, 2]);
     const loading = wiring.props.getCellContent([0, 3]);
@@ -194,7 +217,7 @@ describe("仕様 → Glide の props（描き手が引く形へ写す）", () =>
   });
 
   it("違反の印は地色の上書きとして現れる（落とさない）", () => {
-    const { wiring } = wiringFor(lazyRowSource());
+    const { wiring } = wiringFor({ source: lazyRowSource() });
 
     // 標本の違反は 7 行ごとの 3 行目である（`interactionDriver.ts`）。
     const violated = wiring.props.getCellContent([0, 3]);
@@ -205,7 +228,7 @@ describe("仕様 → Glide の props（描き手が引く形へ写す）", () =>
   });
 
   it("範囲の外を引かれても例外を投げない", () => {
-    const { wiring } = wiringFor(lazyRowSource(2));
+    const { wiring } = wiringFor({ source: lazyRowSource(2) });
 
     // 移植口の不変条件（`getCell` は例外を投げない）は仕様の側の契約である。写しはそれに乗る —
     // ここで例外が出れば、1 つの範囲外のセルが画面全体の描画を落とすことになる。
@@ -226,7 +249,41 @@ describe("仕様 → Glide の props（描き手が引く形へ写す）", () =>
     // 組み立て、貼り付けでは中身を解釈する）。移植口は「呼び出し側が作った文字列をクリップボードへ
     // 渡すだけ」「貼り付けの文字列を解釈しない」と定めているので、Glide の側の経路は止め、
     // **この写しが DOM の `copy` / `paste` を自分で受ける**（下の `clipboard` の節）。
-    expect(wiring.props.keybindings).toEqual({ copy: false, cut: false, paste: false });
+    expect(wiring.props.keybindings).toEqual({
+      copy: false,
+      cut: false,
+      paste: false,
+      // **移動と範囲の広げ、行/列の全体も止める**（要件 2.2、2.3 の意味論は画面が持つ —
+      // `selection.ts` の module doc）。止めないもの（端への移動・ページ・表の全体・Tab・編集の
+      // 起動）は**鍵そのものが無い**（Glide の既定が働き続ける）。ここに鍵を足すと、
+      // 画面が引き受けていない機能が黙って消える。
+      goUpCell: false,
+      goDownCell: false,
+      goLeftCell: "shift+Tab",
+      goRightCell: "Tab",
+      goUpCellRetainSelection: false,
+      goDownCellRetainSelection: false,
+      goLeftCellRetainSelection: false,
+      goRightCellRetainSelection: false,
+      selectGrowUp: false,
+      selectGrowDown: false,
+      selectGrowLeft: false,
+      selectGrowRight: false,
+      selectRow: false,
+      selectColumn: false,
+    });
+    for (const untouched of ["goToLastRow", "goToFirstCell", "goToNextPage", "selectAll"]) {
+      expect(Object.keys(wiring.props.keybindings)).not.toContain(untouched);
+    }
+  });
+
+  it("行見出し列の出し方は、仕様の欄のまま Glide へ渡る", () => {
+    // **この検査が固定するのは「仕様の欄が素通しされること」だけである。**要件 2.3 の
+    // ポインタの経路（行見出しのクリックで行の全体が選ばれること）はここでは観測しない —
+    // 描き手と利用者の操作を要するためであり、実物の起動観測（8.1 と同じ規律）に委ねる。
+    const { wiring } = wiringFor();
+
+    expect(wiring.props.rowMarkers).toBe("clickable-number");
   });
 });
 
@@ -292,23 +349,49 @@ describe("Glide の通知 → 移植口の callback（6 つが外へ出る）", 
   });
 });
 
-describe("選択（移植口に下ろす欄が無いので、実装が持ち、外へ報せる一方通行）", () => {
-  it("矩形の選択は正規化された範囲として外へ出る", () => {
+describe("選択（画面が持ち、実装は指示されたとおりに描く。8.2 が向きを決めた）", () => {
+  it("矩形の選択は、現在位置と範囲の組として外へ出る", () => {
     const { wiring, calls } = wiringFor();
     const range: CellRange = { start: { row: 1, column: 0 }, end: { row: 3, column: 1 } };
 
     wiring.selectionChanged(rectangleSelection(range));
 
+    // 矩形の左上から引いた選択では、現在位置は左上である（`rectangleSelection` の錨）。
     expect(callsNamed(calls, "onSelectionChange")).toEqual([
-      { call: "onSelectionChange", args: [range] },
+      { call: "onSelectionChange", args: [{ current: { row: 1, column: 0 }, range }] },
     ]);
-    // 配線が持つ唯一の写しも同じ範囲を指す（制御選択の props へそのまま渡る）。
+    // 配線が保持する唯一の写しも同じ範囲を指す（制御選択の props へそのまま渡る）。
     expect(wiring.currentRange()).toEqual(range);
   });
 
-  it("列の全体と行の全体も同じ 1 つの矩形として外へ出る", () => {
+  it("現在位置は矩形の左上ではなく、Glide が持つ錨である", () => {
+    // 右下から左上へ引いた選択である（Glide の `current.cell` が右下を指す）。**左上へ潰すと、
+    // 利用者が動かしていたセルが別のセルになる**（`RendererSelection` が矩形だけでは足りない
+    // 理由である）。
+    const { wiring, calls } = wiringFor();
+    const range: CellRange = { start: { row: 1, column: 0 }, end: { row: 3, column: 1 } };
+    const anchoredAtBottomRight: GridSelection = {
+      columns: CompactSelection.empty(),
+      rows: CompactSelection.empty(),
+      current: {
+        cell: [1, 3],
+        range: { x: 0, y: 1, width: 2, height: 3 },
+        rangeStack: [],
+      },
+    };
+
+    wiring.selectionChanged(anchoredAtBottomRight);
+
+    expect(callsNamed(calls, "onSelectionChange")).toEqual([
+      { call: "onSelectionChange", args: [{ current: { row: 3, column: 1 }, range }] },
+    ]);
+  });
+
+  it("列の全体と行の全体も同じ 1 つの矩形として外へ出る（現在位置は矩形の始点へ落ちる）", () => {
     // 要件 2.3 の 3 つの選択（矩形・行の全体・列の全体）は、移植口では**同じ形**（矩形）で
     // 表される（`port.ts` の `CellRange` の docs）。数えるのは写す側である。
+    // Glide は行見出し・列見出しの選択に現在位置を持たないので、**矩形の始点**を現在位置にする
+    // （画面は「表を描くときは現在位置が 1 つある」を保つ）。
     const columns = wiringFor();
     columns.wiring.selectionChanged(columnSelection([1, 2]));
 
@@ -316,6 +399,20 @@ describe("選択（移植口に下ろす欄が無いので、実装が持ち、�
       start: { row: 0, column: 1 },
       end: { row: DRIVE_ROW_COUNT - 1, column: 2 },
     });
+    expect(callsNamed(columns.calls, "onSelectionChange")).toEqual([
+      {
+        call: "onSelectionChange",
+        args: [
+          {
+            current: { row: 0, column: 1 },
+            range: {
+              start: { row: 0, column: 1 },
+              end: { row: DRIVE_ROW_COUNT - 1, column: 2 },
+            },
+          },
+        ],
+      },
+    ]);
 
     const rows = wiringFor();
     rows.wiring.selectionChanged(rowSelection([3, 4]));
@@ -324,6 +421,20 @@ describe("選択（移植口に下ろす欄が無いので、実装が持ち、�
       start: { row: 3, column: 0 },
       end: { row: 4, column: DRIVE_COLUMNS.length - 1 },
     });
+    expect(callsNamed(rows.calls, "onSelectionChange")).toEqual([
+      {
+        call: "onSelectionChange",
+        args: [
+          {
+            current: { row: 3, column: 0 },
+            range: {
+              start: { row: 3, column: 0 },
+              end: { row: 4, column: DRIVE_COLUMNS.length - 1 },
+            },
+          },
+        ],
+      },
+    ]);
   });
 
   it("同じ選択の再通知は外へ出さない（知らせは変化のときだけである）", () => {
@@ -344,7 +455,7 @@ describe("選択（移植口に下ろす欄が無いので、実装が持ち、�
     wiring.selectionChanged(NO_SELECTION);
 
     expect(callsNamed(calls, "onSelectionChange")).toEqual([
-      { call: "onSelectionChange", args: [range] },
+      { call: "onSelectionChange", args: [{ current: { row: 1, column: 0 }, range }] },
       { call: "onSelectionChange", args: [null] },
     ]);
     expect(wiring.currentRange()).toBeNull();
@@ -362,6 +473,132 @@ describe("選択（移植口に下ろす欄が無いので、実装が持ち、�
     unsubscribe();
     wiring.selectionChanged(NO_SELECTION);
     expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("マウントの時点で、仕様の選択がそのまま描かれる", () => {
+    // **現在位置が 1 つも無い状態で描き始めない**（要件 2.1）。仕様の選択が制御選択の props へ
+    // 載り、外へは報せない（画面が自分で決めたことである）。
+    const pushed: RendererSelection = {
+      current: { row: 4, column: 2 },
+      range: { start: { row: 4, column: 2 }, end: { row: 4, column: 2 } },
+    };
+
+    const { wiring, calls } = wiringFor({ selection: pushed });
+
+    expect(wiring.selection.current?.cell).toEqual([2, 4]);
+    expect(wiring.selection.current?.range).toEqual({ x: 2, y: 4, width: 1, height: 1 });
+    // **外へは報せない**（画面が自分で決めたことである）。
+    expect(calls).toEqual([]);
+
+    // 仕様の選択が `null` の場合（表を描かない経路）は、選択が無い状態で始まる。
+    const { wiring: withoutSelection, calls: noCalls } = wiringFor({ selection: null });
+    expect(withoutSelection.selection).toEqual(NO_SELECTION);
+    expect(noCalls).toEqual([]);
+  });
+
+  it("`setSelection` は描くものを差し替え、外へは報せ返さない", () => {
+    // **下ろされた選択を報せ返すと往復する**（画面は自分が決めたことを知っている）。報せ返す
+    // 実装では、この 1 回の指示で `onSelectionChange` が外へ出てしまう。
+    const { wiring, calls } = wiringFor();
+    const pushed: RendererSelection = {
+      current: { row: 6, column: 1 },
+      range: { start: { row: 6, column: 1 }, end: { row: 6, column: 2 } },
+    };
+    const listener = vi.fn();
+    wiring.subscribeSelection(listener);
+
+    wiring.handle.setSelection(pushed);
+
+    // 描くもの（制御選択の props へ渡る値）が差し替わっている。
+    expect(wiring.selection.current).toEqual({
+      cell: [1, 6],
+      range: { x: 1, y: 6, width: 2, height: 1 },
+      rangeStack: [],
+    });
+    expect(wiring.selection.rows.length).toBe(0);
+    expect(wiring.selection.columns.length).toBe(0);
+    // 購読者（React の面）には届く。外への知らせは出ない。
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(callsNamed(calls, "onSelectionChange")).toEqual([]);
+    expect(wiring.currentRange()).toEqual(pushed.range);
+  });
+
+  it("`setSelection` の後で実装が起こした変化は、その新しい描画から導かれる", () => {
+    // **報せる値は「いま描いている選択」から導く。**画面の写しと描かれているものがずれない
+    // ための唯一の仕組みであり、別の値を報せる実装はここで落ちる。
+    const { wiring, calls } = wiringFor();
+    wiring.handle.setSelection({
+      current: { row: 0, column: 0 },
+      range: { start: { row: 0, column: 0 }, end: { row: 0, column: 0 } },
+    });
+
+    wiring.selectionChanged(
+      rectangleSelection({ start: { row: 2, column: 0 }, end: { row: 2, column: 1 } }),
+    );
+
+    expect(callsNamed(calls, "onSelectionChange")).toEqual([
+      {
+        call: "onSelectionChange",
+        args: [
+          {
+            current: { row: 2, column: 0 },
+            range: { start: { row: 2, column: 0 }, end: { row: 2, column: 1 } },
+          },
+        ],
+      },
+    ]);
+    // 報せた値は、いま描いている値から導かれている（同じ範囲である）。
+    expect(wiring.currentRange()).toEqual({
+      start: { row: 2, column: 0 },
+      end: { row: 2, column: 1 },
+    });
+  });
+
+  it("下ろした選択と**同じ位置**を利用者が指しても、写しと描画がずれない", () => {
+    // 8.2 のレビューが実測した欠陥の回帰検査である。`setSelection` が「実装が最後に知っている
+    // 選択」を更新しないと、下ろした値と**マウント時の選択**（実運用ではつねに先頭セル）が
+    // 一致する場合に、利用者の操作が同一判定で飲み込まれる — `onSelectionChange` は出ず、
+    // **描かれているのは利用者が指した位置、画面の写しは下ろした位置**という食い違いが残る
+    // （要件 2.1 の提示と 2.5 の数え上げ、2.6 の対象がすべて古い値になる）。
+    const { wiring, calls } = wiringFor();
+    const pushed: RendererSelection = {
+      current: { row: 6, column: 1 },
+      range: { start: { row: 6, column: 1 }, end: { row: 6, column: 2 } },
+    };
+    wiring.handle.setSelection(pushed);
+
+    // 利用者が**マウント時の選択**（0,0）のセルをポインタで指す。
+    wiring.selectionChanged(
+      rectangleSelection({ start: { row: 0, column: 0 }, end: { row: 0, column: 0 } }),
+    );
+
+    // 外へちょうど 1 件、利用者が指した値で出る（出ないと写しが古いまま残る）。
+    expect(callsNamed(calls, "onSelectionChange")).toEqual([
+      {
+        call: "onSelectionChange",
+        args: [
+          {
+            current: { row: 0, column: 0 },
+            range: { start: { row: 0, column: 0 }, end: { row: 0, column: 0 } },
+          },
+        ],
+      },
+    ]);
+  });
+});
+
+describe("見えている区間（移植口へ 8.2 が足した知らせ）", () => {
+  it("Glide の見えている矩形は、行と列の区間として外へ出る", () => {
+    const { wiring, calls } = wiringFor();
+
+    wiring.props.onVisibleRegionChanged?.({ x: 1, y: 2, width: 3, height: 4 }, 0, 0, {});
+
+    expect(callsNamed(calls, "onVisibleSpanChange")).toEqual([
+      {
+        call: "onVisibleSpanChange",
+        args: [{ rows: { start: 2, count: 4 }, columns: { start: 1, count: 3 } }],
+      },
+    ]);
   });
 });
 
@@ -394,6 +631,11 @@ describe("貼り付けの錨（Glide の規則の写し）", () => {
 
   it("選択が無ければ錨は無い（貼り付けない）", () => {
     const { wiring } = wiringFor();
+    // マウントの時点では**仕様の選択がある**（要件 2.1）ので、錨もその位置である。
+    expect(wiring.currentAnchor()).toEqual({ row: 0, column: 0 });
+
+    // 解除されれば錨は無い（Glide の Escape など）。
+    wiring.selectionChanged(NO_SELECTION);
 
     expect(wiring.currentAnchor()).toBeNull();
   });
@@ -463,14 +705,14 @@ describe("破棄の後は移植口を使えない", () => {
 
 describe("セルの取得の契約が写しでも保たれる", () => {
   it("同期であり、`Promise` を返さない", () => {
-    const { wiring } = wiringFor(lazyRowSource(2));
+    const { wiring } = wiringFor({ source: lazyRowSource(2) });
 
     const cell: GridCell = wiring.props.getCellContent([0, 0]);
     expect(cell).not.toBeInstanceOf(Promise);
   });
 
   it("未取得の行の引きでも例外を投げない（描画の引きに例外を持ち込まない）", () => {
-    const { wiring } = wiringFor(lazyRowSource(0));
+    const { wiring } = wiringFor({ source: lazyRowSource(0) });
 
     // 0 行目だけが取得済みである。未取得の行・範囲の外の行を引いても例外を投げず、
     // 読み込み中の札で答える（Glide は見えている範囲を引くので、未取得の行に必ず当たる）。

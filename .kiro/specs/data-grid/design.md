@@ -314,7 +314,7 @@ stateDiagram-v2
 | 1.1, 1.2, 1.3, 1.4 | 10 万行の表示と走査、位置の提示、端への直接移動 | WindowCache, RendererPort, GlideAdapter, WindowCodec | `encode_window`, `GridRendererPort.mount` | 窓の取得と先読み |
 | 1.5, 1.6 | 行なし・列なしの提示 | GridScreen, GridSession | `GridOpenResponse.row_count`, `columns` | — |
 | 1.7 | 外部経路の変更を表示へ反映 | WindowCache, GridScreen | `WindowCache.invalidate` | 編集の適用と判定 |
-| 2.1, 2.2, 2.3, 2.4, 2.5, 2.6 | 現在位置・選択・追従・範囲の対象化 | GridScreen, RendererPort | `RendererSpec.onSelectionChange`, `RendererHandle.scrollTo` | — |
+| 2.1, 2.2, 2.3, 2.4, 2.5, 2.6 | 現在位置・選択・追従・範囲の対象化 | GridScreen（`selection.ts`）, RendererPort | `RendererSpec.selection` / `onSelectionChange` / `onVisibleSpanChange` / `rowMarkers`, `RendererHandle.setSelection` / `scrollTo` | — |
 | 3.1, 3.2, 3.8 | 型に応じた入力手段（日時・選択肢・真偽・シート間参照） | EditorRegistry, editors | `CellEditorRegistry.resolve` | — |
 | 3.3, 3.4, 3.5 | 判定への送付、変換の提示、違反値の保持 | EditApply, GridCommands | `EditCommand::SetCells`, `GridEditResponse.coercions` | 編集の適用と判定 |
 | 3.6, 3.7 | 編集の取消、値なしへ戻す | GridScreen, EditApply | `CellEditorProps.cancel` | — |
@@ -912,11 +912,31 @@ export interface RenderCell {
   readonly loading: boolean;
 }
 
+export interface RendererSelection {
+  readonly current: CellPosition;          // 現在位置（要件 2.1）。つねに range の中にある
+  readonly range: CellRange;               // 選択されている矩形（両端を含む）
+}
+
+export interface ColumnSpan {
+  readonly start: ColumnIndex;
+  readonly count: number;
+}
+
+export interface VisibleSpan {
+  readonly rows: RowSpan;                  // 半開区間
+  readonly columns: ColumnSpan;            // 半開区間
+}
+
+export type RowMarkerMode = "none" | "clickable-number";
+
 export interface RendererSpec {
   readonly columns: readonly RenderColumn[];
   readonly rowCount: number;
+  readonly selection: RendererSelection | null;                            // マウントの時点の選択（8.2）
+  readonly rowMarkers: RowMarkerMode;                                     // 行見出し列（8.2）
   readonly getCell: (position: CellPosition) => RenderCell;
-  readonly onSelectionChange: (range: CellRange | null) => void;
+  readonly onSelectionChange: (selection: RendererSelection | null) => void;  // 実装が起こした変化（8.2 が広げた）
+  readonly onVisibleSpanChange: (span: VisibleSpan) => void;              // 見えている区間（8.2）
   readonly onActivateEditor: (position: CellPosition) => void;
   readonly onColumnResize: (column: number, width: number) => void;
   readonly onColumnMove: (from: number, to: number) => void;
@@ -925,6 +945,7 @@ export interface RendererSpec {
 }
 
 export interface RendererHandle {
+  readonly setSelection: (selection: RendererSelection | null) => void;  // 選択を下ろす（8.2）
   readonly scrollTo: (position: CellPosition) => void;
   readonly invalidate: (span: RowSpan) => void;
   readonly destroy: () => void;
@@ -935,6 +956,11 @@ export interface GridRendererPort {
 }
 ```
 - Invariants: `getCell` は**同期であり例外を投げない**。未取得の行は `loading: true` を返す
+- Invariants: `RendererSelection.current` はつねに `range` の中にある。表を描いている間は
+  選択が 1 つある（`RendererSpec.selection` は `null` を許すが、それは表を描かない経路だけである）
+
+**この block は 8.2 が広げた**（上の 4 つと `onSelectionChange` の引数の変更）。7.1 の逐語の写しと
+その検査（`port.test.ts` の `Exactly<keyof RendererSpec, …>`）は 8.2 が同じ変更で直した。
 
 **Implementation Notes**
 - Integration: Glide の `getCellContent` は引きに来る形であり、窓単位の記憶とそのまま噛み合う。並べ替えと絞り込みは Glide が持たないが、本設計ではいずれも Rust 側にあるため欠点にならない
@@ -970,14 +996,16 @@ export interface GridRendererPort {
 
 **Implementation Notes（7.2 / 8.x への申し送り）**
 - **`mount` が仕様を受け取る唯一の口である。**`RendererHandle` は `scrollTo` / `invalidate` /
-  `destroy` しか持たないため、**列幅・列順**の変化を表示へ反映する経路は、この面では**次に
+  `destroy` しか持たない（8.2 が `setSelection` を足した。下の「8.2 が広げた面」）ため、
+  **列幅・列順**の変化を表示へ反映する経路は、この面では**次に
   `mount` へ渡す仕様**しかない。7.2 が実装を選ぶとき、この制約（変更のたびに `mount` し直すのか、
   `spec` の同一性を観測するのか）を明示に扱うこと。8.8 が列幅・列順の操作を結線するときに効いてくる。
-  **選択と現在位置はこれに当てはまらない。**`RendererSpec` に選択を**下ろす**欄が無く、
-  `onSelectionChange` は外向きの知らせ（正規化した矩形）だけである — つまり選択と現在位置は
-  **実装が持ち、外へ報せる一方通行**であり、列幅・列順のように仕様の側から押し戻せない
-  （7.1 のレビューが指摘。要件 2.1 が求める「現在位置を他のセルと区別して提示する」を
-  どこが持つかは 8.1 / 8.8 が明示に決めること — 実装が持つ選択と画面の写しが食い違いうる）。
+  **選択と現在位置はこれに当てはまらない**（8.2 が決めた）。`RendererSpec` に選択を**下ろす**欄が
+  無いままだと、`onSelectionChange` は外向きの知らせ（正規化した矩形）だけになり、選択と現在位置は
+  **実装が持ち、外へ報せる一方通行**になって、列幅・列順のように仕様の側から押し戻せなくなる
+  （7.1 のレビューが指摘。実装が持つ選択と画面の写しが食い違いうる）。**8.2 は欄を足してこの向きを
+  逆にした** — 画面が選択を持ち、`RendererSpec.selection`（マウントの時点）と
+  `RendererHandle.setSelection`（以後の更新）で下ろす。詳細は下の「8.2 が広げた面」。
 - **呼び出しの並びの契約は 7.1 が固定した。**`src/features/grid/renderer/port.test.ts` が
   決められた操作の並びを逐語で持ち、内部の作りが違う 2 つの偽の実装と 2 通りの行の出所の
   4 通りで同じ並びが観測されることを示している。7.2 は実物の通知に `RendererEventSource`
@@ -1009,6 +1037,36 @@ export interface GridRendererPort {
 観測する（`scripts/check-port-interaction.sh` と `scripts/ci/*/verify-port-interaction.*`。
 **1.6 の段と同じく一時的であり、9.2 / 9.3 が入った時点で取り除く**）。実測値は
 `research.md`「実測: 移植口の実装（GlideAdapter）の操作の観測（タスク 7.2）」にある。
+
+**8.2 が広げた面（移植口の改訂）**（`src/features/grid/renderer/port.ts` / `glideAdapter.tsx`）
+
+8.1 は 3 つの点を開いたまま残した（同節の「8.1 が開いたままにした点」）。**そのうち 2 つが 8.2 の
+担当である**（残る 1 つ、違反の色は 8.4）。8.2 は移植口を 4 点広げ、`onSelectionChange` の引数を
+変え、**選択の所有の向きを逆にした**。広げた範囲は下の表がすべてであり、それ以外は 7.1 のままである。
+
+| 論点 | 決定 | 理由 |
+|---|---|---|
+| **可視の区間を知らせる口**（開いた点 3） | `RendererSpec.onVisibleSpanChange(span: VisibleSpan)` を足す。**行と列の両方**を運ぶ（`RowSpan` だけでは右へ動いた現在位置に追随できない）。Glide の `onVisibleRegionChanged` の `Rectangle` を写す（Glide の矩形は**データの座標**であり、行見出しのぶんは Glide が内部で補正する） | 追随（要件 2.4）は「現在位置が可視の区間の外へ出たか」を画面が知らないと決まらない。既存の callback から導く道は無い（選択・起動・列幅・列順・複製・貼り付けのどれも可視の区間を運ばない）。**同じ知らせが 7.3 の窓の先読みの材料にもなる**（`setVisibleSpan` へ渡す）ので、口は 1 つで足りる |
+| **行見出し列**（開いた点 2） | `RendererSpec.rowMarkers: RowMarkerMode`（`"none"` \| `"clickable-number"`）を足し、画面は `"clickable-number"` を渡す | 要件 2.3 の「行の全体」には**ポインタの操作**（行見出しのクリック）が要る。Glide の `"number"` は**クリックできない**（`rowMarkers === "number"` のとき行見出しの操作は何もしない — 7.2 の実装を読んで確認した）ので、使える値だけを並べる。Glide が行見出しのぶんの添字を補正するので、写しは値を渡すだけでよい（7.2 の表の行見出し列の行）。**行の番号が見えることは要件 1.2 の提示にも重なる**が、2.3 の操作の成立が主である |
+| **現在位置と選択の所有**（7.1 のレビューが名指しした危険） | **画面が持ち、移植口へ下ろす。**マウントの時点は `RendererSpec.selection`、以後は `RendererHandle.setSelection` | 選択の意味論（要件 2.2 の隣接と端の扱い、2.3 の 3 つの選択）が**製品の要件**であり、移植口の背後（ライブラリの打鍵処理）に置くと差し替えのたびに要件を写し直すことになる。加えて 4.4 / 9.8 の「違反の位置へ現在位置を移す」には**外から現在位置を指定する口**が要り、実装が持つ形では作れない。`selection.ts`（画面側の純粋な module）が移動・拡張・行/列の全体・数え上げ・追随の判断を持つ |
+| 食い違い（写しと描画のずれ）の防ぎ方 | 選択の値は**表を描く状態の `selection` 1 つ**であり、その同じ値が数え上げの表示と `handle.setSelection` の両方へ渡る。実装は選択を自分で変えず、**実装が起こした変化だけ**を `onSelectionChange` で報せる。報せる値は**いま描いている選択から導く**（別の値を持たない）。**`setSelection` は下ろした値を「実装が最後に知っている選択」としても書き戻す**（報せは返さない） | **値が 1 つであるだけではずれないと言えない**（8.2 のレビューが実測した）。報せる側と下ろす側が**同じ基準を見る**ときだけずれない — 下ろした値を基準へ書き戻さないと、利用者が**下ろした値と同じ位置**を指したときに通知が同一判定で飲み込まれ、描かれているのは利用者が指した位置・画面の写しは下ろした位置という食い違いが残る（要件 2.1 の提示・2.5 の数え上げ・2.6 の対象が古くなる）。経路を消しているのは**基準の更新**であり、構造だけでは消えない |
+| 下ろした選択の扱い | `setSelection` は**報せ返さない**（`onSelectionChange` を呼ばない）。報せるのは実装が起こした変化だけである | 報せ返すと画面の状態と実装の状態が往復し、ずれの種になる（`port.test.ts` の並びの比較が往復を検出する — 下ろした指示が返れば `onSelectionChange` がもう 1 つ現れる） |
+| 実装が起こした変化の形 | `onSelectionChange` の引数を `CellRange` から `RendererSelection`（**現在位置と矩形**）へ広げる。現在位置は Glide の `current.cell` から取る（無い選択では矩形の始点へ落とす） | 現在位置は矩形の左上とは限らない（右下から左上へ引いた選択では錨が右下にある）。矩形だけを運ぶと、画面が現在位置を推し量ることになり、**動かしていたセルが別のセルになる** |
+| **移動・範囲の広げ・行/列の全体の打鍵** | 実装の側の束縛を**切る**（`glideAdapter.tsx` の `GLIDE_KEYBINDINGS`。`go*Cell` / `selectGrow*` / `*RetainSelection` / `selectRow` / `selectColumn`）。画面が器の打鍵の受け口で扱う | 上と同じ理由（意味論を製品の側に保つ）。**切らないもの**（端への移動・ページ・表の全体・Tab・編集の起動）は画面が引き受けないので、そのまま働かせる（止めれば機能が黙って消える） |
+| 打鍵の受け口の場所 | 画面の表の器（`GridSurface` の `div`。React の合成イベント）。**扱った打鍵だけ `preventDefault` する** | `ScreenBoundary` は**イベントハンドラの例外を捕まえない**ので、ハンドラは全域でなければならない（`selection.ts` の関数は投げない）。扱わない打鍵はそのまま流し、Glide の束縛を生かす |
+| 端の扱い（要件 2.2 の解釈） | 行・列・シートの端で**止まる**（巻き戻さない） | 巻き戻すと**隣接しないセルへ動く**（最終列で右 → 次の行の先頭は「隣接するセル」ではない）。止まれば端に居ることが位置の提示（要件 1.3）から読める。先頭・末尾への直接移動（要件 1.4）は本 module の担当ではない |
+| 追随の判断 | `followTarget(span, selection)` が**現在位置が可視の区間の外にあるときだけ**その位置を返し、画面が `handle.scrollTo` を呼ぶ。両軸を見る。区間を知らないうち（`null`）と空の区間では動かさない | 要件 2.4 は「見える状態になるまで追従させる」である。軸を選ばないのは `scrollTo` の契約（その位置が見えるところまで）と同じである。何も見えていないのに走査を起こさない |
+| 解除（選択が `null`）の扱い | 画面は**取り下げず、いまの選択を置き直す**（値は同じで、新しい値として下ろし直す） | 要件 2.1 は「現在位置となるセルを 1 つ持つ」と言っており、表を描いている間はつねに 1 つでなければならない。取り下げると、器に解除が描かれたまま画面の写しが残る（上の「食い違いの防ぎ方」が破れる） |
+
+**数を数えるのは画面である**（`selectionCounts`）。移植口は矩形 1 つと現在位置 1 つしか運ばないので、
+行数・列数・セル数（要件 2.5）は画面が数える。3 つの選択（矩形・行の全体・列の全体）は**同じ 1 つの
+形**（矩形）であり、数え方は 1 つで足りる。
+
+**単体テストで観測できないもの**（実物の起動で観測する。8.1 の起動観測と同じ規律）: 現在位置が
+**焦点の環として描かれる**こと、追随が**実際にスクロールを起こす**こと、打鍵が**実際の
+イベントとして器へ届く**こと、選択が変わっても**器が組み直されない**こと（`GridSurface` の
+マウントの効果の依存に選択を入れていない）。単体テストは移動・拡張・数え上げ・追随の判断と、
+写像・配管（`glideAdapter.test.ts` が DOM を持たない配線を叩く）までである。
 
 #### WindowCache
 
@@ -1169,19 +1227,45 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 | 世代の整合 | 画面が `GridSession` と同じ規則で数える（開いた直後 0、`grid_set_view` の成功ごとに +1） | 境界の型は世代を運ばない（7.3 の申し送り）。開いた直後の 1 回の後は 1 である |
 | 記憶へ渡す行数 | `grid_set_view` の応答の**可視行数**（シートの行数ではない） | 窓の区間は可視行の序数である（`RowSpan` の doc）。空の指定では両者は一致するが、絞り込みが効けば食い違う |
 | 取り込み口 | `./gridClient` の 4 つの口（`readDocumentState` / `openSheet` / `setView` / `readWindow`）| 画面は `invoke` もコマンド名も知らない。**要求は `request` という名前の引数で包む**（Tauri が縛る鍵は引数の名前である。包まないと**コマンドへ届く前に復号が失敗**し、封筒の失敗ではなく `invoke` の拒否として現れる — 起動観測で実測した誤りであり、`gridClient.test.ts` が固定する）|
-| 移植口の 5 つの操作 | **結線しない**（8.3〜8.9）。届いた通知は**画面内の告知 1 行**へ流す（内容は消さない。再試行も出さない） | 黙って何もしない実装にしない（`onCopy` が空文字を返せばクリップボードが空になり、`onPaste` が黙って捨てれば貼り付けが消える）。**`onSelectionChange` だけは操作ではない** — 選択は移植口の実装が持ち、8.1 は表示に使わない（8.2 の担当）|
+| 移植口の 5 つの操作 | **結線しない**（8.3〜8.9）。届いた通知は**画面内の告知 1 行**へ流す（内容は消さない。再試行も出さない） | 黙って何もしない実装にしない（`onCopy` が空文字を返せばクリップボードが空になり、`onPaste` が黙って捨てれば貼り付けが消える）。**選択の 3 つは操作ではない**（`selection` / `onSelectionChange` / `onVisibleSpanChange`）— 8.1 は選択を使わないが、**8.2 が結線した**（下の「8.2 が広げた面」）|
 | 配色 | `APPEARANCE_VARS` の 10 本のみを参照し、色の値を 1 つも書かない | 画面の契約 4。源の走査で固定する（走査は**本 module の源 1 つ**に限る。下の「開いたままにした点」）|
 
 **8.1 が開いたままにした点（後続タスクが決めること）**
 
 - **違反の印の色**は移植口の実装が既定を 1 つ持つ（`glideAdapter.tsx` の `VIOLATION_THEME`）。
   `RendererSpec` に色を運ぶ欄が無いため、**配色を画面から決めることは 8.1 にはできない** —
-  8.4 が面を広げるか、移植口へ外から渡す口を作る判断である
+  8.4 が面を広げるか、移植口へ外から渡す口を作る判断である（**8.2 は閉じていない**）
 - **行見出し列（`rowMarkers`）**も同じ理由で渡せない（`RendererSpec` に欄が無い）。要件 2.3 の
-  行の全体の選択は 8.2 が面を広げてから成立する
+  行の全体の選択は 8.2 が面を広げてから成立する — **8.2 が閉じた**（`RendererSpec.rowMarkers`。
+  上の「8.2 が広げた面」の表）
 - **可視の区間を知らせる口**が移植口に無い。8.1 は開いた直後の先頭の窓ぶんを `setVisibleSpan` へ
   渡すだけであり、**走査に追随する更新は 8.2** の担当である（引かれた行は `getCell` がその場で
-  要求するので、表示は成立する）
+  要求するので、表示は成立する）— **8.2 が閉じた**（`RendererSpec.onVisibleSpanChange`）
+
+##### 8.2 が確定させたもの（現在位置・選択・追随。`src/features/grid/selection.ts`）
+
+**選択と現在位置は画面が持ち、`ready` の腕（表を描く状態）が `selection` を持つ。**型が
+「表を描いている間は現在位置が 1 つある」（要件 2.1）を表し、他の腕（読み込み中・失敗・列 0 本・
+行 0 件）は選択を持たない。**この 1 つの値だけが、数え上げの表示（要件 2.5）と移植口へ下ろす選択
+（`handle.setSelection`）の両方へ渡る。**
+
+| 論点 | 決定 | 根拠 |
+|---|---|---|
+| 計算の置き場 | 純粋な module `selection.ts`（`moveCurrent` / `extendSelection` / `selectWholeRow` / `selectWholeColumn` / `selectionCounts` / `followTarget` / `selectionForKey`）。DOM も canvas も要さない | 要件 2.2 の移動と端の扱いは**製品の要件**であり、ライブラリの打鍵処理の中に置けない（移植口を差し替えると要件が消える）。純粋なら `vitest`（`environment: "node"`）がそのまま検査できる |
+| 打鍵の割り当て | ↑↓←→ = 移動（範囲は 1 つへ畳まれる）／ shift + ↑↓←→ = 錨から現在位置までの矩形／ shift + 空白 = 行の全体／ ctrl（または meta）+ 空白 = 列の全体。**修飾キーの付いた矢印は引き受けない**（Glide の端への移動に譲る） | 表計算と同じ束縛である（shift + 空白と ctrl + 空白は Glide の既定と同じ綴りであり、利用者の指の記憶を変えない）。譲る打鍵は**そのまま流す**ので、Glide の束縛（端・ページ・表の全体・Tab）が生き続ける |
+| 打鍵の受け口 | 画面の表の器（`GridSurface` の `div`）。**扱った打鍵だけ `preventDefault` する** | `ScreenBoundary` は**イベントハンドラの例外を捕まえない**ので、ハンドラは全域でなければならない（`selection.ts` の関数は投げず、範囲の外の入力は範囲へ寄せる） |
+| 端の扱い（要件 2.2） | **止まる**（巻き戻さない）。行は `0..可視行数-1`、列は `0..列数-1` へ寄せる | 巻き戻すと**隣接しないセルへ動く**（最終列で右 → 次の行の先頭）。止まれば端に居ることが位置の提示（要件 1.3）から読める |
+| 錨（範囲の広げ） | 錨は**現在位置の対角の角**である（現在位置が範囲の左上なら右下、右下なら左上）。逆向きへ広げれば範囲は縮み、錨を越えれば向きが反転する | 表計算と同じ振る舞いである。錨を選択の外に持たないので、**選択の値だけで広げの状態が決まる**（新しい状態を足さない） |
+| 行の全体・列の全体（要件 2.3） | 現在位置の行（列）の全体を矩形にし、**現在位置は動かさない** | 利用者が居たセルはその行（列）の中にあり、要件 2.1 の「現在位置は 1 つ」もそのまま保たれる。3 つの選択が**同じ 1 つの形**（矩形 + 現在位置）になるので、数え方も 1 つで足りる |
+| 数え上げ（要件 2.5） | 表の上に 1 行出す（行数 × 列数 = セル数）。1 つのセルは 1 × 1 = 1、行の全体は 1 × 列数、列の全体は 行数 × 1 | 表計算の数え方である。**利用者に見える数は 1 起点**（内部の序数は 0 起点）— 現在位置の表示だけは人が読む数にする |
+| 追随（要件 2.4） | 現在位置が可視の区間の外へ出たときだけ `scrollTo` を呼ぶ（**両軸**を見る）。区間を知らないうち（`null`）と空の区間では動かさない | 見えている位置で毎回動かすと、利用者の走査と争う。軸を選ばないのは `scrollTo` の契約と同じである |
+| 要件 2.6 の口 | `ready.selection`（`RendererSelection`）が**その口である**。8.6 / 8.7 / 8.9 が読む | 本 module は複製・貼り付け・削除・取り消しを**実装しない**（対象を指す値だけを定める）。9.8 / 4.4 の移動も同じ値を入れ替えるだけで足りる |
+| 可視の区間の初期値 | 開いた直後は「先頭の窓ぶん（行 0〜min(可視行数, 256)）と全列」と見積もり、**実装の知らせが届いた時点で置き換える** | 実装はマウントの直後に本当の区間を知らせる。それまでの推測で走査を起こさない |
+
+**単体テストが観測しないもの**（実物の起動で観測する。8.1 の起動観測と同じ規律）: 現在位置が
+**焦点の環として描かれる**こと、追随が**実際にスクロールを起こす**こと、打鍵が**実際のイベント
+として器へ届く**こと、選択が変わっても**器が組み直されない**こと。9.2 / 9.3 が画面全体の観測を
+引き受けるまでの間は、8.1 と同じ使い捨ての画面（`smoke-port-probe`）の段で見る。
 
 ## Data Models
 

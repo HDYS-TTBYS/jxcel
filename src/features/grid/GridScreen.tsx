@@ -76,24 +76,43 @@
  * 境界の口は [`GridClient`]（`./gridClient`）1 つを通す。**本 module は `invoke` もコマンド名も
  * 知らない。**
  *
- * # 8.2〜8.9 への申し送り（本 module が足す予定の場所）
+ * # 8.2 が足したもの（現在位置・選択・追従）
  *
- * - **8.2（現在位置・選択・追従）**: [`createGridRendererSpec`] の `onSelectionChange` と、窓の
- *   記憶の `setVisibleSpan`。移植口は**可視の区間を知らせる口を持たない**（`RendererSpec` の
- *   欄は 8.1 の時点でこれだけである）ため、追随の更新は選択の知らせから始めるほかない
- *   （design.md「Implementation Notes（7.2 / 8.x への申し送り）」が同じ穴を名指ししている）
+ * **選択と現在位置は画面が持つ。**表を描く状態（`ready` の腕）が `selection` を持ち、その 1 つの
+ * 値だけが、数え上げの表示（要件 2.5）と移植口へ下ろす選択（`handle.setSelection`）の両方へ渡る
+ * — **写しを 2 つ持たない**ので、画面に出ている数と描かれている選択はずれようがない。
+ *
+ * | 要件 | どこが担うか |
+ * |---|---|
+ * | 2.1 現在位置を 1 つ持ち、区別して示す | `ready.selection`（型が「表を描くときは選択がある」を表す）。区別して示すのは移植口の実装（Glide の焦点の環） |
+ * | 2.2 方向の指示で隣接するセルへ移る | `./selection` の移動の規則（打鍵は `GridSurface` の器が受ける） |
+ * | 2.3 矩形・行の全体・列の全体 | 同じ module の 3 つの規則。ポインタの操作（行見出し・見出し）は移植口の通知として届く |
+ * | 2.4 表示範囲の追随 | `followTarget` が宛先を決め、`handle.scrollTo` が動かす。可視の区間は `RendererSpec.onVisibleSpanChange` が知らせる（**8.2 が移植口へ足した口である**） |
+ * | 2.5 行数・列数・セル数 | `selectionCounts` を表の上の 1 行に出す |
+ * | 2.6 確定した選択を複製・貼り付け・削除・取り消しの対象にする | **`ready.selection` がその口である**（8.6 / 8.7 / 8.9 が読む）。本 module は操作そのものを実装しない |
+ *
+ * # 8.3〜8.9 への申し送り（本 module が足す予定の場所）
+ *
  * - **8.3〜8.9**: 移植口の 5 つの**操作**（`onActivateEditor` / `onColumnResize` /
  *   `onColumnMove` / `onCopy` / `onPaste`）を実装で置き換える。8.1 はそれらを `onUnavailable`
  *   へ流すだけである（**黙って何もしない実装にしない** — `onCopy` が空文字を返せばクリップボード
  *   が空になり、`onPaste` が黙って捨てれば貼り付けが消える。無反応より悪い）
  * - **8.4（違反の提示）**: 違反の印の色は移植口の実装が既定を 1 つ持つ（`RendererSpec` に色を
  *   運ぶ欄が無い）。画面から配色を決めるには移植口の面を広げる判断が要る（本 module は決めて
- *   いない）
+ *   いない）。**4.4 の「違反の位置へ現在位置を移す」は `ready.selection` を入れ替えれば足りる**
+ *   （移動の口は 8.2 が用意した）
  * - **8.6（行の増減）**: 行数が変わったら `WindowCache.clear(rowCount)`（7.3 の申し送り）
  * - **8.8（列幅・列順）**: 列幅と表示上の列順は `createDisplayState`（7.5）が持つ。変化は
- *   **次の `mount` の仕様**に載せる（`RendererHandle` に押し込む口が無い。7.2 の申し送り）
+ *   **次の `mount` の仕様**に載せる（`RendererHandle` に幅や順を押し込む口は無い。7.2 の申し送り）
  */
-import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactElement,
+} from "react";
 
 import { APPEARANCE_VARS } from "../../shell/theme";
 import { assertNever, describeIpcError } from "../../ipc/client";
@@ -101,13 +120,22 @@ import type { ColumnDescriptor, GridSheetSummary } from "../../ipc/bindings";
 import { createDisplayState } from "./displayState";
 import { WINDOW_ROWS, createWindowCache } from "./windowCache";
 import { createGlideAdapter } from "./renderer/glideAdapter";
+import {
+  followTarget,
+  initialSelection,
+  selectionCounts,
+  selectionForKey,
+} from "./selection";
 import type {
   CellPosition,
   GridRendererPort,
   RenderCell,
   RenderColumn,
   RendererHandle,
+  RendererSelection,
   RendererSpec,
+  RowMarkerMode,
+  VisibleSpan,
 } from "./renderer/port";
 import { EMPTY_GRID_VIEW, createGridClient, type GridClient } from "./gridClient";
 
@@ -162,6 +190,14 @@ export type GridScreenState =
        * 渡す行数はこれである（シートの行数ではない。絞り込みが効けば両者は食い違う）。
        */
       readonly visibleRows: number;
+      /**
+       * 選択（**現在位置と矩形**。要件 2.1、2.2、2.3）。
+       *
+       * **この腕が持つことが「表を描いている間は現在位置が 1 つある」を型で表している**
+       * （他の腕は持たない — 要件 2.1 は表があるときの性質である）。単体テストはこの値を
+       * 描いて数え上げを読み、8.6 / 8.7 / 8.9 はこの値を操作の対象として読む（要件 2.6）。
+       */
+      readonly selection: RendererSelection;
     };
 
 /**
@@ -198,6 +234,27 @@ export function gridScreenLoaded(
 /** 器が捕まえない失敗を告知として積む（**内容の領域は変えない**）。 */
 export function gridScreenFailed(model: GridScreenModel, message: string): GridScreenModel {
   return { attempt: model.attempt, state: model.state, notice: message };
+}
+
+/**
+ * 選択（現在位置と矩形）を入れ替える（要件 2.1、2.2、2.3）。**表を描いていないときは何もしない**
+ * — 描いていない表に現在位置は無い（`ready` の腕だけが選択を持つ。上の型）。
+ *
+ * **解除（`null`）は受け取らない。**要件 2.1 は「現在位置となるセルを 1 つ持つ」と言っており、
+ * 表を描いている間はつねに 1 つでなければならない。実装が解除を報せてきたとき（Glide の Escape
+ * など）は、**いまの選択を新しい値として置き直す** — 器は選択を制御されているので、置き直さない
+ * と「解除された選択が描かれたまま、画面の写しは残る」というずれになる（8.1 のレビューが
+ * 名指しした危険である）。
+ */
+export function gridScreenSelectionChanged(
+  model: GridScreenModel,
+  selection: RendererSelection | null,
+): GridScreenModel {
+  if (model.state.status !== "ready") {
+    return model;
+  }
+  const next = selection ?? { ...model.state.selection };
+  return { attempt: model.attempt, state: { ...model.state, selection: next }, notice: model.notice };
 }
 
 /** 告知を閉じる。 */
@@ -281,6 +338,9 @@ export async function loadGridScreenState(client: GridClient): Promise<GridScree
     // **窓が覆うのは可視行である**（窓の区間は可視行の序数で表される。`RowSpan` の doc）ので、
     // 記憶へ渡す行数はシートの行数ではなく応答の可視行数である。
     visibleRows: derived.data.visible_rows,
+    // **表を描き始める時点から現在位置が 1 つある**（要件 2.1）。先頭のセルである（開いた直後に
+    // 見えているのは先頭の窓なので、追随も要らない）。
+    selection: initialSelection(),
   };
 }
 
@@ -301,22 +361,29 @@ const OPERATION_NAMES = {
 } as const;
 
 /**
- * 移植口へ渡す仕様を組む。**8.1 が実装するのは引く口（`getCell`）と列・行数だけである。**
+ * 移植口へ渡す仕様を組む。**引く口（`getCell`）・列・行数と、選択に関わる 3 つである。**
  *
- * 残る 5 つは**操作**であり（8.3〜8.9 の担当）、8.1 はそれらを [`onUnavailable`] へ流す。
+ * 選択に関わる 3 つは 8.2 が結線した（8.1 は選択を使わなかった）:
+ *
+ *   - `selection`: マウントの時点の選択（**表を描くときは現在位置が 1 つある**。要件 2.1）
+ *   - `onSelectionChange`: **実装が起こした**変化（ポインタ・行見出し・Glide の側に残した束縛）
+ *     を画面へ上げる。画面はそれをそのまま自分の選択として取り込む
+ *   - `onVisibleSpanChange`: 見えている区間（追随の判断と窓の先読みの材料。要件 2.4）
+ *
+ * 残る 5 つは**操作**であり（8.3〜8.9 の担当）、8.2 はそれらを [`onUnavailable`] へ流す。
  * **黙って何もしない実装にしない**理由は 2 つある: `onCopy` が空文字を返せばクリップボードが
  * 空になり、`onPaste` が黙って捨てれば貼り付けが消える（どちらも無反応より悪い）。拒否（`Promise`
  * の失敗）にしておくのは、移植口の実装が**クリップボードへ書かず・適用もしない**ためである
  * （`glideAdapter.tsx` の `GlideSurface` は拒否を記録して描画を止めない）。
- *
- * `onSelectionChange` だけは**操作ではない**。選択は移植口の実装が持ち（`RendererSpec` に選択を
- * 下ろす欄が無い）、8.1 は選択を表示に使わない（要件 2.1 の提示は 8.2 の担当である）。移植口の
- * 契約上この欄は必須なので、**何も消費しないことをここに明記する**。
  */
 export function createGridRendererSpec(options: {
   readonly getCell: (position: CellPosition) => RenderCell;
   readonly columns: readonly RenderColumn[];
   readonly rowCount: number;
+  readonly selection: RendererSelection | null;
+  readonly rowMarkers: RowMarkerMode;
+  readonly onSelectionChange: (selection: RendererSelection | null) => void;
+  readonly onVisibleSpanChange: (span: VisibleSpan) => void;
   readonly onUnavailable: (operation: string) => void;
 }): RendererSpec {
   const refuse = (operation: string): Error => {
@@ -327,8 +394,11 @@ export function createGridRendererSpec(options: {
   return {
     columns: options.columns,
     rowCount: options.rowCount,
+    selection: options.selection,
+    rowMarkers: options.rowMarkers,
     getCell: options.getCell,
-    onSelectionChange: () => undefined,
+    onSelectionChange: options.onSelectionChange,
+    onVisibleSpanChange: options.onVisibleSpanChange,
     onActivateEditor: () => {
       refuse(OPERATION_NAMES.activateEditor);
     },
@@ -347,6 +417,15 @@ export function createGridRendererSpec(options: {
 // 4. 表（窓の記憶と移植口を組み立てる場所）
 // ===========================================================================
 
+/**
+ * 行見出し列の出し方。**行の全体をポインタで選べるようにする**（要件 2.3 の 2 つ目）。
+ *
+ * Glide は行見出しの分の添字を内部で補正する（`getCellContent` / 列幅 / 選択の正規化 /
+ * 見えている区間 / `scrollTo` のいずれも）ので、画面はこの値を渡すだけでよい（design.md
+ * 「7.2 が決めたこと」の行見出し列の行）。数字は Glide が 1 起点で描く。
+ */
+const ROW_MARKERS: RowMarkerMode = "clickable-number";
+
 /** 表を入れる枠。**ここが移植口の器である**（確定した寸法が要る。`createGlideAdapter` の doc）。 */
 const TABLE_STYLE = {
   flex: "1 1 auto",
@@ -357,6 +436,22 @@ const TABLE_STYLE = {
   overflow: "hidden",
 } as const;
 
+/** 表の面（数え上げの行と、移植口の器）。**縦に伸びる**（器は確定した寸法を要する）。 */
+const SURFACE_STYLE = {
+  display: "flex",
+  flexDirection: "column",
+  gap: "0.25rem",
+  flex: "1 1 auto",
+  minHeight: 0,
+} as const;
+
+/** 選択の数え上げの行（要件 2.5）。**表の上に出す**。 */
+const SELECTION_STYLE = {
+  margin: 0,
+  fontSize: "0.8125rem",
+  color: `var(${APPEARANCE_VARS.screenMuted})`,
+} as const;
+
 /** 表を組み立てる指定。 */
 interface GridSurfaceProps {
   /** 開いたシートの識別子（窓の要求が名乗る。`grid_open_sheet` に渡した文字列と同一である）。 */
@@ -365,6 +460,10 @@ interface GridSurfaceProps {
   readonly summary: GridSheetSummary;
   /** 可視行の数（窓が覆う行数）。 */
   readonly visibleRows: number;
+  /** 選択（現在位置と矩形）。**画面の状態が持つ唯一の値である**（写しをここに作らない）。 */
+  readonly selection: RendererSelection;
+  /** 選択が変わった（打鍵・ポインタのどちらでも）ことを画面へ上げる口。 */
+  readonly onSelectionChange: (selection: RendererSelection | null) => void;
   /** 器が捕まえない失敗を画面内へ流す口。 */
   readonly onUnavailable: (operation: string) => void;
 }
@@ -380,20 +479,61 @@ interface GridSurfaceProps {
 const GENERATION_AFTER_OPEN = 1;
 
 /**
- * 表そのもの。**開いたシート 1 つぶんの窓の記憶（7.3）と移植口（7.1 / 7.2）を組み立てる。**
+ * 表そのもの。**開いたシート 1 つぶんの窓の記憶（7.3）と移植口（7.1 / 7.2）を組み立て、
+ * 現在位置と選択（8.2）を結線する。**
  *
  * 組み立てはマウントの効果 1 つで行い、後始末で移植口を片付けて記憶を手放す（`dispose`。以後の
  * 応答は捨てられる）。**列の並びは表示状態（7.5）から組む**ので、8.8 が列幅・列順を変えたときは
  * 新しい仕様でマウントし直すことになる（`RendererHandle` に幅や順を押し込む口が無い）。
+ *
+ * 効果は 3 つである: ① 器の組み立て（依存はシートと列の構成と可視行数だけ — **選択を依存に
+ * 入れない**。入れると打鍵のたびに器を組み直し、React の根と Glide の部品を作り直して走査の
+ * 位置を失う）、② 選択を移植口へ下ろし、必要なら追随させる（依存は選択だけ）、③ なし —
+ * 見えている区間は ref に置く（描き直しが要らないためである）。
  */
 function GridSurface({
   sheet,
   summary,
   visibleRows,
+  selection,
+  onSelectionChange,
   onUnavailable,
 }: GridSurfaceProps): ReactElement {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // 移植口の取っ手。**窓の到着（非同期）と選択の効果が使う**ので、効果の外に置く。
+  const handleRef = useRef<RendererHandle | null>(null);
+  /**
+   * いま見えている区間（要件 2.4 の追随の判断と、7.3 の先読みの材料）。
+   *
+   * **状態にしない**（描き直しが要らない）。走査のたびに再描画すると、窓の到着のたびに表を
+   * 組み直すことになる。値は移植口の知らせ（`onVisibleSpanChange`）が書き換える。
+   */
+  const visibleRef = useRef<VisibleSpan | null>(null);
 
+  // 表の大きさ（現在位置を寄せる先。要件 2.2 の端の扱いと、行・列の全体の選択に要る）。
+  const bounds = { rowCount: visibleRows, columnCount: summary.columns.length };
+
+  /**
+   * 表の器が打鍵を受ける口。**方向の指示だけを引き受け、残りは流す**（`./selection` の
+   * module doc の表）。ここで例外を投げない — `ScreenBoundary` は**イベントハンドラの例外を
+   * 捕まえない**（`src/shell/ScreenBoundary.tsx`）ので、投げれば画面が壊れる。
+   */
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    const next = selectionForKey(event, selection, bounds);
+    if (next === null) {
+      return;
+    }
+    // 引き受けた打鍵はブラウザの走査を止める（矢印は器をスクロールさせてしまう）。
+    event.preventDefault();
+    onSelectionChange(next);
+  };
+
+  // 表そのものの組み立て。**選択が変わっても組み直さない** — 器を作り直すと React の根と
+  // Glide の部品が作り直され、走査の位置（表示範囲）も失われる。仕様へ渡す選択はマウントの
+  // 時点の値であり（`RendererSpec.selection` の doc）、以後の更新は下の効果が
+  // `handle.setSelection` で下ろす。**したがってこの効果の依存に選択を入れない**
+  // （入れると打鍵のたびに組み直すことになる）。効果の閉包は依存が変わった回の描画の値なので、
+  // 器を組み直すとき（シートが変わったとき）はそのときの選択が初期値になる。
   useEffect(() => {
     const container = containerRef.current;
     if (container === null) {
@@ -402,8 +542,14 @@ function GridSurface({
 
     // 表示状態（7.5）。8.1 は初期の並び（宣言の順・既定の幅）だけを組む。
     const display = createDisplayState({ columnCount: summary.columns.length });
-    // 移植口の取っ手は**マウントの戻り値**であり、窓の到着（非同期）より後でしか使われない。
-    let handle: RendererHandle | null = null;
+    // 開いた直後に見えている区間の見当。**実装が知らせてくるまでの値である**（Glide は
+    // マウントの直後に本当の区間を知らせる）。
+    const openingSpan: VisibleSpan = {
+      rows: { start: 0, count: Math.min(visibleRows, WINDOW_ROWS) },
+      columns: { start: 0, count: summary.columns.length },
+    };
+    visibleRef.current = openingSpan;
+
     const cache = createWindowCache({
       sheet,
       // 葉の型の札は**列の宣言から取る**（窓は値の変種しか運ばない。7.3 の指定の doc）。
@@ -415,30 +561,85 @@ function GridSurface({
       transport: (argument) => DEFAULT_CLIENT.readWindow(argument),
       // 窓が届いたら、その区間を描き直させる（移植口は知らせが無ければ描き直さない）。
       onArrival: (span) => {
-        handle?.invalidate(span);
+        handleRef.current?.invalidate(span);
       },
     });
 
-    handle = GRID_RENDERER_PORT.mount(
+    const handle = GRID_RENDERER_PORT.mount(
       container,
       createGridRendererSpec({
         columns: display.renderColumns(summary.columns.map((column) => column.name)),
         rowCount: visibleRows,
+        // **マウントの時点で現在位置が 1 つある**（要件 2.1）。
+        selection,
+        rowMarkers: ROW_MARKERS,
         getCell: (position) => cache.getCell(position),
+        onSelectionChange,
+        // 見えている区間の知らせ（8.2 が移植口へ足した口である）。**追随の判断の材料**であり、
+        // 同時に窓の先読みの材料でもある（この行が 8.1 の申し送りの答えである）。
+        onVisibleSpanChange: (span) => {
+          visibleRef.current = span;
+          cache.setVisibleSpan(span.rows);
+        },
         onUnavailable,
       }),
     );
-    // 開いた直後に見えているのは先頭の窓ぶんである（**走査に追随する更新は 8.2 の担当** —
-    // 移植口は可視の区間を知らせる口を持たない。引かれた行は `getCell` がその場で要求する）。
-    cache.setVisibleSpan({ start: 0, count: Math.min(visibleRows, WINDOW_ROWS) });
+    handleRef.current = handle;
+    // 開いた直後の先読み（要件 1.4）。**上の見当を渡す** — 本物の区間は実装が知らせてくる。
+    cache.setVisibleSpan(openingSpan.rows);
 
     return () => {
-      handle?.destroy();
+      handle.destroy();
       cache.dispose();
+      handleRef.current = null;
     };
   }, [sheet, summary, visibleRows, onUnavailable]);
 
-  return <div ref={containerRef} data-testid="jxcel-grid-table" style={TABLE_STYLE} />;
+  /**
+   * 選択を移植口へ下ろし、必要なら表示範囲を追随させる（要件 2.2、2.4）。
+   *
+   * **下ろす値と数え上げの値は同じ 1 つである**（`selection`）— 画面に出ている数と、描かれて
+   * いる選択がずれる余地を作らない（design.md「8.2 が広げた面」の判断）。
+   */
+  useEffect(() => {
+    const handle = handleRef.current;
+    if (handle === null) {
+      return;
+    }
+    handle.setSelection(selection);
+    const target = followTarget(visibleRef.current, selection);
+    if (target !== null) {
+      handle.scrollTo(target);
+    }
+  }, [selection]);
+
+  const counts = selectionCounts(selection);
+
+  return (
+    <div style={SURFACE_STYLE}>
+      {/*
+        選択の数え上げ（要件 2.5）。**利用者に見える数は 1 起点である**（内部の序数は 0 起点）。
+        読み手（検査）のために、生の数を属性にも出しておく。
+      */}
+      <p
+        data-testid="jxcel-grid-selection-counts"
+        data-selection-rows={counts.rows}
+        data-selection-columns={counts.columns}
+        data-selection-cells={counts.cells}
+        data-current-row={selection.current.row}
+        data-current-column={selection.current.column}
+        style={SELECTION_STYLE}
+      >
+        {`現在位置 ${String(selection.current.row + 1)} 行 ${String(selection.current.column + 1)} 列 ／ 選択 ${String(counts.rows)} 行 × ${String(counts.columns)} 列 = ${String(counts.cells)} セル`}
+      </p>
+      <div
+        ref={containerRef}
+        onKeyDown={onKeyDown}
+        data-testid="jxcel-grid-table"
+        style={TABLE_STYLE}
+      />
+    </div>
+  );
 }
 
 // ===========================================================================
@@ -533,10 +734,12 @@ function GridScreenBody({
   model,
   onRetry,
   onUnavailable,
+  onSelectionChange,
 }: {
   readonly model: GridScreenModel;
   readonly onRetry: () => void;
   readonly onUnavailable: (operation: string) => void;
+  readonly onSelectionChange: (selection: RendererSelection | null) => void;
 }): ReactElement {
   const state = model.state;
   switch (state.status) {
@@ -592,6 +795,8 @@ function GridScreenBody({
           sheet={state.sheet}
           summary={state.summary}
           visibleRows={state.visibleRows}
+          selection={state.selection}
+          onSelectionChange={onSelectionChange}
           onUnavailable={onUnavailable}
         />
       );
@@ -609,6 +814,13 @@ export interface GridScreenViewProps {
   readonly onDismissNotice: () => void;
   /** 移植口の操作がまだ結線されていないことを知らせる。 */
   readonly onUnavailable: (operation: string) => void;
+  /**
+   * 選択が変わった（打鍵・ポインタのどちらでも）。要件 2.1、2.2、2.3。
+   *
+   * `null` は**実装が選択を解除した**こと（Glide の Escape など）である。画面はそれを
+   * 取り下げず、いまの選択を置き直す（[`gridScreenSelectionChanged`] の doc）。
+   */
+  readonly onSelectionChange: (selection: RendererSelection | null) => void;
 }
 
 /**
@@ -620,6 +832,7 @@ export function GridScreenView({
   onRetry,
   onDismissNotice,
   onUnavailable,
+  onSelectionChange,
 }: GridScreenViewProps): ReactElement {
   return (
     <section data-testid="jxcel-grid-screen" aria-label="グリッド" style={ROOT_STYLE}>
@@ -636,7 +849,12 @@ export function GridScreenView({
           </button>
         </div>
       )}
-      <GridScreenBody model={model} onRetry={onRetry} onUnavailable={onUnavailable} />
+      <GridScreenBody
+        model={model}
+        onRetry={onRetry}
+        onUnavailable={onUnavailable}
+        onSelectionChange={onSelectionChange}
+      />
     </section>
   );
 }
@@ -676,6 +894,11 @@ export function GridScreen(): ReactElement {
   const dismissNotice = useCallback(() => {
     setModel(gridScreenNoticeDismissed);
   }, []);
+  const select = useCallback((selection: RendererSelection | null) => {
+    // **器に届かない失敗と同じ側である**（イベントハンドラ）。ここは状態の遷移だけであり、
+    // 表を描いていないときは遷移が自分で何もしない（`gridScreenSelectionChanged`）。
+    setModel((current) => gridScreenSelectionChanged(current, selection));
+  }, []);
   const noteUnavailable = useCallback((operation: string) => {
     // **器に届かない失敗である**（イベントハンドラ。`ScreenBoundary` は捕まえない）。内容の
     // 領域は変えず、告知として 1 行出す。
@@ -688,6 +911,7 @@ export function GridScreen(): ReactElement {
       onRetry={retry}
       onDismissNotice={dismissNotice}
       onUnavailable={noteUnavailable}
+      onSelectionChange={select}
     />
   );
 }

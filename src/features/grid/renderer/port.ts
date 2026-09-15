@@ -1,8 +1,24 @@
 /**
- * 描画層の移植口（tasks.md 7.1。design.md「RendererPort と GlideAdapter」）。
+ * 描画層の移植口（tasks.md 7.1 / 8.2。design.md「RendererPort と GlideAdapter」）。
  *
  * 所有: `RendererPort`（同「Components and Interfaces」の表）。要件: 1.1, 1.2, 1.3, 1.4,
- * 2.1, 2.2, 2.3, 2.4, 7.1, 7.2。**本ファイルはタスク 7.1 が定義した。**
+ * 2.1, 2.2, 2.3, 2.4, 7.1, 7.2。**本ファイルはタスク 7.1 が定義し、8.2 が 4 点だけ広げた**
+ * （design.md「8.2 が広げた面（移植口の改訂）」）。
+ *
+ * # 8.2 が広げた 4 点（**7.1 の契約を変えた唯一の箇所である**）
+ *
+ * | 足したもの | 向き | 何のためか |
+ * |---|---|---|
+ * | [`RendererSpec.selection`] | 画面 → 実装 | マウントの時点で現在位置が 1 つあること（要件 2.1） |
+ * | [`RendererHandle.setSelection`] | 画面 → 実装 | 打鍵のたびに選択を下ろす（要件 2.2、2.3、2.4。マウントし直さない） |
+ * | [`RendererSpec.onVisibleSpanChange`] | 実装 → 画面 | 追随の判断（要件 2.4）と、窓の先読み（7.3） |
+ * | [`RendererSpec.rowMarkers`] | 画面 → 実装 | 行の全体の選択のポインタの操作（要件 2.3） |
+ *
+ * 加えて [`RendererSpec.onSelectionChange`] の引数を矩形から [`RendererSelection`]（現在位置と
+ * 矩形）へ広げた — **現在位置は矩形の左上とは限らない**（右下から左上へ引いた選択では錨が右下に
+ * ある）ためである。7.1 は「選択は実装が持ち、外へ報せる一方通行」と定めていたが、8.2 は
+ * **画面が持ち、実装は指示されたとおりに描く**向きへ変えた（理由と、食い違いが起きない仕組みは
+ * design.md の同節）。
  *
  * # 何を運び、何を運ばないか
  *
@@ -101,6 +117,34 @@ export interface CellRange {
 }
 
 /**
+ * 画面が持つ選択: **現在位置（現在のセル）と、選択されている矩形**。
+ *
+ * 要件 2.1 が求める「現在位置となるセルを 1 つ持ち、区別できる形で提示する」は、描き手にとっては
+ * この 2 つの組である — Glide の制御選択も同じ組（`current` と矩形）を持ち、現在位置を矩形の
+ * 枠とは別の印（焦点の環）で描く。**矩形 1 つでは現在位置を表せない**: 右下から左上へ引いた選択の
+ * 錨は右下にあり、正規化した矩形の左上とは別のセルである。
+ *
+ * **不変条件: `current` はつねに `range` の中にある。**選択を作る側（`selection.ts`）が保つ。
+ * 行の全体・列の全体の選択でも現在位置は 1 つである（利用者が居た位置をそのまま残す）。
+ */
+export interface RendererSelection {
+  readonly current: CellPosition;
+  readonly range: CellRange;
+}
+
+/**
+ * 行見出し列の出し方。**画面が決める**（実装は与えられたとおりに描く）。
+ *
+ *   - `none`: 行見出しを描かない（行をポインタで選ぶ操作が無い）。
+ *   - `clickable-number`: 行の番号を描き、**クリックでその行の全体を選べる**ようにする
+ *     （要件 2.3 の 2 つ目）。番号は 1 起点である（Glide の行見出しの既定）。
+ *
+ * Glide の `number` は**クリックできない**（`rowMarkers === "number"` のとき行見出しの操作は
+ * 何もしない — 7.2 の実装を読んで確認した）。使える値だけを並べる。
+ */
+export type RowMarkerMode = "none" | "clickable-number";
+
+/**
  * 可視行の区間: 連続する可視行の並び。窓の要求と、影響を受けた行の通知に使う。
  *
  * **半開区間である**: `start` を含み、`start + count` を含まない（可視 1 行目が `0` であって
@@ -111,6 +155,27 @@ export interface CellRange {
 export interface RowSpan {
   readonly start: RowOrdinal;
   readonly count: number;
+}
+
+/** 可視列の区間: [`ColumnSpan`] の列版であり、同じ半開区間の規約である。 */
+export interface ColumnSpan {
+  readonly start: ColumnIndex;
+  readonly count: number;
+}
+
+/**
+ * 表示範囲に見えている区間（**行と列の両方**）。要件 2.4 の追随の判断がこれで決まる。
+ *
+ * 移植口は画面へ「どこが見えているか」を知らせる口を持たなかった（7.1 は開いたままにした）。
+ * 8.2 が [`RendererSpec.onVisibleSpanChange`] として足した — 追随（現在位置がこの区間の外へ
+ * 出たら `scrollTo` する）と、窓の先読み（7.3 の `setVisibleSpan`）がどちらもこれを使う。
+ *
+ * **列も要る。**行だけでは、右へ動いて見えなくなった現在位置に追随できない（追随の判断が
+ * 片軸だけになる）。画面は行の区間を窓の記憶へ渡し、両軸を追随の判断に使う。
+ */
+export interface VisibleSpan {
+  readonly rows: RowSpan;
+  readonly columns: ColumnSpan;
 }
 
 /**
@@ -166,6 +231,10 @@ export interface RenderCell {
  * `on*` は**知らせであって命令ではない**。移植口は受け取ったことを覚えないし、自分の状態を
  * 変えない。何をどう変えるか（選択の確定、編集の起動、列幅の記憶、列順の記憶、複製の内容、
  * 貼り付けの解釈）は呼び出し側（画面。8.x）の仕事である。
+ *
+ * **選択と現在位置だけは、呼び出し側が持ち、仕様と [`RendererHandle.setSelection`] で下ろす**
+ * （8.2。上の module doc）。列幅・列順のように「次の `mount` の仕様でしか反映できない」ものでは
+ * ない — 選択は打鍵のたびに変わるので、そのたびにマウントし直すわけにいかない。
  */
 export interface RendererSpec {
   /** 左から順に描く列。表示順であり、幅を含む。 */
@@ -173,13 +242,34 @@ export interface RendererSpec {
   /** 可視行の総数（絞り込みを適用したあとの数）。 */
   readonly rowCount: number;
   /**
+   * マウントの時点の選択。**現在位置が 1 つも無い状態で描き始めない**（要件 2.1）。
+   *
+   * `null` は「選択が無い」であり、許されるのは表を描かない場合だけである（画面は表を描くとき
+   * つねに現在位置を 1 つ渡す）。以後の変化は [`RendererHandle.setSelection`] で下ろす。
+   */
+  readonly selection: RendererSelection | null;
+  /** 行見出し列の出し方。**ポインタで行の全体を選ぶ操作の有無を決める**（要件 2.3）。 */
+  readonly rowMarkers: RowMarkerMode;
+  /**
    * セルを引く。**同期であり、例外を投げない**（本移植口の不変条件）。未取得の行は
    * `loading: true` を返す。範囲の外の位置（負・行数以上・列数以上・整数でない）も
    * 例外を投げてはならない — 描き手は描画の途中で引くため、1 つの例外が画面全体を落とす。
    */
   readonly getCell: (position: CellPosition) => RenderCell;
-  /** 選択が変わった（解除は `null`）。要件 2.1、2.3。 */
-  readonly onSelectionChange: (range: CellRange | null) => void;
+  /**
+   * **実装が起こした**選択の変化（利用者がポインタで選んだ、行見出しを押した、Glide 自身の
+   * 打鍵の束縛が動かした）。解除は `null`。要件 2.1、2.3。
+   *
+   * 呼び出し側が `setSelection` で下ろした選択は報せない（**自分が決めたことを自分へ報せない**。
+   * 報せると、画面の状態と実装の状態が往復して食い違いの種になる）。したがってこの知らせは
+   * つねに「画面が知らない変化」であり、画面はそのまま自分の選択として取り込む。
+   */
+  readonly onSelectionChange: (selection: RendererSelection | null) => void;
+  /**
+   * 見えている区間が変わった（走査・マウント・追随の後）。要件 2.4 の追随の判断と、7.3 の窓の
+   * 先読みに使う。**これは知らせであって命令ではない** — 実装は画面の状態を変えない。
+   */
+  readonly onVisibleSpanChange: (span: VisibleSpan) => void;
   /** 編集の起動が指示された（打鍵または二度打ち）。**編集の中身は運ばない**。要件 2.2、3.x。 */
   readonly onActivateEditor: (position: CellPosition) => void;
   /** 列の幅が変更された（変更後の幅。ピクセル）。要件 8.1。 */
@@ -202,12 +292,23 @@ export interface RendererSpec {
 /**
  * 描き終えた移植口を扱う口。**呼び出し側（画面）が使う。**
  *
- * 3 つしか無いのは意図である。表示状態（列幅・列順・選択）を書き換える口を持たないため、
- * 移植口は画面の状態を勝手に変えられない。状態が変われば、次の `mount` に渡す仕様が変わる。
+ * 表示状態（列幅・列順・選択）を**移植口から書き換える口は無い** — 移植口は画面の状態を
+ * 勝手に変えられない。状態が変われば、次の `mount` に渡す仕様が変わる。**唯一の例外が選択で
+ * ある**（8.2）: 選択は打鍵のたびに変わるので、次の `mount` を待っていられない
+ * （マウントし直すと React の根と Glide の部品を作り直すことになり、走査の位置も失われる）。
  */
 export interface RendererHandle {
+  /**
+   * 選択を下ろす（解除は `null`）。要件 2.1、2.2、2.3。
+   *
+   * **これが選択の唯一の更新の口である**（マウントの時点の値は [`RendererSpec.selection`]）。
+   * 実装は与えられた組をそのまま描き、**外へ報せ返さない**（自分が決めたことを自分へ報せない。
+   * `RendererSpec.onSelectionChange` の docs）。
+   */
+  readonly setSelection: (selection: RendererSelection | null) => void;
   /** その位置が見えるところまで表示範囲を動かす（要件 2.4 の追従、9.8 の移動）。 */
   readonly scrollTo: (position: CellPosition) => void;
+
   /** その区間を描き直させる（窓の内容が変わったとき。要件 1.7）。 */
   readonly invalidate: (span: RowSpan) => void;
   /** 描き手を片付ける。**以後その `RendererHandle` を使ってはならない。** */

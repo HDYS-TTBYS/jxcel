@@ -1027,8 +1027,12 @@ function specFor(cache: WindowCache, rowCount: number): RendererSpec {
   return {
     columns: [{ title: "名前", width: 120 }],
     rowCount,
+    // 選択と行見出しは本検査の主題ではない（現在位置は 1 つ、行見出しは出さない）。
+    selection: { current: { row: 0, column: 0 }, range: { start: { row: 0, column: 0 }, end: { row: 0, column: 0 } } },
+    rowMarkers: "none",
     getCell: cache.getCell,
     onSelectionChange: () => undefined,
+    onVisibleSpanChange: () => undefined,
     onActivateEditor: () => undefined,
     onColumnResize: () => undefined,
     onColumnMove: () => undefined,

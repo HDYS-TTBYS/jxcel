@@ -19,9 +19,11 @@
  * | 操作の時の引き | 動いた先の行・区間を引く | 選択の範囲・起動した行・動いた先の行・区間を引く |
  * | 知らせの時機 | その場で渡す | 次の微小タスクまで遅らせる |
  *
- * **どちらの実装も、`RendererHandle` の 3 つの口（`scrollTo` / `invalidate` / `destroy`）を
- * 持つ。**`destroy` の後は移植口を使えない（`mountedSpec` が投げる）— 実装の誤りをテストの側で
- * 気づけるようにするためである。
+ * **どちらの実装も、`RendererHandle` の 4 つの口（`setSelection` / `scrollTo` / `invalidate` /
+ * `destroy`）を持つ。**`destroy` の後は移植口を使えない（`mountedSpec` が投げる）— 実装の誤りを
+ * テストの側で気づけるようにするためである。2 つの実装は `setSelection` の扱いでもわざと違う
+ * （窓をまとめて引く側はその場で描き、必要になった行だけ引く側は引かない）。それでも外へ出る
+ * 呼び出しの並びは同じである。
  *
  * # 7.2（Glide の写し）への申し送り
  *
@@ -71,6 +73,13 @@ export function createEagerFakeRenderer(): DrivableRenderer {
       spec = initial;
       draw(0, EAGER_WINDOW_ROWS);
       return {
+        setSelection(selection) {
+          // **与えられた選択を描く**（下ろされた指示が描くものになる）。範囲の行を引くだけで
+          // あり、外へ報せ返さない（報せ返せば `port.test.ts` の並びの比較に余計な 1 つが載る）。
+          if (selection !== null) {
+            draw(selection.range.start.row, selection.range.end.row - selection.range.start.row + 1);
+          }
+        },
         scrollTo(position) {
           draw(position.row, 1);
         },
@@ -82,8 +91,12 @@ export function createEagerFakeRenderer(): DrivableRenderer {
         },
       };
     },
-    emitSelectionChange(range) {
-      mountedSpec(spec, "emitSelectionChange").onSelectionChange(range);
+    emitSelectionChange(selection) {
+      mountedSpec(spec, "emitSelectionChange").onSelectionChange(selection);
+      return Promise.resolve();
+    },
+    emitVisibleSpanChange(span) {
+      mountedSpec(spec, "emitVisibleSpanChange").onVisibleSpanChange(span);
       return Promise.resolve();
     },
     emitActivateEditor(position) {
@@ -133,6 +146,10 @@ export function createLazyFakeRenderer(): DrivableRenderer {
       // 器は使わない（理由は窓をまとめて引く実装と同じ）。
       spec = initial;
       return {
+        setSelection() {
+          // **この実装は引かない**（必要になった行だけを引く作りである）。下ろされた選択は
+          // 覚えない — 選択を持つのは呼び出し側であり、実装は描くだけである。
+        },
         scrollTo(position) {
           draw(position.row, 1);
         },
@@ -144,10 +161,16 @@ export function createLazyFakeRenderer(): DrivableRenderer {
         },
       };
     },
-    async emitSelectionChange(range) {
+    async emitSelectionChange(selection) {
       await Promise.resolve();
-      if (range !== null) draw(range.start.row, range.end.row - range.start.row + 1);
-      mountedSpec(spec, "emitSelectionChange").onSelectionChange(range);
+      if (selection !== null) {
+        draw(selection.range.start.row, selection.range.end.row - selection.range.start.row + 1);
+      }
+      mountedSpec(spec, "emitSelectionChange").onSelectionChange(selection);
+    },
+    async emitVisibleSpanChange(span) {
+      await Promise.resolve();
+      mountedSpec(spec, "emitVisibleSpanChange").onVisibleSpanChange(span);
     },
     async emitActivateEditor(position) {
       await Promise.resolve();

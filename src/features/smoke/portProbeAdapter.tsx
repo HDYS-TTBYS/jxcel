@@ -53,6 +53,7 @@ import type {
   CellRange,
   RenderCell,
   RendererHandle,
+  RendererSelection,
   RendererSpec,
 } from "../grid/renderer/port";
 import type { TypeKindTag } from "../../ipc/bindings";
@@ -307,7 +308,7 @@ function requireScroller(container: HTMLElement): HTMLElement {
 
 /** 移植口が受け取ったもの（**面が記録するだけであり、状態を変えない**）。 */
 interface Observed {
-  selection: CellRange | null;
+  selection: RendererSelection | null;
   resized: { readonly column: number; readonly width: number } | null;
   moved: { readonly from: number; readonly to: number } | null;
   copyRange: CellRange | null;
@@ -382,9 +383,14 @@ async function driveAdapterProbe(container: HTMLElement): Promise<PortProbeFacts
       width: widths[column] ?? PORT_PROBE_COLUMN_WIDTH,
     })),
     rowCount: PORT_PROBE_ROWS,
+    // 8.2 が広げた 3 つ。本面は**実装の通知を観測するだけ**であり、下ろす選択は持たない
+    // （現在位置の移動と追随の観測は 9.2 / 9.3 の仕事である）。
+    selection: { current: { row: 0, column: 0 }, range: { start: { row: 0, column: 0 }, end: { row: 0, column: 0 } } },
+    rowMarkers: "clickable-number",
     getCell: probeCell,
-    onSelectionChange: (range) => {
-      observed.selection = range;
+    onVisibleSpanChange: () => undefined,
+    onSelectionChange: (selection) => {
+      observed.selection = selection;
     },
     onActivateEditor: () => {
       // 本面は編集の起動を観測しない（要件 2.2 の入力手段は 7.4 の登録簿が担う）。
@@ -565,7 +571,7 @@ async function driveAdapterProbe(container: HTMLElement): Promise<PortProbeFacts
     paintOk: paint.ok,
     paintPixel: paint.pixel,
     colors: countDistinctColors(canvas),
-    selection: describeRange(selectionAfterDrag),
+    selection: describeRange(selectionAfterDrag?.range ?? null),
     selectedCells,
     selectionPixelChanged: selectionPixelBefore !== selectionPixelAfter,
     selectionPixelBefore,

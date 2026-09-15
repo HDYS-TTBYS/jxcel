@@ -5,9 +5,11 @@
  *
  * 1. **セルの取得**（`RendererSpec.getCell`）: 同期であり例外を投げない。未取得の行は
  *    `loading: true` で返る（design.md「RendererPort と GlideAdapter」の不変条件）。
- * 2. **外向きの知らせ**: 選択の変化・編集の起動・列幅の変更・列の移動・複製・貼り付けの
- *    6 つが、移植口を通って外へ出る（タスクの文言の「移植口の呼び出しとして外へ出す」）。
- *    呼び出し側が使う 3 つの口（`scrollTo` / `invalidate` / `destroy`）も同じ並びに載る。
+ * 2. **外向きの知らせ**: 選択の変化・見えている区間の変化・編集の起動・列幅の変更・列の移動・
+ *    複製・貼り付けの 7 つが、移植口を通って外へ出る（タスクの文言の「移植口の呼び出しとして
+ *    外へ出す」）。呼び出し側が使う 4 つの口（`setSelection` / `scrollTo` / `invalidate` /
+ *    `destroy`）も同じ並びに載る。**8.2 が `setSelection` と `onVisibleSpanChange` を、
+ *    選択の知らせを `RendererSelection`（現在位置と矩形）へ広げた。**
  * 3. **実装を差し替えても呼び出しの並びが変わらないこと**: 内部の作りが違う 2 つの偽の実装と、
  *    行の出所が違う 2 つの模型を掛け合わせた 4 通りの駆動で、記録された並びが一致する。
  * 4. **移植口が編集の意味論・判定・履歴を知らないこと**: 面の型（`npm run typecheck` が
@@ -23,8 +25,8 @@
  *
  * 駆動器は移植口に加えて「利用者の操作を注ぐ面」（`RendererEventSource`）を要求する — 移植口
  * そのものには注ぐ口が無い（`GridRendererPort` が持つのは `mount` だけで、外向きの知らせは
- * `RendererSpec` の callback である）。7.2 は Glide の通知（選択・セルの起動・列幅・列の移動・
- * 複製・貼り付け）に同じ面をかぶせ、`driveCanonicalSequence` をそのまま通して
+ * `RendererSpec` の callback である）。7.2 は Glide の通知（選択・走査・セルの起動・列幅・
+ * 列の移動・複製・貼り付け）に同じ面をかぶせ、`driveCanonicalSequence` をそのまま通して
  * `CANONICAL_SEQUENCE` と突き合わせること。**実物の実装がこの並びを保つことが、移植口を
  * 挟んだ理由（上流が止まっても差し替えられる）の実測になる。**
  */
@@ -64,7 +66,24 @@ import type {
  */
 const CANONICAL_SEQUENCE: readonly RecordedCall[] = [
   { call: "mount", args: [] },
-  { call: "onSelectionChange", args: [{ start: { row: 1, column: 0 }, end: { row: 3, column: 1 } }] },
+  // **現在位置は矩形の右下である**（左上ではない）。現在位置を矩形の左上へ潰す実装は、この
+  // 比較で落ちる（8.2 が `RendererSelection` を運ぶ理由である）。
+  {
+    call: "onSelectionChange",
+    args: [
+      {
+        current: { row: 3, column: 1 },
+        range: { start: { row: 1, column: 0 }, end: { row: 3, column: 1 } },
+      },
+    ],
+  },
+  // 見えている区間（追随と先読みの材料。8.2 が足した）。
+  {
+    call: "onVisibleSpanChange",
+    args: [{ rows: { start: 0, count: 24 }, columns: { start: 0, count: 3 } }],
+  },
+  // **下ろした選択は報せ返らない。**返す実装では `onSelectionChange` がもう 1 つ現れる。
+  { call: "setSelection", args: [{ current: { row: 5, column: 2 }, range: { start: { row: 5, column: 2 }, end: { row: 5, column: 2 } } }] },
   { call: "onActivateEditor", args: [{ row: 2, column: 1 }] },
   { call: "onColumnResize", args: [1, 144] },
   { call: "onColumnMove", args: [2, 0] },
@@ -75,9 +94,10 @@ const CANONICAL_SEQUENCE: readonly RecordedCall[] = [
   { call: "destroy", args: [] },
 ];
 
-/** 六つの知らせ（タスクの文言が並べているもの）。 */
+/** 七つの知らせ（タスクの文言が並べているもの、および 8.2 が足した見えている区間）。 */
 const CALLBACKS: readonly PortCall[] = [
   "onSelectionChange",
+  "onVisibleSpanChange",
   "onActivateEditor",
   "onColumnResize",
   "onColumnMove",
@@ -159,7 +179,7 @@ describe("外向きの知らせと呼び出し側の口の並び", () => {
 
     expect(run.calls).toEqual(CANONICAL_SEQUENCE);
 
-    // 六つの知らせが 1 つも欠けていないことを、名前でも言っておく（並びの比較が空同士で
+    // 七つの知らせが 1 つも欠けていないことを、名前でも言っておく（並びの比較が空同士で
     // 一致したのではないことを読み手に示す）。
     const observed = run.calls.map(({ call }) => call);
     for (const callback of CALLBACKS) expect(observed).toContain(callback);
@@ -267,15 +287,21 @@ const rendererSpecSurface: Exactly<
   keyof RendererSpec,
   | "columns"
   | "rowCount"
+  | "selection"
+  | "rowMarkers"
   | "getCell"
   | "onSelectionChange"
+  | "onVisibleSpanChange"
   | "onActivateEditor"
   | "onColumnResize"
   | "onColumnMove"
   | "onCopy"
   | "onPaste"
 > = true;
-const rendererHandleSurface: Exactly<keyof RendererHandle, "scrollTo" | "invalidate" | "destroy"> = true;
+const rendererHandleSurface: Exactly<
+  keyof RendererHandle,
+  "setSelection" | "scrollTo" | "invalidate" | "destroy"
+> = true;
 const renderColumnSurface: Exactly<keyof RenderColumn, "title" | "width"> = true;
 const cellPositionSurface: Exactly<keyof CellPosition, "row" | "column"> = true;
 const cellRangeSurface: Exactly<keyof CellRange, "start" | "end"> = true;
