@@ -822,6 +822,62 @@ describe("影響を受けた行の窓の破棄", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 7.5 編集の宛先（可視行の序数から行の識別子へ。tasks.md 8.3）
+// ---------------------------------------------------------------------------
+
+describe("行の識別子（編集の宛先）", () => {
+  it("取得した行の識別子を正準の文字列で返し、未取得の行は null を返す", async () => {
+    const harness = harnessOf();
+    const cache = cacheWith({ transport: harness.transport, rowCount: 12 });
+
+    // **未取得の行は null である。**要求も始めない（引く口ではない）。
+    expect(cache.rowId({ row: 0, column: 0 })).toBeNull();
+    expect(harness.calls).toEqual([]);
+
+    cache.getCell({ row: 0, column: 0 });
+    await settle();
+
+    // 綴りは `rowKeyText` の写しである（固定ファイルのヘッダが名指す 26 文字と同じ）。
+    expect(cache.rowId({ row: 0, column: 0 })).toBe(FIXTURE_ROW_IDS[0]);
+    expect(cache.rowId({ row: 1, column: 0 })).toBe(FIXTURE_ROW_IDS[1]);
+    expect(cache.rowId({ row: 2, column: 0 })).toBe(FIXTURE_ROW_IDS[2]);
+    // 記憶に無い行（別の窓）・範囲の外・整数でない序数は null である。
+    expect(cache.rowId({ row: 8, column: 0 })).toBeNull();
+    expect(cache.rowId({ row: 12, column: 0 })).toBeNull();
+    expect(cache.rowId({ row: -1, column: 0 })).toBeNull();
+    expect(cache.rowId({ row: 1.5, column: 0 })).toBeNull();
+  });
+
+  it("返した識別子は、影響を受けた行の通知の綴りと同じである", async () => {
+    // **同じ行を別の綴りで名指しすると、窓が捨てられない**（7.3 の `invalidate` は
+    // `rowKeyText` の写しで突き合わせる）。ここが食い違うと、編集の宛先は正しいのに表示が
+    // 更新されない、という一番分かりにくい故障になる。
+    const harness = harnessOf();
+    const cache = cacheWith({ transport: harness.transport, rowCount: 12 });
+    cache.getCell({ row: 0, column: 0 });
+    await settle();
+
+    const id = cache.rowId({ row: 0, column: 0 });
+    expect(id).toBe(FIXTURE_ROW_IDS[0]);
+    cache.invalidate([id ?? ""]);
+
+    expect(cache.windowCount).toBe(0);
+    // 捨てたあとは、その行の識別子も引けなくなる（未取得である）。
+    expect(cache.rowId({ row: 0, column: 0 })).toBeNull();
+  });
+
+  it("列の添字は行の識別子に影響しない（行の身元だけを返す）", async () => {
+    const harness = harnessOf();
+    const cache = cacheWith({ transport: harness.transport, rowCount: 12 });
+    cache.getCell({ row: 1, column: 0 });
+    await settle();
+
+    expect(cache.rowId({ row: 1, column: 0 })).toBe(FIXTURE_ROW_IDS[1]);
+    expect(cache.rowId({ row: 1, column: 3 })).toBe(FIXTURE_ROW_IDS[1]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 8. 空の窓（失敗と世代違いの表現）
 // ---------------------------------------------------------------------------
 

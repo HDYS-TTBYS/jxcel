@@ -213,6 +213,7 @@ crates/app-shell/src/ipc/
 src/features/grid/
 ├── GridScreen.tsx          # 画面本体。SHELL_SCREEN_REGISTRY に 1 件登録される
 ├── gridClient.ts           # invokeCommand / invokeRaw の薄いラッパ
+├── cellEdit.ts             # 入力手段の 2 つの口（確定・取消）と境界の間の 1 枚。**8.3 が足した**
 ├── windowCache.ts          # 窓の記憶と先読み。破棄の方針を持つ
 ├── windowCache.test.ts     # 窓の記憶と二進形式の検査（vitest。7.3）
 ├── displayState.ts         # 列幅と表示上の列順のみ。窓の中身を変えない状態
@@ -313,11 +314,11 @@ stateDiagram-v2
 |-------------|---------|------------|------------|-------|
 | 1.1, 1.2, 1.3, 1.4 | 10 万行の表示と走査、位置の提示、端への直接移動 | WindowCache, RendererPort, GlideAdapter, WindowCodec | `encode_window`, `GridRendererPort.mount` | 窓の取得と先読み |
 | 1.5, 1.6 | 行なし・列なしの提示 | GridScreen, GridSession | `GridOpenResponse.row_count`, `columns` | — |
-| 1.7 | 外部経路の変更を表示へ反映 | WindowCache, GridScreen | `WindowCache.invalidate` | 編集の適用と判定 |
+| 1.7 | 外部経路の変更を表示へ反映 | WindowCache, GridScreen（`cellEdit.ts`） | `WindowCache.invalidate`（`EditOutcome.affected` をそのまま渡す） | 編集の適用と判定 |
 | 2.1, 2.2, 2.3, 2.4, 2.5, 2.6 | 現在位置・選択・追従・範囲の対象化 | GridScreen（`selection.ts`）, RendererPort | `RendererSpec.selection` / `onSelectionChange` / `onVisibleSpanChange` / `rowMarkers`, `RendererHandle.setSelection` / `scrollTo` | — |
-| 3.1, 3.2, 3.8 | 型に応じた入力手段（日時・選択肢・真偽・シート間参照） | EditorRegistry, editors | `CellEditorRegistry.resolve` | — |
-| 3.3, 3.4, 3.5 | 判定への送付、変換の提示、違反値の保持 | EditApply, GridCommands | `EditCommand::SetCells`, `GridEditResponse.coercions` | 編集の適用と判定 |
-| 3.6, 3.7 | 編集の取消、値なしへ戻す | GridScreen, EditApply | `CellEditorProps.cancel` | — |
+| 3.1, 3.2, 3.8 | 型に応じた入力手段（日時・選択肢・真偽・シート間参照） | EditorRegistry, editors, GridScreen（`CellEditorPanel`） | `CellEditorRegistry.resolve`, `CellEditorProps.constraints`（**8.3 が `kind` を渡す**。`choices` / `reference` / `members` / `nullable` は境界に材料が無い） | — |
+| 3.3, 3.4, 3.5 | 判定への送付、変換の提示、違反値の保持 | EditApply, GridCommands, GridScreen（`cellEdit.ts`） | `EditCommand::SetCells`, `GridClient.applyEdit`, `GridEditResponse.coercions` / `violations` / `violation_total` | 編集の適用と判定 |
+| 3.6, 3.7 | 編集の取消、値なしへ戻す | GridScreen（`cellEdit.ts`。**取消は境界へ何も送らない**）, EditApply | `CellEditorProps.cancel`, `WindowCache.rowId`（宛先の行の識別子）, 空の文字列＝値なし（`edited_value`） | — |
 | 4.1, 4.2, 4.6 | 違反の区別・理由・解消 | WindowCodec, GridScreen, ViolationBar | 窓の違反札, `GridViolationResponse.reason` | 編集の適用と判定 |
 | 4.3, 4.4, 4.6 | 違反の総数と次の違反への移動、解消の反映 | ViolationIndex, GridSession, ViolationBar | `violation_total`, `find_violation` | 編集の適用と判定 |
 | 4.5 | 入れ子の内側の違反位置 | WindowCodec, NestedInspector | `Violation.path` の写し | — |
@@ -883,9 +884,15 @@ export interface ColumnConstraints {
 | 2 | 参照先のシートと、その行を一覧する経路（`Ref`）。6.1 のコマンド 6 本に無い | 3.8 | 欄 1 つと**コマンド 1 本** |
 | 3 | ユーザー定義型の識別子。`kind` は `"Custom"` しか運ばないため `resolve` の `customTypeId` の出所が無い | 10.1, 10.4 | 境界用の型に `custom_type_id` |
 | 4 | **確定の文字の運び手。**`commit(text)` は経路を 1 本しか持たないのに、入れ子の列は `SetNested`（構造表現）でなければ適合しない（`Text` → `object` / `array` の変換の行が無い）。このままだと画面が**列の札で経路を選ぶ**ことになり、要件 10.3 と衝突する | 5.5, 10.3 | **本設計の改訂**（登録に経路の札を足すなど） |
+| 5 | **値なしを許すか**（`nullable`）。`ColumnDescriptor` に欄が無いため、画面は「値なしの道」を出すかどうかを決められない（**8.3 が実測**） | 3.7 | 境界用の型に欄を 1 つ足す（欄 1〜3 と同じ経路） |
+| 6 | **入れ子の位置ごとの宣言**（`members`）。`ColumnDescriptor.path` は展開された列の位置であり、位置の一覧ではない | 5.1, 5.5 | 境界用の型、または位置の一覧を返す経路 |
 
-1〜3 は境界の追加、4 は設計の改訂である。**4 は 8.3 の実装時に必ず突き当たる**（詳細と実測は
-`research.md` の「7.4 が記録した隙間」）。
+1〜3・5・6 は境界の追加、4 は設計の改訂である。**4 は 8.3 の実装時に必ず突き当たる**（詳細と実測は
+`research.md` の「7.4 が記録した隙間」と「実測と固定: セルの編集と型強制の提示（タスク 8.3）」）。
+**8.3 が渡せたのは `kind` だけである**（列の札は `ColumnDescriptor.kind` が運ぶ）。`constraints` の
+残る欄は渡さず、面は自分の既定へ落ちる（要件 10.4）。`nullable` だけは**つねに真**を渡す —
+道を閉じると値なしを許す列で値なしへ戻せず（要件 3.7）、値なしを許さない列では判定が違反を返して
+**値が保持される**（要件 3.5）からである。
 
 #### RendererPort と GlideAdapter
 
@@ -937,7 +944,7 @@ export interface RendererSpec {
   readonly getCell: (position: CellPosition) => RenderCell;
   readonly onSelectionChange: (selection: RendererSelection | null) => void;  // 実装が起こした変化（8.2 が広げた）
   readonly onVisibleSpanChange: (span: VisibleSpan) => void;              // 見えている区間（8.2）
-  readonly onActivateEditor: (position: CellPosition) => void;
+  readonly onActivateEditor: (position: CellPosition) => void;               // 編集の起動（7.1 のまま。8.3 も広げていない）
   readonly onColumnResize: (column: number, width: number) => void;
   readonly onColumnMove: (from: number, to: number) => void;
   readonly onCopy: (range: CellRange) => Promise<string>;
@@ -961,6 +968,10 @@ export interface GridRendererPort {
 
 **この block は 8.2 が広げた**（上の 4 つと `onSelectionChange` の引数の変更）。7.1 の逐語の写しと
 その検査（`port.test.ts` の `Exactly<keyof RendererSpec, …>`）は 8.2 が同じ変更で直した。
+**8.3 はこの面を 1 欄も広げていない。**編集の起動は `onActivateEditor(position)` のままであり、
+入力手段の初期値は**画面の側の仕様組み立て（`GridScreen` の `createGridRendererSpec`）が
+`getCell` から取る** — 描かれている値の源は 1 つ（`getCell`）であり、面を広げる必要が無い
+（`port.ts` と `glideAdapter.tsx` は 8.3 で 1 バイトも変わっていない）。
 
 **Implementation Notes**
 - Integration: Glide の `getCellContent` は引きに来る形であり、窓単位の記憶とそのまま噛み合う。並べ替えと絞り込みは Glide が持たないが、本設計ではいずれも Rust 側にあるため欠点にならない
@@ -1226,8 +1237,8 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 | **可視行の順序の導出** | 開いた直後に **`grid_set_view` に空の指定を 1 度だけ**渡す | `GridSession` は可視行の順序をこの呼び出しで導出する（`set_view` が `recompute_order` を行う）。**呼ばないと窓はつねに行 0 件（頭だけの 33 バイト）で返り、表は読み込み中のまま**になる（起動観測で実測: 呼ぶ前 33 バイト → 呼んだ後 4773 バイト）。操作ではないので 8.8（並べ替え・絞り込み）と重ならない |
 | 世代の整合 | 画面が `GridSession` と同じ規則で数える（開いた直後 0、`grid_set_view` の成功ごとに +1） | 境界の型は世代を運ばない（7.3 の申し送り）。開いた直後の 1 回の後は 1 である |
 | 記憶へ渡す行数 | `grid_set_view` の応答の**可視行数**（シートの行数ではない） | 窓の区間は可視行の序数である（`RowSpan` の doc）。空の指定では両者は一致するが、絞り込みが効けば食い違う |
-| 取り込み口 | `./gridClient` の 4 つの口（`readDocumentState` / `openSheet` / `setView` / `readWindow`）| 画面は `invoke` もコマンド名も知らない。**要求は `request` という名前の引数で包む**（Tauri が縛る鍵は引数の名前である。包まないと**コマンドへ届く前に復号が失敗**し、封筒の失敗ではなく `invoke` の拒否として現れる — 起動観測で実測した誤りであり、`gridClient.test.ts` が固定する）|
-| 移植口の 5 つの操作 | **結線しない**（8.3〜8.9）。届いた通知は**画面内の告知 1 行**へ流す（内容は消さない。再試行も出さない） | 黙って何もしない実装にしない（`onCopy` が空文字を返せばクリップボードが空になり、`onPaste` が黙って捨てれば貼り付けが消える）。**選択の 3 つは操作ではない**（`selection` / `onSelectionChange` / `onVisibleSpanChange`）— 8.1 は選択を使わないが、**8.2 が結線した**（下の「8.2 が広げた面」）|
+| 取り込み口 | `./gridClient` の口（`readDocumentState` / `openSheet` / `setView` / `readWindow`。**8.3 が `applyEdit` を足して 5 つ**）| 画面は `invoke` もコマンド名も知らない。**要求は `request` という名前の引数で包む**（Tauri が縛る鍵は引数の名前である。包まないと**コマンドへ届く前に復号が失敗**し、封筒の失敗ではなく `invoke` の拒否として現れる — 起動観測で実測した誤りであり、`gridClient.test.ts` が固定する）|
+| 移植口の 5 つの操作 | **結線しない**（8.3〜8.9）。届いた通知は**画面内の告知 1 行**へ流す（内容は消さない。再試行も出さない） | 黙って何もしない実装にしない（`onCopy` が空文字を返せばクリップボードが空になり、`onPaste` が黙って捨てれば貼り付けが消える）。**選択の 3 つは操作ではない**（`selection` / `onSelectionChange` / `onVisibleSpanChange`）— 8.1 は選択を使わないが、**8.2 が結線した**（下の「8.2 が広げた面」）。**編集の起動（`onActivateEditor`）は 8.3 が結線した**（下の「8.3 が確定させたもの」）。残る 4 つは 8.4〜8.9 である |
 | 配色 | `APPEARANCE_VARS` の 10 本のみを参照し、色の値を 1 つも書かない | 画面の契約 4。源の走査で固定する（走査は**本 module の源 1 つ**に限る。下の「開いたままにした点」）|
 
 **8.1 が開いたままにした点（後続タスクが決めること）**
@@ -1266,6 +1277,46 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 **焦点の環として描かれる**こと、追随が**実際にスクロールを起こす**こと、打鍵が**実際のイベント
 として器へ届く**こと、選択が変わっても**器が組み直されない**こと。9.2 / 9.3 が画面全体の観測を
 引き受けるまでの間は、8.1 と同じ使い捨ての画面（`smoke-port-probe`）の段で見る。
+
+##### 8.3 が確定させたもの（セルの編集と型強制の提示。`src/features/grid/cellEdit.ts`）
+
+**入力手段の 2 つの口（`commit` / `cancel`）は `settleCellEdit` 1 つへ集まる。**取消は
+**境界へ 1 つも送らない**（取消の腕は `GridClient` も窓の記憶も触らない）— 要件 3.6 の
+「値が戻り、ドキュメントが変わらない」は、**文書を変えるのが適用の 1 命令だけであること**と、
+画面が窓の記憶を捨てないことから出る。実測と固定の記録は
+`research.md`「実測と固定: セルの編集と型強制の提示（タスク 8.3）」。
+
+| 論点 | 決定 | 根拠 |
+|---|---|---|
+| 入力手段の選択（要件 3.1、10.3） | **登録簿（`editorRegistry.resolve`）だけが解決する。**画面に型ごとの分岐を 1 つも書かない（札が読めない列は `"Any"`、未登録の札は登録簿の既定へ落ちる） | 要件 10.3「入力手段の追加は登録簿への登録のみで成立する」。`editorRegistry.test.ts` の源の走査が、画面が入力手段の成分を名指ししていないことを固定する |
+| 編集するセル | **現在位置の 1 セルだけである**（`SetCells` の 1 件）。範囲へ書く経路（`PasteRange`）は 8.7 の担当であり、本タスクは作らない | 範囲の編集は表示の並びと文書の位置の写像を伴う（要件 8.9）。1 セルなら `ready.selection.current` がそのまま宛先になる |
+| 宛先（文書の位置） | **`WindowCache.rowId` を足して行の識別子を引き、列は表示の位置をそのまま使う**（いまの並びは恒等である）。引けなければ**送らない** | `GridCellAddress` は行の識別子と列の添字であり、可視行の序数ではない（要件 8.6「取り違えると別の行を編集する」）。**恒等が崩れるのは 8.8 の列順と 8.5 の入れ子の展開の 2 つである**（展開すると `ColumnDescriptor` の並びが文書の列の添字と一致しなくなる — `view/mod.rs` の `push_column`）。どちらが入るときも、この写像と窓の記憶の列の添字を同じ 1 箇所で揃えること |
+| 編集の面の位置 | **表の面の中、数え上げの行と表の器の間**。位置を属性と文言で名乗る | 移植口に「セルの上へ DOM を重ねる」口は無い（`RendererSpec` に欄が無い）。覆われたセルを探させるより、どのセルを編集しているかを名乗る方が読める |
+| 初期値 | **開いた時点の `getCell` の写し**を `ready.editing` に入れる | 窓の到着で表が描き直されても、入力中の値が足元で変わらない（要件 3.5 の「値を捨てない」は、打っている最中に足元が変わることでも壊れる） |
+| 確定（要件 3.3、3.4、3.5） | `{ command: "SetCells", cells: [{ cell, text }] }` を `grid_apply_edit` へ。結果の `coercions` と `violations` / `violation_total` を**表の上の報告 1 つ**として出す（**変換前の値を落とさない**） | 打たれた文字を解釈するのは `schema-engine` であり、適合しない値も破棄されずに返る（`WriteOrigin::Edit` は決して拒否しない）。**型強制は起きた出来事**でありセルの状態ではないので、窓のセルの印にはしない（`RenderCell` に欄が無い） |
+| 値なし（要件 3.7） | **空の文字列をそのまま送る**（`edited_value` が `Null` へ写す）。画面は「値なし」という別の表現を作らない | 境界の宛先は「打たれた文字」である（`GridCellEdit.text`）。**`nullable` は境界に欄が無い**ので、値なしの道はつねに出す（下の「申し送り」） |
+| 適用のあとの作り直し（要件 1.7） | `EditOutcome.affected` をそのまま `WindowCache.invalidate` へ渡す | 窓が取り直され、到着の通知が `RendererHandle.invalidate` を呼ぶ（8.1 の `onArrival` の結線）。`SetCells` は行数を変えないので `clear` は要らない（行数を変える命令は 8.6 / 8.7 / 8.9） |
+| 適用できなかったとき | **入力手段を開いたままにする**（適用されていないので、打たれている値を閉じて捨てる理由が無い）。理由は 8.1 の告知として出す | 画面内の失敗の扱いは 8.1 の表のままである（内容の領域を置き換えない） |
+| 要件 3.5 の残り | **バー・巡回・理由の文言は 8.4**。本タスクが出すのは「どこで何件か」まで（理由は `grid_find_violation` が組み立てる） | `GridEditOutcome.violations` は位置だけを運ぶ（理由の写像を持たない）。**`violation_total` はシート全体の数である** — 適応層が `GridSession::violation_total()` から写すためであり、再検証した列に閉じるのは位置の一覧のほうである（8.3 のレビューが実測。以前ここに「総数をシート全体へ広げるのは 8.4」と書いてあったのは誤りで、6.2 の時点で既にシート全体である） |
+
+**単体テストが観測しないもの（3 つ。実物の起動で観測する）**: ① **編集の面が実際に現れること**
+（表は canvas であり、`node` の環境では描かれたものを観測できない。canvas の中のセルを打鍵で
+起動する操作は a11y からは起こせない）、② **焦点が入力手段へ移り打鍵が届くこと**、③ **確定の往復が
+実物の Rust を相手に成立すること**（単体テストの境界は偽の実装である）。観測の場所は 9.2 の台本
+（`scripts/ci/`）と、8.1 が使った段（検証用のビルドを `JXCEL_VERIFICATION_INITIAL_SCREEN=grid` で
+起動し、a11y の木と `jxcel.log` を読む）である。**本タスクは起動の観測を行っていない**ので、
+この 3 つは未確認であり、残るリスクとして `research.md` に明示してある。
+
+**申し送り（境界に足りないもの。8.3 が実測した）**
+
+| # | 何が足りないか | どの要件か | どこへ足すか |
+|---|---|---|---|
+| 1 | 選択肢の一覧（7.4 の申し送り 1） | 3.2 | 境界用の型（`crates/app-shell/src/ipc/grid.rs`）→ 生成物を再生成 |
+| 2 | 参照先のシートと行（7.4 の申し送り 2） | 3.8 | 欄 1 つと**コマンド 1 本** |
+| 3 | ユーザー定義型の識別子（7.4 の申し送り 3） | 10.1、10.4 | 境界用の型に `custom_type_id` |
+| 4 | **確定の文字の運び手**（7.4 の申し送り 4。入れ子は `SetNested` でなければ適合しない） | 5.5、10.3 | **設計の改訂**（登録に「どの命令へ載せるか」の札を足す）。**本タスクでは閉じていない** — 入れ子の列の編集はいま「違反として示される」経路に落ちる（値は保持される）。画面が列の札で経路を選ぶ形にすると 10.3 と衝突するので、そうしていない |
+| 5 | **値なしを許すか**（`ColumnDescriptor` に欄が無い。8.3 が実測） | 3.7 | 境界用の型に欄を 1 つ足し、生成し直す。それまでは `nullable: true` を渡す（道を閉じると、値なしを許す列で値なしへ戻せない） |
+| 6 | 入れ子の位置ごとの宣言（`members`。`ColumnDescriptor.path` は展開された列の位置であり、位置の一覧ではない） | 5.1、5.5 | 境界用の型、または位置の一覧を返す経路 |
 
 ## Data Models
 

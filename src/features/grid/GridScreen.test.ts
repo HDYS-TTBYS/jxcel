@@ -41,10 +41,14 @@ import type {
   ColumnDescriptor,
   DocumentSheet,
   DocumentStateResponse,
+  GridEditCommand,
+  GridEditOutcome,
+  GridEditResponse,
   GridOpenResponse,
   GridSheetSummary,
   GridViewResponse,
   IpcResult,
+  TypeKindTag,
 } from "../../ipc/bindings";
 import type { IpcClientError } from "../../ipc/client";
 import { EDITOR_SMOKE_SCREEN_ID } from "../smoke/EditorSmoke";
@@ -56,6 +60,9 @@ import {
   GridScreen,
   GridScreenView,
   createGridRendererSpec,
+  gridScreenEditReportDismissed,
+  gridScreenEditSettled,
+  gridScreenEditStarted,
   gridScreenFailed,
   gridScreenLoaded,
   gridScreenNoticeDismissed,
@@ -68,7 +75,7 @@ import {
 } from "./GridScreen";
 import { initialSelection } from "./selection";
 import type { GridClient } from "./gridClient";
-import type { RendererSelection, VisibleSpan } from "./renderer/port";
+import type { CellPosition, RendererSelection, VisibleSpan } from "./renderer/port";
 
 // ===========================================================================
 // 検査の道具（偽の境界と、状態からの描画）
@@ -121,16 +128,20 @@ function err<T>(): IpcResult<T, IpcClientError> {
 /** 偽の境界。**どの口が呼ばれたかを順に数える**（表を描かないとき開く呼び出しが起きないこと）。 */
 interface FakeClient extends GridClient {
   readonly calls: readonly string[];
+  readonly edits: readonly GridEditCommand[];
 }
 
 function fakeClient(answers: {
   readonly state: IpcResult<DocumentStateResponse, IpcClientError>;
   readonly open?: IpcResult<GridOpenResponse, IpcClientError>;
   readonly view?: IpcResult<GridViewResponse, IpcClientError>;
+  readonly edit?: IpcResult<GridEditResponse, IpcClientError>;
 }): FakeClient {
   const calls: string[] = [];
+  const edits: GridEditCommand[] = [];
   return {
     calls,
+    edits,
     readDocumentState: async () => {
       calls.push("document_state");
       return answers.state;
@@ -149,6 +160,11 @@ function fakeClient(answers: {
       // 8.1 の検査は窓を引かない（引くのは描き手である）。空の窓を返して再試行を起こさない。
       return new ArrayBuffer(0);
     },
+    applyEdit: async (command) => {
+      calls.push("grid_apply_edit");
+      edits.push(command);
+      return answers.edit ?? err<GridEditResponse>();
+    },
   };
 }
 
@@ -157,10 +173,15 @@ function markOf(model: GridScreenModel): string {
   return renderToStaticMarkup(
     createElement(GridScreenView, {
       model,
+      // 効果は走らないので、この口が呼ばれることはない（描かれるものだけを読む）。
+      client: fakeClient({ state: err<DocumentStateResponse>() }),
       onRetry: () => undefined,
       onDismissNotice: () => undefined,
+      onDismissEditReport: () => undefined,
       onUnavailable: () => undefined,
       onSelectionChange: () => undefined,
+      onEditStarted: () => undefined,
+      onEditSettled: () => undefined,
     }),
   );
 }
@@ -329,6 +350,7 @@ describe("画面内の失敗の経路（器に届かない失敗）", () => {
       summary: { columns: [descriptor(0, "名前")], row_count: 3 },
       visibleRows: 3,
       selection: initialSelection(),
+      editing: null,
     });
 
     const withNotice = gridScreenFailed(ready, "この操作はまだ結線されていない: 列の幅");
@@ -373,9 +395,10 @@ describe("画面内の失敗の経路（器に届かない失敗）", () => {
   });
 });
 
-describe("移植口の操作（8.2〜8.9 が結線する）", () => {
-  it("まだ結線していない操作は、黙って捨てずに画面内の告知へ流す", async () => {
+describe("移植口の操作（8.3〜8.9 が結線する）", () => {
+  it("編集の起動は結線され、まだ結線していない操作は黙って捨てずに画面内の告知へ流す", async () => {
     const unavailable: string[] = [];
+    const activated: [CellPosition, string][] = [];
     const spec = createGridRendererSpec({
       columns: [{ title: "名前", width: 120 }],
       rowCount: 3,
@@ -385,6 +408,9 @@ describe("移植口の操作（8.2〜8.9 が結線する）", () => {
       getCell: () => ({ text: "標本", variant: "Text", violated: false, loading: false }),
       onSelectionChange: () => undefined,
       onVisibleSpanChange: () => undefined,
+      onActivateEditor: (position, initialText) => {
+        activated.push([position, initialText]);
+      },
       onUnavailable: (operation) => {
         unavailable.push(operation);
       },
@@ -399,7 +425,12 @@ describe("移植口の操作（8.2〜8.9 が結線する）", () => {
       loading: false,
     });
 
+    // **編集の起動（要件 3.1）はもう「まだ使えない操作」ではない。**位置と、いま描かれている
+    // 値が画面へ上がる。
     spec.onActivateEditor({ row: 0, column: 0 });
+    expect(activated).toEqual([[{ row: 0, column: 0 }, "標本"]]);
+    expect(unavailable).toEqual([]);
+
     spec.onColumnResize(0, 200);
     spec.onColumnMove(0, 1);
     // 値を持つ 2 つは**拒否**である（空文字を返せばクリップボードが空になり、黙って解決すれば
@@ -412,7 +443,6 @@ describe("移植口の操作（8.2〜8.9 が結線する）", () => {
     );
 
     expect(unavailable).toEqual([
-      "セルの編集の起動",
       "列の幅の変更",
       "列の位置の変更",
       "選択の範囲の複製",
@@ -421,7 +451,7 @@ describe("移植口の操作（8.2〜8.9 が結線する）", () => {
 
     // 選択の知らせは**操作ではない**（8.2 が消費する。告知へは流さない）。
     spec.onSelectionChange(null);
-    expect(unavailable).toHaveLength(5);
+    expect(unavailable).toHaveLength(4);
   });
 });
 
@@ -445,6 +475,7 @@ function readyModel(selection: RendererSelection): GridScreenModel {
     summary: { columns: [...SAMPLE_COLUMNS], row_count: SAMPLE_ROWS },
     visibleRows: SAMPLE_ROWS,
     selection,
+    editing: null,
   });
 }
 
@@ -589,6 +620,7 @@ describe("現在位置と選択（8.2。要件 2.1、2.3、2.5）", () => {
       onVisibleSpanChange: (span) => {
         spans.push(span);
       },
+      onActivateEditor: () => undefined,
       onUnavailable: () => undefined,
     });
 
@@ -653,6 +685,372 @@ describe("選択の遷移（8.2。要件 2.1）", () => {
     expect(after.state.selection).not.toBe(before.state.selection);
     // 画面の数え上げも変わらない（写しは 1 つである）。
     expect(countsIn(markOf(after))).toEqual(countsIn(markOf(before)));
+  });
+});
+
+// ===========================================================================
+// 2.6 セルの編集（tasks.md 8.3。要件 3.1、3.3、3.4、3.5、3.6、3.7）
+// ===========================================================================
+
+/** 編集した行の識別子（正準の 26 文字）。 */
+const EDITED_ROW = "01ARZ3NDEKTSV4RRFFQ69G5FB0";
+
+/** もう 1 つの行（違反の位置が複数になる場合に使う）。 */
+const OTHER_ROW = "01ARZ3NDEKTSV4RRFFQ69G5FB1";
+
+/** 札を選べる列の記述（既存の `descriptor` は `Text` 固定である）。 */
+function descriptorOfKind(column: number, name: string, kind: TypeKindTag | null): ColumnDescriptor {
+  return { column, path: [], name, kind, element_count: null, expandability: "leaf" };
+}
+
+/** 適用の結果（指定した欄だけを変えて組む）。 */
+function outcomeOf(overrides: Partial<GridEditOutcome>): GridEditOutcome {
+  return {
+    affected: [],
+    coercions: [],
+    violation_total: 0,
+    violations: [],
+    revalidated_columns: [],
+    row_count: SAMPLE_ROWS,
+    ...overrides,
+  };
+}
+
+/** 表を描いていて、1 つのセルを編集中の状態（列の札を選べる）。 */
+function editingModel(
+  columns: readonly ColumnDescriptor[],
+  position: CellPosition,
+  initialText: string,
+): GridScreenModel {
+  return gridScreenEditStarted(
+    gridScreenLoaded(initialGridScreenModel(), {
+      status: "ready",
+      sheet: "s1",
+      summary: { columns: [...columns], row_count: SAMPLE_ROWS },
+      visibleRows: SAMPLE_ROWS,
+      selection: initialSelection(),
+      editing: null,
+    }),
+    position,
+    initialText,
+  );
+}
+
+/** 確定の結果を画面へ反映する（画面が `settleCellEdit` の結果に対して行う遷移そのものである）。 */
+function settled(model: GridScreenModel, outcome: GridEditOutcome | null): GridScreenModel {
+  return gridScreenEditSettled(model, { status: "applied", outcome });
+}
+
+/** `checked` の付いた欄が持つ値の並び（初期値がどの選択肢かを読む）。 */
+function checkedValues(markup: string): readonly string[] {
+  return (markup.match(/<input\b[^>]*>/g) ?? [])
+    .filter((tag) => tag.includes("checked"))
+    .map((tag) => /value="([^"]*)"/.exec(tag)?.[1] ?? "");
+}
+
+describe("編集の起動と入力手段の解決（8.3。要件 3.1、10.3、10.4）", () => {
+  it("編集中の面は、現在位置を名乗り、その列の札の入力手段を登録簿から出す", () => {
+    const markup = markOf(
+      editingModel(
+        [descriptorOfKind(0, "在庫", "Bool"), descriptorOfKind(1, "名前", "Text")],
+        { row: 4, column: 0 },
+        "true",
+      ),
+    );
+
+    // **どのセルを編集しているかが読める**（面は表の器の外に出る。覆われたセルを探させない）。
+    expect(markup).toContain("jxcel-grid-editor");
+    expect(markup).toContain('data-editor-row="4"');
+    expect(markup).toContain('data-editor-column="0"');
+    expect(markup).toContain("5 行 1 列を編集中");
+    // 札に対応する面が出る（`Bool` の面 = 二値の切り替え）。
+    expect(markup).toContain('data-editor-kind="Bool"');
+    expect(markup).toContain('aria-label="真偽"');
+    expect(markup).toContain('type="radio"');
+    // 初期値は**開いた時点の表示文字列**である（`true` の側が選ばれている）。
+    expect(checkedValues(markup)).toEqual(["true"]);
+  });
+
+  it("別の札の列では、別の面が出る（画面に型ごとの分岐が無いこと）", () => {
+    const columns = [descriptorOfKind(0, "在庫", "Bool"), descriptorOfKind(1, "名前", "Text")];
+
+    const text = markOf(editingModel(columns, { row: 4, column: 1 }, "標本"));
+
+    // 文字の札は文字の欄であり、**真偽の面は出ない**（解決は登録簿が行う）。
+    expect(text).toContain('data-editor-kind="Text"');
+    expect(text).toContain('type="text"');
+    expect(text).toContain('value="標本"');
+    expect(text).not.toContain('aria-label="真偽"');
+  });
+
+  it("登録の無い札は、登録簿の既定（値をそのまま扱う面）へ落ちる", () => {
+    // `Attachment` は組込が登録しない札である（`editors/index.ts` の表。実体の選択は本スペックの
+    // 対象外）。**面を出さないのではなく、既定へ落ちる**（要件 10.4 の事後条件）。
+    const markup = markOf(
+      editingModel([descriptorOfKind(0, "添付", "Attachment")], { row: 0, column: 0 }, "a.png"),
+    );
+
+    expect(markup).toContain('data-editor-kind="Attachment"');
+    expect(markup).toContain('type="text"');
+    expect(markup).toContain('value="a.png"');
+  });
+
+  it("札が読めない列は `Any` として登録簿へ来る（値をそのまま扱う面）", () => {
+    // 宣言が壊れている列は `kind` が `null` で届く（生成物の doc）。7.4 の約束どおり `Any` と
+    // して解決され、**面は必ず出る**（編集できない列は作らない）。
+    const markup = markOf(
+      editingModel([descriptorOfKind(0, "壊れた列", null)], { row: 0, column: 0 }, "{}"),
+    );
+
+    expect(markup).toContain('data-editor-kind="Any"');
+    expect(markup).toContain("<textarea");
+  });
+
+  it("値なしへ戻す道が出る（要件 3.7。**境界に nullable の欄が無いので、つねに出す**）", () => {
+    // キーだけで取り消せない面（二値）は、値なしを許す列でだけ `値なし` を出す。**境界の
+    // `ColumnDescriptor` に nullable の欄が無い**ため、いまはつねに出す（材料が来たら写す。
+    // 下の「申し送り」）。道を閉じると、値なしを許す列で値なしへ戻せない。
+    const markup = markOf(
+      editingModel([descriptorOfKind(0, "在庫", "Bool")], { row: 0, column: 0 }, "true"),
+    );
+
+    expect(markup).toContain("値なし");
+    expect(markup).toContain("取消");
+  });
+
+  it("表を描いていないときは、編集を開かない（描かれていないセルは編集できない）", () => {
+    const loading = initialGridScreenModel();
+
+    expect(gridScreenEditStarted(loading, { row: 0, column: 0 }, "標本")).toBe(loading);
+  });
+
+  it("編集を開くと、現在位置と初期値が状態に入る（選択も内容も動かない）", () => {
+    const before = readyModel(initialSelection());
+
+    const after = gridScreenEditStarted(before, { row: 4, column: 2 }, "標本");
+
+    if (after.state.status !== "ready" || before.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.editing).toEqual({
+      position: { row: 4, column: 2 },
+      initialText: "標本",
+    });
+    expect(after.state.selection).toEqual(before.state.selection);
+    expect(after.state.summary).toEqual(before.state.summary);
+    expect(after.attempt).toBe(before.attempt);
+  });
+});
+
+describe("確定と取消（8.3。要件 3.3、3.6）", () => {
+  it("確定の結果を反映すると、入力手段が閉じ、報告が出る（送った値の反映は境界が担う）", () => {
+    const before = editingModel([descriptorOfKind(0, "名前", "Text")], { row: 4, column: 0 }, "標本");
+
+    const after = settled(
+      before,
+      outcomeOf({ affected: [EDITED_ROW], revalidated_columns: [0] }),
+    );
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.editing).toBeNull();
+    expect(markOf(after)).not.toContain("jxcel-grid-editor");
+    // 表はそのまま描かれている（表を失わない）。
+    expect(markOf(after)).toContain("jxcel-grid-table");
+  });
+
+  it("取り消すと、入力手段が閉じ、報告も告知も動かない（境界へは何も送らない）", () => {
+    // 前の確定で報告が付いている状態を作り、そのうえで開いて取り消す。
+    const reported = settled(
+      readyModel(initialSelection()),
+      outcomeOf({
+        affected: [EDITED_ROW],
+        coercions: [{ cell: { row: EDITED_ROW, column: 0 }, before: "12.50", after: "12.5" }],
+        revalidated_columns: [0],
+      }),
+    );
+    const withNotice = gridScreenFailed(reported, "この操作はまだ使えません: 列の幅の変更");
+    const opened = gridScreenEditStarted(withNotice, { row: 4, column: 0 }, "12.50");
+
+    const after = gridScreenEditSettled(opened, { status: "cancelled" });
+
+    if (after.state.status !== "ready" || opened.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.editing).toBeNull();
+    // **文書を触っていないので、直近の確定の報告はまだ「直近」である。**
+    expect(after.editReport).toEqual(opened.editReport);
+    expect(after.editReport).not.toBeNull();
+    expect(after.notice).toBe(opened.notice);
+    // 内容の領域（選択・要約・可視行）も動かない。
+    expect(after.state).toEqual({ ...opened.state, editing: null });
+    expect(markOf(after)).toContain("jxcel-grid-coercions");
+  });
+
+  it("適用できなかったときは、入力手段を開いたままにして、理由を告知として出す", () => {
+    // **適用されていないので、打たれている値を閉じて捨てる理由が無い。**
+    const before = editingModel([descriptorOfKind(0, "名前", "Text")], { row: 4, column: 0 }, "打ちかけ");
+
+    const after = gridScreenEditSettled(before, {
+      status: "failed",
+      message: "ドキュメントの失敗: 経路が不達である",
+    });
+
+    expect(after.state).toEqual(before.state);
+    expect(after.notice).toBe("編集を適用できませんでした: ドキュメントの失敗: 経路が不達である");
+    const markup = markOf(after);
+    expect(markup).toContain("jxcel-grid-editor");
+    expect(markup).toContain('value="打ちかけ"');
+    expect(markup).toContain("jxcel-grid-notice");
+  });
+});
+
+describe("型強制の提示（8.3。要件 3.4）", () => {
+  it("型強制が起きたとき、変換が起きたことと、**変換前**の値を出す", () => {
+    const after = settled(
+      editingModel([descriptorOfKind(0, "単価", "Decimal")], { row: 4, column: 0 }, "12.50"),
+      outcomeOf({
+        affected: [EDITED_ROW],
+        coercions: [{ cell: { row: EDITED_ROW, column: 0 }, before: "12.50", after: "12.5" }],
+        revalidated_columns: [0],
+      }),
+    );
+
+    const markup = markOf(after);
+    expect(markup).toContain("jxcel-grid-edit-report");
+    expect(markup).toContain("jxcel-grid-coercions");
+    // 変換が起きたことが読める。
+    expect(markup).toContain("型強制");
+    // **前後の値はどちらも境界が運んだものであり、取り違えない。**
+    expect(markup).toContain("変換前「12.50」");
+    expect(markup).toContain("変換後「12.5」");
+    expect(markup).not.toContain("変換前「12.5」");
+    // 位置も読める（人が読む行と、機械が読む属性の両方）。
+    expect(markup).toContain(`行「${EDITED_ROW}」の 1 列目`);
+    expect(markup).toContain(`data-coercion-row="${EDITED_ROW}"`);
+    expect(markup).toContain('data-coercion-column="0"');
+    expect(markup).toContain('data-coercion-before="12.50"');
+    expect(markup).toContain('data-coercion-after="12.5"');
+  });
+
+  it("型強制が起きなければ、型強制の提示は出ない（空の枠を出さない）", () => {
+    const after = settled(
+      editingModel([descriptorOfKind(0, "名前", "Text")], { row: 4, column: 0 }, "標本"),
+      outcomeOf({ affected: [EDITED_ROW], revalidated_columns: [0] }),
+    );
+
+    const markup = markOf(after);
+    expect(markup).not.toContain("jxcel-grid-coercions");
+    expect(markup).not.toContain("jxcel-grid-violations");
+    // 出すものが 1 つも無いので、報告の枠そのものを出さない。
+    expect(markup).not.toContain("jxcel-grid-edit-report");
+  });
+
+  it("次の確定は、前の報告を置き換える（前の変換を残さない）", () => {
+    const reported = settled(
+      editingModel([descriptorOfKind(0, "単価", "Decimal")], { row: 4, column: 0 }, "12.50"),
+      outcomeOf({
+        affected: [EDITED_ROW],
+        coercions: [{ cell: { row: EDITED_ROW, column: 0 }, before: "12.50", after: "12.5" }],
+      }),
+    );
+
+    const after = settled(reported, outcomeOf({ affected: [EDITED_ROW] }));
+
+    expect(after.editReport).toBeNull();
+    expect(markOf(after)).not.toContain("jxcel-grid-coercions");
+  });
+
+  it("適用の結果が無い（`None`）ときも、報告は出ない（生成物の型がその腕を許す）", () => {
+    // `GridEditResponse.outcome` が `None` であるのは「進める履歴が無かった」場合であり、適用では
+    // つねに `Some` である（生成物の doc）。それでも型はその腕を許すので、**壊れない**ことを固定する。
+    const after = settled(
+      editingModel([descriptorOfKind(0, "名前", "Text")], { row: 4, column: 0 }, "標本"),
+      null,
+    );
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.editReport).toBeNull();
+    expect(after.state.editing).toBeNull();
+    expect(markOf(after)).not.toContain("jxcel-grid-edit-report");
+  });
+
+  it("報告は閉じられる（閉じても内容の領域も告知も動かない）", () => {
+    const reported = settled(
+      editingModel([descriptorOfKind(0, "単価", "Decimal")], { row: 4, column: 0 }, "12.50"),
+      outcomeOf({
+        affected: [EDITED_ROW],
+        coercions: [{ cell: { row: EDITED_ROW, column: 0 }, before: "12.50", after: "12.5" }],
+      }),
+    );
+
+    const dismissed = gridScreenEditReportDismissed(reported);
+
+    expect(dismissed.editReport).toBeNull();
+    expect(dismissed.state).toEqual(reported.state);
+    expect(dismissed.notice).toBe(reported.notice);
+    expect(markOf(dismissed)).not.toContain("jxcel-grid-edit-report");
+  });
+});
+
+describe("違反の提示（8.3。要件 3.5。**提示の本体は 8.4**）", () => {
+  it("適合しない値の確定は、違反として示され、入力手段は閉じる（値の保持は境界が担う）", () => {
+    // **値が文書に残ることは Rust 側の契約である** — 判定する側は `WriteOrigin::Edit` を決して
+    // 拒否せず、`grid_apply_edit` は適合しない値も破棄せずに返す（`src-tauri/src/commands/
+    // grid.rs` の同コマンドの docs）。したがって画面がするのは「送る」「違反として示す」であり、
+    // **値を捨てる経路を作らない**（送る中身は `cellEdit.test.ts` が固定する）。
+    const after = settled(
+      editingModel([descriptorOfKind(0, "数量", "Int")], { row: 4, column: 0 }, "存在しない名前"),
+      outcomeOf({
+        affected: [EDITED_ROW],
+        violation_total: 2,
+        violations: [
+          { row: EDITED_ROW, column: 0, path: [] },
+          { row: OTHER_ROW, column: 0, path: [] },
+        ],
+        revalidated_columns: [0],
+      }),
+    );
+
+    const markup = markOf(after);
+    // **失敗ではない**（適用は成功しており、値は文書にある）。告知も出さない。
+    expect(markup).not.toContain("jxcel-grid-notice");
+    expect(markup).not.toContain("jxcel-grid-failure");
+    expect(markup).toContain("jxcel-grid-table");
+    // 違反として示される（位置と、**シート全体**の総数）。
+    expect(markup).toContain("jxcel-grid-violations");
+    expect(markup).toContain('data-violation-total="2"');
+    expect(markup).toContain('data-violation-count="2"');
+    expect(markup).toContain("違反 2 件（シート全体の総数）");
+    expect(markup).toContain(`行「${EDITED_ROW}」の 1 列目`);
+    expect(markup).toContain(`行「${OTHER_ROW}」の 1 列目`);
+    // 入力手段は閉じている（確定したので、面は用済みである）。
+    expect(markup).not.toContain("jxcel-grid-editor");
+  });
+
+  it("位置を持たない違反でも、総数があればそれを出す（シート全体の数と偽らない）", () => {
+    const after = settled(
+      editingModel([descriptorOfKind(0, "数量", "Int")], { row: 4, column: 0 }, "9"),
+      outcomeOf({ affected: [EDITED_ROW], violation_total: 1, revalidated_columns: [0] }),
+    );
+
+    const markup = markOf(after);
+    expect(markup).toContain('data-violation-total="1"');
+    expect(markup).toContain('data-violation-count="0"');
+    // **シート全体**の数であることを言う（適応層が `GridSession::violation_total()` から写す）。
+    expect(markup).toContain("違反 1 件（シート全体の総数）");
+  });
+
+  it("違反が残っていなければ、違反の提示は出ない", () => {
+    const after = settled(
+      editingModel([descriptorOfKind(0, "数量", "Int")], { row: 4, column: 0 }, "9"),
+      outcomeOf({ affected: [EDITED_ROW], revalidated_columns: [0] }),
+    );
+
+    expect(markOf(after)).not.toContain("jxcel-grid-violations");
   });
 });
 

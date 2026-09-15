@@ -89,6 +89,40 @@ describe("境界の口の引数の形", () => {
     expect(invoke).toHaveBeenCalledWith("document_state", undefined);
   });
 
+  it("編集命令も `request` という名前の引数で包む（1 セルの `SetCells`）", async () => {
+    invoke.mockResolvedValue({
+      status: "ok",
+      data: {
+        context: { window: "main" },
+        outcome: {
+          affected: [],
+          coercions: [],
+          violation_total: 0,
+          violations: [],
+          revalidated_columns: [],
+          row_count: 0,
+        },
+      },
+    });
+    const client = createGridClient();
+
+    await client.applyEdit({
+      command: "SetCells",
+      cells: [{ cell: { row: "01ARZ3NDEKTSV4RRFFQ69G5FB0", column: 2 }, text: "12.50" }],
+    });
+
+    // **宛先は文書の位置である**（行の識別子と列の添字。可視行の序数ではない）。
+    // 包みを落とすと、コマンドへ届く前に復号が失敗し、封筒ではなく拒否として現れる。
+    expect(invoke).toHaveBeenCalledWith("grid_apply_edit", {
+      request: {
+        command: {
+          command: "SetCells",
+          cells: [{ cell: { row: "01ARZ3NDEKTSV4RRFFQ69G5FB0", column: 2 }, text: "12.50" }],
+        },
+      },
+    });
+  });
+
   it("`invoke` の拒否は封筒の失敗として返る（画面はそれを失敗として扱える）", async () => {
     invoke.mockRejectedValue(new Error("コマンドが許可されていない"));
     const client = createGridClient();

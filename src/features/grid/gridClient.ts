@@ -36,6 +36,8 @@ import { invokeCommand, invokeRaw } from "../../ipc/client";
 import type { CommandName, IpcClientResult, RawCommandName } from "../../ipc/client";
 import type {
   DocumentStateResponse,
+  GridEditCommand,
+  GridEditResponse,
   GridOpenResponse,
   GridViewResponse,
   GridViewSpec,
@@ -67,6 +69,15 @@ const GRID_SET_VIEW_COMMAND: CommandName = "grid_set_view";
 const GRID_ROWS_WINDOW_COMMAND: RawCommandName = "grid_rows_window";
 
 /**
+ * 編集命令を 1 つ適用するコマンド（6.2。要件 3.3、3.4、3.5、1.7）。
+ *
+ * 応答が運ぶのは**判定の結果**である（影響範囲・型強制・違反・行数）— 画面はそれで窓を捨て、
+ * 変換と違反を提示する。**適合しない値も破棄されずに返る**（`src-tauri/src/commands/grid.rs` の
+ * `grid_apply_edit` の docs。判定するのは `schema-engine` である）。
+ */
+const GRID_APPLY_EDIT_COMMAND: CommandName = "grid_apply_edit";
+
+/**
  * 表示の指定を変えない指定（**空の指定＝絞り込み無し・並べ替え無し・展開無し**）。
  *
  * 8.1 は開いた直後にこれ 1 つだけを適用し、**並べ替え・絞り込み・展開の操作は 8.8 の担当**
@@ -74,7 +85,7 @@ const GRID_ROWS_WINDOW_COMMAND: RawCommandName = "grid_rows_window";
  */
 export const EMPTY_GRID_VIEW: GridViewSpec = { sort: [], filters: [], expansion: [] };
 
-/** 画面が境界へ出す口。**この 4 つだけである。** */
+/** 画面が境界へ出す口。**この 5 つだけである。** */
 export interface GridClient {
   /** 呼び出し元ウィンドウのセッションの状態（シートの一覧を含む）。 */
   readonly readDocumentState: () => Promise<IpcClientResult<DocumentStateResponse>>;
@@ -100,6 +111,17 @@ export interface GridClient {
    * （設計の誤り表「経路の失敗」）。本 module は拒否を握らない。
    */
   readonly readWindow: (argument: Uint8Array) => Promise<ArrayBuffer>;
+  /**
+   * 編集命令を 1 つ適用し、**判定の結果**（影響範囲・型強制・違反・行数）を受ける
+   * （要件 3.3、3.4、3.5、1.7）。
+   *
+   * 本口が受けるのは**命令そのもの**であり、宛先（行の識別子と列の添字）も命令の中にある
+   * （`GridCellEdit`）。**打たれた文字を解釈しない** — 適合を判定するのは `schema-engine` で
+   * あり、本口はその結果を写すだけである（`./cellEdit` の module doc）。
+   */
+  readonly applyEdit: (
+    command: GridEditCommand,
+  ) => Promise<IpcClientResult<GridEditResponse>>;
 }
 
 /**
@@ -119,5 +141,10 @@ export function createGridClient(): GridClient {
       invokeCommand<GridOpenResponse>(GRID_OPEN_SHEET_COMMAND, { request: { sheet } }),
     setView: (view) => invokeCommand<GridViewResponse>(GRID_SET_VIEW_COMMAND, { request: { view } }),
     readWindow: (argument) => invokeRaw(GRID_ROWS_WINDOW_COMMAND, argument),
+    // 編集命令も**`request` という名前の引数で包む**（実体は
+    // `fn grid_apply_edit(app, window, request: GridEditRequest)`。`grid_open_sheet` と同じ規律で
+    // あり、包まないと復号の失敗が `invoke` の拒否として現れる。この file の module doc）。
+    applyEdit: (command) =>
+      invokeCommand<GridEditResponse>(GRID_APPLY_EDIT_COMMAND, { request: { command } }),
   };
 }

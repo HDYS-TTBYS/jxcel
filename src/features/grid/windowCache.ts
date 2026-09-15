@@ -564,6 +564,22 @@ export interface WindowCache {
    */
   getCell(position: CellPosition): RenderCell;
   /**
+   * その可視行の**文書の行の識別子**（正準の 26 文字）を返す。**記憶に無ければ `null`**。
+   *
+   * 編集の宛先（生成物の `GridCellAddress.row`）を組むための口である（tasks.md 8.3）。画面は
+   * **可視行の序数しか持たない** — 行の識別子は窓（[`DecodedRow.key`]）にしか無く、序数から
+   * 行への対応を持つのは本記憶と移植口だけである。
+   *
+   * 写しは [`rowKeyText`] の 1 つだけである。**`invalidate` が突き合わせる綴りと同じでなければ
+   * ならない**（同じ行を別の綴りで名指しすると、影響を受けた行の窓が捨てられない）。
+   *
+   * `null` は「まだ無い」である（範囲の外・未取得の行・整数でない序数）。**空白や推測で
+   * 答えてはならない** — 呼び出し側はそれを文書の位置として使う（要件 8.6 の取り違え）。
+   * **[`getCell`] と違い、要求を始めない**（引く口ではなく、既に描かれている行の身元を尋ねる
+   * 口である）。
+   */
+  rowId(position: CellPosition): string | null;
+  /**
    * 可視範囲が変わったことを報せる（窓の要求と先読みの起点）。
    *
    * **走査の向きはこの通知の並びから観測する**（前回の開始序数との比較）。向きが変わると、
@@ -865,6 +881,26 @@ export function createWindowCache(options: WindowCacheOptions): WindowCache {
     return { text: cell.text, variant, violated: isViolated(cell), loading: false };
   };
 
+  /**
+   * その可視行の行の識別子（`WindowCache.rowId` の実装）。
+   *
+   * **要求を始めない**（引く口ではない）。`covering` は使った印を繰り上げるので、この引きも
+   * 「その窓を使った」として数えられる — 身元を尋ねる相手はたいてい直前に描かれた窓であり、
+   * 追い出しの規則から見て同じ扱いでよい。
+   */
+  const rowId = (position: CellPosition): string | null => {
+    const row = position.row;
+    if (!Number.isInteger(row) || row < 0 || row >= end) {
+      return null;
+    }
+    const entry = covering(row);
+    if (entry === undefined) {
+      return null;
+    }
+    const decoded = entry.rows[row - entry.span.start];
+    return decoded === undefined ? null : rowKeyText(decoded.key);
+  };
+
   const setVisibleSpan = (span: RowSpan): void => {
     const start = Math.max(0, Math.floor(span.start));
     const count = Math.max(0, Math.floor(span.count));
@@ -947,6 +983,7 @@ export function createWindowCache(options: WindowCacheOptions): WindowCache {
 
   return {
     getCell,
+    rowId,
     setVisibleSpan,
     invalidate,
     setGeneration,
