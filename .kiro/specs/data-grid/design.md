@@ -333,7 +333,7 @@ stateDiagram-v2
 | 9.8 | 取り消し後に対象範囲を見せる | GridScreen, RendererHandle | `scrollTo` | — |
 | 10.1, 10.2, 10.3, 10.4, 10.5, 10.6 | 入力手段の登録簿と既定・重複検出 | EditorRegistry | `CellEditorRegistry` | — |
 | 11.1, 11.2, 11.3, 11.5, 11.6, 11.7 | 応答時間と資源の予算 | WindowCache, WindowCodec, RowOrder | ベンチ `large_grid/*` | 窓の取得と先読み |
-| 11.4 | 1 セルの編集で全件検証しない | EditApply | `validate_columns` に限定して呼ぶ | 編集の適用と判定 |
+| 11.4 | 1 セルの編集で全件検証しない | EditApply, GridSession | `validate_columns` に限定して呼ぶ（差分の入口は `ViolationIndex::apply_report_delta`） | 編集の適用と判定 |
 | 12.1, 12.4 | 3 OS での走査と編集の成立 | 3 OS 観測の台本 | `scripts/ci/` の段 | — |
 | 12.2, 12.3 | 描画不成立の識別と劣化の記録 | RenderProbe | `probePaint`, `sampleFrameTimes` | 描画成立の検査 |
 
@@ -341,12 +341,12 @@ stateDiagram-v2
 
 | Component | Domain/Layer | Intent | Req Coverage | Key Dependencies | Contracts |
 |-----------|--------------|--------|--------------|------------------|-----------|
-| GridSession | data-grid api | 画面 1 枚ぶんの操作口 | 1, 4, 8, 9 | RowOrder (P0), EditApply (P0), UndoStack (P0) | Service |
+| GridSession | data-grid api | 画面 1 枚ぶんの操作口 | 1, 4, 8, 9 | RowOrder (P0), EditApply (P0), UndoStack (P0), ViolationIndex (P0) | Service |
 | RowOrder | data-grid view | 並べ替え・絞り込みの結果としての行の順序 | 8 | document-format (P0) | Service, State |
 | EditApply | data-grid edit | 編集命令の適用と判定の依頼 | 3, 5, 6, 7 | schema-engine (P0), document-format (P0) | Service |
 | PasteCodec | data-grid edit | 表形式テキストとセル値の相互変換 | 7 | EditApply (P0) | Service |
 | UndoStack | data-grid history | 取り消し履歴。**拡張点の所有者** | 6, 7, 9 | EditApply (P0) | Service, State |
-| ViolationIndex | data-grid view | 可視行の序数に対する違反の索引。編集で差分更新する | 4 | RowOrder (P0), schema-engine (P0) | Service, State |
+| ViolationIndex | data-grid view | 可視行の序数に対する違反の索引。編集で差分更新する（入口は `apply_report_delta`） | 4 | RowOrder (P0), schema-engine (P0) | Service, State |
 | WindowCodec | data-grid transport | 窓の二進符号化 | 1, 4, 11 | RowOrder (P0) | Batch |
 | GridCommands | src-tauri 適応層 | ドメイン型 ⇄ 境界用の型 | 全体 | data-grid (P0), document-session (P0) | API |
 | WindowCache | frontend | 窓の記憶と先読み | 1, 11 | GridCommands (P0) | State |
@@ -372,25 +372,40 @@ stateDiagram-v2
 - シートに対する表示状態（行の順序・違反の索引）と取り消し履歴を所有する
 - **`Document` を所有しない。**呼び出しごとに参照または可変参照を受け取る（所有者は `document-session`）
 - スキーマは開いた時点の `CompiledSchema` を保持する。スキーマが変わったらセッションを作り直す
+- **違反の総数は、索引を組み立てた後（最初の `set_view` の後）は編集・取り消し・やり直しの直後に差分で最新に保つ。**材料は `EditOutcome` が運ぶ違反と再検証した列であり、**全件検証は 1 回も呼ばない**（要件 4.3, 4.6, 11.4。式と、`set_view` の前に据え置く理由は Implementation Notes）
+- 公開面は根（`lib.rs`）の再輸出に集める。本型は `api` 層にあり、層の鎖の文言をモジュール冒頭に置く（`structure.md`「ドメインクレートの内部構造」）
 
 **Dependencies**
 - Outbound: RowOrder — 行の順序の導出 (P0)
 - Outbound: EditApply — 編集の適用 (P0)
 - Outbound: UndoStack — 履歴 (P0)
+- Outbound: ViolationIndex — 違反の索引の組み立てと差分更新 (P0)
 - External: `schema-engine` — 判定と列の情報 (P0)
 
 **Contracts**: Service [x] / API [ ] / Event [ ] / Batch [ ] / State [x]
 
 ##### Service Interface
 ```rust
-pub struct GridSession { /* view: ViewState, order: RowOrder, history: UndoStack, schema: CompiledSchema */ }
+pub struct GridSession { /* sheet: SheetId, schema: CompiledSchema, view: ViewState, order: RowOrder,
+                            history: UndoStack, apply: EditApply, index: ViolationIndex,
+                            layout: ColumnLayout, codec: WindowCodec,
+                            query: Arc<dyn EditSchemaQuery>, indexed: bool */ }
 
 impl GridSession {
     pub fn open(sheet: SheetId, schema: CompiledSchema) -> Result<Self, GridError>;
-    pub fn columns(&self) -> &[ColumnDescriptor];
+    pub fn with_query<Q: EditSchemaQuery + 'static>(
+        sheet: SheetId,
+        schema: CompiledSchema,
+        query: Arc<Q>,
+    ) -> Result<Self, GridError>;
+    /// 列の構成（入れ子の展開を含む平坦な並び）。**6.1 の境界型へ写すのはここから**
+    pub fn columns(&self) -> &[LayoutColumn];
     pub fn visible_row_count(&self) -> usize;
     pub fn hidden_row_count(&self) -> usize;
     pub fn violation_total(&self) -> usize;
+    pub fn generation(&self) -> Generation;
+    pub fn set_expansion(&mut self, state: ExpansionState);
+    pub fn expansion(&self) -> &[ExpansionState];
 
     pub fn set_view(&mut self, doc: &Document, spec: ViewSpec) -> Result<ViewSummary, GridError>;
     pub fn encode_window(&self, doc: &Document, span: RowSpan) -> Result<Vec<u8>, GridError>;
@@ -399,15 +414,21 @@ impl GridSession {
     pub fn redo(&mut self, doc: &mut Document) -> Result<Option<EditOutcome>, GridError>;
     pub fn find_violation(&self, from: RowOrdinal, direction: SearchDirection) -> Option<CellAddress>;
 }
+
+pub const DEFAULT_UNDO_LIMIT: usize = 1_000;
 ```
-- Preconditions: `schema` は同一シートを `compile` したものであること（列の添字は `Row::values()` に対する位置である）
+- Preconditions: `schema` は同一シートを `compile` したものであること（列の添字は `Row::values()` に対する位置である）。`open` / `with_query` は列 0 本の計画を `GridError::SchemaUnusable` で拒む（要件 1.6 の提示はセッション無しに画面が行う）
 - Postconditions: `apply` / `undo` / `redo` は `EditOutcome.affected` に影響を受けた `RowId` を必ず含める
 - Invariants: `set_view` と `encode_window` は `Document` を変更しない
-- Invariants: `violation_total` は `apply` / `undo` / `redo` の直後につねに最新である。**全件検証の再実行ではなく、判定が返した違反との差分で索引を更新する**（要件 11.4 が全件検証を禁じているため）
+- Invariants: `violation_total` は**索引を組み立てた後（`set_view` を 1 度呼んだ後）**は `apply` / `undo` / `redo` の直後につねに最新である。**全件検証の再実行ではなく、判定が返した違反との差分で索引を更新する**（要件 11.4 が全件検証を禁じているため）。**`set_view` の前は据え置き（0 のまま）である** — これは実装の逃げではなく**固定の前提**である: `open(sheet, schema)` は**文書を受け取らない** signature であり、索引はシートを読まなければ組み立てられないため、`set_view(&doc, spec)` が文書を渡すまで物理的に作れない（据え置きの規則は Implementation Notes「索引をまだ組み立てていないセッション」）
+- **`columns` の戻り値は `view` 層の `LayoutColumn` である。**design.md の `ColumnDescriptor` は 6.1 の境界型であり、本クレートに写しを足さない — `LayoutColumn` が写しに要るもの（列の添字・内側の位置・表示名・葉の型の札・要素数の能力・展開の可否）を全部持つためである。**6.1 はここから境界型へ写す**
+- **判定の縫い目を差し替える `with_query` を公開する。**要件 11.4 の観測（編集・取り消し・やり直しの経路で `validate_sheet` が 0 回であること）は、本番の縫い目を包んだ実装を差し込んで**呼び出しの形を数える**ことでしか取れない（`open` は本番の縫い目で開く薄い入口である）
+- **入れ子の展開（`set_expansion` / `expansion`）と世代（`generation`）も公開する。**展開は表示状態の一部であり（要件 5.3）、境界（6.1）が展開の指定を運ぶにはセッションに指定口と読み口が要る
 
 **Implementation Notes**
 - Integration: `GridCommands` がウィンドウごとに 1 つ保持する。ウィンドウが閉じたら破棄する
 - Validation: `visible_row_count` と `encode_window` の範囲の整合を型で守る（`RowSpan` は可視行の序数で表す）
+- **差分の入口は `ViolationIndex::apply_report_delta`**（`view` 層）。`EditOutcome.revalidated_columns` が**全列**を覆っていれば `EditOutcome.violation_total` をそのままシートの総数とする（行の構造を変える命令と、補充を伴う貼り付けは全列を再検証する。長さが宣言の列数に等しいことで全列と判定する — `revalidated_columns` は昇順・重複なしである）。**一部の列**に閉じているときは `索引の旧総数 − ViolationIndex::violations_in_columns(覆った列) + EditOutcome.violation_total` とする。被減数は「索引が**載せている**その列の違反の数」であり、索引は `set_view` で `ValidationOptions::unlimited` の全件検証から組み立てるため、覆った列について「編集前のシートのその列の違反」に一致する（触っていない列は編集で変わらない）。`apply_report_delta` は行を鍵とする保持の載せ替え・据え付け（`ViolationPresence`）の作り直し・**変わった行だけ**の序数の修正までを行い、順序が変わったときだけ `ViolationIndex::rekey` を足で呼ぶ。索引をまだ組み立てていないセッション（`set_view` の前）は総数を据え置く
 - Risks: スキーマ変更時のセッション再作成を忘れると列の添字がずれる。`schema-editor` との継ぎ目として記録する
 
 #### RowOrder
@@ -480,12 +501,18 @@ pub struct EditOutcome {
     pub affected: Vec<RowId>,
     pub coercions: Vec<CoercionNotice>,
     pub violation_total: usize,
+    /// 5.2 が足した: 再検証した列が持つ違反の一覧（差分の材料であり、追加の検証は呼ばない）
+    pub violations: Vec<Violation>,
+    /// 5.2 が足した: 再検証した列の索引（昇順・重複なし。空の命令では空）
+    pub revalidated_columns: Vec<ColumnIndex>,
     pub row_count: usize,
 }
 pub struct CoercionNotice { pub cell: CellAddress, pub before: String, pub after: String }
 ```
 - Preconditions: `CellAddress` の列は `CompiledSchema` の範囲内であること
 - Postconditions: 適用後、`UndoStack` に逆命令が 1 つ積まれる
+- **`violations` と `revalidated_columns` は 5.2 の差分更新（要件 4.6, 11.4）のために足した欄であり、`violation_total` と同じ範囲を覆う**（`SetCells` / `SetNested` は編集した列だけ、行の構造を変える命令と補充を伴う貼り付けは全列）。**埋めるために追加の検証は 1 回も呼ばない** — 適用の経路が既に得ている報告を写すだけである
+- **`EditOutcome` は `Eq` を導出しない**（`violations` が `schema_engine::Violation` を運び、その `PartialEq` までしか持たない。`Violation` は `CellValue` を運び、`CellValue` は浮動小数を持つため `Eq` を持たない）。`PartialEq` は導出したままであり、`EditOutcome` を集合や写像の鍵にする経路は無い
 
 **Implementation Notes**
 - Integration: 打たれた文字は `String` として受け取り、型解釈は `schema-engine` に委ねる。**フロントエンドは値を数値として扱わない**

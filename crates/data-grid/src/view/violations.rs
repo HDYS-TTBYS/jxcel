@@ -188,13 +188,21 @@
 //! 変わっても据え付けは変わらない（鍵は [`RowId`] であり、序数ではない）— だから
 //! [`ViolationIndex::rekey`] は据え付けに触れない。
 //!
-//! # 編集の差分更新は 5.2 の仕事（本タスクの範囲外）
+//! # 編集の差分更新（タスク 5.2）
 //!
-//! design.md は `ViolationIndex` の役割を「編集で差分更新する」とするが、差分の**入口**は
-//! 編集の適用が返す違反（タスク 5.2）である。本モジュールが与えるのは (1) 検証結果からの
-//! 組み立て（[`ViolationIndex::build`]）、(2) 順序の変化に対する張り直し
-//! （[`ViolationIndex::rekey`]）、(3) 行を鍵とする保持である。**全件検証を呼び直す経路は
-//! 持たない**（要件 11.4）。
+//! design.md は `ViolationIndex` の役割を「編集で差分更新する」とする。差分の**入口**は
+//! 編集の適用が返す違反（[`EditOutcome::violations`]）であり、本モジュールはそれを
+//! 索引へ載せ替える口を 1 つ持つ（[`ViolationIndex::apply_report_delta`]）。
+//!
+//! 差分が触るのは `rows`（行を鍵とする保持。順序に依らない）と、そこから作る `presence` と
+//! `total` / `indexed` であり、`ordinals`（序数 → 行の写像）は**触らない** — 値だけの編集は
+//! 行の集合も順序も変えないためである（要件 8.8）。順序が変わったときは呼び出し側が
+//! [`ViolationIndex::rekey`] を呼ぶ（`set_view` と、行の集合を変える編集の後。5.2）。
+//!
+//! **全件検証を呼び直す経路は持たない**（要件 11.4）。差分の材料は編集の適用が既に得ている
+//! 報告であり、本モジュールはその写しを載せ替えるだけである。
+//!
+//! [`EditOutcome::violations`]: crate::edit::EditOutcome::violations
 //!
 //! # 決定性
 //!
@@ -227,7 +235,7 @@
 use std::collections::BTreeMap;
 
 use document_format::RowId;
-use schema_engine::SheetReport;
+use schema_engine::{SheetReport, Violation};
 
 use crate::types::{CellAddress, ColumnIndex, NestedPath, RowOrdinal, SearchDirection};
 
@@ -475,6 +483,240 @@ impl ViolationIndex {
         index
     }
 
+    /// 編集の適用が返した違反で、行を鍵とする保持を**載せ替える**（タスク 5.2。要件 4.6,
+    /// 11.4）。
+    ///
+    /// 差分の材料は [`EditOutcome::violations`](crate::edit::EditOutcome::violations) と
+    /// [`EditOutcome::violation_total`](crate::edit::EditOutcome::violation_total) である。
+    /// **どちらも編集の適用が既に得ている報告そのものであり、本メソッドは検証を呼ばない**
+    /// （要件 11.4 が禁じる全件検証の再実行を、差分更新の側からも呼ばない）。
+    ///
+    /// # 何を置き換え、何を置き換えないか
+    ///
+    /// `violations` が覆うのは**適用が再検証した列に属する違反**だけである
+    /// （`EditOutcome::violations` の docs の表）。したがって本メソッドは `columns`
+    /// （適用が再検証した列）に属する違反を**その列について丸ごと置き換える** — 消えた違反は
+    /// 消え、生じた違反は載る。他の列の保持は**そのまま残す**（本メソッドは覆っていない列の
+    /// 違反について何も主張しない）。
+    ///
+    /// 行に属する違反（[`Violation::row`] が `Some`）は `rows` を、行に属さない違反
+    /// （`None`）は `column_level` を置き換える。**行そのもの**（どの行が存在するか）は
+    /// 呼び出し側が決める — 行の集合が変わったときは呼び出し側が順序を導出し直してから本
+    /// メソッドを呼ぶ。本メソッドは与えられた違反の**位置**だけを扱い、最後に `order` で
+    /// 序数の写像を張り直す（据え付けと序数が**呼び出しの後の状態**でそろう）。
+    ///
+    /// # `total` は呼び出し側が渡す
+    ///
+    /// 本メソッドは `total` を計算しない。**シート全体の総数は、覆った列に閉じた報告からは
+    /// 導けない**ためである（1 セルの編集は 1 列しか再検証しない。覆っていない列の違反は
+    /// 報告に現れない）。総数をどう閉じるかは 5.2 の `GridSession` が決める
+    /// （`crate::api` のモジュール docs「違反の総数をどう閉じるか」）。本メソッドは
+    /// 渡された `total` をそのまま総数として据える。
+    ///
+    /// # `indexed` と [`ViolationIndex::is_complete`]
+    ///
+    /// 載せ替えたあとの `indexed` は、`rows` と `column_level` に実際に載っている違反の数で
+    /// 数え直す。したがって `is_complete()` の意味（「載せた件数が総数に一致するか」）は
+    /// 変わらない — 5.2 が真のシート総数を据えれば、上限で切られていない索引では真になる。
+    ///
+    /// # 据え付け（2.2 への引き渡し）
+    ///
+    /// `presence` は**行を鍵とする保持から作り直す**（据え付けは「その行の違反」の写しで
+    /// あり、差分の後に古い写しを残すと [`FilterSpec::HasViolation`][filter] が編集前の状態を答える）。
+    /// 据え付けの**全体**を作り直すのは、その行の違反が空になった場合に列の印を消す必要が
+    /// あるためである（[`ViolationPresence`] は印を消す口を持たない — 丸ごと入れ替える形が
+    /// 2.2 の契約である。`view/mod.rs` の `set_violation_presence` の docs）。
+    ///
+    /// [filter]: super::FilterSpec::HasViolation
+    pub fn apply_report_delta(
+        &mut self,
+        order: &RowOrder,
+        columns: &[ColumnIndex],
+        violations: &[Violation],
+        total: usize,
+    ) {
+        // 1. 覆った列の違反を、行を鍵とする保持と行に属さない保持の双方から取り除く。
+        //    取り除いた行（違反を持たなくなった行）は、序数の写像を直す対象である。
+        let mut changed: Vec<RowId> = self.remove_columns(columns);
+
+        // 2. 渡された違反を載せる。行に属さない違反は `column_level` へ、属する違反は
+        //    一時の表を経て**列の昇順**の欄へ確定する（`build` と同じ規則 — 並びの作り方を
+        //    2 つ持たない）。
+        let mut cells: BTreeMap<ColumnIndex, CellViolations> = BTreeMap::new();
+        let mut current: Option<RowId> = None;
+        for violation in violations {
+            let path = NestedPath::from(violation.path());
+            match violation.row() {
+                Some(row) => {
+                    if current != Some(row) {
+                        if let Some(previous) = current.replace(row) {
+                            flush_row(self, previous, &mut cells);
+                        }
+                    }
+                    let column = violation.column();
+                    cells
+                        .entry(column)
+                        .or_insert_with(|| CellViolations {
+                            column,
+                            paths: Vec::new(),
+                        })
+                        .paths
+                        .push(path);
+                }
+                None => {
+                    push_rowless(&mut self.column_level, violation.column(), path);
+                }
+            }
+        }
+        if let Some(previous) = current {
+            flush_row(self, previous, &mut cells);
+        }
+        changed.extend(violations.iter().filter_map(Violation::row));
+
+        // 3. 総数と、載っている件数と、据え付けを据え直し、**変わった行だけ**の序数を直す。
+        self.total = total;
+        self.indexed = self.count_indexed();
+        self.rebuild_presence();
+        self.relink(&changed, order);
+    }
+
+    /// **変わった行だけ**の序数の写像を直す（[`ViolationIndex::apply_report_delta`] の
+    /// 下請け。タスク 5.2「差分で更新する」の実体）。
+    ///
+    /// 値だけの編集は行の集合も順序も変えないため、序数と行の対応が変わるのは**違反を持つ
+    /// ようになった行**と**違反を持たなくなった行**だけである（要件 8.8 が並べ替えの基準列の
+    /// 値の編集で行を動かさないと定めているとおりである）。したがって
+    /// [`ViolationIndex::rekey`]（可視行の**全部**を走査する）を呼ばず、`changed` の行だけを
+    /// 直す。
+    ///
+    /// `changed` の並びは重複を許す（呼び出し側が 2 つの源を継ぐため）。同じ行を 2 度直しても
+    /// 結果は同じである（この経路は冪等である）。
+    ///
+    /// [`RowOrder::ordinal_of`] は可視行の走査であり、`ordinals` からの除去は索引が載せる
+    /// 違反行（**違反を持つ行だけ**）の走査である — どちらの走査も `RowId` しか読まない
+    /// （モジュール docs「張り直しの費用」。全件検証とは費用の階級が違う）。
+    fn relink(&mut self, changed: &[RowId], order: &RowOrder) {
+        if changed.is_empty() {
+            return;
+        }
+        for row in changed {
+            match order.ordinal_of(*row) {
+                // 可視であり、かつ違反を持つ: 序数を載せる（既にあれば同じ値で上書きされる）。
+                Some(ordinal) if self.rows.contains_key(row) => {
+                    self.ordinals.insert(ordinal, *row);
+                }
+                // 違反を持たないか、可視でない（隠れた行には序数が存在しない）。
+                _ => {
+                    self.ordinals.retain(|_, found| found != row);
+                }
+            }
+        }
+    }
+
+    /// `columns` に属する違反を、この索引が**いま保持している数**（タスク 5.2 の差分の被減数）。
+    ///
+    /// 行に属する違反（`rows`）と行に属さない違反（`column_level`）の**双方**を数える —
+    /// [`ViolationIndex::violation_total`] が数える集合と同じ集合であり、`columns` を
+    /// 絞り込んだだけである。したがって被減数は `violation_total` を超えない。
+    ///
+    /// 数の意味は「**いま索引が載せている**その列の違反」である。詳細な報告から組み立てた
+    /// 索引では（`is_complete()` が真のとき）それが「シートのその列の違反」に一致する — 5.2 の
+    /// 差分の正しさはこの一致に依る（`crate::api` のモジュール docs「違反の総数をどう閉じるか」）。
+    #[must_use]
+    pub fn violations_in_columns(&self, columns: &[ColumnIndex]) -> usize {
+        if columns.is_empty() {
+            return 0;
+        }
+        let rows: usize = self
+            .rows
+            .values()
+            .map(|entry| {
+                entry
+                    .columns
+                    .iter()
+                    .filter(|cell| columns.contains(&cell.column))
+                    .map(|cell| cell.paths.len())
+                    .sum::<usize>()
+            })
+            .sum();
+        let level: usize = self
+            .column_level
+            .iter()
+            .filter(|level| columns.contains(&level.column))
+            .map(|level| level.paths.len())
+            .sum();
+        rows + level
+    }
+
+    /// `columns` に属する違反を、行を鍵とする保持と行に属さない保持から取り除き、
+    /// **触れた行**（違反を持たなくなった行を含む）を返す
+    /// （[`ViolationIndex::apply_report_delta`] の下請け）。
+    ///
+    /// 空になった欄は**取り除く**（違反が 1 件も無い行は `rows` に現れない — この不変条件は
+    /// [`ViolationIndex::build`] が守っており、差分の後も保つ。`row_violations` と
+    /// `find` の「違反を持つ行」の意味がこれに依っている）。
+    ///
+    /// 返る行の並びは、この呼び出しで**欄が変わった**（違反を失った列があった）行である。
+    /// 重複はしない。行の順は `rows` の鍵の順（`RowId` の順）である。
+    fn remove_columns(&mut self, columns: &[ColumnIndex]) -> Vec<RowId> {
+        if columns.is_empty() {
+            return Vec::new();
+        }
+        let mut changed = Vec::new();
+        let mut emptied: Vec<RowId> = Vec::new();
+        for (row, entry) in self.rows.iter_mut() {
+            let before = entry.columns.len();
+            entry.columns.retain(|cell| !columns.contains(&cell.column));
+            if entry.columns.len() != before {
+                changed.push(*row);
+            }
+            if entry.columns.is_empty() {
+                emptied.push(*row);
+            }
+        }
+        for row in emptied {
+            self.rows.remove(&row);
+        }
+        // 行に属さない保持は**覆った列の欄だけ**を取り除く（覆っていない列の違反はそのまま
+        // 残す。丸ごと空にすると、たとえば 1 セルの編集で他の列の列レベルの違反が消える）。
+        self.column_level
+            .retain(|level| !columns.contains(&level.column));
+        changed
+    }
+
+    /// 保持に載っている違反の数を数える（`rows` と `column_level` の和）。
+    fn count_indexed(&self) -> usize {
+        let rows: usize = self
+            .rows
+            .values()
+            .map(|entry| {
+                entry
+                    .columns
+                    .iter()
+                    .map(|cell| cell.paths.len())
+                    .sum::<usize>()
+            })
+            .sum();
+        let columns: usize = self
+            .column_level
+            .iter()
+            .map(|level| level.paths.len())
+            .sum();
+        rows + columns
+    }
+
+    /// 行を鍵とする保持から据え付けを作り直す（[`ViolationIndex::apply_report_delta`] の
+    /// 下請け。規則は `flush_row` と同じである）。
+    fn rebuild_presence(&mut self) {
+        let mut presence = ViolationPresence::new();
+        for (row, entry) in &self.rows {
+            for cell in &entry.columns {
+                presence.mark_column(*row, cell.column);
+            }
+        }
+        self.presence = presence;
+    }
+
     /// 序数の写像を、いまの表示の順序へ張り直す（タスク 2.4「順序や絞り込みが変わったとき」）。
     ///
     /// [`RowOrder::recompute`] の**後に**呼ぶ。並べ替えの基準列の変更・絞り込みの変更・
@@ -642,13 +884,10 @@ fn flush_row(
     let columns: Vec<CellViolations> = std::mem::take(cells).into_values().collect();
     index.indexed += columns.iter().map(|cell| cell.paths.len()).sum::<usize>();
     // 同じ行の違反は 1 つの欄へ畳む（`rows` の鍵が行であり、報告の並びに依らない）。
-    let entry = index
-        .rows
-        .entry(row)
-        .or_insert_with(|| RowViolations {
-            row,
-            columns: Vec::new(),
-        });
+    let entry = index.rows.entry(row).or_insert_with(|| RowViolations {
+        row,
+        columns: Vec::new(),
+    });
     // 空なら置き換えてよい（`Vec` の確保を 1 回で済ませる）。既にあれば**併合**する。
     if entry.columns.is_empty() {
         entry.columns = columns;

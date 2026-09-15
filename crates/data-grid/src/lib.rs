@@ -159,9 +159,34 @@
 //! 符号化は [`Document`](document_format::Document) を**一切受け取らない**ため、10 万行を
 //! 走査する経路が型の上に存在しない（要件 11.2 の費用は呼び出しの形で示す）。
 //!
-//! 残りの層（`api` は群 5）は設計の File Structure Plan に挙げられた順に後続のタスクが足す。
+//! タスク 5.2 が [`api`] 層の**画面 1 枚ぶんの操作口**を足した（[`GridSession`]。design.md
+//! の File Structure Plan の `api.rs`。要件 4.3, 4.6, 11.4）。表示状態（順序・違反の索引）、
+//! 入れ子の展開、取り消し履歴、窓の世代を 1 つの型が所有し、**開く・列を返す・表示の指定を
+//! 変える・窓を符号化する・編集を適用する・履歴を進める・次の違反を探す**を 1 つの口として
+//! 公開する。**文書は所有しない** — [`GridSession::open`] はシートと計画だけを受け取り、
+//! 以後の文書を触る呼び出しはすべて参照または可変参照を受け取る（design.md
+//! 「GridSession」の Responsibility）。
+//!
+//! 本タスクの核心は**違反の総数を全件検証の再実行なしで最新に保つこと**である
+//! （design.md の Invariants「判定が返した違反との差分で索引を更新する」）。そのため
+//! `edit` 層の [`EditOutcome`] が違反そのものと再検証した列を運ぶようになり
+//! （**適用の経路が既に得ている報告の写しであり、追加の検証は 1 回も呼ばない**）、
+//! `view` 層の [`ViolationIndex`] がその差分を載せる口
+//! （`ViolationIndex::apply_report_delta`）を持つ。総数をどう閉じるかは [`api`] の
+//! モジュール docs「違反の総数をどう閉じるか」が正典である（覆いが全列なら報告がシート
+//! 全体であり、列に閉じているなら覆った列の旧違反数を索引から引いて足す）。
+//! 観測は 3.1〜3.4 と同じ縫い目（[`EditSchemaQuery`]）で行い、編集・取り消し・やり直しの
+//! 経路で `validate_sheet` が **0 回**であることを `tests/grid_session.rs` が数えて固定する。
+//!
+//! **列の構成は `view` 層の [`LayoutColumn`] をそのまま返す**（[`GridSession::columns`]）。
+//! 境界の型（6.1 の `ColumnDescriptor`）を本クレートに足さないのは、`LayoutColumn` が
+//! 6.1 の写しに要るものを全部持ち、写しを 2 つ持つと必ず食い違うためである（判断の根拠は
+//! [`api`] のモジュール docs「design.md が開いたままにした点」）。
+//!
+//! 残りの層は設計の File Structure Plan に挙げられた順に後続のタスクが足す。
 //! **実体の無いモジュールを先に宣言しない**（錆びた宣言は、層の鎖が実際に守られているかを
 //! 検査できなくする）。
+pub mod api;
 pub mod edit;
 pub mod error;
 pub mod history;
@@ -219,7 +244,12 @@ pub use history::{UndoEntry, UndoLabel, UndoRedo, UndoStack};
 // 要約（要素数）だけを運ぶ。6.3 の生バイト経路が `encode` を呼び、7.3 の窓の記憶が
 // `decode_window` を呼ぶ。
 pub use transport::{
-    decode_window, variant_tag, DecodedCell, DecodedRow, DecodedWindow, Generation,
-    VariantTag, WindowCodec, WindowDecodeError, WindowRequest, WindowRowSource, EMPTY_WINDOW,
-    HEADER_LEN, ROW_KEY_LEN, WINDOW_FORMAT_VERSION,
+    decode_window, variant_tag, DecodedCell, DecodedRow, DecodedWindow, Generation, VariantTag,
+    WindowCodec, WindowDecodeError, WindowRequest, WindowRowSource, EMPTY_WINDOW, HEADER_LEN,
+    ROW_KEY_LEN, WINDOW_FORMAT_VERSION,
 };
+// `api` 層の**画面 1 枚ぶんの操作口**（タスク 5.2）: 表示状態（順序・違反の索引・入れ子の
+// 展開）、取り消し履歴、窓の世代を 1 つの型が所有する。**文書は所有しない** — 文書を触る
+// 呼び出しはすべて参照または可変参照を受け取る（design.md「GridSession」の
+// Responsibility）。`src-tauri` の適応層がこの 1 つをウィンドウごとに保持する。
+pub use api::{GridSession, DEFAULT_UNDO_LIMIT};

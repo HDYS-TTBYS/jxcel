@@ -215,27 +215,52 @@
 //! **2 つ目の写しを作らない**。画面に見えている文字列と、変換の前後として提示する文字列が
 //! 食い違わないことは、この 1 つの源が保証する。
 //!
-//! # 違反の総数の源（[`EditOutcome::violation_total`]）
+//! # 違反は結果が運ぶ（[`EditOutcome::violations`]）— 総数だけでは足りない
 //!
-//! 本タスクが `violation_total` に入れるのは、**再検証のために呼んだ列に閉じた総数**
-//! （[`SheetReport::total_violations`]）である。要件 4.3 が求める「表示中のシートに存在する
-//! 違反の総数」は**シート全体**の数であり、それを答えるのは 5.2 の `GridSession` である
-//! （design.md の Invariants「`violation_total` は `apply` / `undo` / `redo` の直後につねに
-//! 最新である。全件検証の再実行ではなく、判定が返した違反との差分で索引を更新する」）。
-//! 群 3 の残りのタスク（3.2 の行の追加・削除・複製、3.4 の貼り付け）は再検証する列の集合を
-//! 広げることでこの数を広げる。
+//! 要件 4.3 が求める「表示中のシートに存在する違反の総数」は**シート全体**の数であり、
+//! その数を編集の直後につねに最新に保つのは 5.2 の `GridSession` である（design.md の
+//! Invariants「`violation_total` は `apply` / `undo` / `redo` の直後につねに最新である。
+//! **全件検証の再実行ではなく、判定が返した違反との差分で索引を更新する**」）。
 //!
-//! 本層が再検証の報告から読むのは**総数だけ**である。したがって保持の上限 0
-//! （[`ValidationOptions::capped`]）で呼ぶ — 10 万行 × 1 列の違反一覧を保持する理由が無く、
-//! 総数と違反を持つ行の一覧は上限に関わらず保たれる（`schema-engine` の契約）。違反の
-//! **一覧**（どの行のどの位置か）が要るのは 5.2 であり、そちらは判定が返した違反を使う
-//! （design.md の Invariants）。
+//! 差分で更新するには、**どの違反が生じてどの違反が消えたか**が要る。本層は適用の経路で
+//! すでにその情報を得ている — 1 セル・1 行の編集は [`EditVerdict`] が違反を持ち、行の
+//! 構造を変える命令と貼り付けは `EditApply::revalidate_columns` の報告が持つ。したがって
+//! 本層はそれを**捨てずに [`EditOutcome::violations`] へ写す**。**追加の検証は 1 回も
+//! 呼ばない** — 写すのは同じ呼び出しの返り値であり、3.1〜3.4 が固定した呼び出しの形は
+//! 1 つも変わらない（`tests/edit_apply.rs` / `tests/edit_rows.rs` / `tests/edit_paste.rs`）。
+//!
+//! ## どの報告がどの範囲に閉じているか
+//!
+//! [`EditOutcome::violations`] が覆う範囲は、その経路が**再検証した列**と同じである。
+//! 総数（[`EditOutcome::violation_total`]）も同じ範囲に閉じる。
+//!
+//! | 経路 | 再検証した列 | `violations` / `violation_total` の範囲 |
+//! |---|---|---|
+//! | `SetCells` / `SetNested` | 編集した列（昇順・重複なし） | その列 |
+//! | `InsertRows` / `RemoveRows` / `DuplicateRows` | **すべての列** | シート全体 |
+//! | `PasteRange`（補充なし） | 貼り付けた列 | その列 |
+//! | `PasteRange`（補充あり） | **すべての列** | シート全体 |
+//! | `HistoryCommand` の復元・合成 | **すべての列** | シート全体 |
+//! | 空の命令 | 呼ばない | 空（`violations` は空、`violation_total` は 0） |
+//!
+//! したがって **5.2 はこの 2 つを「シート全体の数」としてそのまま使えない**。使うのは
+//! `revalidated_columns`（[`EditOutcome::revalidated_columns`]）と組みにした差分であり、
+//! 差分の作り方と、1 セルの編集でシート全体の総数がどう閉じるかは `api` 層が定める
+//! （`crate::api` のモジュール docs「違反の総数をどう閉じるか」）。
+//!
+//! ## 上限を外した理由（`ValidationOptions::unlimited`）
+//!
+//! 再検証は**上限を外して**（[`ValidationOptions::unlimited`]）呼ぶ。5.2 の差分更新が要るのは
+//! 違反の**一覧**であり、上限で切られた報告からは「どの違反が消えたか」が読めないためである
+//! （切られた側の違反は報告に載らない。`ViolationIndex` の「上限で切られた報告」と同じ問題）。
+//! 呼ぶ範囲は上の表のとおり**編集が触れた列（または全列）**に閉じているため、10 万行 × 30 列の
+//! 全件になりますことはない（1 セルの編集では 1 列、すなわち 10 万行 × 1 列である）。
 //!
 //! 1 行分の判定（[`EditVerdict`]）も違反を持つが、本層はそれを `violation_total` に写さない。
 //! 書き込みの後に当該列を再検証した報告が**同じ位置・同じ理由**を持つためである（どちらも
 //! 同じ値と同じ計画から導かれ、連続する違反の有無を除けば報告のほうが広い — 報告は行を跨ぐ
 //! 性質（一意性と参照の実在）も含むが、1 行分の判定は含まない）。2 つを足すと同じ違反を
-//! 二重に数える。
+//! 二重に数える。`violations` についても同じ理由で**報告だけ**を写す（判定の違反は写さない）。
 //!
 //! # 履歴（4.1）との境目
 //!
@@ -297,12 +322,11 @@
 //! 要件 4.5 は「入れ子のどの位置が違反しているかを特定できる形で提示する」ことを求める
 //! （提示そのものは 8.5 が担う）。編集経路の 5.5 / 5.7 は、その位置が**失われない**ことを
 //! 本層に求める。
-//! **位置は本層の [`EditOutcome`] には載らない** — design.md「EditApply」の Service Interface
-//! が定めるのは `violation_total`（総数）と `coercions` だけであり、本層が再検証の報告から
-//! 読むのも総数だけである（モジュール docs「違反の総数の源」）。3.1 も同じ形であり、
-//! 入れ子だけを特別扱いしない。
-//!
-//! 位置を運ぶのは `schema-engine` の [`Violation::path`](schema_engine::Violation) である。
+//! **位置は本層の [`EditOutcome::violations`] が運ぶ**（3.3 の時点では総数
+//! [`EditOutcome::violation_total`] だけを載せていたが、5.2 が差分更新に使うため違反そのものを
+//! 載せる形へ広げた。モジュール docs「違反は結果が運ぶ」）。本層は位置を作らず、再検証の報告
+//! （[`Violation::path`](schema_engine::Violation)）が持つ位置をそのまま写す — 入れ子だけを
+//! 特別扱いしない。
 //! 本層は判定へ渡す値を平坦化しない（[`CellValue::Nested`] の木をそのまま渡す）ため、
 //! 判定と再検証の違反は**内側の位置を保ったまま**生成される。その位置は本クレートの
 //! `types` 層の [`NestedPath`](crate::types::NestedPath) が写し（`From<&ValuePath>` が唯一の入口）、
@@ -376,8 +400,8 @@
 //! 規則表は列の型に応じた写しを返すだけである。強制したうえで書くため、貼り付けのセルの
 //! 意味論は 1 セルの編集（3.1）と一致する（変換の記録も同じ形で載る）。
 //! 適合しない値は**破棄されず**、書かれたまま再検証の違反として報告される（要件 7.5）。
-//! 違反の**位置**は報告が持つ（本層は `EditOutcome` に総数しか載せない。モジュール docs
-//! 「違反の総数の源」）。
+//! 違反の**位置**は報告が持つ（本層は [`EditOutcome::violations`] へそのまま写す。
+//! モジュール docs「違反は結果が運ぶ」）。
 //!
 //! ## 不足する行の補充（要件 7.4）
 //!
@@ -456,7 +480,7 @@ use document_format::{
 };
 use schema_engine::{
     validate_columns, validate_sheet, validate_write, Coercion, ColumnIndex, CompiledSchema,
-    EditVerdict, SheetReport, ValidationOptions, WriteOrigin, WriteVerdict,
+    EditVerdict, SheetReport, ValidationOptions, Violation, WriteOrigin, WriteVerdict,
 };
 // 貼り付けは**判定を呼ばず**、強制の規則表だけをセルごとに引く（モジュール docs「貼り付け」）。
 // `coerce` は縫い目の 3 つの口（判定・再検証・全件検証）のいずれでもない — 縫い目が数えるのは
@@ -639,7 +663,10 @@ pub enum EditCommand {
 /// **判定が返したものを写しただけ**であり、本層が足す解釈は無い。`affected` と `row_count` は
 /// 画面側が窓の記憶を捨てる（要件 1.7）ためと、行数の変化を提示する（要件 6.2）ための要約で
 /// ある。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `violations` が [`Violation`] を運ぶため `Eq` は導出しない（[`CellValue`] が浮動小数を持ち
+/// `Eq` を実装しない。`schema-engine` の `Violation` も同じ理由で `PartialEq` までしか持たない）。
+#[derive(Debug, Clone, PartialEq)]
 pub struct EditOutcome {
     /// 影響を受けた行の識別子（重複を畳み、命令に現れた順）。
     ///
@@ -661,12 +688,33 @@ pub struct EditOutcome {
     /// `PasteRange` では**矩形の順**（行ごと、行の中は列の順）に載る — 値は判定を経ずに規則表
     /// （[`coerce`]）で変換されるため、1 セルの編集と同じ形で変換が記録される。
     pub coercions: Vec<CoercionNotice>,
-    /// 違反の総数（本タスクでは**再検証した列に閉じた総数**。モジュール docs
-    /// 「違反の総数の源」）。行の構造を変える命令は**すべての列**を再検証するため、適用後の
-    /// シートの違反の総数と一致する（同「行の構造を変える命令の再検証」）。`PasteRange` は
+    /// 違反の総数（**再検証した列に閉じた総数**。モジュール docs
+    /// 「違反は結果が運ぶ」の表）。行の構造を変える命令は**すべての列**を再検証するため、適用後
+    /// のシートの違反の総数と一致する（同「行の構造を変える命令の再検証」）。`PasteRange` は
     /// 貼り付けた列だけを再検証するため（行を補充したときを除く）、**貼り付けた列に閉じた**
-    /// 総数である（要件 7.5 の違反の件数。モジュール docs「貼り付け」）。
+    /// 総数である（要件 7.5 の違反の件数。モジュール docs「貼り付け」）。空の命令では 0。
+    ///
+    /// シート全体の総数を保つのは 5.2 の `GridSession` であり、その数は
+    /// [`EditOutcome::violations`] と [`EditOutcome::revalidated_columns`] を組にした差分で
+    /// 閉じる（`crate::api` のモジュール docs「違反の総数をどう閉じるか」）。
     pub violation_total: usize,
+    /// 適用のあとに**再検証した列**が持つ違反の一覧（重複なし、報告の順）。
+    ///
+    /// 範囲は [`EditOutcome::violation_total`] と同じである（モジュール docs「違反は結果が
+    /// 運ぶ」の表）。5.2 の `GridSession` が「どの違反が生じ、どの違反が消えたか」を差分で
+    /// 取り出すために運ぶ — **この欄を埋めるために追加の検証は 1 回も呼ばない**（同じ呼び出しの
+    /// 返り値を写すだけである）。
+    ///
+    /// [`EditCommand`] が `SetCells` / `SetNested` のときにこの一覧が覆うのは**編集した列**
+    /// だけであり、判定（[`EditVerdict`]）が挙げた違反は写さない（モジュール docs
+    /// 「違反は結果が運ぶ」末尾 — 同じ列の再検証の報告が同じ違反を必ず含むため）。
+    pub violations: Vec<Violation>,
+    /// 適用のあとに**再検証した列の索引**（昇順・重複なし）。
+    ///
+    /// 空の命令では空であり、そのとき [`EditOutcome::violations`] も空、
+    /// [`EditOutcome::violation_total`] も 0 である。5.2 はこの欄が全列を覆うかどうかで
+    /// 差分の組み方を選ぶ（`crate::api` のモジュール docs「違反の総数をどう閉じるか」）。
+    pub revalidated_columns: Vec<ColumnIndex>,
     /// 適用の**後**のシートの行数。`SetCells` と `PasteRange` は行を増減しない限り前後で
     /// 変わらない（`PasteRange` は矩形が既存の行数を超えるときに増える。要件 7.4。行を増減する
     /// 命令（3.2）がこの欄に変化を載せる）。
@@ -952,11 +1000,9 @@ impl EditApply {
             EditCommand::InsertRows { at, count } => self.insert_rows_with_inverse(doc, at, count),
             EditCommand::RemoveRows { rows } => self.remove_rows_with_inverse(doc, rows),
             EditCommand::DuplicateRows { rows } => self.duplicate_rows_with_inverse(doc, rows),
-            EditCommand::PasteRange {
-                anchor,
-                rows,
-                text,
-            } => self.paste_range_with_inverse(doc, anchor, rows, text),
+            EditCommand::PasteRange { anchor, rows, text } => {
+                self.paste_range_with_inverse(doc, anchor, rows, text)
+            }
         }
     }
 
@@ -1017,15 +1063,21 @@ impl EditApply {
 
     /// 何も変えなかった適用の結果（空の命令）。
     ///
-    /// `affected` は空、`coercions` は空、`violation_total` は 0、`row_count` は**適用後の**
-    /// 行数（変わっていない）。**縫い目を 1 回も呼ばない** — 状態を変えない命令の違反の総数は
-    /// 変わりようがなく、引き直せば要件 11.4 の費用を理由もなく払う
-    /// （モジュール docs「空の命令」）。
+    /// `affected` は空、`coercions` は空、`violation_total` は 0、`violations` と
+    /// `revalidated_columns` も空、`row_count` は**適用後の**行数（変わっていない）。
+    /// **縫い目を 1 回も呼ばない** — 状態を変えない命令の違反の総数は変わりようがなく、
+    /// 引き直せば要件 11.4 の費用を理由もなく払う（モジュール docs「空の命令」）。
+    ///
+    /// 総数を 0 とするのは、この結果が運ぶ数が**触れた列に閉じた数**だからである（触れた列が
+    /// 1 本も無い）。5.2 は `revalidated_columns` が空であることで「この結果の数を使っては
+    /// ならない」と読む（`crate::api` のモジュール docs「違反の総数をどう閉じるか」）。
     fn unchanged(&self, doc: &Document) -> Result<EditOutcome, GridError> {
         Ok(EditOutcome {
             affected: Vec::new(),
             coercions: Vec::new(),
             violation_total: 0,
+            violations: Vec::new(),
+            revalidated_columns: Vec::new(),
             row_count: self.target_sheet(doc)?.rows().len(),
         })
     }
@@ -1035,33 +1087,35 @@ impl EditApply {
     ///
     /// 変換の記録は空である（この経路へ届く値は打たれた文字ではないため判定を通らない）。
     fn changed_rows(&self, doc: &Document, affected: Vec<RowId>) -> Result<EditOutcome, GridError> {
+        let revalidated = self.revalidate_every_column(doc);
         Ok(EditOutcome {
             affected,
             coercions: Vec::new(),
-            violation_total: self.revalidate_every_column(doc),
+            violation_total: revalidated.total,
+            violations: revalidated.violations,
+            revalidated_columns: revalidated.columns,
             row_count: self.target_sheet(doc)?.rows().len(),
         })
     }
 
-    /// すべての列を指定した再検証を**1 回**呼び、その総数を返す。
+    /// すべての列を指定した再検証を**1 回**呼び、その報告を本層が運ぶ形に畳んで返す。
     ///
     /// 列の集合は計画の列の添字を昇順に並べたものである（上流は列の並びを正規化するため
     /// 結果に影響しないが、数える側が「全列を指定した」ことを読める形にする）。
     /// [`EditSchemaQuery::validate_sheet`] を呼ばない理由はモジュール docs
     /// 「行の構造を変える命令の再検証」にある（全列の**指定**が呼び出しの形に残る）。
-    fn revalidate_every_column(&self, doc: &Document) -> usize {
+    fn revalidate_every_column(&self, doc: &Document) -> Revalidated {
         let columns: Vec<ColumnIndex> = (0..self.schema.column_count())
             .map(ColumnIndex::new)
             .collect();
-        self.query
-            .revalidate_columns(
-                doc,
-                self.sheet,
-                &self.schema,
-                &columns,
-                &ValidationOptions::capped(0),
-            )
-            .total_violations()
+        let report = self.query.revalidate_columns(
+            doc,
+            self.sheet,
+            &self.schema,
+            &columns,
+            &ValidationOptions::unlimited(),
+        );
+        Revalidated::from_report(columns, &report)
     }
 
     /// `InsertRows` の適用（[`EditApply::apply_with_inverse`] の本体。要件 6.1）。
@@ -1492,13 +1546,16 @@ impl EditApply {
             self.sheet,
             &self.schema,
             &revalidated,
-            &ValidationOptions::capped(0),
+            &ValidationOptions::unlimited(),
         );
+        let revalidated = Revalidated::from_report(revalidated, &report);
 
         let outcome = EditOutcome {
             affected,
             coercions,
-            violation_total: report.total_violations(),
+            violation_total: revalidated.total,
+            violations: revalidated.violations,
+            revalidated_columns: revalidated.columns,
             row_count: self.target_sheet(doc)?.rows().len(),
         };
         let pair = self.paste_pair(doc, anchor, displayed, restore_values, &targets, text)?;
@@ -1691,12 +1748,7 @@ impl EditApply {
                             position,
                             values: values.clone(),
                         });
-                        rows.push(RowEdit::from_text(
-                            address.row(),
-                            values,
-                            column,
-                            text,
-                        ));
+                        rows.push(RowEdit::from_text(address.row(), values, column, text));
                     }
                 }
             }
@@ -1736,7 +1788,8 @@ impl EditApply {
         // 解釈できない入力は**値の不適合ではなく入力の破損**である。`CellValue` が 1 つも
         // 得られないため判定を呼ぶ値が無く、処理を止める（`error` 層の 2 分法。
         // モジュール docs「解釈できない入力は処理を止める」）。
-        let value = from_json_bytes(json.as_bytes()).map_err(|_| GridError::NestedDecode { cell })?;
+        let value =
+            from_json_bytes(json.as_bytes()).map_err(|_| GridError::NestedDecode { cell })?;
         // やり直しの命令は**適用した命令そのもの**である（打たれた表現をそのまま運ぶ）。
         let redo = EditCommand::SetNested {
             cell,
@@ -1817,16 +1870,16 @@ impl EditApply {
         let mut writes: Vec<(RowId, usize, CellValue)> = Vec::new();
         let mut coercions: Vec<CoercionNotice> = Vec::new();
         for row in rows {
-            let (decided, recorded) = match self.query.judge_write(&self.schema, row.edited_values())
-            {
-                // どちらの腕でも、返った値と変換の記録をそのまま受け取る（**判定の分岐を
-                // 書かない**）。判定が運ぶ違反は、書き込みの後の再検証が同じ位置・同じ理由で
-                // 持つ（モジュール docs「違反の総数の源」）。
-                EditVerdict::Accepted { values, coercions } => (values, coercions),
-                EditVerdict::AcceptedWithViolations {
-                    values, coercions, ..
-                } => (values, coercions),
-            };
+            let (decided, recorded) =
+                match self.query.judge_write(&self.schema, row.edited_values()) {
+                    // どちらの腕でも、返った値と変換の記録をそのまま受け取る（**判定の分岐を
+                    // 書かない**）。判定が運ぶ違反は、書き込みの後の再検証が同じ位置・同じ理由で
+                    // 持つ（モジュール docs「違反は結果が運ぶ」）。
+                    EditVerdict::Accepted { values, coercions } => (values, coercions),
+                    EditVerdict::AcceptedWithViolations {
+                        values, coercions, ..
+                    } => (values, coercions),
+                };
             for (column, _) in &row.edits {
                 // `decided` の長さは渡した値の並びと同じであり、`coercions` は値ごとに 1 件が
                 // 対応する（`schema-engine` の契約。縫い目の docs 参照）。
@@ -1858,13 +1911,16 @@ impl EditApply {
             self.sheet,
             &self.schema,
             &revalidated,
-            &ValidationOptions::capped(0),
+            &ValidationOptions::unlimited(),
         );
+        let revalidated = Revalidated::from_report(revalidated, &report);
 
         Ok(EditOutcome {
             affected,
             coercions,
-            violation_total: report.total_violations(),
+            violation_total: revalidated.total,
+            violations: revalidated.violations,
+            revalidated_columns: revalidated.columns,
             // セルを書く命令は行を増減しないため、適用の前後で同じ数になる。適用の後の行数を
             // 改めて読む（行数を変える命令（3.2）がこの経路をそのまま使えるようにする）。
             row_count: self.target_sheet(doc)?.rows().len(),
@@ -1901,10 +1957,13 @@ impl EditApply {
             return self.unchanged_of(doc, sheet);
         }
         Self::write_material_rows(doc, sheet, rows)?;
+        let revalidated = self.revalidate_every_column_of(doc, sheet);
         Ok(EditOutcome {
             affected: rows.iter().map(|row| row.id).collect(),
             coercions: Vec::new(),
-            violation_total: self.revalidate_every_column_of(doc, sheet),
+            violation_total: revalidated.total,
+            violations: revalidated.violations,
+            revalidated_columns: revalidated.columns,
             row_count: self.sheet_of(doc, sheet)?.rows().len(),
         })
     }
@@ -1954,17 +2013,20 @@ impl EditApply {
             }
             let batch: Vec<(usize, Row)> = rest.drain(..end).collect();
             let inserted: Vec<Row> = batch.into_iter().map(|(_, row)| row).collect();
-            doc.insert_rows_at(sheet, start, inserted).map_err(|error| {
-                // 差し戻そうとした行が既にある（古い対）か、名乗られたシートが無い。位置の
-                // 範囲外は材料が壊れている場合だけであり、先頭の行を載せて返す。
-                match error {
-                    RowInsertionError::UnknownSheet { sheet } => GridError::SchemaUnusable { sheet },
-                    RowInsertionError::DuplicateRow { row } => GridError::UnknownRow { row },
-                    RowInsertionError::IndexOutOfRange { .. } => GridError::UnknownRow {
-                        row: rows[0].id,
-                    },
-                }
-            })?;
+            doc.insert_rows_at(sheet, start, inserted)
+                .map_err(|error| {
+                    // 差し戻そうとした行が既にある（古い対）か、名乗られたシートが無い。位置の
+                    // 範囲外は材料が壊れている場合だけであり、先頭の行を載せて返す。
+                    match error {
+                        RowInsertionError::UnknownSheet { sheet } => {
+                            GridError::SchemaUnusable { sheet }
+                        }
+                        RowInsertionError::DuplicateRow { row } => GridError::UnknownRow { row },
+                        RowInsertionError::IndexOutOfRange { .. } => {
+                            GridError::UnknownRow { row: rows[0].id }
+                        }
+                    }
+                })?;
         }
         // **行の幅を材料の幅へ戻す**。wire 形式（復号の正規の入口）は列数ぶんのキーを書くため、
         // 復号された行の幅は**つねに列数**である — 決して材料の幅ではない（材料が短い行でも、
@@ -1976,10 +2038,13 @@ impl EditApply {
         // 書く）。**幅 0 の行もここで戻る** — 空の並びの置換は「値なし」ではなく「値なしを
         // 1 つも持たない」であり、[`Row::set_values`] が並びを丸ごと差し替えるためである。
         Self::write_material_rows(doc, sheet, rows)?;
+        let revalidated = self.revalidate_every_column_of(doc, sheet);
         Ok(EditOutcome {
             affected: rows.iter().map(|row| row.id).collect(),
             coercions: Vec::new(),
-            violation_total: self.revalidate_every_column_of(doc, sheet),
+            violation_total: revalidated.total,
+            violations: revalidated.violations,
+            revalidated_columns: revalidated.columns,
             row_count: self.sheet_of(doc, sheet)?.rows().len(),
         })
     }
@@ -2104,10 +2169,13 @@ impl EditApply {
         // （`affected` の既存の規律）。
         let mut seen: HashSet<RowId> = HashSet::with_capacity(affected.len());
         affected.retain(|row| seen.insert(*row));
+        let revalidated = self.revalidate_every_column_of(doc, sheet);
         Ok(EditOutcome {
             affected,
             coercions: Vec::new(),
-            violation_total: self.revalidate_every_column_of(doc, sheet),
+            violation_total: revalidated.total,
+            violations: revalidated.violations,
+            revalidated_columns: revalidated.columns,
             row_count: self.sheet_of(doc, sheet)?.rows().len(),
         })
     }
@@ -2134,25 +2202,33 @@ impl EditApply {
         Ok(found)
     }
 
-    /// 名指されたシートについて、何も変えなかった適用の結果を返す。
+    /// 名指されたシートについて、何も変えなかった適用の結果を返す
+    /// （[`EditApply::unchanged`] のシート指定版）。
     fn unchanged_of(&self, doc: &Document, sheet: SheetId) -> Result<EditOutcome, GridError> {
         Ok(EditOutcome {
             affected: Vec::new(),
             coercions: Vec::new(),
             violation_total: 0,
+            violations: Vec::new(),
+            revalidated_columns: Vec::new(),
             row_count: self.sheet_of(doc, sheet)?.rows().len(),
         })
     }
 
-    /// 名指されたシートの**すべての列**を 1 回だけ再検証し、その総数を返す
+    /// 名指されたシートの**すべての列**を 1 回だけ再検証し、その報告を畳んで返す
     /// （[`EditApply::revalidate_every_column`] のシート指定版）。
-    fn revalidate_every_column_of(&self, doc: &Document, sheet: SheetId) -> usize {
+    fn revalidate_every_column_of(&self, doc: &Document, sheet: SheetId) -> Revalidated {
         let columns: Vec<ColumnIndex> = (0..self.schema.column_count())
             .map(ColumnIndex::new)
             .collect();
-        self.query
-            .revalidate_columns(doc, sheet, &self.schema, &columns, &ValidationOptions::capped(0))
-            .total_violations()
+        let report = self.query.revalidate_columns(
+            doc,
+            sheet,
+            &self.schema,
+            &columns,
+            &ValidationOptions::unlimited(),
+        );
+        Revalidated::from_report(columns, &report)
     }
 
     /// 対象シートを引く。文書に無い場合と、計画の列数と食い違う場合は使用不能として返す。
@@ -2189,6 +2265,40 @@ fn edited_value(text: &str) -> CellValue {
         CellValue::Null
     } else {
         CellValue::Text(text.to_owned())
+    }
+}
+
+/// 再検証の報告を、結果が運ぶ形へ畳んだもの（[`EditOutcome`] の 3 つの欄の源）。
+///
+/// 再検証の報告（[`SheetReport`]）を**そのまま**運ばないのは、報告が本層の公開型ではない
+/// ためである（`EditOutcome` は本クレートの境界の内側で共有される型であり、上流の報告を
+/// そのまま載せると 5.2 が「報告のどの欄を読んでよいか」を上流の契約に照らして判断する
+/// ことになる）。畳むのは 3 つだけである:
+///
+/// - [`Revalidated::columns`] — この報告が覆う列（呼び出した側が指定した列そのもの）
+/// - [`Revalidated::total`] — 報告の総数（[`SheetReport::total_violations`]）
+/// - [`Revalidated::violations`] — 報告の違反（[`SheetReport::violations`] の写し）
+///
+/// **報告を作るのは 1 回だけである** — 本型はその 1 回の返り値から作る（畳むために検証を
+/// 呼び直さない。要件 11.4）。
+struct Revalidated {
+    /// 報告が覆う列（昇順・重複なし。呼び出した側が指定した列）。
+    columns: Vec<ColumnIndex>,
+    /// 報告の総数（その列に閉じた数）。
+    total: usize,
+    /// 報告の違反（その列に閉じた一覧）。
+    violations: Vec<Violation>,
+}
+
+impl Revalidated {
+    /// 報告そのものから畳む。`columns` は**呼び出しに渡した列**（報告は列を持たないため、
+    /// 呼び出した側が唯一の源である）。
+    fn from_report(columns: Vec<ColumnIndex>, report: &SheetReport) -> Self {
+        Self {
+            columns,
+            total: report.total_violations(),
+            violations: report.violations().to_vec(),
+        }
     }
 }
 
@@ -2324,7 +2434,9 @@ fn row_insertion_error(error: RowInsertionError, at: RowOrdinal, count: usize) -
         },
         RowInsertionError::UnknownSheet { sheet } => GridError::SchemaUnusable { sheet },
         RowInsertionError::DuplicateRow { row } => {
-            unreachable!("insert_row_at は識別子を発行するため、重複した識別子は起こりえない: {row}")
+            unreachable!(
+                "insert_row_at は識別子を発行するため、重複した識別子は起こりえない: {row}"
+            )
         }
     }
 }
