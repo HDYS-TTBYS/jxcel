@@ -9,9 +9,10 @@
  * 2. **適用のあとの作り直しは 8.3 / 8.6 / 8.7 と同じ 1 つである**（要件 1.7）。影響を受けた行が
  *    あれば `WindowCache.clear(row_count)` を**応答の行数で**呼ぶ（`invalidate` では、行数が
  *    変わったときに後ろの窓が別の行を指したまま残る）。
- * 3. **移動先の解決は捨てる前に済ませる**（要件 9.8）。`invalidate` / `clear` は影響を受けた
- *    行の窓そのものを捨てるので、**後に引けば答えは必ず `null`** になる。ここが本 module で
- *    最も壊れやすい順序であり、偽の記憶がその性質を写している（`droppingCache`）。
+ * 3. **移動先は窓の記憶から引かない**（要件 9.8。10.5 が境界へ移した）。序数は応答が運び
+ *    （`GridEditOutcome.affected_ordinals`）、現在位置を移すのは表の遷移である
+ *    （`./GridScreen` の `appliedRowOperation`）。したがって本 module の依存は `clear` だけで
+ *    あり、偽の記憶は `ordinalOf` を**持たない**（持てば型が通り、呼べば実行時に落ちる）。
  * 4. **進める履歴が無いことは失敗ではない**（生成物の `GridEditResponse.outcome` の doc）。
  *    何も動かさない（作り直しも移動もしない）。
  * 5. **メニューの 2 つの項目は同じ 1 つの入口へ着く。**イベント名は生成物の定数であり、
@@ -39,7 +40,6 @@ import type { IpcClientError } from "../../ipc/client";
 import type { GridClient } from "./gridClient";
 import { applyHistory, installGridHistoryRequests, parseHistoryDirection } from "./history";
 import { initialSelection, selectionForKey } from "./selection";
-import type { CellPosition } from "./renderer/port";
 
 // `listen` を模す（`node` 環境には IPC が無い）。**捉えた引数はそのまま読む**ので、購読の宛先
 // （イベント名）と、登録された処理は本物である。
@@ -49,14 +49,17 @@ vi.mock("@tauri-apps/api/event", () => ({ listen }));
 /** 窓の文脈（`WindowContext`。値そのものは検査に効かない）。 */
 const CONTEXT = { window: "main" } as const;
 
-/** 影響を受けた行の識別子（正準の 26 文字）。 */
-const EDITED_ROW = "01ARZ3NDEKTSV4RRFFQ69G5FB0";
+/** 影響を受けた行の識別子（正準の 26 文字）。**窓の記憶が保っていない行**である（10.5）。 */
 const RESTORED_ROW = "01ARZ3NDEKTSV4RRFFQ69G5FB1";
+
+/** 2 つ目の影響を受けた行（**並びが 2 件以上のとき、本 module はどれも取り出さない**）。 */
+const EDITED_ROW = "01ARZ3NDEKTSV4RRFFQ69G5FB2";
 
 /** 適用の結果（指定した欄だけを変えて組む）。 */
 function outcomeOf(overrides: Partial<GridEditOutcome>): GridEditOutcome {
   return {
     affected: [],
+    affected_ordinals: [],
     coercions: [],
     violation_total: 0,
     violations: [],
@@ -114,45 +117,21 @@ function fakeClient(answer: () => IpcResult<GridEditResponse, IpcClientError>): 
 }
 
 /**
- * 偽の窓の記憶。**捨てると行の対応が消える**（`invalidate` / `clear` が影響を受けた行の窓を
- * 捨てるという事実を写したもの）。
+ * 偽の窓の記憶。**行数の作り直し（`clear`）だけを受ける。**
  *
- * この性質があるので、「捨てる前に移動先を引く」という順序が**落とせる** — 順序を入れ替えれば
- * `applyHistory` の `affectedRow` は `null` になる（`windowCache.test.ts` の `ordinalOf` の
- * 検査と対になる。あちらは本物の記憶が答えることを見る）。
+ * `ordinalOf` を持たないことが本検査の 1 つである — 本 module は移動先を窓の記憶から**引かない**
+ * （序数は応答が運ぶ。10.5）。あれば型が通ってしまい、経路が戻ってきたことに気づけない。
  */
-function droppingCache(options: {
-  /** 行の識別子 → 表示の序数（**いま記憶が保っている行**）。 */
-  readonly held: ReadonlyMap<string, number>;
-}): {
-  readonly cache: {
-    clear: (rowCount?: number) => void;
-    ordinalOf: (rowId: string) => number | null;
-  };
+function clearingCache(): {
+  readonly cache: { clear: (rowCount?: number) => void };
   readonly cleared: readonly (number | undefined)[];
-  readonly asked: readonly string[];
 } {
   const cleared: (number | undefined)[] = [];
-  const asked: string[] = [];
-  const held = new Map(options.held);
   return {
     cleared,
-    asked,
     cache: {
       clear: (rowCount?: number) => {
         cleared.push(rowCount);
-        // **捨てる。**以後はどの行も引けない（行数が変わる編集では序数と行の対応そのものが
-        // 変わるので、記憶は全部を捨てる）。
-        held.clear();
-      },
-      ordinalOf: (rowId: string) => {
-        asked.push(rowId);
-        for (const [key, ordinal] of held) {
-          if (key.toUpperCase() === rowId.toUpperCase()) {
-            return ordinal;
-          }
-        }
-        return null;
       },
     },
   };
@@ -165,7 +144,7 @@ function droppingCache(options: {
 describe("履歴を 1 つ進める（要件 9.2、9.3）", () => {
   it("向きをそのまま境界へ渡す（取り消しとやり直しは同じ 1 つの口を通る）", async () => {
     const client = fakeClient(() => ok(outcomeOf({})));
-    const memory = droppingCache({ held: new Map() });
+    const memory = clearingCache();
 
     expect((await applyHistory({ client, cache: memory.cache, direction: "undo" })).status).toBe(
       "applied",
@@ -183,7 +162,7 @@ describe("履歴を 1 つ進める（要件 9.2、9.3）", () => {
     const client = fakeClient(() =>
       ok(outcomeOf({ affected: [RESTORED_ROW], row_count: 4 })),
     );
-    const memory = droppingCache({ held: new Map([[RESTORED_ROW, 6]]) });
+    const memory = clearingCache();
 
     const settlement = await applyHistory({ client, cache: memory.cache, direction: "undo" });
 
@@ -195,7 +174,7 @@ describe("履歴を 1 つ進める（要件 9.2、9.3）", () => {
 
   it("影響を受けた行が無ければ記憶を触らない（何も変わっていない）", async () => {
     const client = fakeClient(() => ok(outcomeOf({})));
-    const memory = droppingCache({ held: new Map([[EDITED_ROW, 2]]) });
+    const memory = clearingCache();
 
     await applyHistory({ client, cache: memory.cache, direction: "undo" });
 
@@ -204,19 +183,18 @@ describe("履歴を 1 つ進める（要件 9.2、9.3）", () => {
 
   it("進める履歴が無いことは失敗ではない（何も動かさない）", async () => {
     const client = fakeClient(() => ok(null));
-    const memory = droppingCache({ held: new Map([[EDITED_ROW, 2]]) });
+    const memory = clearingCache();
 
     const settlement = await applyHistory({ client, cache: memory.cache, direction: "undo" });
 
     expect(settlement).toEqual({ status: "empty" });
     // 文書が変わっていないので、作り直す理由も移動する理由も無い。
     expect(memory.cleared).toEqual([]);
-    expect(memory.asked).toEqual([]);
   });
 
   it("経路が失敗したら、理由を 1 行にして記憶を触らない", async () => {
     const client = fakeClient(failure);
-    const memory = droppingCache({ held: new Map([[EDITED_ROW, 2]]) });
+    const memory = clearingCache();
 
     const settlement = await applyHistory({ client, cache: memory.cache, direction: "redo" });
 
@@ -226,53 +204,46 @@ describe("履歴を 1 つ進める（要件 9.2、9.3）", () => {
 });
 
 // ===========================================================================
-// 2. 移動先の解決（要件 9.8）
+// 2. 移動先は窓の記憶から引かない（要件 9.8。10.5）
 // ===========================================================================
 
-describe("対象となった範囲へ現在位置を移す（要件 9.8）", () => {
-  it("影響を受けた行の表示の序数を、**捨てる前に**引く", async () => {
-    const client = fakeClient(() =>
-      ok(outcomeOf({ affected: [EDITED_ROW], row_count: 12 })),
-    );
-    const memory = droppingCache({ held: new Map([[EDITED_ROW, 7]]) });
-
-    const settlement = await applyHistory({ client, cache: memory.cache, direction: "undo" });
-
-    // **順序が本質である**: 作り直し（`clear`）の後に引けば、記憶はもうその行を持たない。
-    expect(settlement).toEqual({
-      status: "applied",
-      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 12 }),
-      affectedRow: 7,
-      // **世代も応答が運ぶ**（タスク 10.1。画面は数え直さない）。
-      generation: "2",
+/**
+ * **移動先の序数は応答が運ぶ**（`GridEditOutcome.affected_ordinals`。10.5 が境界へ移した）。
+ * したがって本 module は序数を 1 つも解決せず、窓の記憶に問い合わせもしない — 10.5 より前は
+ * `WindowCache.ordinalOf` で `affected` の行を引いており、**記憶が保っていない行**（行の追加の
+ * やり直しで戻ってくる行）では答えが `null` になっていた（8.9 のレビューが実測した最小の再現）。
+ *
+ * ここで固定できるのは**依存の形**である（偽の記憶は `ordinalOf` を持たず、本 module の `cache`
+ * の型も `clear` だけを要求する）。**現在位置が実際に移ること**は、表を描く状態の遷移が
+ * 応答の序数を使うことそのものであり、`GridScreen.test.ts` の
+ * 「行の追加のやり直しでも、現在位置が対象の行へ移り、追随が走る（要件 9.8）」が
+ * `applyHistory` → `gridScreenHistorySettled` → `followSelection` の本物の経路で観測する。
+ */
+describe("移動先の序数は応答が運ぶ（要件 9.8）", () => {
+  it("記憶の対応が無くても往復は成立し、序数は応答のまま画面へ渡る", async () => {
+    // **`affected_ordinals` に載っている行は、記憶が 1 つも保っていない行である**
+    // （行の追加のやり直しがこれに当たる）。
+    const outcome = outcomeOf({
+      affected: [RESTORED_ROW, EDITED_ROW],
+      affected_ordinals: [6, 2],
+      row_count: 6,
     });
-    expect(memory.cleared).toEqual([12]);
-  });
+    const client = fakeClient(() => ok(outcome));
+    const memory = clearingCache();
 
-  it("見つかった最初の行を採る（影響を受けた並びの順である）", async () => {
-    const client = fakeClient(() =>
-      ok(outcomeOf({ affected: [RESTORED_ROW, EDITED_ROW] })),
-    );
-    // 2 つ目だけが記憶にある（1 つ目は削除された行である）。
-    const memory = droppingCache({ held: new Map([[EDITED_ROW, 3]]) });
+    const settlement = await applyHistory({ client, cache: memory.cache, direction: "redo" });
 
-    const settlement = await applyHistory({ client, cache: memory.cache, direction: "undo" });
-
-    expect(settlement.status === "applied" && settlement.affectedRow).toBe(3);
-  });
-
-  it("序数が引けない行へは動かさない（推測しない）", async () => {
-    // 削除の取り消しがこれに当たる: 戻ってくる行の識別子は、削除の時点の `clear` で記憶から
-    // 消えている（**境界は行の識別子しか運ばない**ので、序数を求める手段が無い）。
-    const client = fakeClient(() =>
-      ok(outcomeOf({ affected: [RESTORED_ROW], row_count: 6 })),
-    );
-    const memory = droppingCache({ held: new Map([[EDITED_ROW, 3]]) });
-
-    const settlement = await applyHistory({ client, cache: memory.cache, direction: "undo" });
-
-    expect(settlement.status === "applied" && settlement.affectedRow).toBeNull();
-    // 作り直しは行う（値は戻っている。位置だけが動かない）。
+    // 記憶から引く経路が無いので、順序（捨てる前に引く）も依存も無い — 作り直しだけを行う。
+    expect(settlement.status).toBe("applied");
+    if (settlement.status !== "applied") {
+      throw new Error("適用の腕でなければならない");
+    }
+    // **影響を受けた並びは 1 つも落ちず、順も変わらない** — 本 module は序数を 1 つも取り出さない
+    // （先頭を採るのは表の遷移である。10.5）。1 件だけを見る検査では、ここで `[0]` を取り出す
+    // 実装も、昇順に並べ直す実装も通ってしまう。
+    expect(settlement.outcome.affected_ordinals).toEqual([6, 2]);
+    expect(settlement.outcome.affected).toEqual([RESTORED_ROW, EDITED_ROW]);
+    expect(settlement.generation).toBe("2");
     expect(memory.cleared).toEqual([6]);
   });
 });
@@ -364,27 +335,7 @@ describe("メニューの活性化を 1 つの入口へ渡す（要件 9.9）", 
 });
 
 // ===========================================================================
-// 4. 位置の型が表示の位置であること（**取り違えの固定**）
-// ===========================================================================
-describe("解決した序数は表示の位置である", () => {
-  it("序数（可視行の添字）をそのまま返す（文書の位置ではない）", async () => {
-    const client = fakeClient(() =>
-      ok(outcomeOf({ affected: [EDITED_ROW], row_count: 20 })),
-    );
-    const memory = droppingCache({ held: new Map([[EDITED_ROW, 0]]) });
-
-    const settlement = await applyHistory({ client, cache: memory.cache, direction: "undo" });
-
-    // 0 は**先頭の可視行**である（1 行目）。画面はこの値をそのまま現在位置へ入れる
-    // （`GridScreen.test.ts` の「対象となった範囲へ現在位置を移す」がその使い方を見る）。
-    expect(settlement.status === "applied" && settlement.affectedRow).toBe(0);
-    const position: CellPosition = { row: 0, column: 0 };
-    expect(position.row).toBe(0);
-  });
-});
-
-// ===========================================================================
-// 5. アクセラレータが奪う経路が無いこと（要件 9.9）
+// 4. アクセラレータが奪う経路が無いこと（要件 9.9）
 // ===========================================================================
 
 /**

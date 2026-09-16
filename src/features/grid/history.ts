@@ -26,23 +26,20 @@
  * **別の行を指したまま残る**（`WindowCache.clear` の doc）。画面は数を数え直さない（応答が運ぶ
  * `GridEditOutcome.row_count` がそのまま新しい行数である）。
  *
- * # 移動先の解決は**捨てる前**に済ませる（要件 9.8）
+ * # 移動先は**応答が運ぶ**（要件 9.8。10.5 が窓の記憶から移した）
  *
  * 「取り消しまたはやり直しの後、対象となった範囲へ現在位置が移り、変更された箇所が見える」ため
- * には、**影響を受けた行の表示の序数**が要る。序数と行の対応を持つのは**窓の記憶だけ**であり
- * （境界は行の識別子しか運ばない）、`invalidate` / `clear` は**その行の窓そのものを捨てる**。
- * したがって順序が本質である:
+ * には、**影響を受けた行の表示の序数**が要る。序数は**応答が運ぶ**（`GridEditOutcome.affected_ordinals`。
+ * 写すのは `RowOrder` を持つ適応層であり、画面は写像を持たない）。本 module は序数を**1 つも
+ * 解決しない** — 現在位置を移すのは表を描く状態の遷移（`./GridScreen` の `appliedRowOperation`）
+ * であり、そこが応答の序数の先頭を使う（移す先が無ければ**動かさない**）。
  *
- * 1. [`WindowCache.ordinalOf`] で `affected` の行を順に見て、**引けた最初の序数**を採る
- * 2. そのあとで記憶を作り直す（`clear`）
- *
- * 逆順にすれば答えは必ず `null` になる（`history.test.ts` が「捨てた後に引く偽の記憶」で
- * 落とす）。序数は**表示の位置**であり、現在位置へそのまま入る（行の識別子ではない）。
- *
- * **引けなければ動かさない。** 行の識別子から序数への写像は境界に無いので、削除された行
- * （識別子がもう文書に無い行）や、まだ届いていない行は引けない。推測した序数へ動かせば
- * **無関係な行**を名乗ることになる（要件 8.6 が禁じた推測の行版である。`design.md` の
- * 「8.9 が残した申し送り」が、この穴を閉じる道を記録している）。
+ * **窓の記憶に依らない。**10.5 より前は `WindowCache.ordinalOf` で `affected` の行を順に引いて
+ * いたが、この口は**保っている窓を順に見るだけ**であり、記憶がその行を持っていなければ答えられ
+ * なかった（8.9 のレビューが実測した最小の再現は**行の追加のやり直し**である — 行数が変わる
+ * 編集の後に記憶は全部を捨てるので、戻ってくる行は 1 つも保たれていない）。序数が応答に載った
+ * いま、**「捨てる前に引く」という順序も、`ordinalOf` への依存も無い** — 本 module が記憶から
+ * 要るのは行数の作り直し（`clear`）だけである。
  *
  * # 移動した先が見えること（要件 9.8 の後半）
  *
@@ -97,17 +94,15 @@ import type { WindowCache } from "./windowCache";
 /**
  * 1 往復の結果。**画面が状態を決めるのに要るものだけ**を持つ。
  *
- * `applied` の `affectedRow` が `null` でありうるのは**移動先が引けなかった**場合である
- * （序数が引けない行しか影響を受けていない。module doc「移動先の解決」）。`outcome` は
- * `applied` ではつねに `Some` である — `None`（進める履歴が無い）は `empty` の腕である。
+ * `applied` は応答の `outcome`（適用の要約）と世代だけを持つ。**現在位置を移す先はここで
+ * 決めない** — 決めるのは表を描く状態の遷移（`./GridScreen` の `appliedRowOperation`）であり、
+ * 応答が運ぶ `affected_ordinals` の先頭を使う（要件 9.8。窓の記憶に依らない）。
  */
 export type HistorySettlement =
   | { readonly status: "empty" }
   | {
       readonly status: "applied";
       readonly outcome: GridEditOutcome;
-      /** 現在位置を移す先（**表示の序数**。引けなければ `null` ＝ 動かさない）。 */
-      readonly affectedRow: number | null;
       /** **応答を組み立てた時点の世代**（10 進の文字列。`GridEditResponse.generation` そのもの）。 */
       readonly generation: string;
     }
@@ -120,16 +115,13 @@ export type HistorySettlement =
  * 画面の側は `ScreenBoundary` が捕まえない経路（メニューの購読と非同期）に居るので、投げない
  * ことがそのまま画面の壊れなさになる。
  *
- * 依存を**狭く取る**: 窓の記憶から要るのは `ordinalOf`（移動先の解決）と `clear`（行数の
- * 作り直し）の 2 つだけである（`./cellEdit` の `Pick` と同じ規律であり、検査が偽の実装を
- * 置きやすくなる）。
- *
- * **順序**（module doc「移動先の解決は捨てる前に済ませる」）: 解決 → 作り直し。逆にすると
- * 移動先が引けなくなる。
+ * 依存を**狭く取る**: 窓の記憶から要るのは `clear`（行数の作り直し）**だけ**である
+ * （`./cellEdit` の `Pick` と同じ規律）。10.5 より前は移動先の解決に `ordinalOf` も要ったが、
+ * 序数は応答が運ぶようになった（module doc「移動先は応答が運ぶ」）。
  */
 export async function applyHistory(options: {
   readonly client: GridClient;
-  readonly cache: Pick<WindowCache, "clear" | "ordinalOf">;
+  readonly cache: Pick<WindowCache, "clear">;
   readonly direction: GridHistoryDirection;
 }): Promise<HistorySettlement> {
   const answer = await options.client.readHistory(options.direction);
@@ -142,35 +134,12 @@ export async function applyHistory(options: {
     // 作り直す理由も移動する理由も無い。
     return { status: "empty" };
   }
-  // **捨てる前に引く。**`clear` は序数と行の対応そのものを捨てるので、後では答えられない。
-  const affectedRow =
-    outcome.affected.length === 0 ? null : firstResolvableOrdinal(outcome.affected, options.cache);
   if (outcome.affected.length > 0) {
     // 行数を渡す（渡さなければ、増えた行は永久に読み込み中のままになり、減った先は古い窓の
     // まま配られる。`WindowCache.clear` の doc）。
     options.cache.clear(outcome.row_count);
   }
-  return { status: "applied", outcome, affectedRow, generation: answer.data.generation };
-}
-
-/**
- * 影響を受けた行のうち、**記憶が保っている最初のもの**の表示の序数（要件 9.8）。
- *
- * `affected` の並びは「命令に現れた順」である（生成物の `GridEditOutcome.affected` の doc）ので、
- * その順に見る — 並べ替え直したり、序数の小さい方を選んだりすると、**画面が決めた順**が
- * もう 1 つ現れる。
- */
-function firstResolvableOrdinal(
-  affected: readonly string[],
-  cache: Pick<WindowCache, "ordinalOf">,
-): number | null {
-  for (const rowId of affected) {
-    const ordinal = cache.ordinalOf(rowId);
-    if (ordinal !== null) {
-      return ordinal;
-    }
-  }
-  return null;
+  return { status: "applied", outcome, generation: answer.data.generation };
 }
 
 /**

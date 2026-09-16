@@ -104,6 +104,7 @@ describe("境界の口の引数の形", () => {
         context: { window: "main" },
         outcome: {
           affected: [],
+          affected_ordinals: [],
           coercions: [],
           violation_total: 0,
           violations: [],
@@ -157,6 +158,7 @@ describe("境界の口の引数の形", () => {
         context: { window: "main" },
         outcome: {
           affected: [],
+          affected_ordinals: [],
           coercions: [],
           violation_total: 0,
           violations: [],

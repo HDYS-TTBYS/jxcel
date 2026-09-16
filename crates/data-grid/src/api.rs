@@ -233,6 +233,7 @@
 //! [`NestedPath`]: crate::types::NestedPath
 //! [`ViolationPresence`]: crate::view::ViolationPresence
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use document_format::{CellValue, Document, Row, RowId, Sheet, SheetId};
@@ -422,6 +423,54 @@ impl GridSession {
     #[must_use]
     pub fn hidden_row_count(&self) -> usize {
         self.order.hidden()
+    }
+
+    /// 指定した行たちの**表示の序数**（可視行の添字。要件 8.6、9.8。design.md の
+    /// `visible_ordinals_of`）。
+    ///
+    /// 返るのは**渡した並びの順**の序数であり、`rows` に現れるが**いまの表示の並びに無い行**
+    /// （絞り込みで隠れた行、削除で消えた行、別のシートの行）は**落ちる** — 順序に無い行に
+    /// 序数を与えれば、呼び出し側は無関係な行を名乗る（要件 8.6 の取り違えの行版）。`rows` に
+    /// 同じ行が 2 度現れれば 1 つへ畳む（最初の出現の位置に載る）。
+    ///
+    /// **写像は [`RowOrder`] の可視の並びただ 1 つを通る**（本層は行 → 序数の写しを作らない。
+    /// 写しが 2 つあれば、並べ替えや絞り込みの下で食い違う。要件 8.6）。
+    ///
+    /// # なぜ「並び → 並び」の 1 つの口なのか（10.5 の費用）
+    ///
+    /// 行ごとに引く口（1 行を受け取って `RowOrder::ordinal_of` へ降りる口）を影響行の数だけ
+    /// 呼ぶ形は、費用が**影響行数 × 可視行数**になる — 10 万行の可視の並びの末尾 1 万行で
+    /// debug ビルド **3.0 秒**（`tests/grid_session.rs` の
+    /// `visible_ordinals_of_a_trailing_batch_of_a_hundred_thousand_rows_is_one_scan` が
+    /// 実測し、1 秒に収まることを表明する）。本口は**可視の並びを 1 度だけ走り**、対象の
+    /// 識別子の集合に在る行の序数を集める — 費用は影響行数と可視行数の**和**に比例する。
+    /// 1 行だけ写したい呼び出しも本口を 1 要素で呼べばよく、行ごとの口は置かない
+    /// （置けば二次の経路が戻る）。
+    ///
+    /// **本口が要るのは、表示の序数を境界へ写す層が `RowOrder` を読めないためである**
+    /// （10.5）。適応層は適用・取り消し・やり直しの**後**にこれを呼ぶ — その時点の並びは
+    /// [`GridSession::settle`] が導出し直した**整えたあとの**並びであり、行を戻す操作
+    /// （追加のやり直し）で戻ってくる行の位置もそこで初めて定まる。
+    #[must_use]
+    pub fn visible_ordinals_of(&self, rows: &[RowId]) -> Vec<RowOrdinal> {
+        if rows.is_empty() || self.order.is_empty() {
+            return Vec::new();
+        }
+        // 対象の行を**渡された並びの位置**へ写す（重複は最初の出現を残す）。
+        let mut wanted: HashMap<RowId, usize> = HashMap::with_capacity(rows.len());
+        for (position, row) in rows.iter().enumerate() {
+            wanted.entry(*row).or_insert(position);
+        }
+        // 可視の並びを**1 度だけ**走る（行ごとに引き直さない）。
+        let mut slots: Vec<Option<RowOrdinal>> = vec![None; rows.len()];
+        let span = RowSpan::new(RowOrdinal::new(0), self.order.len());
+        for (ordinal, row) in self.order.span(span).iter().enumerate() {
+            if let Some(position) = wanted.get(row) {
+                slots[*position] = Some(RowOrdinal::new(ordinal));
+            }
+        }
+        // **写せなかった行は落とす**（渡された並びの順のまま詰める）。
+        slots.into_iter().flatten().collect()
     }
 
     /// シートに存在する違反の総数（要件 4.3。design.md の `violation_total`）。

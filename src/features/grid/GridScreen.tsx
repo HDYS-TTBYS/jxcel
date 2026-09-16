@@ -246,7 +246,7 @@
  * | 削除の確認（要件 6.5） | 閾値は**いま 1 画面に見えている行数**（移植口の `onVisibleSpanChange` が報せた区間。**先読みの幅ではない**）。超えるときは**送らずに**数を示して尋ねる。**選択が動けば取り下げる**（尋ねた数と消える数が食い違わない） | `./rowOps` の `deleteNeedsConfirmation`、`ready.pendingDelete`、`RowOperations` |
  * | 確認への取り消し | **境界へ 1 つも送らない**（`./rowOps` の計画の腕であり、往復へ載らない）。報告・告知も動かさない | `gridScreenDeleteCancelled` |
  * | 行数が変わったあと（要件 1.7） | **新しい行数で記憶を作り直す**（`WindowCache.clear(row_count)`）。窓の区間は序数であるため、`invalidate` では足りない | `./rowOps` の `applyRowOperation` |
- * | 行の位置の提示（要件 6.5） | ① **窓が覆う行数**（`visibleRows` → 移植口の `rowCount`）② **提示する行数**（`summary.row_count`）③ 現在位置と選択の**寄せ**（`clampSelection`）、の 3 つを同じ遷移で置き換える | `gridScreenRowOperationSettled` |
+ * | 行の位置の提示（要件 6.5） | ① **窓が覆う行数**（`visibleRows` → 移植口の `rowCount`）② **提示する行数**（`summary.row_count`）③ 現在位置と選択の**寄せ**（`clampSelection`）、の 3 つを同じ遷移で置き換える。**応答が影響を受けた行の表示の序数を運んでいれば、その先頭へ現在位置を移す**（9.8 の規則はこの 1 つの遷移にあり、行の操作・貼り付け・履歴が同じ材料を使う。10.5） | `gridScreenRowOperationSettled` |
  *
  * **`clear` を呼ぶ理由（表の面は記憶を組み直すのに、なぜ要るか）。**表の面は可視行数を依存に
  * 持つ効果で器と記憶を組み直す（**移植口へ行数を渡す唯一の口が組み立てである** —
@@ -1381,10 +1381,10 @@ export function gridScreenPasteSettled(
  * | 進める履歴が無い | **何も動かさない**（失敗でも、告知を出す理由でもない。要件 9.2、9.3） |
  * | 適用できなかった | 理由を**告知**へ出す（表も状態も動かない） |
  *
- * **対象となった範囲へ移す**のは `affectedRow`（**表示の序数**。`./history` が窓の記憶から
- * 解決したもの）である。列は現在位置のものを保つ（変わったのは行だけであり、影響を受けた列は
- * 境界が運ばない）。引けなかった（`null`）ときは**動かさない** — 推測した序数へ動かせば、
- * 無関係な行を名乗ることになる（要件 8.6 の取り違えの行版）。
+ * **対象となった範囲へ移す**のは**応答が運ぶ表示の序数**（`GridEditOutcome.affected_ordinals`）
+ * であり、`./history` は序数を 1 つも解決しない（10.5 が窓の記憶からの解決を消した）。移す先が
+ * 無ければ（序数が空）**動かさない** — 推測した序数へ動かせば、無関係な行を名乗ることになる
+ * （要件 8.6 の取り違えの行版）。
  *
  * 移した先が新しい表の範囲の外なら、**既存の寄せ**（[`clampSelection`]）が表の端へ寄せる
  * （8.6 が行数の減少で通るのと同じ道である）。移した選択が表示範囲の外にあれば、**追随**
@@ -1402,12 +1402,7 @@ export function gridScreenHistorySettled(
       // **文書が動いていない。**作り直すものも、移すものも、名乗るものも無い（要件 9.2、9.3）。
       return model;
     case "applied":
-      return appliedRowOperation(
-        model,
-        settlement.outcome,
-        settlement.generation,
-        settlement.affectedRow,
-      );
+      return appliedRowOperation(model, settlement.outcome, settlement.generation);
     default:
       return assertNever(settlement, "履歴の結果の分岐が網羅されていない");
   }
@@ -1433,11 +1428,6 @@ function appliedRowOperation(
    * どの経路も、適用の応答が運ぶ値をそのまま渡す）。
    */
   generation: string,
-  /**
-   * 現在位置を移す先（**表示の序数**。8.9 の要件 9.8）。`null` なら**動かさない** —
-   * 8.6 / 8.7 の経路はつねに `null` であり、現在位置は寄せだけを受ける。
-   */
-  target: number | null = null,
 ): GridScreenModel {
   if (model.state.status !== "ready") {
     return model;
@@ -1461,11 +1451,24 @@ function appliedRowOperation(
    */
   const rowBound = hasRowRestriction(state.view) ? state.visibleRows : rowCount;
   /**
+   * 現在位置を移す先（**表示の序数**。要件 9.8）。**応答が運ぶ影響を受けた行の序数の先頭**
+   * である — 行の識別子（`affected`）ではなく、窓の記憶でもない。
+   *
+   * 序数を写すのは `RowOrder` を持つ適応層であり（10.5）、**写せなかった行は応答に載らない**
+   * （順序に無い行＝削除で消えた行・絞り込みで隠れた行・別のシートの行）。したがって
+   * **空なら移す先が無い** — 動かさない（推測した序数へ動かせば、無関係な行を名乗る。要件 8.6 の
+   * 取り違えの行版）。10.5 より前は `./history` が窓の記憶から引いており、**記憶がその行を
+   * 保っていなければ引けなかった**（8.9 のレビューが実測した最小の再現は行の追加のやり直しで
+   * ある）。経路は 1 つである（行の操作・貼り付け・履歴のどれもこの遷移を通る）。
+   */
+  const target = outcome.affected_ordinals[0] ?? null;
+  /**
    * 反映の出発点になる選択（要件 9.8）。
    *
-   * **移す先があるとき（取り消し・やり直し）は、その行へ現在位置を移して選択を 1 セルへ畳む。**
-   * 列は現在位置のものを保つ（境界が運ぶのは行の識別子だけであり、影響を受けた列は分からない）。
-   * 移す先が無ければいまの選択のままであり、**下の寄せだけ**を受ける（8.6 / 8.7 の経路である）。
+   * **移す先があるとき（取り消し・やり直し・行の操作・貼り付け）は、その行へ現在位置を移して
+   * 選択を 1 セルへ畳む。**列は現在位置のものを保つ（境界が運ぶのは行の序数だけであり、
+   * 影響を受けた列は分からない）。移す先が無ければいまの選択のままであり、**下の寄せだけ**を
+   * 受ける（行を消した適用である）。
    */
   const moved =
     target === null

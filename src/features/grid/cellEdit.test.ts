@@ -48,6 +48,7 @@ const ROW_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB0";
 function outcomeOf(overrides: Partial<GridEditOutcome>): GridEditOutcome {
   return {
     affected: [],
+    affected_ordinals: [],
     coercions: [],
     violation_total: 0,
     violations: [],

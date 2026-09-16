@@ -89,6 +89,7 @@ function contextOf(overrides: Partial<RowOperationContext> = {}): RowOperationCo
 function outcomeOf(overrides: Partial<GridEditOutcome>): GridEditOutcome {
   return {
     affected: [],
+    affected_ordinals: [],
     coercions: [],
     violation_total: 0,
     violations: [],

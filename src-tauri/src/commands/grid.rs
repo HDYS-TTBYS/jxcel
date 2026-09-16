@@ -1004,17 +1004,37 @@ fn violation_location(violation: &Violation) -> GridViolationLocation {
     }
 }
 
-/// 編集の要約を写す（要件 3.4、4.3、4.6、6.2、6.4、7.5）。
+/// 編集の要約を写す（要件 3.4、4.3、4.6、6.2、6.4、7.5、9.8）。
 ///
 /// **違反の総数はシート全体の数を載せる**（要件 4.3）。[`EditOutcome::violation_total`] は
 /// 再検証した列に閉じた総数であり（6.1 の同型の欄の doc）、シート全体へ閉じるのは本モジュール
 /// の仕事である — 差分で最新に保たれている数を [`GridSession::violation_total`] から読む。
 /// **そのために検証を呼び直すことは無い**（要件 11.4）。
 ///
+/// **影響を受けた行の表示の序数もここで写す**（要件 9.8。10.5）。写像を持つのは
+/// [`GridSession`] だけであり（`RowOrder` の可視の並びの 1 つ。要件 8.6 が写しを禁じている）、
+/// **写せない行は落とす** — 順序に無い行（削除で消えた行、絞り込みで隠れた行、別のシートの
+/// 行）に序数を推測して与えれば、画面は無関係な行を名乗る。
+///
+/// **写像は [`GridSession::visible_ordinals_of`] の 1 回で済ませる**（行ごとに引く口を影響行の
+/// 数だけ呼ぶ形は、費用が**影響行数 × 可視行数**になる。10.5 のレビューの実測で、10 万行の
+/// 可視の並びの末尾 1 万行に 2.84 秒 — 要件 11.5 の予算 3 秒のほぼ全部を写像だけで使っていた）。
+///
+/// **本関数は適用・取り消し・やり直しの後で呼ぶ。**その時点の並びは
+/// [`GridSession::settle`] が導出し直した**整えたあとの**並びであり、行を戻す操作
+/// （追加のやり直し）で戻ってくる行の位置もそこで初めて定まる — 適用の**前**の並びで写すと、
+/// 戻ってくる行は順序に無いため 1 つも写せない（10.5 の直前まで `history.ts` の
+/// `firstResolvableOrdinal` が、窓の記憶の側で同じ穴に落ちていた — 8.9 のレビューの実測）。
+///
 /// **適用先が表示中のシートでないときは、この関数を使わない**（[`untouched_sheet_outcome`]）。
 fn outcome_to_boundary(session: &GridSession, outcome: &EditOutcome) -> GridEditOutcome {
     GridEditOutcome {
         affected: outcome.affected.iter().map(|row| row.to_string()).collect(),
+        affected_ordinals: session
+            .visible_ordinals_of(&outcome.affected)
+            .iter()
+            .map(|ordinal| count_to_u32(ordinal.get()))
+            .collect(),
         coercions: outcome.coercions.iter().map(coercion_to_boundary).collect(),
         violation_total: count_to_u32(session.violation_total()),
         violations: outcome.violations.iter().map(violation_location).collect(),
@@ -1035,19 +1055,21 @@ fn outcome_to_boundary(session: &GridSession, outcome: &EditOutcome) -> GridEdit
 /// （`EditOutcome::sheet`）ので、本層はそれを見分けられる。
 ///
 /// そのとき**表示中のシートの中身は 1 つも変わっていない**。したがって応答が運ぶ材料は
-/// 表示中のシートのものでなければならない（画面はこの 6 つの欄をそのまま採用する —
+/// 表示中のシートのものでなければならない（画面はこの 7 つの欄をそのまま採用する —
 /// `./GridScreen` の `appliedRowOperation` と `./history` の `applyHistory`）:
 ///
 /// | 欄 | なにを載せるか | 理由 |
 /// |---|---|---|
 /// | `violation_total` | 表示中のシートの総数（`session.violation_total()`） | ドメインが索引に触れていないため、この数は表示中のシートのままである（`GridSession::settle` の docs） |
 /// | `violations` / `revalidated_columns` | **空** | 別のシートの位置である。画面は印と巡回の材料に使うため、載せれば**別のシートの違反を表示中のセルの印にする** |
-/// | `affected` | **空** | 別のシートの行識別子である。画面はこれを現在位置の移動と窓の作り直し（`WindowCache.clear(row_count)`）に使う |
+/// | `affected` | **空** | 別のシートの行識別子である。画面はこれを窓の作り直し（`WindowCache.clear(row_count)`）に使う |
+/// | `affected_ordinals` | **空** | 別のシートの行である。**空であれば画面は現在位置を動かさない**（要件 9.8 の「移す先が無ければ動かさない」）— 表示中のシートの行に推測した序数を与えれば、無関係な行を名乗る |
 /// | `coercions` | **空** | 同じく別のシートの位置である（復元の経路は強制を行わないため、実際にはつねに空である） |
 /// | `row_count` | 表示中のシートの行数（`displayed_rows`） | 画面はこれを**表示している表の行数**として採用する（`ready.summary.row_count`）。別のシートの数を載せると、表示中のシートの行数が別のシートの数になる |
 fn untouched_sheet_outcome(session: &GridSession, displayed_rows: usize) -> GridEditOutcome {
     GridEditOutcome {
         affected: Vec::new(),
+        affected_ordinals: Vec::new(),
         coercions: Vec::new(),
         violation_total: count_to_u32(session.violation_total()),
         violations: Vec::new(),
@@ -4286,6 +4308,490 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // 影響を受けた行の表示の序数（タスク 10.5。要件 9.8）
+    // -----------------------------------------------------------------------
+
+    /// 表示の序数 `ordinal` の窓が運ぶ行の識別子（**序数から行を引ける唯一の経路である**）。
+    ///
+    /// 窓は `RowOrder::row_at` を通って組まれる（`transport` の符号化）ので、この突き合わせは
+    /// 「`ordinal_of` が答えた序数」と「`row_at` が答える行」の往復を、本番の経路で確かめる。
+    fn row_key_at(
+        sessions: &Arc<DocumentSessions>,
+        grids: &GridSessions,
+        label: &WindowLabel,
+        sheet: &str,
+        ordinal: u32,
+    ) -> [u8; ROW_KEY_LEN] {
+        let bytes = window_bytes(answer_rows_window(
+            sessions,
+            grids,
+            label,
+            &InvokeBody::Raw(window_argument(
+                sheet,
+                generation_of(grids, label),
+                u64::from(ordinal),
+                1,
+            )),
+        ));
+        let window = decode_window(&bytes).expect("窓は復号できる");
+        assert_eq!(1, window.row_count(), "1 行の窓が返る");
+        window.rows()[0].key()
+    }
+
+    /// **応答が運ぶ序数は、その時点の表示の序数である**（tasks.md 10.5 の 2 つ目の検査。要件 9.8）。
+    ///
+    /// **可視の序数と文書の位置が食い違う表示**を作って測る — 品番が `C` の行（文書の位置 2）
+    /// だけを見せれば、その行の表示の序数は 0 である。文書の位置を写した実装は 2 を名乗り、
+    /// **序数 2 の窓は空になる**（可視は 1 行しか無い）ので、下の突き合わせが落ちる。
+    #[test]
+    fn the_affected_ordinals_are_the_display_ordinals_of_the_rows() {
+        let (_scratch, sessions, grids, label) = opened("affected-ordinals");
+        let path = _scratch.file("台帳.jxcel");
+        let rows = stored_rows(&path);
+        let sheet = sheet_id(&path);
+
+        let view = data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest {
+                view: GridViewSpec {
+                    filters: vec![GridFilterSpec::Equals {
+                        column: 0,
+                        text: "C".to_owned(),
+                    }],
+                    ..empty_view()
+                },
+            },
+        ));
+        assert_eq!(1, view.visible_rows, "前提: 可視は 1 行だけである");
+
+        let applied = data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest {
+                command: set_one(&rows[2], 1, "9"),
+            },
+        ));
+        let outcome = applied.outcome.expect("適用は必ず要約を返す");
+        assert_eq!(
+            vec![rows[2].clone()],
+            outcome.affected,
+            "影響を受けた行は C である"
+        );
+        assert_eq!(
+            vec![0],
+            outcome.affected_ordinals,
+            "C の**表示の序数**は 0 である（文書の位置 2 ではない）"
+        );
+        assert_eq!(
+            row_key(&rows[2]),
+            row_key_at(&sessions, &grids, &label, &sheet, 0),
+            "序数 0 の窓が運ぶのは C そのものである"
+        );
+        // **可視の範囲の外を名乗らない。**
+        assert!(
+            outcome
+                .affected_ordinals
+                .iter()
+                .all(|ordinal| *ordinal < view.visible_rows),
+            "序数は可視の範囲に収まる: {:?} < {}",
+            outcome.affected_ordinals,
+            view.visible_rows
+        );
+    }
+
+    /// **順序に無い行は序数に含めない**（tasks.md 10.5 の 3 つ目の検査）。
+    ///
+    /// 絞り込みが隠している行（品番 `A`）を識別子で編集すると、`affected` にはその識別子が
+    /// 載るが、**表示の序数は載らない**。写せない行に序数を与えれば、画面は無関係な行を名乗る
+    /// （その行はこの表示のどこにも無い）。
+    #[test]
+    fn a_row_outside_the_displayed_order_has_no_ordinal() {
+        let (_scratch, sessions, grids, label) = opened("hidden-ordinal");
+        let path = _scratch.file("台帳.jxcel");
+        let rows = stored_rows(&path);
+
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest {
+                view: GridViewSpec {
+                    filters: vec![GridFilterSpec::Equals {
+                        column: 0,
+                        text: "C".to_owned(),
+                    }],
+                    ..empty_view()
+                },
+            },
+        ));
+
+        let applied = data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest {
+                command: set_one(&rows[0], 1, "9"),
+            },
+        ));
+        let outcome = applied.outcome.expect("適用は必ず要約を返す");
+        assert_eq!(
+            vec![rows[0].clone()],
+            outcome.affected,
+            "隠れている行でも、識別子で指せば編集できる"
+        );
+        assert!(
+            outcome.affected_ordinals.is_empty(),
+            "順序に無い行に序数は与えない: {:?}",
+            outcome.affected_ordinals
+        );
+    }
+
+    /// **行の追加のやり直しでも、応答は戻ってくる行の表示の序数を運ぶ**
+    /// （tasks.md 10.5 の 1 つ目の検査の境界側。8.9 のレビューが実測した最小の再現）。
+    ///
+    /// 戻ってくる行は**適用の前の並びに無い**（取り消しが行を取り除き、`settle` が順序を導出し
+    /// 直す）。したがって序数は**整えたあとの並び**から写さなければ得られない — 適用の前の並び
+    /// から写す実装では空の一覧になり、画面は現在位置を移せない（`history.ts` の
+    /// `firstResolvableOrdinal` が窓の記憶の側で同じ穴に落ちていた）。
+    #[test]
+    fn redoing_an_insertion_reports_the_ordinal_of_the_restored_row() {
+        let (_scratch, sessions, grids, label) = opened("redo-ordinal");
+        let path = _scratch.file("台帳.jxcel");
+        let sheet = sheet_id(&path);
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+
+        // 1. **可視の序数 1 の行の直前**へ 1 行足す（`Before` は表示の位置である。10.4）。
+        let inserted = data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest {
+                command: GridEditCommand::InsertRows {
+                    at: GridRowAnchor::Before { ordinal: 1 },
+                    count: 1,
+                },
+            },
+        ))
+        .outcome
+        .expect("適用は必ず要約を返す");
+        assert_eq!(1, inserted.affected.len(), "足した行が 1 つ返る");
+        assert_eq!(
+            vec![1],
+            inserted.affected_ordinals,
+            "足した行は可視の序数 1 に在る"
+        );
+        let added = inserted.affected[0].clone();
+
+        // 2. 取り消す。**消えた行は順序に無い**ので、識別子だけが返る。
+        let undone = data(answer_history(
+            &sessions,
+            &grids,
+            &label,
+            &GridHistoryRequest {
+                direction: GridHistoryDirection::Undo,
+            },
+        ))
+        .outcome
+        .expect("取り消せる操作がある");
+        assert_eq!(vec![added.clone()], undone.affected);
+        assert!(
+            undone.affected_ordinals.is_empty(),
+            "消えた行に序数は無い: {:?}",
+            undone.affected_ordinals
+        );
+
+        // 3. **やり直す** — 戻ってくる行の**表示の序数**が運ばれる。
+        let redone = data(answer_history(
+            &sessions,
+            &grids,
+            &label,
+            &GridHistoryRequest {
+                direction: GridHistoryDirection::Redo,
+            },
+        ))
+        .outcome
+        .expect("やり直せる操作がある");
+        assert_eq!(vec![added.clone()], redone.affected);
+        assert_eq!(
+            1,
+            redone.affected_ordinals.len(),
+            "戻ってくる行の序数が運ばれる: {:?}",
+            redone.affected_ordinals
+        );
+        assert_eq!(
+            row_key(&added),
+            row_key_at(&sessions, &grids, &label, &sheet, redone.affected_ordinals[0]),
+            "その序数の窓が運ぶのは、戻ってきた行そのものである"
+        );
+        assert!(
+            (redone.affected_ordinals[0] as usize) < redone.row_count as usize,
+            "可視の範囲の外を名乗らない: {:?} < {}",
+            redone.affected_ordinals,
+            redone.row_count
+        );
+    }
+
+    /// **数量が同じ 2 行だけを見せ、単価の降順で並べる**（10.5 の複数行の検査の下ごしらえ）。
+    ///
+    /// 可視は 2 行であり、その**表示の序数と文書の位置が食い違う**（可視の序数 0 は文書の
+    /// 位置 1 の行）。3 行目（文書の位置 2）は絞り込みが隠す — 写せない行を混ぜる検査の材料で
+    /// ある。返るのは 3 行の識別子（文書の順）と、可視の順に並べた識別子である。
+    fn two_visible_rows_of_three(
+        sessions: &Arc<DocumentSessions>,
+        grids: &GridSessions,
+        label: &WindowLabel,
+        rows: &[String],
+    ) -> Vec<String> {
+        // 1. 数量（列 1）を 2 行で同じ値にする（同じ表示文字列でなければ 1 本の絞り込みで
+        //    2 行だけを選べない）。
+        let command = GridEditCommand::SetCells {
+            cells: vec![
+                GridCellEdit {
+                    cell: GridCellAddress {
+                        row: rows[0].clone(),
+                        column: 1,
+                    },
+                    text: "5".to_owned(),
+                },
+                GridCellEdit {
+                    cell: GridCellAddress {
+                        row: rows[1].clone(),
+                        column: 1,
+                    },
+                    text: "5".to_owned(),
+                },
+            ],
+        };
+        data(answer_apply_edit(
+            sessions,
+            grids,
+            label,
+            &GridEditRequest { command },
+        ));
+
+        // 2. 数量が 5 の行だけを見せ、単価（列 2）の降順に並べる（降順にしたのは、表示の序数が
+        //    文書の順と**逆**になるようにするためである — 写像が順序を保つかを観測できる）。
+        let view = data(answer_set_view(
+            sessions,
+            grids,
+            label,
+            &GridViewRequest {
+                view: GridViewSpec {
+                    filters: vec![GridFilterSpec::Equals {
+                        column: 1,
+                        text: "5".to_owned(),
+                    }],
+                    sort: vec![GridSortKey {
+                        column: 2,
+                        descending: true,
+                    }],
+                    ..empty_view()
+                },
+            },
+        ));
+        assert_eq!(2, view.visible_rows, "前提: 可視は 2 行である");
+        assert_eq!(1, view.hidden_rows, "前提: 隠れている行が 1 行ある");
+        vec![rows[1].clone(), rows[0].clone()]
+    }
+
+    /// **応答が運ぶ序数は `affected` と同じ順であり、先頭は「最初の写せた行」である**
+    /// （tasks.md 10.5。要件 9.8）。
+    ///
+    /// 表示の序数と文書の位置が食い違い、**可視の序数が文書の順と逆になる**表示で測る
+    /// （可視の序数 0 = 文書の位置 1 の行）。2 行を 1 つの命令で書くと、応答の `affected` は
+    /// 命令の並び（文書の順）であり、序数は**その順**で並ばなければならない — 表示の順に
+    /// 並べ直す実装も、写す順を逆にする実装も、下の突き合わせで落ちる。
+    ///
+    /// 取り消し（`RestoreValues`）も**同じ写像**を通るので、こちらでも同じ並びを表明する。
+    #[test]
+    fn the_affected_ordinals_follow_the_affected_order() {
+        let (_scratch, sessions, grids, label) = opened("affected-ordinals-order");
+        let path = _scratch.file("台帳.jxcel");
+        let rows = stored_rows(&path);
+        let sheet = sheet_id(&path);
+        let visible = two_visible_rows_of_three(&sessions, &grids, &label, &rows);
+        assert_eq!(
+            vec![rows[1].clone(), rows[0].clone()],
+            visible,
+            "前提: 可視の順は文書の順の逆である"
+        );
+
+        // 1 つの命令で 2 行を書く（`affected` は**命令の並び** = 文書の順である）。
+        let command = GridEditCommand::SetCells {
+            cells: vec![
+                GridCellEdit {
+                    cell: GridCellAddress {
+                        row: rows[0].clone(),
+                        column: 1,
+                    },
+                    text: "6".to_owned(),
+                },
+                GridCellEdit {
+                    cell: GridCellAddress {
+                        row: rows[1].clone(),
+                        column: 1,
+                    },
+                    text: "7".to_owned(),
+                },
+            ],
+        };
+        let applied = data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest { command },
+        ));
+        let outcome = applied.outcome.expect("適用は必ず要約を返す");
+        assert_eq!(
+            vec![rows[0].clone(), rows[1].clone()],
+            outcome.affected,
+            "影響を受けた行は命令の並び（文書の順）である"
+        );
+        assert_eq!(
+            vec![1, 0],
+            outcome.affected_ordinals,
+            "序数は `affected` と同じ順であり（表示の順に並べ直さない）、可視の序数が文書の順と逆である"
+        );
+        // **先頭が「最初の写せた行」である**（序数の意味は窓の側で確かめる — 序数から行を
+        // 引ける唯一の経路である）。
+        assert_eq!(
+            (row_key(&rows[0]), row_key(&rows[1])),
+            (
+                row_key_at(
+                    &sessions,
+                    &grids,
+                    &label,
+                    &sheet,
+                    outcome.affected_ordinals[0]
+                ),
+                row_key_at(
+                    &sessions,
+                    &grids,
+                    &label,
+                    &sheet,
+                    outcome.affected_ordinals[1]
+                ),
+            ),
+            "序数の先頭は最初の写せた行であり、2 番目はその次の写せた行である"
+        );
+
+        // 取り消しも同じ写像を通る（`affected` は差し戻した行である）。
+        let undone = data(answer_history(
+            &sessions,
+            &grids,
+            &label,
+            &GridHistoryRequest {
+                direction: GridHistoryDirection::Undo,
+            },
+        ))
+        .outcome
+        .expect("取り消せる操作がある");
+        assert_eq!(
+            vec![rows[0].clone(), rows[1].clone()],
+            undone.affected,
+            "差し戻した行は材料の並び（文書の順）である"
+        );
+        assert_eq!(
+            vec![1, 0],
+            undone.affected_ordinals,
+            "取り消しの応答も同じ並びの序数を運ぶ"
+        );
+    }
+
+    /// **写せない行が混ざっても、その行は序数に含まれず、他の行の序数は保たれる**
+    /// （tasks.md 10.5。要件 9.8）。
+    ///
+    /// 絞り込みが隠している行（文書の位置 2）を 1 つの命令に混ぜると、`affected` には識別子が
+    /// 載るが、序数は載らない。写せない行に序数を与える実装（空きを 0 で埋める・序数を文書の
+    /// 位置で代用する）は、下の 2 つの表明（件数と値）のどちらかで落ちる。
+    #[test]
+    fn the_affected_ordinals_skip_a_row_outside_the_display_and_keep_the_others() {
+        let (_scratch, sessions, grids, label) = opened("affected-ordinals-skip");
+        let path = _scratch.file("台帳.jxcel");
+        let rows = stored_rows(&path);
+        let sheet = sheet_id(&path);
+        two_visible_rows_of_three(&sessions, &grids, &label, &rows);
+
+        // 可視の 2 行と、**隠れている行**を 1 つの命令で書く。
+        let command = GridEditCommand::SetCells {
+            cells: vec![
+                GridCellEdit {
+                    cell: GridCellAddress {
+                        row: rows[0].clone(),
+                        column: 1,
+                    },
+                    text: "6".to_owned(),
+                },
+                GridCellEdit {
+                    cell: GridCellAddress {
+                        row: rows[1].clone(),
+                        column: 1,
+                    },
+                    text: "7".to_owned(),
+                },
+                GridCellEdit {
+                    cell: GridCellAddress {
+                        row: rows[2].clone(),
+                        column: 1,
+                    },
+                    text: "8".to_owned(),
+                },
+            ],
+        };
+        let applied = data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest { command },
+        ));
+        let outcome = applied.outcome.expect("適用は必ず要約を返す");
+        assert_eq!(
+            vec![rows[0].clone(), rows[1].clone(), rows[2].clone()],
+            outcome.affected,
+            "前提: 隠れている行も識別子で指せば影響を受ける（3 行が載る）"
+        );
+        assert_eq!(
+            2,
+            outcome.affected_ordinals.len(),
+            "順序に無い行は序数に含まれない（0 で埋めない）: {:?}",
+            outcome.affected_ordinals
+        );
+        assert_eq!(
+            vec![1, 0],
+            outcome.affected_ordinals,
+            "残る 2 つの序数は写せた行のものである（文書の位置で代用しない）"
+        );
+        assert_eq!(
+            (row_key(&rows[0]), row_key(&rows[1])),
+            (
+                row_key_at(
+                    &sessions,
+                    &grids,
+                    &label,
+                    &sheet,
+                    outcome.affected_ordinals[0]
+                ),
+                row_key_at(
+                    &sessions,
+                    &grids,
+                    &label,
+                    &sheet,
+                    outcome.affected_ordinals[1]
+                ),
+            ),
+            "序数は写せた 2 行を指す"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // 履歴（要件 9.2、9.3）
     // -----------------------------------------------------------------------
 
@@ -4529,7 +5035,11 @@ mod tests {
         );
         assert!(
             undone.affected.is_empty(),
-            "影響を受けた行も別のシートのものである（画面はこれを現在位置の移動と窓の作り直しに使う）"
+            "影響を受けた行も別のシートのものである（画面はこれを窓の作り直しに使う）"
+        );
+        assert!(
+            undone.affected_ordinals.is_empty(),
+            "表示の序数も別のシートのものである（空であれば画面は現在位置を動かさない。要件 9.8）"
         );
         let after = data(answer_find_violation(
             &sessions,

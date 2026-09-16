@@ -384,7 +384,7 @@
   - _Requirements: 6.1, 6.2, 6.3, 8.6_
   - _Boundary: crates/app-shell/src/ipc/grid.rs, src/ipc/bindings.ts, src-tauri/src/commands/grid.rs, crates/data-grid/src/edit/, crates/data-grid/tests/, src/features/grid/rowOps.ts, .kiro/specs/data-grid/design.md_
 
-- [ ] 10.5 適用と履歴の応答が、影響を受けた行の表示の序数を運ぶ
+- [x] 10.5 適用と履歴の応答が、影響を受けた行の表示の序数を運ぶ
   - `GridEditOutcome` に、**整えたあとの表示の序数**（影響を受けた行の並び）を足す。適応層が `RowOrder` から写す（画面は写像を持たない）
   - 画面はそれを使って現在位置を移す。**`history.ts` の `firstResolvableOrdinal` を消す**（窓が保つかどうかに依存しない）
   - **検査**: 行の追加のやり直しで現在位置が対象の行へ移り、追随が走る（8.9 のレビューが実測した最小の再現）
@@ -420,6 +420,8 @@
   - _Boundary: src-tauri/Cargo.toml, src-tauri/src/, src-tauri/permissions/app.toml, src-tauri/capabilities/, crates/app-shell/src/ipc/, src/ipc/bindings.ts, src/features/grid/, scripts/check-menu-shortcut.sh, .kiro/specs/data-grid/design.md_
 
 ## Implementation Notes
+
+- **検証の集合に `cargo test -p app-shell`（lib の単体テスト）を必ず含めること（10.5 が実測）**: 10.4 は `crates/app-shell/src/ipc/mod.rs` の `edit_command_mirrors_the_domain_commands` を追随させず、**10.4 の時点で `cargo test -p app-shell` がコンパイルできなくなっていた**（`bindings_drift` は統合テストなので緑のまま通る）。10.5 の作業で発見して追随させた。**境界の型やコマンドの形を変えたタスクは、`-p app-shell` の lib の検査まで走らせること。**
 
 - **10.3 が残した限界（親が記録する）**:
   1. **「次の N 行を読む」の押下そのものは検査で覆われていない**（`onMore` を空関数にする変異は生存する。`jsdom` を足さない方針のため、押下の配線は実起動の観測の領分である）。タスク本文が要求した 3 つの検査（一覧になる・識別子が確定する・一度に全部を読まない）は満たしている。**9.2 の筋書きに「参照の面の続きを読む」を含めるかは、レビューの判断として保留した。**

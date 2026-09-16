@@ -2561,20 +2561,36 @@ mod tests {
                 }),
             ),
             (
-                GridEditCommand::InsertRows { at: 3, count: 2 },
-                serde_json::json!({ "command": "InsertRows", "at": 3, "count": 2 }),
+                // **10.4 が足した 2 つの空間**（挿入の位置は文書の位置か可視の序数である）。
+                GridEditCommand::InsertRows {
+                    at: GridRowAnchor::Document { at: 3 },
+                    count: 2,
+                },
+                serde_json::json!({
+                    "command": "InsertRows",
+                    "at": { "anchor": "Document", "at": 3 },
+                    "count": 2,
+                }),
             ),
             (
                 GridEditCommand::RemoveRows {
-                    rows: vec!["01J8Z0".to_owned(), "01J8Z1".to_owned()],
+                    target: GridRowTarget::Ids {
+                        rows: vec!["01J8Z0".to_owned(), "01J8Z1".to_owned()],
+                    },
                 },
-                serde_json::json!({ "command": "RemoveRows", "rows": ["01J8Z0", "01J8Z1"] }),
+                serde_json::json!({
+                    "command": "RemoveRows",
+                    "target": { "target": "Ids", "rows": ["01J8Z0", "01J8Z1"] },
+                }),
             ),
             (
                 GridEditCommand::DuplicateRows {
-                    rows: vec!["01J8Z0".to_owned()],
+                    target: GridRowTarget::Ordinals { from: 0, count: 1 },
                 },
-                serde_json::json!({ "command": "DuplicateRows", "rows": ["01J8Z0"] }),
+                serde_json::json!({
+                    "command": "DuplicateRows",
+                    "target": { "target": "Ordinals", "from": 0, "count": 1 },
+                }),
             ),
             (
                 GridEditCommand::PasteRange {
@@ -2636,6 +2652,9 @@ mod tests {
     fn edit_outcome_summarises_the_verdict() {
         let outcome = GridEditOutcome {
             affected: vec!["01J8Z0".to_owned()],
+            // **写せなかった行は入らない**（`affected` の 1 件に対し、こちらは 1 件である —
+            // 対応は部分列であり、添字が一致することを契約にしない。10.5）。
+            affected_ordinals: vec![7],
             coercions: vec![GridCoercionNotice {
                 cell: GridCellAddress {
                     row: "01J8Z0".to_owned(),
@@ -2660,6 +2679,7 @@ mod tests {
             encoded,
             serde_json::json!({
                 "affected": ["01J8Z0"],
+                "affected_ordinals": [7],
                 "coercions": [{
                     "cell": { "row": "01J8Z0", "column": 1 },
                     "before": "1,5",
@@ -2684,6 +2704,7 @@ mod tests {
         // 空の命令の結果（何も書かず、違反も無い）も表現できる。
         let empty = GridEditOutcome {
             affected: Vec::new(),
+            affected_ordinals: Vec::new(),
             coercions: Vec::new(),
             violation_total: 0,
             violations: Vec::new(),
@@ -2694,6 +2715,7 @@ mod tests {
             serde_json::to_value(&empty).unwrap(),
             serde_json::json!({
                 "affected": [],
+                "affected_ordinals": [],
                 "coercions": [],
                 "violation_total": 0,
                 "violations": [],

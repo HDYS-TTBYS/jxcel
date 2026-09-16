@@ -1008,6 +1008,12 @@ const EDITED_ROW = "01ARZ3NDEKTSV4RRFFQ69G5FB0";
 /** もう 1 つの行（違反の位置が複数になる場合に使う）。 */
 const OTHER_ROW = "01ARZ3NDEKTSV4RRFFQ69G5FB1";
 
+/**
+ * **窓の記憶が 1 つも保っていない行**（行の追加のやり直しで戻ってくる行。10.5 の最小の再現）。
+ * 偽の記憶の対応表に載せないことで、記憶からは序数を引けない状態を作る。
+ */
+const NEW_ROW = "01ARZ3NDEKTSV4RRFFQ69G5FB2";
+
 /** 札を選べる列の記述（既存の `descriptor` は `Text` 固定である）。 */
 function descriptorOfKind(column: number, name: string, kind: TypeKindTag | null): ColumnDescriptor {
   return { column, path: [], name, kind, element_count: null, expandability: "leaf", nullable: true, choices: [], reference_sheet: null, custom_type_id: null, members: [] };
@@ -1017,6 +1023,7 @@ function descriptorOfKind(column: number, name: string, kind: TypeKindTag | null
 function outcomeOf(overrides: Partial<GridEditOutcome>): GridEditOutcome {
   return {
     affected: [],
+    affected_ordinals: [],
     coercions: [],
     violation_total: 0,
     violations: [],
@@ -2437,7 +2444,6 @@ describe("世代は境界が運び、画面は数えない（10.1。要件 1.1�
     const undone = gridScreenHistorySettled(pasted, {
       status: "applied",
       outcome: outcomeOf({ affected: [EDITED_ROW], row_count: SAMPLE_ROWS }),
-      affectedRow: null,
       generation: "12",
     });
     if (edited.state.status !== "ready" || pasted.state.status !== "ready" || undone.state.status !== "ready") {
@@ -2601,6 +2607,36 @@ describe("行の増減の反映（8.6。要件 6.2、6.5）", () => {
     const markup = markOf(after);
     expect(markup).toContain('data-row-count="7"');
     expect(markup).toContain("行数 7");
+  });
+
+  it("行の操作の応答が序数を運ぶとき、現在位置がその行へ移り、選択が 1 セルへ畳まれる（要件 9.8）", () => {
+    // **行の操作は 10.5 より前、現在位置を 1 つも動かさなかった**（移す先は履歴の引数から
+    // 得ており、行の操作の応答は序数を運ばなかった）。いまは行の操作も同じ遷移
+    // （`appliedRowOperation`）を通るので、応答が運ぶ序数へ移る — 足した行がその場で
+    // 現在位置になる。
+    const before = readyModel({
+      current: { row: 0, column: 2 },
+      range: { start: { row: 0, column: 0 }, end: { row: 4, column: 2 } },
+    });
+
+    const after = gridScreenRowOperationSettled(before, {
+      status: "applied",
+      outcome: outcomeOf({
+        affected: [NEW_ROW],
+        affected_ordinals: [7],
+        row_count: 21,
+        violation_total: 0,
+      }),
+      generation: "3",
+    });
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.visibleRows).toBe(21);
+    // 列は現在位置のもの（3 列目）を保ち、**矩形の選択はその 1 セルへ畳まれる**。
+    expect(after.state.selection).toEqual(selectionAt({ row: 7, column: 2 }));
+    expect(countsIn(markOf(after)).currentRow).toBe(7);
   });
 
   it("行数が減ったとき、現在位置と選択が新しい表の範囲へ寄る", () => {
@@ -2786,14 +2822,19 @@ describe("削除の確認（8.6。要件 6.5）", () => {
 });
 
 describe("貼り付けの反映（8.7。要件 7.3、7.4、1.7）", () => {
-  it("行が増えたとき、提示する行数と窓が覆う行数が新しい数になり、選択は動かない", () => {
+  it("行が増えたとき、提示する行数と窓が覆う行数が新しい数になり、現在位置は貼り付けた行へ移る", () => {
     // 要件 7.4 の行の補充である（矩形が表の末尾を越えると行が足される）。**行数が変わりうる
     // 操作は、反映の形が 8.6 と同じ 1 つである**（`clear(row_count)` ＋ 寄せ）。
     const before = readyModel(initialSelection());
 
     const after = gridScreenPasteSettled(before, {
       status: "applied",
-      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 22, violation_total: 1 }),
+      outcome: outcomeOf({
+        affected: [EDITED_ROW],
+        affected_ordinals: [12],
+        row_count: 22,
+        violation_total: 1,
+      }),
       generation: "5",
     });
 
@@ -2805,8 +2846,9 @@ describe("貼り付けの反映（8.7。要件 7.3、7.4、1.7）", () => {
     expect(after.state.violationTotal).toBe(1);
     // **世代は応答が運ぶ値そのものである**（タスク 10.1。画面は数えない）。
     expect(after.state.generation).toBe("5");
-    // 行が増えたので、現在位置（先頭のセル）は寄せられない。
-    expect(after.state.selection).toEqual(before.state.status === "ready" ? before.state.selection : null);
+    // **現在位置は貼り付けた行（応答が運ぶ表示の序数）へ移る**（要件 9.8。10.5 が貼り付けの
+    // 経路も同じ遷移にした）。行が増えても寄せは働かない（序数 12 は新しい 22 行の内側である）。
+    expect(after.state.selection).toEqual(selectionAt({ row: 12, column: 0 }));
     expect(markOf(after)).toContain('data-row-count="22"');
   });
 
@@ -2818,7 +2860,12 @@ describe("貼り付けの反映（8.7。要件 7.3、7.4、1.7）", () => {
 
     const after = gridScreenPasteSettled(editing, {
       status: "applied",
-      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 3 }),
+      outcome: outcomeOf({
+        affected: [EDITED_ROW],
+        // 応答の序数（9）は**新しい表の外**にあるので、寄せが動かした先にも掛かる。
+        affected_ordinals: [9],
+        row_count: 3,
+      }),
       generation: "2",
     });
 
@@ -2826,7 +2873,35 @@ describe("貼り付けの反映（8.7。要件 7.3、7.4、1.7）", () => {
       throw new Error("表を描く状態でなくなった");
     }
     expect(after.state.summary.row_count).toBe(3);
+    // **動かした先が新しい表の範囲へ寄る**（題の「現在位置と選択が寄る」の本体である）。
+    expect(after.state.selection).toEqual(selectionAt({ row: 2, column: 0 }));
     expect(after.state.editing).toBeNull();
+  });
+
+  it("貼り付けの応答が序数を運ぶとき、現在位置がその行へ移り、選択が 1 セルへ畳まれる（要件 9.8）", () => {
+    // 貼り付けも**同じ 1 つの遷移**を通る（`gridScreenPasteSettled` → `appliedRowOperation`）。
+    // 応答が運ぶ序数（貼り付けた行の表示の序数）へ現在位置が移り、選択は 1 セルへ畳まれる。
+    const before = readyModel({
+      current: { row: 0, column: 2 },
+      range: { start: { row: 0, column: 0 }, end: { row: 4, column: 2 } },
+    });
+
+    const after = gridScreenPasteSettled(before, {
+      status: "applied",
+      outcome: outcomeOf({
+        affected: [EDITED_ROW],
+        affected_ordinals: [12],
+        row_count: 20,
+        violation_total: 1,
+      }),
+      generation: "5",
+    });
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.selection).toEqual(selectionAt({ row: 12, column: 2 }));
+    expect(countsIn(markOf(after)).currentRow).toBe(12);
   });
 
   it("適用できなかったときは、内容を消さずに理由を告知へ出す（表も状態も動かない）", () => {
@@ -2855,8 +2930,9 @@ describe("貼り付けの反映（8.7。要件 7.3、7.4、1.7）", () => {
  * 1. **反映の形は 8.6 / 8.7 と同じ 1 つである**（`appliedRowOperation` を通る）。取り消しは
  *    行数を変えうるので、提示する行数・窓が覆う行数・現在位置と選択の寄せ・消えた行の面を
  *    閉じることが要る — 形を 2 つに割れば、片方だけが寄せを持つ日が来る
- * 2. **対象となった範囲へ現在位置が移る**（要件 9.8）。移動先は**表示の序数**であり（行の
- *    識別子ではない）、引けなければ**動かさない**（推測しない）
+ * 2. **対象となった範囲へ現在位置が移る**（要件 9.8）。移動先は**応答が運ぶ表示の序数**の
+ *    先頭である（行の識別子でも、窓の記憶が答える位置でもない。10.5）。序数が空なら
+ *    **動かさない**（推測しない）
  * 3. **3 種の操作が同じ 1 つの履歴に乗っている**（8.9 の受け入れ）。セルの編集・行の操作・
  *    貼り付けはどれも `grid_apply_edit` へ行き、取り消しとやり直しはどれも `grid_history` へ
  *    行く — 画面は**操作の種別を 1 つも持たない**（種別を持つと、5 つ目の操作が来た日に
@@ -2882,7 +2958,6 @@ describe("取り消しとやり直しの反映（8.9。要件 9.2、9.3、9.8）
     const after = gridScreenHistorySettled(before, {
       status: "applied",
       outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 3, violation_total: 4 }),
-      affectedRow: null,
       generation: "5",
     });
 
@@ -2905,8 +2980,7 @@ describe("取り消しとやり直しの反映（8.9。要件 9.2、9.3、9.8）
 
     const after = gridScreenHistorySettled(before, {
       status: "applied",
-      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 20 }),
-      affectedRow: 7,
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 20, affected_ordinals: [7] }),
       generation: "2",
     });
 
@@ -2920,14 +2994,41 @@ describe("取り消しとやり直しの反映（8.9。要件 9.2、9.3、9.8）
     expect(markup).toContain("現在位置 8 行 1 列");
   });
 
+  it("応答の序数が 2 つ以上あるときも、**先頭**へ現在位置を移す（最小でも末尾でもない）", () => {
+    // **移す先は「影響を受けた並びの順で最初のもの」である**（要件 9.8）。序数の並びは
+    // `affected` と同じ順であり、可視の並びの順とは限らない（並べ替えの下では降順にもなる）。
+    // 最小を採る実装も末尾を採る実装も落ちるよう、3 つの数はどれも異ならせる。
+    const before = readyModel({
+      current: { row: 0, column: 1 },
+      range: { start: { row: 0, column: 0 }, end: { row: 4, column: 2 } },
+    });
+
+    const after = gridScreenHistorySettled(before, {
+      status: "applied",
+      outcome: outcomeOf({
+        affected: [EDITED_ROW, OTHER_ROW, NEW_ROW],
+        affected_ordinals: [12, 3, 7],
+        row_count: 20,
+      }),
+      generation: "2",
+    });
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // **先頭の 12 である**（最小の 3 でも、末尾の 7 でもない）。列は現在位置のものが残り、
+    // 選択は**その 1 セルへ畳まれる**（矩形の 4 行 × 3 列は残らない）。
+    expect(after.state.selection).toEqual(selectionAt({ row: 12, column: 1 }));
+    expect(countsIn(markOf(after)).currentRow).toBe(12);
+  });
+
   it("移した先が表示範囲の外なら、追随がスクロールを起こす（変更された箇所が見える）", () => {
     // **可視の区間は先頭 5 行である**（要件 9.8 の「見える状態」は追随が担う。8.4 の巡回と
     // 同じ道であり、`scrollTo` へ何を渡すかは 1 箇所に閉じている）。
     const before = readyModel(initialSelection());
     const after = gridScreenHistorySettled(before, {
       status: "applied",
-      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 20 }),
-      affectedRow: 12,
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 20, affected_ordinals: [12] }),
       generation: "2",
     });
     if (after.state.status !== "ready") {
@@ -2959,14 +3060,14 @@ describe("取り消しとやり直しの反映（8.9。要件 9.2、9.3、9.8）
     expect(calls).toEqual(["set:12", "scroll:12"]);
   });
 
-  it("移動先が引けなければ現在位置を動かさない（推測しない）", () => {
+  it("移す先が無ければ（序数が空）現在位置を動かさない（推測しない）", () => {
     const before = readyModel({ current: { row: 4, column: 2 }, range: { start: { row: 4, column: 2 }, end: { row: 4, column: 2 } } });
 
     const after = gridScreenHistorySettled(before, {
       status: "applied",
-      // 削除の取り消しがこれに当たる（戻ってくる行の識別子は記憶に無い）。
-      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 20 }),
-      affectedRow: null,
+      // **写せない行しか影響を受けていない**（順序に無い行である）。行を消した適用がこれに
+      // 当たり、適応層は序数を 1 つも載せない（写せない行に序数を与えれば、無関係な行を名乗る）。
+      outcome: outcomeOf({ affected: [EDITED_ROW], affected_ordinals: [], row_count: 20 }),
       generation: "2",
     });
 
@@ -3098,12 +3199,13 @@ describe("3 種の操作が同じ 1 つの履歴に乗っている（8.9 の受�
         },
       },
       cache: {
-        // **捨てると行の対応が消える**（本物の記憶と同じ性質である。8.9 の移動先の解決が
-        // 作り直しの前に済んでいることは `history.test.ts` が固定する）。
+        // **捨てると行の対応が消える**（本物の記憶と同じ性質である）。移動先の解決は 10.5 が
+        // **応答の序数**へ移したので、本 module はもう `ordinalOf` を呼ばない — 呼べばここで
+        // 落ちる（窓の記憶から引く経路が戻ってきたことを、この 1 行が捕まえる）。
         clear: () => {
           rows.clear();
         },
-        ordinalOf: (rowId: string) => rows.get(rowId.toUpperCase()) ?? null,
+        ordinalOf: unused("ordinalOf"),
         invalidate: () => undefined,
         rowId: (position) => (position.row === 1 ? EDITED_ROW : null),
         documentColumn: (position) => position.column,
@@ -3114,14 +3216,34 @@ describe("3 種の操作が同じ 1 つの履歴に乗っている（8.9 の受�
   it("編集 → 行の操作 → 貼り付け → 取り消し 3 回 → やり直し 3 回で、同じ履歴を往復する", async () => {
     const tool = instrumented();
     // 3 種の操作が積む結果。① セルの編集（4 行のまま）② 行の追加（4 → 5 行）③ 貼り付け（5 行の
-    // まま、2 行へ書く）。
-    const editOutcome = outcomeOf({ affected: [EDITED_ROW], row_count: 4 });
-    const insertOutcome = outcomeOf({ affected: [OTHER_ROW], row_count: 5 });
-    const pasteOutcome = outcomeOf({ affected: [OTHER_ROW, EDITED_ROW], row_count: 5 });
+    // まま、1 行へ書く）。**序数は本番と同じ組で載せる** — 影響を受けた行が可視であれば、
+    // 適応層はその序数を運ぶ（10.5。`affected` が非空で `affected_ordinals` が空という組は、
+    // 影響を受けた行が 1 つも写せないとき（行を消した適用・絞り込みで隠れた行の編集）にしか
+    // 起こらない）。
+    const editOutcome = outcomeOf({
+      affected: [EDITED_ROW],
+      affected_ordinals: [1],
+      row_count: 4,
+    });
+    const insertOutcome = outcomeOf({
+      affected: [OTHER_ROW],
+      affected_ordinals: [2],
+      row_count: 5,
+    });
+    const pasteOutcome = outcomeOf({
+      affected: [EDITED_ROW],
+      affected_ordinals: [1],
+      row_count: 5,
+    });
     // **取り消しの応答は、逆命令を適用したあとの数である**（行の追加の取り消しは行を取り除くの
     // で、応答の行数は 4 である）。だから取り消しとやり直しで同じ欄が違う値になる。
-    const insertUndone = outcomeOf({ affected: [OTHER_ROW], row_count: 4 });
-    const editUndone = outcomeOf({ affected: [EDITED_ROW], row_count: 4 });
+    // **消えた行は順序に無い**ので、行の追加の取り消しは序数を 1 つも運ばない（写せない）。
+    const insertUndone = outcomeOf({ affected: [OTHER_ROW], affected_ordinals: [], row_count: 4 });
+    const editUndone = outcomeOf({
+      affected: [EDITED_ROW],
+      affected_ordinals: [1],
+      row_count: 4,
+    });
     tool.scriptEdits([editOutcome, insertOutcome, pasteOutcome]);
     // 取り消しは**新しい操作から戻る**（貼り付け → 行の追加 → セルの編集）ので、行数は
     // 5 → 4 → 4 と動く。やり直しは**同じ履歴を前へ戻る**ので 4 → 5 → 5 である。
@@ -3144,6 +3266,13 @@ describe("3 種の操作が同じ 1 つの履歴に乗っている（8.9 の受�
     });
     expect(edit.status).toBe("applied");
     let model = gridScreenEditSettled(readyModel(initialSelection()), edit);
+    // **セルの編集の経路は序数を使わない**（現在位置のセルを編集するのであり、移す先が既に
+    // 現在位置である。10.5 の決定表）。応答は序数を運んでいる（`affected_ordinals: [1]`）ので、
+    // この経路が序数へ移る実装になれば、下の 1 行が落ちる。
+    if (model.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(model.state.selection).toEqual(initialSelection());
 
     // ② 行の操作（`InsertRows`）
     const inserted = await applyRowOperation({
@@ -3157,6 +3286,8 @@ describe("3 種の操作が同じ 1 つの履歴に乗っている（8.9 の受�
       throw new Error("表を描く状態でなくなった");
     }
     expect(model.state.summary.row_count).toBe(5);
+    // **行の操作でも現在位置が移る**（10.5 より前は 1 つも動かなかった。移す先は応答が運ぶ）。
+    expect(model.state.selection).toEqual(selectionAt({ row: 2, column: 0 }));
 
     // ③ 貼り付け（`PasteRange`）
     const pasted = await applyPaste({
@@ -3166,6 +3297,11 @@ describe("3 種の操作が同じ 1 つの履歴に乗っている（8.9 の受�
     });
     expect(pasted.status).toBe("applied");
     model = gridScreenPasteSettled(model, pasted);
+    if (model.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // **貼り付けも同じ遷移を通る**（応答の序数 1 へ移り、選択は 1 セルへ畳まれる）。
+    expect(model.state.selection).toEqual(selectionAt({ row: 1, column: 0 }));
 
     // **3 種とも同じ 1 つの口（`grid_apply_edit`）へ行った**（種別ごとの経路を作っていない）。
     expect(tool.edits.map((command) => command.command)).toEqual([
@@ -3209,6 +3345,58 @@ describe("3 種の操作が同じ 1 つの履歴に乗っている（8.9 の受�
     expect(exhausted).toEqual({ status: "empty" });
     const unchanged = gridScreenHistorySettled(model, exhausted);
     expect(unchanged.state).toEqual(model.state);
+  });
+
+  /**
+   * **8.9 のレビューが実測した最小の再現である**（tasks.md 10.5 の 1 つ目の検査。要件 9.8）。
+   *
+   * 行の**追加のやり直し**で戻ってくる行は、`clear`（行数が変わる編集の後に記憶が全部を捨てる）
+   * の側にあり、**窓の記憶はその行を 1 つも保っていない**。序数を記憶から引く経路
+   * （10.5 が消した `firstResolvableOrdinal`）では答えが `null` になり、現在位置が移らず
+   * 追随も走らなかった。**序数は応答が運ぶ**（境界が `RowOrder` から写す）ので、記憶に依らず
+   * に移せる — ここでは偽の記憶が `NEW_ROW` の対応を持たない状態で、移ることを見る。
+   */
+  it("行の追加のやり直しでも、現在位置が対象の行へ移り、追随が走る（要件 9.8）", async () => {
+    const tool = instrumented();
+    // **戻ってくる行は記憶が保っていない**（`rows` の対応表に無い）が、応答は表示の序数を運ぶ。
+    tool.scriptHistory([
+      outcomeOf({ affected: [NEW_ROW], affected_ordinals: [12], row_count: SAMPLE_ROWS }),
+    ]);
+
+    const settlement = await applyHistory({
+      client: tool.client,
+      cache: tool.cache,
+      direction: "redo",
+    });
+    expect(settlement.status).toBe("applied");
+
+    const after = gridScreenHistorySettled(readyModel(initialSelection()), settlement);
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // **移す先は応答の序数である**（表示の位置。行の識別子でも、記憶が答える位置でもない）。
+    expect(after.state.selection).toEqual(selectionAt({ row: 12, column: 0 }));
+    expect(countsIn(markOf(after)).currentRow).toBe(12);
+
+    // 9.8 の後半（変更された箇所が見える）は**既存の追随**が担う（8.4 の巡回と同じ 1 本である）。
+    const visible: VisibleSpan = {
+      rows: { start: 0, count: 5 },
+      columns: { start: 0, count: SAMPLE_COLUMNS.length },
+    };
+    const calls: string[] = [];
+    followSelection(
+      {
+        setSelection: (selection) => {
+          calls.push(`set:${selection === null ? "none" : String(selection.current.row)}`);
+        },
+        scrollTo: (position) => {
+          calls.push(`scroll:${String(position.row)}`);
+        },
+      },
+      visible,
+      after.state.selection,
+    );
+    expect(calls).toEqual(["set:12", "scroll:12"]);
   });
 });
 

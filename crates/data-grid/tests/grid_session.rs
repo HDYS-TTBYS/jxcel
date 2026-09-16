@@ -63,6 +63,7 @@ mod common;
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use common::sample::{sample, Sample, SampleEditParts, SampleOptions};
 use data_grid::{
@@ -2595,4 +2596,140 @@ fn redoing_a_composite_step_that_names_another_sheet_writes_nothing() {
         "やり直しは台帳の貼り付けを再び適用する"
     );
     assert_eq!(5, step.ledger_row_count(), "補充した行も戻る");
+}
+
+// ---------------------------------------------------------------------------
+// 影響を受けた行の並び → 表示の序数の写像の費用（タスク 10.5。要件 9.8、11.5）
+// ---------------------------------------------------------------------------
+
+/// **影響を受けた行の並びを、1 回の走査で表示の序数へ写す**（タスク 10.5。要件 9.8、11.5）。
+///
+/// 写像は可視の並びを **1 度だけ**走る（対象の識別子の集合を作り、可視行を先頭から 1 回見る）。
+/// 行ごとに引く形（`RowOrder::ordinal_of` を影響行の数だけ呼ぶ形）では費用が
+/// **影響行数 × 可視行数**になり、10 万行の可視の並びの**末尾 1 万行**を写すのに debug ビルドで
+/// **2.8 秒台**（10.5 のレビューが実測した値）— 要件 11.5 が 1 万行の貼り付けへ与えた予算
+/// 3 秒のほぼ全部を、写像だけで使う。ここでは**同じ観測**をやり直し、1 秒に収まることを表明する。
+#[test]
+fn visible_ordinals_of_a_trailing_batch_of_a_hundred_thousand_rows_is_one_scan() {
+    const ROWS: usize = 100_000;
+    const TRAILING: usize = 10_000;
+
+    let artifact = sample(&SampleOptions::new(ROWS, 3));
+    let plan = artifact.compiled();
+    let parts = artifact.into_edit_parts();
+    let mut session = GridSession::with_query(parts.sheet, plan, Arc::new(SchemaEngineQuery))
+        .expect("セッションを開ける");
+    let summary = session
+        .set_view(&parts.document, no_view())
+        .expect("表示を指定できる");
+    assert_eq!(ROWS, summary.visible, "前提: 可視は 10 万行である");
+
+    // 末尾の 1 万行を**可視の順序の側から**取る（写像の答えを突き合わせる相手である）。
+    let mut order = RowOrder::default();
+    order.recompute(&parts.document, parts.sheet, &no_view());
+    let trailing: Vec<RowId> = (ROWS - TRAILING..ROWS)
+        .map(|position| {
+            order
+                .row_at(RowOrdinal::new(position))
+                .expect("可視の序数である")
+        })
+        .collect();
+    let expected: Vec<RowOrdinal> = (ROWS - TRAILING..ROWS).map(RowOrdinal::new).collect();
+
+    let started = Instant::now();
+    let ordinals = session.visible_ordinals_of(&trailing);
+    let elapsed = started.elapsed();
+    println!("10 万行の可視の並びの末尾 1 万行の写像: {elapsed:?}");
+
+    assert_eq!(
+        expected, ordinals,
+        "末尾の 1 万行の表示の序数は 90,000..100,000 である"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "写像は 1 回の走査である（要件 11.5 の 3 秒の内側に十分な余裕を残す）: {elapsed:?}"
+    );
+}
+
+/// **影響を受けた行の並びは、渡された順の表示の序数になる**（タスク 10.5。要件 9.8）。
+///
+/// 固定するのは 4 つである: ① 返るのは**渡した並びの順**（可視の順でも昇順でもない）、
+/// ② 順序に無い行（絞り込みで隠れた行・別のシートの行）は**落ち**、他の行の序数は保たれる、
+/// ③ 同じ行は 1 つへ**畳む**、④ 空の並びには空を返す。突き合わせる相手は `RowOrder::ordinal_of`
+/// である — 写像の源は 1 つであり、本口はそれと食い違ってはならない（要件 8.6）。
+#[test]
+fn visible_ordinals_of_answers_in_the_given_order_and_skips_rows_without_a_position() {
+    let mut fixture = Fixture::new(&SampleOptions::new(40, 3));
+    // 品番（列 0）を絞り、品番の降順に並べる — 可視の序数と文書の位置が食い違い、隠れる行も
+    // できる表示である（可視は行 0〜9 の 10 行であり、可視の序数 0 は文書の位置 9 の行）。
+    let spec = ViewSpec {
+        sort: sorted_descending(0).sort,
+        filters: filtered(0, "000000").filters,
+    };
+    let summary = fixture.set_view(spec.clone());
+    let mut order = RowOrder::default();
+    order.recompute(fixture.document(), fixture.sheet(), &spec);
+    assert!(
+        summary.visible > 1 && summary.hidden > 0,
+        "前提: 可視が 2 行以上あり、隠れた行もある（可視 {} / 隠れ {}）",
+        summary.visible,
+        summary.hidden
+    );
+
+    let visible_first = order.row_at(RowOrdinal::new(0)).expect("可視である");
+    let visible_second = order.row_at(RowOrdinal::new(1)).expect("可視である");
+    let hidden = (0..fixture.rows())
+        .map(|index| fixture.row(index))
+        .find(|row| order.ordinal_of(*row).is_none())
+        .expect("前提: 隠れている行がある");
+    let elsewhere = fixture
+        .document()
+        .sheet_by_id(fixture.parts.reference)
+        .map(|sheet| sheet.rows()[0].id());
+    let elsewhere = elsewhere.expect("前提: 標本は参照先のシートを持ち、行がある");
+    assert!(
+        order.ordinal_of(elsewhere).is_none(),
+        "前提: 別のシートの行はこの表示の順序に無い"
+    );
+    assert_ne!(
+        visible_first,
+        fixture.row(0),
+        "前提: 可視の先頭は文書の先頭ではない（可視の序数と文書の位置が食い違う表示である）"
+    );
+
+    // 渡す並びは**可視の序数 1 → 隠れた行 → 別のシートの行 → 可視の序数 0 → 重複**である。
+    let asked = [
+        visible_second,
+        hidden,
+        elsewhere,
+        visible_first,
+        visible_second,
+    ];
+    let ordinals = fixture.session.visible_ordinals_of(&asked);
+    assert_eq!(
+        vec![RowOrdinal::new(1), RowOrdinal::new(0)],
+        ordinals,
+        "渡した順であり（昇順に並べ直さない）、順序に無い行は落ち、重複は畳まれる"
+    );
+    let expected: Vec<RowOrdinal> = {
+        // 期待も**重複を畳む**（本口の契約。畳まなければ突き合わせが 1 件ずれる）。
+        let mut deduped: Vec<RowId> = Vec::with_capacity(asked.len());
+        for row in asked {
+            if !deduped.contains(&row) {
+                deduped.push(row);
+            }
+        }
+        deduped
+            .iter()
+            .filter_map(|row| order.ordinal_of(*row))
+            .collect()
+    };
+    assert_eq!(
+        expected, ordinals,
+        "写像の源（`RowOrder::ordinal_of`）と一致する"
+    );
+    assert!(
+        fixture.session.visible_ordinals_of(&[]).is_empty(),
+        "空の並びには空を返す"
+    );
 }
