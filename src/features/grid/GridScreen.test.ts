@@ -46,6 +46,7 @@ import type {
   GridEditResponse,
   GridOpenResponse,
   GridSheetSummary,
+  GridViolationResponse,
   GridViewResponse,
   IpcResult,
   TypeKindTag,
@@ -60,7 +61,10 @@ import {
   GridScreen,
   GridScreenView,
   createGridRendererSpec,
+  followSelection,
   gridScreenEditReportDismissed,
+  gridScreenNextViolation,
+  gridScreenViolationReason,
   gridScreenEditSettled,
   gridScreenEditStarted,
   gridScreenFailed,
@@ -73,9 +77,10 @@ import {
   type GridScreenModel,
   type GridScreenState,
 } from "./GridScreen";
-import { initialSelection } from "./selection";
+import { initialSelection, selectionAt } from "./selection";
 import type { GridClient } from "./gridClient";
 import type { CellPosition, RendererSelection, VisibleSpan } from "./renderer/port";
+import { nextViolation, reasonInRow, type ViolationPresentation } from "./violations";
 
 // ===========================================================================
 // 検査の道具（偽の境界と、状態からの描画）
@@ -110,9 +115,17 @@ function openedSheet(summary: GridSheetSummary): GridOpenResponse {
   return { context: CONTEXT, sheet: summary };
 }
 
-/** 表示の指定を適用した応答（可視行数だけが検査に効く）。 */
-function derivedView(visibleRows: number): GridViewResponse {
-  return { context: CONTEXT, visible_rows: visibleRows, hidden_rows: 0, violation_total: 0 };
+/**
+ * 表示の指定を適用した応答。**可視行数と、シート全体の違反の総数**が検査に効く
+ * （総数は要件 4.3 の提示の唯一の源である）。
+ */
+function derivedView(visibleRows: number, violationTotal = 0): GridViewResponse {
+  return {
+    context: CONTEXT,
+    visible_rows: visibleRows,
+    hidden_rows: 0,
+    violation_total: violationTotal,
+  };
 }
 
 /** 成功の封筒。 */
@@ -125,10 +138,16 @@ function err<T>(): IpcResult<T, IpcClientError> {
   return { status: "error", error: FAILURE };
 }
 
-/** 偽の境界。**どの口が呼ばれたかを順に数える**（表を描かないとき開く呼び出しが起きないこと）。 */
+/**
+ * 偽の境界。**どの口が呼ばれたかを順に数える**（表を描かないとき開く呼び出しが起きないこと）。
+ *
+ * 違反の探索（`grid_find_violation`）は**起点の序数を順に記録する** — 4.4 の巡回が
+ * 「いまの行の次」から探し、序数の解決で何度も問い合わせることの観測である。
+ */
 interface FakeClient extends GridClient {
   readonly calls: readonly string[];
   readonly edits: readonly GridEditCommand[];
+  readonly searches: readonly number[];
 }
 
 function fakeClient(answers: {
@@ -136,12 +155,16 @@ function fakeClient(answers: {
   readonly open?: IpcResult<GridOpenResponse, IpcClientError>;
   readonly view?: IpcResult<GridViewResponse, IpcClientError>;
   readonly edit?: IpcResult<GridEditResponse, IpcClientError>;
+  /** 違反の探索の答え（既定は「見つからない」）。 */
+  readonly search?: (from: number) => IpcResult<GridViolationResponse, IpcClientError>;
 }): FakeClient {
   const calls: string[] = [];
   const edits: GridEditCommand[] = [];
+  const searches: number[] = [];
   return {
     calls,
     edits,
+    searches,
     readDocumentState: async () => {
       calls.push("document_state");
       return answers.state;
@@ -165,7 +188,39 @@ function fakeClient(answers: {
       edits.push(command);
       return answers.edit ?? err<GridEditResponse>();
     },
+    findViolation: async (request) => {
+      calls.push(`grid_find_violation:${request.direction}`);
+      searches.push(request.from);
+      return answers.search?.(request.from) ?? ok({ context: CONTEXT, violation: null });
+    },
   };
+}
+
+/**
+ * 偽の索引（**境界の意味を写したもの**。`./violations.test.ts` の `searchOf` と同じ規則である）。
+ * `from` 以降で最初の違反を返す（`from` は含む）。
+ */
+function indexOf(
+  all: readonly { readonly ordinal: number; readonly row: string; readonly column: number; readonly reason: string }[],
+): (from: number) => IpcResult<GridViolationResponse, IpcClientError> {
+  return (from) => {
+    const found = all.find((violation) => violation.ordinal >= from);
+    if (found === undefined) {
+      return ok<GridViolationResponse>({ context: CONTEXT, violation: null });
+    }
+    return ok<GridViolationResponse>({
+      context: CONTEXT,
+      violation: {
+        location: { row: found.row, column: found.column, path: [] },
+        reason: found.reason,
+      },
+    });
+  };
+}
+
+/** 探索そのものが失敗する偽の索引（経路の不達）。 */
+function failingIndex(): (from: number) => IpcResult<GridViolationResponse, IpcClientError> {
+  return () => err<GridViolationResponse>();
 }
 
 /** 状態を描いたマーク付け（画面が実際に DOM へ出すものを読む）。 */
@@ -182,6 +237,8 @@ function markOf(model: GridScreenModel): string {
       onSelectionChange: () => undefined,
       onEditStarted: () => undefined,
       onEditSettled: () => undefined,
+      onNextViolation: () => undefined,
+      onViolationRead: () => undefined,
     }),
   );
 }
@@ -351,6 +408,8 @@ describe("画面内の失敗の経路（器に届かない失敗）", () => {
       visibleRows: 3,
       selection: initialSelection(),
       editing: null,
+      violationTotal: 0,
+      violation: null,
     });
 
     const withNotice = gridScreenFailed(ready, "この操作はまだ結線されていない: 列の幅");
@@ -467,15 +526,28 @@ const SAMPLE_COLUMNS: readonly ColumnDescriptor[] = [
 ];
 const SAMPLE_ROWS = 20;
 
-/** 表を描いている状態（選択を指定して組む）。 */
-function readyModel(selection: RendererSelection): GridScreenModel {
+/**
+ * 表を描いている状態（選択を指定して組む）。違反の総数と、いま出している違反の提示も指定できる
+ * （既定はどちらも「無い」）。
+ */
+function readyModel(
+  selection: RendererSelection,
+  options: {
+    readonly visibleRows?: number;
+    readonly violationTotal?: number;
+    readonly violation?: ViolationPresentation | null;
+  } = {},
+): GridScreenModel {
+  const visibleRows = options.visibleRows ?? SAMPLE_ROWS;
   return gridScreenLoaded(initialGridScreenModel(), {
     status: "ready",
     sheet: "s1",
-    summary: { columns: [...SAMPLE_COLUMNS], row_count: SAMPLE_ROWS },
-    visibleRows: SAMPLE_ROWS,
+    summary: { columns: [...SAMPLE_COLUMNS], row_count: visibleRows },
+    visibleRows,
     selection,
     editing: null,
+    violationTotal: options.violationTotal ?? 0,
+    violation: options.violation ?? null,
   });
 }
 
@@ -730,6 +802,8 @@ function editingModel(
       visibleRows: SAMPLE_ROWS,
       selection: initialSelection(),
       editing: null,
+      violationTotal: 0,
+      violation: null,
     }),
     position,
     initialText,
@@ -1057,6 +1131,354 @@ describe("違反の提示（8.3。要件 3.5。**提示の本体は 8.4**）", (
 // ===========================================================================
 // 3. 画面の契約と登録簿（tasks.md 8.1 の受け入れ）
 // ===========================================================================
+// ===========================================================================
+// 2.7 違反のバーと巡回（tasks.md 8.4。要件 4.1、4.2、4.3、4.4、4.6）
+// ===========================================================================
+
+/**
+ * 違反の表示のうち、**画面が担う部分**を固定する。
+ *
+ *   - **4.1（区別できる形で示す）**は窓の印（`RenderCell.violated`）と移植口の実装の色であり、
+ *     本 file は窓の印を移植口へ渡す仕様（`createGridRendererSpec`）までを見る。**色そのものは
+ *     実物の起動で観測する**（下の「単体テストが観測しないもの」）
+ *   - **4.2（理由）**、**4.4（次の違反への移動）**は境界への問い合わせの結果を
+ *     [`gridScreenViolationReason`] / [`gridScreenNextViolation`] へ通して読む（画面が行う合成
+ *     そのものである。8.3 の `settled` と同じ規律）
+ *   - **4.3（総数）**は `grid_set_view` の応答が運ぶ**シート全体**の数を、表を描く状態が持ち、
+ *     バーが常に出す
+ *   - **4.6（解消の反映）**は、適用の結果が運ぶ新しい総数と、提示の取り下げである。**窓の印
+ *     そのものの取り直しは 7.3 の記憶の検査が担う**（下の「単体テストが観測しないもの」）
+ */
+describe("違反のバーと巡回（8.4。要件 4.1〜4.4、4.6）", () => {
+  it("開いたとき、シート全体の違反の総数がバーに出る（要件 4.3）", async () => {
+    const client = fakeClient({
+      state: ok(openDocument([sheetOf("s1", "標本シート", 3, SAMPLE_ROWS)])),
+      open: ok(openedSheet({ columns: [...SAMPLE_COLUMNS], row_count: SAMPLE_ROWS })),
+      view: ok(derivedView(SAMPLE_ROWS, 5)),
+    });
+
+    const state = await loadGridScreenState(client);
+
+    if (state.status !== "ready") {
+      throw new Error("表を描く状態にならなかった");
+    }
+    // 総数は `grid_set_view` の応答が運ぶ（**それ以外にシート全体の数の源は無い**）。
+    expect(state.violationTotal).toBe(5);
+    // 開いた直後は出すべき理由が 1 つも無い。
+    expect(state.violation).toBeNull();
+    // **総数を読むために探索を 1 度も呼ばない**（総数は検証の結果が既に持っている）。
+    expect(client.searches).toEqual([]);
+
+    const markup = markOfState(state);
+    expect(markup).toContain("jxcel-grid-violation-bar");
+    expect(markup).toContain('data-violation-total="5"');
+    expect(markup).toContain("違反 5 件");
+    // 表はそのまま描かれている。
+    expect(markup).toContain("jxcel-grid-table");
+  });
+
+  it("表を描いていないときは、バーも出ない（総数の源が無い）", () => {
+    const markup = markOfState({
+      status: "no-rows",
+      sheetName: "空のシート",
+      columns: [descriptor(0, "名前")],
+    });
+
+    expect(markup).not.toContain("jxcel-grid-violation-bar");
+    expect(markup).not.toContain("jxcel-grid-next-violation");
+  });
+
+  it("いまの行の違反の理由を、位置とともに出す（要件 4.2）", async () => {
+    const model = readyModel(selectionAt({ row: 5, column: 1 }), { violationTotal: 3 });
+    const client = fakeClient({
+      state: err<DocumentStateResponse>(),
+      search: indexOf([
+        {
+          ordinal: 5,
+          row: OTHER_ROW,
+          column: 1,
+          reason: "値が 0 以上 100 以下の外の値である",
+        },
+      ]),
+    });
+
+    // 画面が行う合成そのものである（現在位置の行を起点に、いまの行の識別子で確かめる）。
+    const reading = await reasonInRow({
+      client,
+      current: { row: 5, column: 1 },
+      rowId: OTHER_ROW,
+    });
+    const after = gridScreenViolationReason(model, reading);
+
+    if (after.state.status !== "ready" || model.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.violation).toEqual({
+      kind: "reason",
+      position: { row: 5, column: 1 },
+      reason: "値が 0 以上 100 以下の外の値である",
+    });
+    // 起点は現在の行である。
+    expect(client.searches).toEqual([5]);
+    // **現在位置は動かない**（理由を読むことは移動ではない）。
+    expect(after.state.selection).toEqual(model.state.selection);
+
+    const markup = markOf(after);
+    expect(markup).toContain("jxcel-grid-violation-reason");
+    // 文言は境界が組み立てたものをそのまま出す（画面は 2 つ目の文言を作らない）。
+    expect(markup).toContain("値が 0 以上 100 以下の外の値である");
+    expect(markup).toContain("6 行 2 列目");
+  });
+
+  it("答えが後ろの行の違反なら、理由を出さない（いまの行の違反として貼らない）", async () => {
+    const model = readyModel(selectionAt({ row: 2, column: 0 }), { violationTotal: 3 });
+    const client = fakeClient({
+      state: err<DocumentStateResponse>(),
+      search: indexOf([
+        { ordinal: 5, row: OTHER_ROW, column: 1, reason: "値が範囲の外である" },
+      ]),
+    });
+
+    // 起点 2 の答えは序数 5 の違反であり、いまの行（`EDITED_ROW`）のものではない。
+    const reading = await reasonInRow({
+      client,
+      current: { row: 2, column: 0 },
+      rowId: EDITED_ROW,
+    });
+    const after = gridScreenViolationReason(model, reading);
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.violation).toBeNull();
+    expect(markOf(after)).not.toContain("jxcel-grid-violation-reason");
+  });
+
+  it("理由の問い合わせが失敗したら、告知として出す（理由は出さない）", async () => {
+    const model = readyModel(selectionAt({ row: 5, column: 1 }));
+    const client = fakeClient({ state: err<DocumentStateResponse>(), search: failingIndex() });
+
+    const reading = await reasonInRow({
+      client,
+      current: { row: 5, column: 1 },
+      rowId: OTHER_ROW,
+    });
+    const after = gridScreenViolationReason(model, reading);
+
+    expect(after.notice).toBe(
+      "違反の理由を取得できませんでした: ドキュメントの失敗: 経路が不達である",
+    );
+    const markup = markOf(after);
+    expect(markup).toContain("jxcel-grid-notice");
+    expect(markup).not.toContain("jxcel-grid-violation-reason");
+    // **表は失わない**（選ばれた 1 つの操作の失敗で内容を消さない。8.1 の表のまま）。
+    expect(markup).toContain("jxcel-grid-table");
+  });
+
+  it("次の違反への移動は、表示範囲の外の違反へ現在位置を移す（要件 4.4）", async () => {
+    // 10 万行のシートで、違反は 4 万行目に 1 件だけある。表示範囲は先頭の数十行である。
+    const model = readyModel(selectionAt({ row: 0, column: 0 }), { visibleRows: 100_000 });
+    const client = fakeClient({
+      state: err<DocumentStateResponse>(),
+      search: indexOf([
+        { ordinal: 40_000, row: OTHER_ROW, column: 2, reason: "参照先の行が無い" },
+      ]),
+    });
+
+    // いまの行は 0 である（起点は `./violations` がいまの行の次として決める）。
+    const reading = await nextViolation({
+      client,
+      current: { row: 0, column: 0 },
+      rowCount: 100_000,
+    });
+    const after = gridScreenNextViolation(model, reading);
+
+    if (after.state.status !== "ready" || model.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(client.searches[0]).toBe(1);
+    // **現在位置は違反の位置へ移る**（行の識別子ではなく、可視行の序数である）。
+    expect(after.state.selection.current).toEqual({ row: 40_000, column: 2 });
+    // 範囲は畳まれる（利用者が指していた範囲を持ち越さない）。
+    expect(after.state.selection.range).toEqual({
+      start: { row: 40_000, column: 2 },
+      end: { row: 40_000, column: 2 },
+    });
+    // 移った先の違反の理由をそのまま出す。
+    expect(after.state.violation).toEqual({
+      kind: "reason",
+      position: { row: 40_000, column: 2 },
+      reason: "参照先の行が無い",
+    });
+    expect(after.notice).toBeNull();
+
+    // **追随が `scrollTo` へ渡す位置は、移った現在位置そのものである。**表示範囲（先頭 40 行）
+    // の外なので、追随は「動かす」と決める（要件 2.4 の判断は 8.2 の `followTarget` である）。
+    const scrolled: CellPosition[] = [];
+    const lowered: (RendererSelection | null)[] = [];
+    followSelection(
+      {
+        setSelection: (selection) => {
+          lowered.push(selection);
+        },
+        scrollTo: (position) => {
+          scrolled.push(position);
+        },
+      },
+      { rows: { start: 0, count: 40 }, columns: { start: 0, count: 3 } },
+      after.state.selection,
+    );
+    expect(lowered).toEqual([after.state.selection]);
+    expect(scrolled).toEqual([{ row: 40_000, column: 2 }]);
+  });
+
+  it("これ以上違反が無ければ、現在位置は動かず、その旨を出す（要件 4.4 の正常な結果）", async () => {
+    const model = readyModel(selectionAt({ row: 3, column: 1 }), { violationTotal: 2 });
+    const client = fakeClient({ state: err<DocumentStateResponse>() });
+
+    const reading = await nextViolation({
+      client,
+      current: { row: 3, column: 1 },
+      rowCount: SAMPLE_ROWS,
+    });
+    const after = gridScreenNextViolation(model, reading);
+
+    if (after.state.status !== "ready" || model.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // **失敗ではない**（告知を出さない。内容も選択も動かさない）。
+    expect(after.notice).toBeNull();
+    expect(after.state.selection).toEqual(model.state.selection);
+    expect(after.state.violationTotal).toBe(2);
+    expect(after.state.violation).toEqual({ kind: "exhausted" });
+
+    const markup = markOf(after);
+    expect(markup).toContain("jxcel-grid-violation-exhausted");
+    expect(markup).toContain("これ以上違反はありません");
+    // **総数が 2 のままでも「尽きた」と言える**（総数は行を持たない違反も数えるが、探索は
+    // それを移動先にしない。`violationBar.tsx` の module doc）。
+    expect(markup).toContain('data-violation-total="2"');
+  });
+
+  it("巡回の問い合わせが失敗したら、現在位置を動かさず、理由を告知へ出す", async () => {
+    const model = readyModel(selectionAt({ row: 3, column: 1 }));
+    const client = fakeClient({ state: err<DocumentStateResponse>(), search: failingIndex() });
+
+    const reading = await nextViolation({
+      client,
+      current: { row: 3, column: 1 },
+      rowCount: SAMPLE_ROWS,
+    });
+    const after = gridScreenNextViolation(model, reading);
+
+    expect(after.notice).toBe("次の違反を取得できませんでした: ドキュメントの失敗: 経路が不達である");
+    if (after.state.status !== "ready" || model.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.selection).toEqual(model.state.selection);
+    expect(markOf(after)).toContain("jxcel-grid-notice");
+  });
+
+  it("選択が動けば、その理由は取り下げられる（古い理由を新しい位置へ貼らない）", () => {
+    const before = readyModel(selectionAt({ row: 4, column: 1 }), {
+      violation: { kind: "reason", position: { row: 4, column: 1 }, reason: "値が範囲の外である" },
+    });
+
+    const moved = gridScreenSelectionChanged(before, selectionAt({ row: 5, column: 1 }));
+
+    if (moved.state.status !== "ready" || before.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(moved.state.violation).toBeNull();
+    expect(markOf(moved)).not.toContain("jxcel-grid-violation-reason");
+
+    // 同じ位置を置き直すだけなら、理由は残る（動いていないので取り下げる理由が無い）。
+    const same = gridScreenSelectionChanged(before, selectionAt({ row: 4, column: 1 }));
+    if (same.state.status !== "ready" || before.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(same.state.violation).toEqual(before.state.violation);
+  });
+
+  it("総数は差し引きの推測ではなく、適用の結果が運ぶ数である（4.6）", () => {
+    // 4.6 の「総数が減る」を**画面が 1 引く**実装でも満たせてしまうため、**減り方が -1 でない**
+    // 適用で固定する（8.4 のレビューが実測: `violationTotal - 1` の変異が 302 件すべてを緑の
+    // まま通った）。1 セルの編集で複数の違反が解消することはありうる（一意性の違反が 1 行で
+    // 3 件あった場合など）ので、画面は**境界が運んだ数をそのまま**置かなければならない。
+    const before = readyModel(selectionAt({ row: 4, column: 0 }), { violationTotal: 7 });
+    const after = settled(
+      before,
+      outcomeOf({ affected: [EDITED_ROW], violation_total: 4, revalidated_columns: [0] }),
+    );
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // 7 - 1 = 6 でも、据え置きの 7 でもない。
+    expect(after.state.violationTotal).toBe(4);
+  });
+
+  it("編集で違反が解消されたとき、総数が減り、そのセルの提示が取り下げられる（要件 4.6）", () => {
+    const before = readyModel(selectionAt({ row: 4, column: 0 }), {
+      violationTotal: 3,
+      violation: { kind: "reason", position: { row: 4, column: 0 }, reason: "値が範囲の外である" },
+    });
+    expect(markOf(before)).toContain("jxcel-grid-violation-reason");
+
+    // 解消した適用（再検証した列に違反が残っていない）である。総数は 3 → 2 へ減る。
+    const after = settled(
+      before,
+      outcomeOf({ affected: [EDITED_ROW], violation_total: 2, revalidated_columns: [0] }),
+    );
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // **総数は適用の結果が運ぶシート全体の数である**（索引が差分で最新に保っている）。
+    expect(after.state.violationTotal).toBe(2);
+    // **そのセルの提示は取り下げられる。**
+    expect(after.state.violation).toBeNull();
+
+    const markup = markOf(after);
+    expect(markup).toContain("jxcel-grid-violation-bar");
+    expect(markup).toContain('data-violation-total="2"');
+    expect(markup).not.toContain("jxcel-grid-violation-reason");
+    // 表はそのまま描かれている。
+    expect(markup).toContain("jxcel-grid-table");
+  });
+
+  it("適用の結果が無い（`None`）ときは、総数を動かさない（動かす根拠が無い）", () => {
+    const before = readyModel(initialSelection(), { violationTotal: 1 });
+
+    const after = settled(before, null);
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.violationTotal).toBe(1);
+  });
+
+  it("窓の印は移植口へそのまま渡る（要件 4.1 の結線）", () => {
+    // 印を描くのは移植口の実装であり、画面がするのは**窓の印を渡すこと**である
+    // （色そのものは実物の起動で観測する）。
+    const spec = createGridRendererSpec({
+      columns: [{ title: "名前", width: 120 }],
+      rowCount: 1,
+      selection: initialSelection(),
+      rowMarkers: "clickable-number",
+      getCell: () => ({ text: "標本", variant: "Text", violated: true, loading: false }),
+      onSelectionChange: () => undefined,
+      onVisibleSpanChange: () => undefined,
+      onActivateEditor: () => undefined,
+      onUnavailable: () => undefined,
+    });
+
+    expect(spec.getCell({ row: 0, column: 0 }).violated).toBe(true);
+    // **移植口に色を運ぶ欄は無い**（8.4 の決定。`design.md`「8.4 が確定させたもの」）。
+    expect(Object.keys(spec)).not.toContain("violationTheme");
+  });
+});
+
 describe("画面の契約（受け取るのは器が渡す引数だけ）", () => {
   it("`ScreenProps` だけで描ける（それ以外の props を要求しない）", () => {
     // 型の水準の証明: 登録簿が要求する形（`ComponentType<ScreenProps>`）へそのまま代入できる。
@@ -1173,12 +1595,21 @@ describe("自前の配色を持たない（器が与える変数のみを参照�
  * 画面の源の生のテキスト。`import.meta.glob` は Vite が変換時に解決するので、検査の環境を
  * node の API（`node:fs`）へ結び付けない（`displayState.test.ts` / `windowCache.test.ts` と
  * 同じ方針）。
+ *
+ * **画面が持つ源は 1 つではない**（8.4 がバーを `violationBar.tsx` へ分けた）。走査を画面本体
+ * だけに当てると、**分けた側へ色の値を書いても緑のまま**になる — 実際に 8.4 のレビューが
+ * 確かめられるよう、源の一覧をここに並べる。
  */
-const SOURCES = import.meta.glob("/src/features/grid/GridScreen.tsx", {
+const SOURCE_PATHS = [
+  "/src/features/grid/GridScreen.tsx",
+  "/src/features/grid/violationBar.tsx",
+] as const;
+
+const SOURCES = import.meta.glob("/src/features/grid/{GridScreen,violationBar}.tsx", {
   query: "?raw",
   import: "default",
   eager: true,
 }) as Record<string, string>;
 
-/** グリッド画面の源（本 file の主役）。 */
-const SCREEN_SOURCE = SOURCES["/src/features/grid/GridScreen.tsx"] ?? "";
+/** グリッド画面の源（本 file の主役と、その表示の一部）。 */
+const SCREEN_SOURCE = SOURCE_PATHS.map((path) => SOURCES[path] ?? "").join("\n");

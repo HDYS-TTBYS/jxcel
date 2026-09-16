@@ -41,6 +41,8 @@ import type {
   GridOpenResponse,
   GridViewResponse,
   GridViewSpec,
+  GridViolationRequest,
+  GridViolationResponse,
 } from "../../ipc/bindings";
 
 /**
@@ -69,6 +71,12 @@ const GRID_SET_VIEW_COMMAND: CommandName = "grid_set_view";
 const GRID_ROWS_WINDOW_COMMAND: RawCommandName = "grid_rows_window";
 
 /**
+ * 次の違反を探すコマンド（6.2。要件 4.2、4.4）。**起点は可視行の序数であり、向きは前向きだけを
+ * 本機能が使う**（要件 4.4 は「次の違反への移動」である。8.4）。
+ */
+const GRID_FIND_VIOLATION_COMMAND: CommandName = "grid_find_violation";
+
+/**
  * 編集命令を 1 つ適用するコマンド（6.2。要件 3.3、3.4、3.5、1.7）。
  *
  * 応答が運ぶのは**判定の結果**である（影響範囲・型強制・違反・行数）— 画面はそれで窓を捨て、
@@ -85,7 +93,7 @@ const GRID_APPLY_EDIT_COMMAND: CommandName = "grid_apply_edit";
  */
 export const EMPTY_GRID_VIEW: GridViewSpec = { sort: [], filters: [], expansion: [] };
 
-/** 画面が境界へ出す口。**この 5 つだけである。** */
+/** 画面が境界へ出す口。**この 6 つだけである。** */
 export interface GridClient {
   /** 呼び出し元ウィンドウのセッションの状態（シートの一覧を含む）。 */
   readonly readDocumentState: () => Promise<IpcClientResult<DocumentStateResponse>>;
@@ -122,6 +130,20 @@ export interface GridClient {
   readonly applyEdit: (
     command: GridEditCommand,
   ) => Promise<IpcClientResult<GridEditResponse>>;
+  /**
+   * 指定した起点から、その向きで最も近い違反を探す（要件 4.2、4.4）。
+   *
+   * **起点は可視行の 0 起点の序数**であり、ウィンドウの行ではない（生成物の
+   * `GridViolationRequest` の doc）。応答が運ぶのは**行の識別子**（26 文字）と列の添字と理由で
+   * あり、**可視行の序数は運ばない** — 序数へ写すのは `./violations` の仕事である
+   * （同 module の「序数の失われた欄」の節）。
+   *
+   * `direction` は生成物の綴り（`"forward"` / `"backward"`）をそのまま渡す。本機能が使うのは
+   * 前向きだけである（8.4）が、**本口は境界の薄い写しであり、方針を持たない**。
+   */
+  readonly findViolation: (
+    request: GridViolationRequest,
+  ) => Promise<IpcClientResult<GridViolationResponse>>;
 }
 
 /**
@@ -146,5 +168,9 @@ export function createGridClient(): GridClient {
     // あり、包まないと復号の失敗が `invoke` の拒否として現れる。この file の module doc）。
     applyEdit: (command) =>
       invokeCommand<GridEditResponse>(GRID_APPLY_EDIT_COMMAND, { request: { command } }),
+    // 違反の探索も**`request` という名前の引数で包む**（実体は
+    // `fn grid_find_violation(app, window, request: GridViolationRequest)`）。
+    findViolation: (request) =>
+      invokeCommand<GridViolationResponse>(GRID_FIND_VIOLATION_COMMAND, { request }),
   };
 }

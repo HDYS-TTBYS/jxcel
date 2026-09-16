@@ -26,6 +26,10 @@
  * 11. **行数が変わる編集のあとは、画面が新しい行数を `clear` へ渡す**（渡さなければ、元の
  *    行数より先は**永久に読み込み中**のままである。減った先は範囲の外として扱い、要求も
  *    配りもしない）。
+ * 12. **編集のあとに取り直した窓の内容が使われる**（古い内容を記憶に残さない）。編集で
+ *    違反が解消されたとき、セルの提示が取り下げられる（要件 4.6）のは、この性質と、窓が
+ *    運ぶ違反の印（5.1）が組み合わさって成立する — **印そのものは窓が運ぶのであり、
+ *    記憶が作るものではない**（`transport` の module docs）
  *
  * # 検査の側の偽のサーバについて
  *
@@ -796,6 +800,38 @@ describe("影響を受けた行の窓の破棄", () => {
     cache.invalidate([FIXTURE_ROW_IDS[0]]);
     expect(harness.calls.length).toBe(before + 1);
     expect(harness.calls.at(-1)?.start).toBe(0);
+  });
+
+  it("捨てて取り直した窓は、新しい内容になる（古い印を記憶に残さない。要件 4.6）", async () => {
+    // **編集で違反が解消された状況**を作る: 2 度目の移送は印の無いセルを返す。記憶が古い窓を
+    // 残していれば、画面は解消されたセルを違反として描き続ける（要件 4.6 の取り下げが起きない）。
+    let asked = 0;
+    const harness = harnessOf((request) => {
+      asked += 1;
+      return windowBytes({
+        generation: request.generation,
+        start: request.start,
+        columns: 1,
+        rows: [{ key: keyFor(0), cells: [{ tag: 5, text: "0:0", violated: asked === 1 }] }],
+      });
+    });
+    const cache = cacheWith({ transport: harness.transport, rowCount: 12 });
+    cache.setVisibleSpan({ start: 0, count: 2 });
+    await settle();
+
+    // 前提: 取り直す前のセルは違反している（窓の印が真である）。
+    expect(cache.getCell({ row: 0, column: 0 })).toMatchObject({ violated: true, loading: false });
+
+    // 適用の結果の通知（`EditOutcome.affected`。8.3 の `cellEdit.ts` がそのまま渡す）。
+    cache.invalidate([FIXTURE_ROW_IDS[0]]);
+    await settle();
+
+    // **新しい内容が使われる**（同じ序数のセルが、印の無い内容になる）。落ちた窓が捨てられて
+    // いなければ**古い印（真）が返る**し、取り直しが起きなければ**読み込み中のまま**になる
+    // （どちらの誤りもこの 1 つの表明で落ちる）。
+    expect(cache.getCell({ row: 0, column: 0 })).toMatchObject({ violated: false, loading: false });
+    // 落ちた窓は取り直されている（先読みの本数は周りの事情で決まるので数えない）。
+    expect(harness.calls.filter((call) => call.start === 0)).toHaveLength(2);
   });
 
   it("知らない行の通知では何も捨てない", async () => {

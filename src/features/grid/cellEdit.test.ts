@@ -93,6 +93,7 @@ function fakeClient(answer: IpcResult<GridEditResponse, IpcClientError>): FakeCl
       edits.push(command);
       return answer;
     },
+    findViolation: async () => unused("grid_find_violation")(),
   };
 }
 

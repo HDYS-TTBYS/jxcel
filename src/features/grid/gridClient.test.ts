@@ -123,6 +123,25 @@ describe("境界の口の引数の形", () => {
     });
   });
 
+  it("違反の探索も `request` という名前の引数で包む（起点と向き）", async () => {
+    invoke.mockResolvedValue({
+      status: "ok",
+      data: { context: { window: "main" }, violation: null },
+    });
+    const client = createGridClient();
+
+    const result = await client.findViolation({ from: 3, direction: "forward" });
+
+    // 起点は**可視行の序数**であり、向きは生成物の綴り（`"forward"` / `"backward"`）である。
+    expect(invoke).toHaveBeenCalledWith("grid_find_violation", {
+      request: { from: 3, direction: "forward" },
+    });
+    expect(result).toEqual({
+      status: "ok",
+      data: { context: { window: "main" }, violation: null },
+    });
+  });
+
   it("`invoke` の拒否は封筒の失敗として返る（画面はそれを失敗として扱える）", async () => {
     invoke.mockRejectedValue(new Error("コマンドが許可されていない"));
     const client = createGridClient();

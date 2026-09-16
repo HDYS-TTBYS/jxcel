@@ -158,12 +158,23 @@ function anchorOf(selection: RendererSelection): CellPosition {
 }
 
 /**
+ * その位置へ現在位置を移す（**範囲は 1 セルへ畳む**）。要件 4.4 の「違反の位置へ現在位置を
+ * 移動する」と、表を描き始めるときの初期値（[`initialSelection`]）がこれを使う。
+ *
+ * 畳むのは、**位置を指定する指示に範囲が無い**ためである。直前の範囲を持ち越すと、画面に
+ * 出ている数え上げ（要件 2.5）と、確定した選択を対象にする操作（要件 2.6）が「利用者が
+ * 指したつもりのない範囲」を指すことになる。
+ */
+export function selectionAt(position: CellPosition): RendererSelection {
+  return { current: position, range: { start: position, end: position } };
+}
+
+/**
  * 表を描き始めるときの選択: 先頭のセル 1 つ。**要件 2.1 の「現在位置となるセルを 1 つ持つ」の
  * 初期値である**（表を描く間、現在位置が 1 つも無い瞬間を作らない）。
  */
 export function initialSelection(): RendererSelection {
-  const origin: CellPosition = { row: 0, column: 0 };
-  return { current: origin, range: { start: origin, end: origin } };
+  return selectionAt({ row: 0, column: 0 });
 }
 
 /**

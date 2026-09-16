@@ -132,20 +132,87 @@
  *     拒否せず、`grid_apply_edit` は適合しない値も破棄せずに返す（`src-tauri/src/commands/grid.rs`
  *     の同コマンドの docs）。したがって 3.5 の「保持」は**画面が値を捨てないこと**で満たす
  *
- * **8.4 が引き取るもの**: 違反の印の色（移植口が既定を 1 つ持つ）、違反のバーと巡回
- * （`grid_find_violation` と、違反の位置への現在位置の移動）。**本 module が持つのは、直近の
+ * **8.4 が引き取ったもの**（下の「8.4 が確定させたもの」）: 違反の印の色、違反のバーと巡回
+ * （`grid_find_violation` と、違反の位置への現在位置の移動）。**本 module が持つのも、直近の
  * 確定で生じた違反を 1 行使に出して閉じられるようにするところまで**である（位置の一覧は
  * `GridEditOutcome.violations` が運ぶが、**理由の文言はこの経路に無い** — `GridViolation` の
  * `reason` は `grid_find_violation` が組み立てる）。
  *
+ * # 8.4 が確定させたもの（違反の提示と巡回。`./violations` / `./violationBar`）
+ *
+ * 違反の提示は 4 つに割れる。**それぞれ源が別**であり、1 つの経路へ畳まない。
+ *
+ * | 要件 | 何を出すか | 源 | どこが担うか |
+ * |---|---|---|---|
+ * | 4.1 違反しているセル | 印（地色の上書き） | 窓が運ぶセルごとの違反の札（5.1） | 移植口の実装（本 module は `RenderCell.violated` を渡すだけである） |
+ * | 4.2 指定したセルの理由 | 理由の文言 | `grid_find_violation` の `reason`（組み立てるのは適応層） | `./violations` の `reasonInRow` と、表（窓の印と行の識別子を読む） |
+ * | 4.3 シート全体の総数 | 数 | `grid_set_view` / `grid_apply_edit` の応答 | `ready.violationTotal` と `./violationBar` |
+ * | 4.4 次の違反への移動 | 現在位置の移動と、その違反の理由 | `grid_find_violation`（前向き） | `./violations` の `nextViolation` と `gridScreenNextViolation` |
+ *
+ * **文言は 1 つしか無い。**理由の文は適応層が `ViolationReason` / `Expected` から組み立てた
+ * ものであり（生成物の `GridViolation` の doc）、本 module も `./violations` も**写すだけ**で
+ * ある。したがって同じ違反が経路によって別の言い方になることはない。
+ *
+ * ## 決定（**7.1 / 8.1 が開いたままにした点をどう閉じたか**）
+ *
+ * | 論点 | 決定 | 理由 |
+ * |---|---|---|
+ * | **違反の印の色**（8.1 の開いた点 1） | **移植口を広げない。**色は実装（`glideAdapter.tsx` の `VIOLATION_THEME`）の既定のままにする | ① 移植口が保証するのは**印を落とさないこと**であり（4.1 が求めるのは「区別できる形で示す」である）、色そのものは Glide の `Theme` という**ライブラリ固有の型**に属する — `RendererSpec` へ載せると、移植口を差し替えるたびにその写しを書き直すことになる。② 画面は**自前の配色を持たない**（本 module の契約 3）ので、色を渡す口を作っても渡せる色が無い — `APPEARANCE_VARS` の 10 本は器のクロームの色であり、違反の色は無い（足すのは器の設計の変更である）。③ 実装を差し替えても「違反が区別できること」は要件として残るが、その**色の値**は要件ではない |
+ * | 巡回の向き | **前向きだけである。**起点は現在の行の次（`+1`） | 要件 4.4 は「次の違反への移動」である。逆向きは要件に無く、序数の解決の単調性も成り立たない（`./violations` の module doc） |
+ * | いまの行の違反を起点にしない | `from` は `現在の行 + 1` である | いまの行の違反を返すと、違反の上で押しても動かない（「次の違反へ」が壊れて見える） |
+ * | **違反の位置（可視行の序数）の求め方** | 行の識別子から**二分探索で解く**（`./violations` の「序数の解決」） | **境界が序数を運ばない**（応答は行の識別子と列だけである）。序数を持つのは Rust 側の索引であり、落ちているのは応答の欄だけである — 境界が運べば 1 回の問い合わせで済む（`design.md`「8.4 が確定させたもの」の申し送り） |
+ * | 巡回の費用 | 可視行数の対数（10 万行で 17 回）。**検査が問い合わせの回数（20 回以内）を固定する** | 索引は可視行の序数を鍵に持つので、問い合わせは「起点以降で最初の違反」を返す。序数はその単調な述語の二分探索で確定する。**行数を走査する経路を作らない**（要件 11 の目的はどの操作でも待たされないことである） |
+ * | これ以上違反が無いとき | **正常な結果**（`exhausted`）としてバーに出す。告知（`notice`）には載せない | 生成物の `GridViolationResponse` が「`violation: None` はその向きに違反が無い場合であり**正常な結果である**」と定めている。失敗の告知に載せると、利用者の操作が失敗したように読める |
+ * | 総数が 0 でも巡回の操作を残す | 残す（無効にしない） | 総数は**行を持たない違反**（列そのものの問題）も数えるが、探索はそれを移動先にしない — 総数と探索の対象は同じ集合ではない（`./violationBar` の module doc） |
+ * | 確定の報告（8.3）とバーの関係 | **別のものである**（報告は確定のたびに出て閉じられる記録、バーは表を描いている間つねに出る提示）。数を出すのはどちらも同じ源（シート全体の総数）をそのまま置くので、食い違いようがない | `./violationBar` の module doc の表 |
+ * | 適用のあとの違反（4.6） | 総数は `GridEditOutcome.violation_total` で置き換え、**いまの提示は取り下げる。**そのあと表が理由を引き直す | 解消されたかどうかはこの遷移では分からない（分かるのは窓の印の取り直しと、境界への問い合わせである）。取り下げておけば、**解消された違反の提示が残らない** |
+ * | 印そのものの更新（4.6） | **7.3 の窓の記憶の経路である**（`EditOutcome.affected` → `invalidate` → 取り直し → `onArrival` → `Handle.invalidate` → 描き直し） | 8.3 が組んだ経路をそのまま使う。窓の違反の札は索引から作られる（`crates/data-grid/src/transport/mod.rs`）ので、適用が索引を差分更新すれば、取り直した窓の印は新しい |
+ *
+ * ## 表が担うこと（**窓の印と行の識別子を読める唯一の場所である**）
+ *
+ * 理由（4.2）と、適用のあとの引き直し（4.6）は**本 module の `GridSurface`** が行う。窓の印
+ * （`RenderCell.violated`）と行の識別子（`WindowCache.rowId`）を読むには窓の記憶が要り、
+ * 記憶を持つのは表だからである。表は**読み取りだけ**を行い、状態へ入れるのは遷移
+ * （`gridScreenViolationReason`）である。
+ *
+ * 引き直しの契機は 3 つある: ① **現在位置が変わった**（移動のたび。**印の無いセルでは境界へ
+ * 問い合わせない** — 門番は窓の印である）、② **窓が届いた**（未取得だったセルと、適用のあとの
+ * 取り直し）、③ **適用が成功した**（その場で 1 度引く — 索引は既に新しいので、古い印に
+ * 引きずられない）。
+ *
+ * 遅れて届いた答えは捨てる（世代の印）。現在位置がもう違うのに、前の位置の理由を出す経路を
+ * 作らない。
+ *
+ * ## 4.5（入れ子の内側の位置）は 8.5 である
+ *
+ * 窓はセルごとに**内側の位置の札**を運ぶ（`transport` の `marks`）が、移植口の `RenderCell` は
+ * それを運ばない（`violated` の 1 ビットだけである）。本 module が扱う
+ * `GridViolationLocation.path` も、**理由の文言の中にしか現れない**（適応層が内側の位置を
+ * 含めて組み立てる）。内側の位置そのものの提示（要件 4.5 の「どの位置が違反しているか」）は
+ * `NestedInspector`（8.5）の担当であり、**本タスクは移植口を広げていない**（広げると、8.5 が
+ * 入れ子の詳細表示を設計するときに 2 つの案がぶつかる）。
+ *
+ * ## 単体テストが観測しないもの（実物の起動で観測する）
+ *
+ * ① **印の色**（`VIOLATION_THEME` の地色が実際に塗られること。単体テストは「印を落とさない」
+ * ことまでであり、`glideAdapter.test.ts` が `themeOverride` を載せることを見ている）、
+ * ② **追随が実際にスクロールを起こすこと**（`followSelection` は「`scrollTo` へ何を渡すか」まで
+ * を固定する）、③ **`grid_find_violation` が表示範囲の外の違反へ実際に到達すること**（Rust 側の
+ * 索引の性質であり、`crates/data-grid/src/view/violations.rs` の `find` とその検査が担う）。
+ * 観測の場所は 8.1 / 8.2 と同じ段（`smoke-port-probe` と
+ * `scripts/check-port-interaction.sh`。**標本の面は既に違反の帯を描いている** — `probeCell` が
+ * `row % 7 === 3` を違反として返す。帯の中の画素を 1 つ読めば色の主張を足せる）と、9.2 の
+ * 台本である。
+ *
  * # 8.3〜8.9 への申し送り（本 module が足す予定の場所）
  *
- * - **8.4〜8.9**: 移植口の 4 つの**操作**（`onColumnResize` / `onColumnMove` / `onCopy` /
- *   `onPaste`）を実装で置き換える。8.1 はそれらを `onUnavailable` へ流すだけである
+ * - **8.5〜8.9**: 移植口の 4 つの**操作**（`onColumnResize` / `onColumnMove` / `onCopy` /
+ *   `onPaste`）を実装で置き換える（8.4 はこの 4 つに触っていない）。8.1 はそれらを
+ *   `onUnavailable` へ流すだけである
  *   （**黙って何もしない実装にしない** — `onCopy` が空文字を返せばクリップボード
  *   が空になり、`onPaste` が黙って捨てれば貼り付けが消える。無反応より悪い）
- * - **8.4（違反の提示）**: 上の「8.4 が引き取るもの」（本 module が受け取る `violation_total` は
- *   6.2 の時点で既に**シート全体**の数である。広げる作業は残っていない）
+ * - **8.4（違反の提示）**: 実装済みである（上の「8.4 が確定させたもの」）。本 module が受け取る
+ *   `violation_total` は 6.2 の時点で既に**シート全体**の数であり、広げる作業は無かった
  * - **8.6（行の増減）**: 行数が変わったら `WindowCache.clear(rowCount)`（7.3 の申し送り）。
  *   `SetCells` は行数を変えないので、本 module の経路では要らない
  * - **8.8（列幅・列順）**: 列幅と表示上の列順は `createDisplayState`（7.5）が持つ。変化は
@@ -176,6 +243,14 @@ import type {
   GridViolationLocation,
 } from "../../ipc/bindings";
 import { settleCellEdit, type CellEditIntent, type CellEditSettlement } from "./cellEdit";
+import { ViolationBar } from "./violationBar";
+import {
+  nextViolation,
+  reasonInRow,
+  violationMark,
+  type ViolationPresentation,
+  type ViolationReading,
+} from "./violations";
 import { createDisplayState } from "./displayState";
 import { editorRegistry } from "./editors";
 import type { ColumnConstraints } from "./editorRegistry";
@@ -184,6 +259,7 @@ import { createGlideAdapter } from "./renderer/glideAdapter";
 import {
   followTarget,
   initialSelection,
+  selectionAt,
   selectionCounts,
   selectionForKey,
 } from "./selection";
@@ -268,6 +344,29 @@ export type GridScreenState =
        * 理由は、窓の到着で表が描き直されても**入力中の値が足元で変わらない**ためである。
        */
       readonly editing: CellEdit | null;
+      /**
+       * 表示中のシートに存在する違反の総数（要件 4.3）。**シート全体**の数である。
+       *
+       * 源は**開いたときの `grid_set_view` の応答**（`GridViewResponse.violation_total`）と、
+       * そのあとの適用の応答（`GridEditOutcome.violation_total`。要件 4.6）だけである。
+       * **画面は数え直さない** — 数を保つのは索引（`ViolationIndex`）であり、差分で最新に
+       * 保たれる（`crates/data-grid` の module docs「違反の総数をどう閉じるか」）。
+       *
+       * この腕が持つことが「表を描いているときは総数が分かっている」を型で表している
+       * （他の腕は `grid_set_view` を呼んでいないので、総数の源が無い）。
+       */
+      readonly violationTotal: number;
+      /**
+       * いま出している違反の提示（要件 4.2、4.4）。`null` なら出すものが無い。
+       *
+       * [`ViolationPresentation`] の 2 つの腕は**別の出来事**である — `reason` はいまの位置の
+       * 違反の理由（要件 4.2。表が窓の印を見て引く）、`exhausted` は巡回が尽きたこと
+       * （要件 4.4 の正常な結果）である。**後者を告知（`notice`）に載せない**のは、利用者の
+       * 操作が失敗したわけではないためである。
+       *
+       * **現在位置が動けば取り下げる**（提示は「いまの位置についてのもの」だからである）。
+       */
+      readonly violation: ViolationPresentation | null;
     };
 
 /**
@@ -370,12 +469,23 @@ export function gridScreenSelectionChanged(
     return model;
   }
   const next = selection ?? { ...model.state.selection };
+  const moved = currentPositionMoved(model.state.selection, next);
   return {
     attempt: model.attempt,
-    state: { ...model.state, selection: next },
+    // **動いたら違反の提示を取り下げる**（要件 4.2 の理由は「いまの位置のもの」である。
+    // 取り下げないと、動く前に見ていたセルの理由が新しいセルへ貼られたままになる。引き直しは
+    // 表が行う — 窓の印を読むには記憶（`./windowCache`）が要るためである）。
+    state: { ...model.state, selection: next, violation: moved ? null : model.state.violation },
     notice: model.notice,
     editReport: model.editReport,
   };
+}
+
+/** 現在位置（現在のセル）が動いたか。**列だけの移動も動いたうちである。** */
+function currentPositionMoved(before: RendererSelection, after: RendererSelection): boolean {
+  return (
+    before.current.row !== after.current.row || before.current.column !== after.current.column
+  );
 }
 
 /** 告知を閉じる。 */
@@ -440,7 +550,11 @@ export function gridScreenEditSettled(
       return gridScreenFailed(model, `編集を適用できませんでした: ${settlement.message}`);
     case "applied": {
       const closed = gridScreenEditClosed(model);
-      return { ...closed, editReport: reportOf(settlement.outcome) };
+      return {
+        ...closed,
+        editReport: reportOf(settlement.outcome),
+        state: stateAfterEdit(closed.state, settlement.outcome),
+      };
     }
     default:
       return assertNever(settlement, "確定の結果の分岐が網羅されていない");
@@ -455,6 +569,112 @@ export function gridScreenEditReportDismissed(model: GridScreenModel): GridScree
     notice: model.notice,
     editReport: null,
   };
+}
+
+/**
+ * 適用の結果を、表を描く状態へ反映する（要件 4.6）。
+ *
+ * 総数を `GridEditOutcome.violation_total`（**シート全体**の数）で置き換え、**いま出している
+ * 違反の提示を取り下げる**。取り下げるのは、そのセルの違反が解消されたかどうかがこの時点では
+ * 分からないためである — 分かるのは窓の印の取り直し（7.3 の `invalidate` の経路）と、
+ * 境界への問い合わせ（`./violations` の `reasonInRow`）であり、どちらもこの遷移の外で起きる。
+ * **取り下げておけば、解消された違反の提示が残ることはない**（残ると要件 4.6 が満たされない）。
+ *
+ * 結果が無い（`None`。`grid_history` の腕）ときは**何も動かさない** — 適用していないので、
+ * 総数を変える根拠が無い（生成物の doc が「適用では `None` を取り得ない」と定めている）。
+ */
+function stateAfterEdit(state: GridScreenState, outcome: GridEditOutcome | null): GridScreenState {
+  if (state.status !== "ready" || outcome === null) {
+    return state;
+  }
+  return { ...state, violationTotal: outcome.violation_total, violation: null };
+}
+
+/**
+ * 現在位置の違反の理由の読み取りを画面へ反映する（要件 4.2、4.6）。**表が窓の印を見て引いた
+ * 結果**がここへ来る（現在位置を動かすのは巡回であり、こちらではない）。
+ *
+ * 「尽きた」（`exhausted`）はこの経路では起きない（型は巡回と共有している）。起きたときに
+ * 何もしないのは、**理由の経路の答えとして「違反がもう無い」と言う根拠が無い**ためである
+ * （探索は行の単位で尽きるが、いまの位置についての言明ではない）。
+ */
+export function gridScreenViolationReason(
+  model: GridScreenModel,
+  reading: ViolationReading,
+): GridScreenModel {
+  if (model.state.status !== "ready") {
+    return model;
+  }
+  switch (reading.kind) {
+    case "reason":
+      return withViolation(model, {
+        kind: "reason",
+        position: reading.position,
+        reason: reading.reason,
+      });
+    case "cleared":
+      return withViolation(model, null);
+    case "exhausted":
+      return model;
+    case "failed":
+      return gridScreenFailed(model, `違反の理由を取得できませんでした: ${reading.message}`);
+    default:
+      return assertNever(reading, "違反の読み取りの分岐が網羅されていない");
+  }
+}
+
+/**
+ * 巡回（「次の違反へ」）の読み取りを画面へ反映する（要件 4.4）。
+ *
+ * | 読み取り | 何が起きるか |
+ * |---|---|
+ * | 違反が見つかった | **現在位置をその位置へ移す**（範囲は 1 セルへ畳む。[`selectionAt`]）— 表示範囲の外にあっても、追随（要件 2.4）が `scrollTo` を呼ぶ。移った先の理由をその場で出す |
+ * | 尽きた | **現在位置を動かさない。**「これ以上違反はありません」を出す（**失敗ではない**） |
+ * | 取り下げ | 提示を消す（この経路では起きない） |
+ * | 失敗した | 現在位置を動かさず、理由を**告知**へ出す（経路の失敗である） |
+ */
+export function gridScreenNextViolation(
+  model: GridScreenModel,
+  reading: ViolationReading,
+): GridScreenModel {
+  if (model.state.status !== "ready") {
+    return model;
+  }
+  switch (reading.kind) {
+    case "reason": {
+      // **移ってから提示を置く**（移ると選択の遷移が提示を取り下げるためである）。
+      const moved = gridScreenSelectionChanged(model, selectionAt(reading.position));
+      return withViolation(moved, {
+        kind: "reason",
+        position: reading.position,
+        reason: reading.reason,
+      });
+    }
+    case "exhausted":
+      return withViolation(model, { kind: "exhausted" });
+    case "cleared":
+      return withViolation(model, null);
+    case "failed":
+      return gridScreenFailed(model, `次の違反を取得できませんでした: ${reading.message}`);
+    default:
+      return assertNever(reading, "違反の読み取りの分岐が網羅されていない");
+  }
+}
+
+/**
+ * 違反の提示を入れ替える（**表を描いていないときは何もしない**）。
+ *
+ * 同じ値を置き直すときは**同じ model を返す**（状態を替えない遷移は React に再描画を
+ * 起こさせない — 窓の到着のたびに引き直す経路があるので、無駄な再描画を作らない）。
+ */
+function withViolation(
+  model: GridScreenModel,
+  violation: ViolationPresentation | null,
+): GridScreenModel {
+  if (model.state.status !== "ready" || model.state.violation === violation) {
+    return model;
+  }
+  return { ...model, state: { ...model.state, violation } };
 }
 
 /** 入力手段を閉じる（**表を描いていないときは何もしない**）。 */
@@ -572,6 +792,11 @@ export async function loadGridScreenState(client: GridClient): Promise<GridScree
     selection: initialSelection(),
     // 開いた直後は編集していない（要件 3.1。編集は利用者の起動で始まる）。
     editing: null,
+    // **シート全体の違反の総数**（要件 4.3）。順序を導出させた呼び出しがその数を運ぶ
+    // （`GridSession` はこの呼び出しで索引を組み立てる — `gridClient.ts` の `setView` の doc）。
+    violationTotal: derived.data.violation_total,
+    // 開いた直後は出すべき違反の理由が 1 つも無い（表が現在位置を読んでから引く）。
+    violation: null,
   };
 }
 
@@ -651,6 +876,29 @@ export function createGridRendererSpec(options: {
   };
 }
 
+/**
+ * 選択を移植口へ下ろし、必要なら表示範囲を追随させる（要件 2.4）。
+ *
+ * **`GridSurface` の効果の本体である。**効果は走らせないと観測できない（`node` の環境には
+ * DOM が無く、`renderToStaticMarkup` は効果を実行しない）ので、検査できる形に切り出してある
+ * — 要件 4.4 の「違反の位置へ現在位置を移す」が `scrollTo` へ**何を渡すか**は、この関数を
+ * 偽の取っ手で呼べば読める（`GridScreen.test.ts`「次の違反への移動は、表示範囲の外の違反へ
+ * 現在位置を移す」）。
+ *
+ * 下ろす値と追随の判断は**同じ 1 つの選択**を見る（写しを作らない）。
+ */
+export function followSelection(
+  handle: Pick<RendererHandle, "setSelection" | "scrollTo">,
+  visible: VisibleSpan | null,
+  selection: RendererSelection,
+): void {
+  handle.setSelection(selection);
+  const target = followTarget(visible, selection);
+  if (target !== null) {
+    handle.scrollTo(target);
+  }
+}
+
 // ===========================================================================
 // 4. 表（窓の記憶と移植口を組み立てる場所）
 // ===========================================================================
@@ -714,6 +962,13 @@ interface GridSurfaceProps {
   readonly onEditStarted: (position: CellPosition, initialText: string) => void;
   /** 確定の 1 往復の結果を画面へ上げる口（要件 3.3、3.4、3.5、3.6）。 */
   readonly onEditSettled: (settlement: CellEditSettlement) => void;
+  /**
+   * いまの位置の違反の読み取りを画面へ上げる口（要件 4.2、4.6）。
+   *
+   * 窓の印と行の識別子を読むには記憶が要る（[`WindowCache`]）ので、**引くのはここ**であり、
+   * 画面の状態へ入れるのは遷移（[`gridScreenViolationReason`]）である。
+   */
+  readonly onViolationRead: (reading: ViolationReading) => void;
   /** 器が捕まえない失敗を画面内へ流す口。 */
   readonly onUnavailable: (operation: string) => void;
 }
@@ -751,6 +1006,7 @@ function GridSurface({
   onSelectionChange,
   onEditStarted,
   onEditSettled,
+  onViolationRead,
   onUnavailable,
 }: GridSurfaceProps): ReactElement {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -768,6 +1024,60 @@ function GridSurface({
    * 組み直すことになる。値は移植口の知らせ（`onVisibleSpanChange`）が書き換える。
    */
   const visibleRef = useRef<VisibleSpan | null>(null);
+  /**
+   * いまの選択（**移植口の知らせの中から最新の値を読むため**の写し）。
+   *
+   * 窓の到着と、確定のあとの引き直しは効果の外（移植口の callback と、非同期の続き）から
+   * 起こるので、その時点の選択を知る必要がある。効果（選択が変わったときに走るもの）が
+   * 書き換える。
+   */
+  const selectionRef = useRef<RendererSelection>(selection);
+  /**
+   * 違反の読み取りの世代。**遅れて届いた答えを捨てる**ために使う（現在位置がもう違うのに、
+   * 前の位置の理由を出す経路を閉じる）。
+   */
+  const violationTokenRef = useRef(0);
+  /**
+   * 窓が届いたら**もう一度**違反を引き直すか。
+   *
+   * 未取得のセルは印が読めない（`violationMark` が `unknown` を返す）ので、そのときは
+   * 引き直しを予約する。適用のあとも予約する — 窓の印は取り直しの途中であり、**編集で
+   * 新しく生じた違反**（印がまだ無い）を取りこぼさないためである（要件 4.6）。
+   */
+  const violationWaitingRef = useRef(false);
+
+  /**
+   * いまの位置の違反の理由を引き直す（要件 4.2）。
+   *
+   * **窓の印を門番にする**（理由を引くのは印のあるセルに限る — 矢印で動くたびに境界へ
+   * 問い合わせる経路を作らない）。印が読めない（未取得）ときは予約だけして引き直し、窓の
+   * 到着（`onArrival`）でもう一度試す。
+   */
+  const refreshViolation = (position: CellPosition, awaitingRefetch = false): void => {
+    const cache = cacheRef.current;
+    if (cache === null) {
+      return;
+    }
+    const token = (violationTokenRef.current += 1);
+    const mark = violationMark(cache.getCell(position));
+    violationWaitingRef.current = mark === "unknown" || awaitingRefetch;
+    if (mark === "unknown") {
+      // 印が読めない。**推測しない**（窓が届いたら読み直す）。
+      return;
+    }
+    if (mark === "clear") {
+      // 印が無い。引くものが無い（取り下げる）。ここは同期的に答える — 動いた直後に古い理由が
+      // 残る瞬間を作らない。
+      onViolationRead({ kind: "cleared" });
+      return;
+    }
+    void reasonInRow({ client, current: position, rowId: cache.rowId(position) }).then((reading) => {
+      if (token !== violationTokenRef.current) {
+        return;
+      }
+      onViolationRead(reading);
+    });
+  };
 
   // 表の大きさ（現在位置を寄せる先。要件 2.2 の端の扱いと、行・列の全体の選択に要る）。
   const bounds = { rowCount: visibleRows, columnCount: summary.columns.length };
@@ -821,6 +1131,10 @@ function GridSurface({
       // 窓が届いたら、その区間を描き直させる（移植口は知らせが無ければ描き直さない）。
       onArrival: (span) => {
         handleRef.current?.invalidate(span);
+        // 印を読み直す約束をしていたなら、いまの位置についてもう一度引く（要件 4.2、4.6）。
+        if (violationWaitingRef.current) {
+          refreshViolation(selectionRef.current.current);
+        }
       },
     });
 
@@ -862,19 +1176,29 @@ function GridSurface({
    * 選択を移植口へ下ろし、必要なら表示範囲を追随させる（要件 2.2、2.4）。
    *
    * **下ろす値と数え上げの値は同じ 1 つである**（`selection`）— 画面に出ている数と、描かれて
-   * いる選択がずれる余地を作らない（design.md「8.2 が広げた面」の判断）。
+   * いる選択がずれる余地を作らない（design.md「8.2 が広げた面」の判断）。本体は
+   * [`followSelection`] に切り出してある（効果を走らせずに検査できるようにするためである）。
    */
   useEffect(() => {
+    // 移植口の知らせと確定の続きが最新の値を読めるようにする（この効果は選択が変わるたびに
+    // 走るので、つねに最新である）。
+    selectionRef.current = selection;
     const handle = handleRef.current;
     if (handle === null) {
       return;
     }
-    handle.setSelection(selection);
-    const target = followTarget(visibleRef.current, selection);
-    if (target !== null) {
-      handle.scrollTo(target);
-    }
+    followSelection(handle, visibleRef.current, selection);
   }, [selection]);
+
+  /**
+   * 現在位置の違反の理由を引く（要件 4.2）。**現在位置が変わるたびに走る。**
+   *
+   * 窓の印を門番にするので、印の無いセルでは境界へ問い合わせない（移動のたびに往復する経路を
+   * 作らない）。未取得のセルでは窓の到着で引き直す（`refreshViolation` の doc）。
+   */
+  useEffect(() => {
+    refreshViolation(selection.current);
+  }, [selection.current.row, selection.current.column]);
 
   const counts = selectionCounts(selection);
 
@@ -891,7 +1215,16 @@ function GridSurface({
       // 器がまだ無い（描かれていない）。編集も開いていないので、ここへは来ない。
       return;
     }
-    void settleCellEdit({ client, cache, position, intent }).then(onEditSettled);
+    void settleCellEdit({ client, cache, position, intent }).then((settlement) => {
+      onEditSettled(settlement);
+      if (settlement.status !== "applied") {
+        return;
+      }
+      // **適用のあとは違反を引き直す**（要件 4.6）。解消されたなら理由は出ず（境界の索引は
+      // 既に新しい）、残っているなら新しい理由が出る。窓の印は取り直しの途中で古いので、
+      // **到着でもう一度**引く（新しく生じた違反を取りこぼさない）。
+      refreshViolation(selectionRef.current.current, true);
+    });
   };
 
   return (
@@ -1114,6 +1447,8 @@ function GridScreenBody({
   onSelectionChange,
   onEditStarted,
   onEditSettled,
+  onNextViolation,
+  onViolationRead,
 }: {
   readonly model: GridScreenModel;
   /** 境界の口（表を描く腕が、編集の 1 往復に使う）。 */
@@ -1123,6 +1458,10 @@ function GridScreenBody({
   readonly onSelectionChange: (selection: RendererSelection | null) => void;
   readonly onEditStarted: (position: CellPosition, initialText: string) => void;
   readonly onEditSettled: (settlement: CellEditSettlement) => void;
+  /** バーの「次の違反へ」（要件 4.4）。 */
+  readonly onNextViolation: () => void;
+  /** 表が読んだ違反の提示（要件 4.2、4.6）。 */
+  readonly onViolationRead: (reading: ViolationReading) => void;
 }): ReactElement {
   const state = model.state;
   switch (state.status) {
@@ -1174,18 +1513,31 @@ function GridScreenBody({
       );
     case "ready":
       return (
-        <GridSurface
-          sheet={state.sheet}
-          summary={state.summary}
-          visibleRows={state.visibleRows}
-          selection={state.selection}
-          editing={state.editing}
-          client={client}
-          onSelectionChange={onSelectionChange}
-          onEditStarted={onEditStarted}
-          onEditSettled={onEditSettled}
-          onUnavailable={onUnavailable}
-        />
+        <>
+          {/*
+            違反のバー（要件 4.3、4.4）。**表を描く状態にだけ出す** — 総数の源は
+            `grid_set_view` の応答であり、他の腕はその呼び出しをしていない（`GridScreenState`
+            の「この腕が持つことが総数の源を持つことを表す」）。
+          */}
+          <ViolationBar
+            total={state.violationTotal}
+            presentation={state.violation}
+            onNext={onNextViolation}
+          />
+          <GridSurface
+            sheet={state.sheet}
+            summary={state.summary}
+            visibleRows={state.visibleRows}
+            selection={state.selection}
+            editing={state.editing}
+            client={client}
+            onSelectionChange={onSelectionChange}
+            onEditStarted={onEditStarted}
+            onEditSettled={onEditSettled}
+            onViolationRead={onViolationRead}
+            onUnavailable={onUnavailable}
+          />
+        </>
       );
     default:
       return assertNever(state);
@@ -1219,6 +1571,16 @@ export interface GridScreenViewProps {
   readonly onEditSettled: (settlement: CellEditSettlement) => void;
   /** 直近の確定の報告を閉じる（**文書も値も動かない**）。 */
   readonly onDismissEditReport: () => void;
+  /**
+   * バーが指示する「次の違反へ」（要件 4.4）。
+   *
+   * **表の外の出来事である**（境界への問い合わせと、現在位置の移動）。表を描く腕の外に
+   * 置いてあるのは、巡回が要するものが**境界の口と可視行数だけ**であり、窓の記憶も移植口の
+   * 取っ手も要さないためである（追随は現在位置の移動から自動的に起きる — 要件 2.4）。
+   */
+  readonly onNextViolation: () => void;
+  /** 表が読んだ違反の提示（要件 4.2、4.6）。 */
+  readonly onViolationRead: (reading: ViolationReading) => void;
 }
 
 /**
@@ -1235,6 +1597,8 @@ export function GridScreenView({
   onSelectionChange,
   onEditStarted,
   onEditSettled,
+  onNextViolation,
+  onViolationRead,
 }: GridScreenViewProps): ReactElement {
   return (
     <section data-testid="jxcel-grid-screen" aria-label="グリッド" style={ROOT_STYLE}>
@@ -1316,6 +1680,8 @@ export function GridScreenView({
         onSelectionChange={onSelectionChange}
         onEditStarted={onEditStarted}
         onEditSettled={onEditSettled}
+        onNextViolation={onNextViolation}
+        onViolationRead={onViolationRead}
       />
     </section>
   );
@@ -1336,6 +1702,11 @@ export function GridScreenView({
  */
 export function GridScreen(): ReactElement {
   const [model, setModel] = useState<GridScreenModel>(initialGridScreenModel);
+  /**
+   * 巡回の世代。**遅れて届いた答えを捨てる**（二度押しの 1 つ目が後から届いても、その間に
+   * 動いた現在位置を巻き戻さない）。
+   */
+  const traversalRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -1377,6 +1748,29 @@ export function GridScreen(): ReactElement {
   const dismissEditReport = useCallback(() => {
     setModel(gridScreenEditReportDismissed);
   }, []);
+  const readViolation = useCallback((reading: ViolationReading) => {
+    // **表から上がってくる読み取りである**（窓の印と行の識別子を読んだ結果）。遷移は全域で
+    // あり、投げない（`gridScreenViolationReason`）。
+    setModel((current) => gridScreenViolationReason(current, reading));
+  }, []);
+  const goToNextViolation = useCallback(() => {
+    const state = model.state;
+    if (state.status !== "ready") {
+      return;
+    }
+    const token = (traversalRef.current += 1);
+    // 起点（いまの行の次）を決めるのは `./violations` である（そこに規則があり、検査もある）。
+    void nextViolation({
+      client: DEFAULT_CLIENT,
+      current: state.selection.current,
+      rowCount: state.visibleRows,
+    }).then((reading) => {
+      if (token !== traversalRef.current) {
+        return;
+      }
+      setModel((current) => gridScreenNextViolation(current, reading));
+    });
+  }, [model]);
 
   return (
     <GridScreenView
@@ -1389,6 +1783,8 @@ export function GridScreen(): ReactElement {
       onSelectionChange={select}
       onEditStarted={startEdit}
       onEditSettled={settleEdit}
+      onNextViolation={goToNextViolation}
+      onViolationRead={readViolation}
     />
   );
 }
