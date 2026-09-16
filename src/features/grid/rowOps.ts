@@ -341,7 +341,12 @@ export function runRowOperationPlan(plan: RowOperationPlan, sinks: RowOperationS
 
 /** 往復の結果（**画面が状態を決めるのに要るものだけ**）。 */
 export type RowOperationSettlement =
-  | { readonly status: "applied"; readonly outcome: GridEditOutcome | null }
+  | {
+      readonly status: "applied";
+      readonly outcome: GridEditOutcome | null;
+      /** **応答を組み立てた時点の世代**（10 進の文字列。`GridEditResponse.generation` そのもの）。 */
+      readonly generation: string;
+    }
   | { readonly status: "failed"; readonly message: string };
 
 /**
@@ -355,9 +360,9 @@ export type RowOperationSettlement =
  * 判断の側であり、判断は記憶を持たない）。
  *
  * `clear` を呼ぶのは**適用が影響を受けた行を持ったとき**だけである（`affected` が空であるのは
- * 「何も書かなかった」であり、行数の対応は正しいままである）。この条件は世代の進み方と同じ
- * 規則である（`./cellEdit` の [`generationAfterEdit`]）— 片方だけを進めると、窓の要求が
- * 古い世代を名乗るか、捨てなくてよい窓を捨てることになる。
+ * 「何も書かなかった」であり、行数の対応は正しいままである）。**世代の進み方は本 module が
+ * 決めない** — 応答が運ぶ値をそのまま返し、画面が採用する（タスク 10.1。規則を 2 つに割ると、
+ * 片方だけが古い記憶を残す日が来る）。
  */
 export async function applyRowOperation(options: {
   readonly client: GridClient;
@@ -375,7 +380,7 @@ export async function applyRowOperation(options: {
     // 組み立て時にしか決まらない）、減った先は古い窓のまま配られる。
     options.cache.clear(outcome.row_count);
   }
-  return { status: "applied", outcome };
+  return { status: "applied", outcome, generation: answer.data.generation };
 }
 
 /** 対象を、生成物の編集命令へ写す（**値を運ばない 3 つの命令だけである**）。 */

@@ -108,6 +108,8 @@ export type HistorySettlement =
       readonly outcome: GridEditOutcome;
       /** 現在位置を移す先（**表示の序数**。引けなければ `null` ＝ 動かさない）。 */
       readonly affectedRow: number | null;
+      /** **応答を組み立てた時点の世代**（10 進の文字列。`GridEditResponse.generation` そのもの）。 */
+      readonly generation: string;
     }
   | { readonly status: "failed"; readonly message: string };
 
@@ -148,7 +150,7 @@ export async function applyHistory(options: {
     // まま配られる。`WindowCache.clear` の doc）。
     options.cache.clear(outcome.row_count);
   }
-  return { status: "applied", outcome, affectedRow };
+  return { status: "applied", outcome, affectedRow, generation: answer.data.generation };
 }
 
 /**

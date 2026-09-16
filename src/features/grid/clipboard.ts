@@ -426,7 +426,12 @@ export function planPaste(
 
 /** 往復の結果（**画面が状態を決めるのに要るものだけ**）。 */
 export type PasteSettlement =
-  | { readonly status: "applied"; readonly outcome: GridEditOutcome | null }
+  | {
+      readonly status: "applied";
+      readonly outcome: GridEditOutcome | null;
+      /** **応答を組み立てた時点の世代**（10 進の文字列。`GridEditResponse.generation` そのもの）。 */
+      readonly generation: string;
+    }
   | { readonly status: "failed"; readonly message: string };
 
 /**
@@ -462,7 +467,7 @@ export async function applyPaste(options: {
     // **行数を渡す**（`GridEditResponse.row_count` をそのまま。画面は数え直さない）。
     options.cache.clear(outcome.row_count);
   }
-  return { status: "applied", outcome };
+  return { status: "applied", outcome, generation: answer.data.generation };
 }
 
 /**

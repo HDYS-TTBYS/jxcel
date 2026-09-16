@@ -136,9 +136,14 @@ function outcomeOf(overrides: Partial<GridEditOutcome>): GridEditOutcome {
   };
 }
 
-/** 成功の封筒。 */
-function applied(outcome: GridEditOutcome): IpcResult<GridEditResponse, IpcClientError> {
-  return { status: "ok", data: { context: CONTEXT, outcome } };
+/**
+ * 成功の封筒。**世代も応答が運ぶ**（タスク 10.1。既定は「1 つ進んだ後」に当たる値である）。
+ */
+function applied(
+  outcome: GridEditOutcome,
+  generation = "2",
+): IpcResult<GridEditResponse, IpcClientError> {
+  return { status: "ok", data: { context: CONTEXT, outcome, generation } };
 }
 
 /**
@@ -479,6 +484,8 @@ describe("貼り付けの 1 往復（要件 7.3、7.4、1.7）", () => {
     expect(settlement).toEqual({
       status: "applied",
       outcome: expect.objectContaining({ row_count: 22 }) as GridEditOutcome,
+      // **世代も応答が運ぶ**（タスク 10.1。画面は数え直さない）。
+      generation: "2",
     });
   });
 

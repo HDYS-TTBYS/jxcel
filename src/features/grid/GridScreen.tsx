@@ -70,8 +70,10 @@
  *    `RendererSpec.getCell` は窓の記憶のものをそのまま渡し、窓が届いたら `invalidate` で
  *    その区間を描き直させる（移植口は知らせが無ければ描き直さない）
  *
- * 手順 4 と 5 のあいだに**世代の整合**がある。境界の型は世代を運ばないので、画面が
- * `GridSession` と同じ規則で数える（開いた直後が 0、`grid_set_view` の成功ごとに +1）。
+ * 手順 4 と 5 のあいだに**世代の整合**がある。**境界の応答が世代を運ぶ**（タスク 10.1。
+ * `GridOpenResponse` / `GridViewResponse` / `GridEditResponse` の `generation`。10 進の文字列）
+ * ので、画面はそれを**採用するだけ**である — 数え直さない（かつての「成功ごとに +1」は、
+ * 1 つのコマンドの内側で世代が複数回進む経路でつねにずれる）。
  * 記憶へ渡す行数は**可視行数**（手順 4 の応答）である — 窓の区間は可視行の序数で表される。
  *
  * 境界の口は [`GridClient`]（`./gridClient`）1 つを通す。**本 module は `invoke` もコマンド名も
@@ -218,7 +220,7 @@
  * | **展開の結果の列の構成**（要件 5.1、5.2。申し送り 2 の修復） | `grid_set_view` の応答が運ぶ**導出後**の構成を `ready.summary.columns` へ採用し、表の面を同じ 1 つの経路（`summary` を依存に持つ効果）で組み直す | `gridScreenViewSettled` と `GridSurface` |
  * | 段数の上限の誘導（要件 5.4） | 記述の印（`expandability` が `capped`）から「詳細表示へ」を出し、押すと**現在位置の行のその列**の詳細表示を開く | `./nestedInspector` の `nestedColumnControls` と `gridScreenDetailOpened` |
  * | 詳細表示（要件 4.5、5.5、5.6） | 値を読むのは**表**（窓の記憶を持つ側）であり、開いている位置は状態が持つ。**同じ遷移でセルの編集と同一の規律**（`gridScreenDetailEditSettled` が `gridScreenEditSettled` を呼ぶ） | `GridSurface` の中の `NestedInspector` |
- * | 世代（8.5 が足した是正） | `grid_set_view` の成功と、影響を伴う適用で進める。**組み直さずに**記憶へ下ろす（構成が変わったときだけ、構成を依存に持つ効果が組み直す） | `ready.generation` と `GridSurface` の効果 |
+ * | 世代（10.1 が境界へ移した） | **境界の応答が運ぶ 10 進の文字列をそのまま採用する**（数え直さない）。**組み直さずに**記憶へ下ろす（構成が変わったときだけ、構成を依存に持つ効果が組み直す） | `ready.generation` と `GridSurface` の効果 |
  *
  * **要件 5.1 / 5.2 の見える結果は、申し送り 2 の修復で届くようになった。** 境界が返す導出後の
  * 構成を状態が採用し、表の面がそれを描く（展開すると内側の位置が列として並び、折りたたむと
@@ -349,7 +351,6 @@ import type {
   GridViewSpec,
 } from "../../ipc/bindings";
 import {
-  generationAfterEdit,
   settleCellEdit,
   type CellEditIntent,
   type CellEditSettlement,
@@ -570,16 +571,20 @@ export type GridScreenState =
        */
       readonly view: GridViewSpec;
       /**
-       * `GridSession` が持つ**世代**の写し（8.5。**境界は世代を運ばない** — 7.3 の申し送り）。
+       * `GridSession` が持つ**世代**（**10 進の文字列**。タスク 10.1）。
        *
-       * 進むのは 2 つの出来事である: ① `grid_set_view`（つねに +1。`api.rs` の `set_view`）、
-       * ② 適用（影響を受けた行があるときだけ +1。同 `apply`。規則は `./cellEdit` の
-       * [`generationAfterEdit`]）。**写さないと、以後の窓の要求が古い世代を名乗り、Rust 側が
-       * 空の窓を返す**（`WindowCodec::is_stale`）— 取り直した窓は永久に読み込み中のままになる。
+       * **源は境界の応答ただ 1 つである**（`GridOpenResponse` / `GridViewResponse` /
+       * `GridEditResponse` の `generation`）— 画面はそれを採用するだけであり、数え直さない。
+       * かつての「`grid_set_view` の成功ごとに +1」「`affected` が空でなければ +1」という
+       * 規則（`./cellEdit` の `generationAfterEdit`）は**消した**: 展開の適用は 1 つの
+       * コマンドの内側で 2 回進むので、数え上げはつねにずれる。**ずれると、以後の窓の要求が
+       * 古い世代を名乗り、Rust 側が空の窓を返す**（`WindowCodec::is_stale`）— 取り直した窓は
+       * 永久に読み込み中のままになる。
        *
-       * 開いた直後は 1 である（8.1 が開く流れで `grid_set_view` を 1 度呼ぶ）。
+       * 開いた直後の値は `grid_set_view`（空の指定）の応答が運ぶ（`api.rs` の `set_view` が
+       * つねに 1 つ進めるので 1 である）。
        */
-      readonly generation: number;
+      readonly generation: string;
       /**
        * 開いている詳細表示（8.5。`null` なら開いていない）。**この腕が持つ**ことが、描かれて
        * いる表のセルにしか詳細表示が無いことを型で表している。
@@ -816,7 +821,7 @@ export function gridScreenEditSettled(
       return {
         ...closed,
         editReport: reportOf(settlement.outcome),
-        state: stateAfterEdit(closed.state, settlement.outcome),
+        state: stateAfterEdit(closed.state, settlement.outcome, settlement.generation),
       };
     }
     default:
@@ -843,14 +848,19 @@ export function gridScreenEditReportDismissed(model: GridScreenModel): GridScree
  * 境界への問い合わせ（`./violations` の `reasonInRow`）であり、どちらもこの遷移の外で起きる。
  * **取り下げておけば、解消された違反の提示が残ることはない**（残ると要件 4.6 が満たされない）。
  *
- * 世代もここで進める（8.5）。規則は `./cellEdit` の [`generationAfterEdit`] であり、**適用が
- * 行の値を変えたときだけ**進む（`api.rs` の `apply` と同じ）。進めないと、以後の窓の要求が
- * 古い世代を名乗り、**取り直した窓が永久に読み込み中のまま**になる。
+ * 世代もここで入れる（タスク 10.1）。**値は適用の応答が運ぶものであり、画面は数え直さない**
+ * （かつての `generationAfterEdit` は消した — ドメインの規則の写しを 2 つ持つと、片方だけが
+ * 正しいまま残る）。入れないと、以後の窓の要求が古い世代を名乗り、**取り直した窓が永久に
+ * 読み込み中のまま**になる。
  *
  * 結果が無い（`None`。`grid_history` の腕）ときは**何も動かさない** — 適用していないので、
  * 総数を変える根拠が無い（生成物の doc が「適用では `None` を取り得ない」と定めている）。
  */
-function stateAfterEdit(state: GridScreenState, outcome: GridEditOutcome | null): GridScreenState {
+function stateAfterEdit(
+  state: GridScreenState,
+  outcome: GridEditOutcome | null,
+  generation: string,
+): GridScreenState {
   if (state.status !== "ready" || outcome === null) {
     return state;
   }
@@ -858,7 +868,8 @@ function stateAfterEdit(state: GridScreenState, outcome: GridEditOutcome | null)
     ...state,
     violationTotal: outcome.violation_total,
     violation: null,
-    generation: generationAfterEdit(state.generation, outcome),
+    // **応答が運ぶ世代をそのまま入れる**（タスク 10.1。数え直さない）。
+    generation,
   };
 }
 
@@ -891,6 +902,13 @@ export type GridViewSettlement =
       readonly hiddenRows: number;
       /** **シート全体**の違反の総数（要件 4.3）。 */
       readonly violationTotal: number;
+      /**
+       * **応答を組み立てた時点の世代**（10 進の文字列。`GridViewResponse.generation` そのもの）。
+       *
+       * `grid_set_view` は 1 つの呼び出しの内側で世代を複数回進めるので（折りたたみ・順序の
+       * 導出・展開の適用）、画面が +1 で数えることはできない。
+       */
+      readonly generation: string;
     }
   | { readonly status: "failed"; readonly message: string };
 
@@ -919,6 +937,8 @@ export async function applyGridView(
     // **隠れている行の数も応答が運ぶ**（要件 8.7）。画面は数え直さない。
     hiddenRows: answer.data.hidden_rows,
     violationTotal: answer.data.violation_total,
+    // **世代も応答が運ぶ**（タスク 10.1）。画面は数え直さない。
+    generation: answer.data.generation,
   };
 }
 
@@ -954,7 +974,7 @@ function sameLayout(
  *
  * | 結果 | 何が起きるか |
  * |---|---|
- * | 適用された | **送った指定をそのまま状態へ入れる**（展開の状態がここに住むので、走査では失われない）。**導出後の列の構成を採用し**、可視行数・違反の総数を置き換え、**世代を 1 つ進める** |
+ * | 適用された | **送った指定をそのまま状態へ入れる**（展開の状態がここに住むので、走査では失われない）。**導出後の列の構成を採用し**、可視行数・違反の総数を置き換え、**世代は応答が運ぶ値を採用する**（数え直さない） |
  * | 適用できなかった | **状態を 1 つも動かさず**、理由を告知として出す（世代も進めない — 進めると、窓の要求が存在しない世代を名乗る） |
  *
  * # 列の構成を採用することが要件 5.1 / 5.2 の見える結果である
@@ -1023,8 +1043,10 @@ export function gridScreenViewSettled(
             settlement.visibleRows === model.state.visibleRows
               ? model.state.pendingDelete
               : null,
-          // 世代は**進めることだけが契約である**（`api.rs` の `set_view` はつねに +1 する）。
-          generation: model.state.generation + 1,
+          // **応答が運ぶ世代をそのまま入れる**（タスク 10.1）。`grid_set_view` は 1 つの
+          // 呼び出しの内側で世代を複数回進める（折りたたみ・順序の導出・展開の適用）ので、
+          // +1 の数え上げでは追いつけない。
+          generation: settlement.generation,
           // 詳細表示は**開いたままにする**（構成が変わったことを理由に閉じる理由が無い。位置は
           // 表示の位置であり、いまの構成の同じ位置の列を詳しく見せる — design.md の 8.5 の表）。
         },
@@ -1307,7 +1329,7 @@ export function gridScreenRowOperationSettled(
       // 失敗したときに入力手段を開いたままにするのと同じ規律である）。
       return gridScreenFailed(model, `行の操作を適用できませんでした: ${settlement.message}`);
     case "applied":
-      return appliedRowOperation(model, settlement.outcome);
+      return appliedRowOperation(model, settlement.outcome, settlement.generation);
     default:
       return assertNever(settlement, "行の操作の結果の分岐が網羅されていない");
   }
@@ -1331,7 +1353,7 @@ export function gridScreenPasteSettled(
     case "failed":
       return gridScreenFailed(model, `貼り付けを適用できませんでした: ${settlement.message}`);
     case "applied":
-      return appliedRowOperation(model, settlement.outcome);
+      return appliedRowOperation(model, settlement.outcome, settlement.generation);
     default:
       return assertNever(settlement, "貼り付けの結果の分岐が網羅されていない");
   }
@@ -1372,7 +1394,12 @@ export function gridScreenHistorySettled(
       // **文書が動いていない。**作り直すものも、移すものも、名乗るものも無い（要件 9.2、9.3）。
       return model;
     case "applied":
-      return appliedRowOperation(model, settlement.outcome, settlement.affectedRow);
+      return appliedRowOperation(
+        model,
+        settlement.outcome,
+        settlement.generation,
+        settlement.affectedRow,
+      );
     default:
       return assertNever(settlement, "履歴の結果の分岐が網羅されていない");
   }
@@ -1393,6 +1420,11 @@ function withPendingDelete(
 function appliedRowOperation(
   model: GridScreenModel,
   outcome: GridEditOutcome | null,
+  /**
+   * **応答を組み立てた時点の世代**（10 進の文字列。タスク 10.1。行の操作・貼り付け・履歴の
+   * どの経路も、適用の応答が運ぶ値をそのまま渡す）。
+   */
+  generation: string,
   /**
    * 現在位置を移す先（**表示の序数**。8.9 の要件 9.8）。`null` なら**動かさない** —
    * 8.6 / 8.7 の経路はつねに `null` であり、現在位置は寄せだけを受ける。
@@ -1455,8 +1487,9 @@ function appliedRowOperation(
       // （要件 4.6。解消されたかどうかは、窓の印の取り直しと境界への問い合わせで決まる）。
       violationTotal: outcome.violation_total,
       violation: null,
-      // 行が変われば窓の要求が名乗る世代も進む（`api.rs` の `apply` と同じ規則）。
-      generation: generationAfterEdit(state.generation, outcome),
+      // **応答が運ぶ世代をそのまま入れる**（タスク 10.1。数え直さない — 行の追加・削除・
+      // 貼り付けの補充・取り消しはどれも世代を進めうるし、進めない適用もある）。
+      generation,
     },
     notice: model.notice,
     editReport: model.editReport,
@@ -1663,8 +1696,11 @@ export async function loadGridScreenState(client: GridClient): Promise<GridScree
     display,
     layoutKey: layoutKeyOf(display),
     rowOrderKey: rowOrderKeyOf(EMPTY_GRID_VIEW),
-    // いま `grid_set_view` を 1 度呼んだところである（世代は 0 から 1 へ進んだ）。
-    generation: GENERATION_AFTER_OPEN,
+    // **世代は応答が運ぶ値そのものである**（タスク 10.1）。`grid_open_sheet` の応答も世代を
+    // 運ぶが（開いた直後は `Generation::FIRST`）、**その直後に呼ぶ `grid_set_view` の応答が
+    // より新しい値を持つ**（`set_view` はつねに 1 つ進める）ので、表を描き始める時点の値は
+    // こちらである — 画面は数え直さない。
+    generation: derived.data.generation,
     // 開いた直後は詳細表示を開いていない（要件 5.5。開くのは利用者の操作である）。
     detail: null,
     // 開いた直後は削除の確認を待っていない（8.6。尋ねるのは利用者の操作の後である）。
@@ -1924,7 +1960,8 @@ interface GridSurfaceProps {
    *
    * 並べ替えと絞り込みは「何番目の行がどの行か」を変えるので、**取得済みの窓は別の行を指す**
    * （7.3 の `clear` の doc）。世代（`generation`）では代用できない — 世代は値だけの編集でも
-   * 進む（`./cellEdit` の `generationAfterEdit`）が、そのとき行の並びは動かない（要件 8.8）。
+   * 進む（応答が運ぶ値であり、画面が規則を持つのではない。タスク 10.1）が、そのとき行の並びは
+   * 動かない（要件 8.8）。
    */
   readonly rowOrderKey: string;
   /** 可視行の数（窓が覆う行数）。 */
@@ -1936,12 +1973,12 @@ interface GridSurfaceProps {
    */
   readonly hiddenRows: number;
   /**
-   * いまの世代（8.5。`grid_set_view` と適用で進む）。
+   * いまの世代（**10 進の文字列**。源は境界の応答ただ 1 つである。タスク 10.1）。
    *
    * **依存には入れない**（入れると、編集のたびに器を組み直して走査の位置を失う）。組み立ての
    * 時点の値として読み、以後の変化は専用の効果が記憶へ下ろす。
    */
-  readonly generation: number;
+  readonly generation: string;
   /** 選択（現在位置と矩形）。**画面の状態が持つ唯一の値である**（写しをここに作らない）。 */
   readonly selection: RendererSelection;
   /** 編集中のセル（要件 3.1）。`null` なら編集していない。 */
@@ -2014,20 +2051,6 @@ interface GridSurfaceProps {
 }
 
 /**
- * 開いた直後に 1 度だけ `grid_set_view` を呼んだあとの世代。
- *
- * 画面は `GridSession` と同じ規則で世代を数える（**境界の型は世代を運ばない**ため。design.md
- * 「世代を進めるのは画面である」）: 開いた直後が 0（`Generation::FIRST`）であり、
- * `grid_set_view` の成功ごとに 1 つ進む（8.5 は**適用でも進む**ことを足した。
- * `./cellEdit` の `generationAfterEdit`）。**食い違うと窓はつねに空になる**（Rust 側は一致
- * しない世代へ空の窓を返すため、画面は読み込み中のまま再試行を続ける）。
- *
- * 以後の世代は [`GridScreenState`] の `generation` が持ち、この定数は**開いた直後の値**だけを
- * 表す。
- */
-const GENERATION_AFTER_OPEN = 1;
-
-/**
  * 表の面が使う窓の記憶を組む（**効果の外に出した純粋な部分である**）。
  *
  * 効果（`useEffect`）の中で組み立てると、検査は「画面がどの列の写像で記憶を組んだか」を観測
@@ -2052,8 +2075,8 @@ export function createGridSurfaceCache(options: {
    */
   readonly columns: readonly ColumnDescriptor[];
   readonly visibleRows: number;
-  /** いまの世代（`grid_set_view` と適用で進む）。 */
-  readonly generation: number;
+  /** いまの世代（**10 進の文字列**。源は境界の応答ただ 1 つである。タスク 10.1）。 */
+  readonly generation: string;
   readonly client: GridClient;
   /** 窓が記憶に入ったときの通知（区間は実際に記憶した範囲）。 */
   readonly onArrival?: (span: RowSpan) => void;

@@ -258,11 +258,11 @@ use app_shell::ipc::{
     command_names, ColumnDescriptor, ColumnElementCount, ColumnExpandability, GridCellAddress,
     GridCoercionNotice, GridEditCommand, GridEditOutcome, GridEditRequest, GridEditResponse,
     GridExpansionState, GridFilterSpec, GridHistoryDirection, GridHistoryRequest,
-    GridHistoryRequestedEvent, GridOpenRequest,
-    GridOpenResponse, GridPathSegment, GridSearchDirection, GridSheetSummary, GridViewRequest,
-    GridViewResponse, GridViewSpec, GridViolation, GridViolationLocation, GridViolationRequest,
-    GridViolationResponse, IpcError, IpcResult, TypeKindTag, WindowContext, WindowLabel,
-    GRID_COPY_REQUESTED_EVENT, GRID_HISTORY_REQUESTED_EVENT,
+    GridHistoryRequestedEvent, GridOpenRequest, GridOpenResponse, GridPathSegment,
+    GridSearchDirection, GridSheetSummary, GridViewRequest, GridViewResponse, GridViewSpec,
+    GridViolation, GridViolationLocation, GridViolationRequest, GridViolationResponse, IpcError,
+    IpcResult, TypeKindTag, WindowContext, WindowLabel, GRID_COPY_REQUESTED_EVENT,
+    GRID_HISTORY_REQUESTED_EVENT,
 };
 use data_grid::{
     display_text, CellAddress, CoercionNotice, ColumnIndex, EditCommand, EditOutcome, ElementCount,
@@ -531,6 +531,19 @@ fn session_failure(command: &str, label: &WindowLabel, error: &SessionError) -> 
 /// `session/commands.rs` の `count_to_u32` と同じ判断である）。
 fn count_to_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// セッションの世代を、境界の表現（**10 進の文字列**）へ写す（タスク 10.1）。
+///
+/// `GridSession::generation()` の写しそのものであり、**u64 を数値として境界へ出さない**
+/// （生成物の TS の数は 2^53 までであり、上位のバイトが消える）。画面はこの文字列をそのまま
+/// 持ち回り、`grid_rows_window` の要求の頭へ載せるときだけ u64 へ戻す。
+///
+/// **1 つのコマンドの内側で世代は複数回進む**（`answer_set_view` の手順 1 と 3）ので、応答を
+/// 組み立てる直前に読む — 呼び出しの途中で読んだ値を控えてはならない（数え直しの規則を
+/// 適応層へ持ち込むことになる）。
+fn generation_text(generation: Generation) -> String {
+    generation.get().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1136,6 +1149,9 @@ pub(crate) fn answer_open(
 
     match opened {
         Ok(Ok((entry, sheet))) => {
+            // **開いた時点の世代**（`Generation::FIRST`。`GridSession::open` は進めない）。表へ
+            // 置く前に読む — `store` は保持を受け取る（`entry` は move される）。
+            let generation = generation_text(entry.session.generation());
             if !grids.store(label, entry) {
                 return IpcResult::Err {
                     error: path_failure(command, label, "破棄の購読を登録できない"),
@@ -1146,6 +1162,8 @@ pub(crate) fn answer_open(
                     context: WindowContext {
                         window: label.clone(),
                     },
+                    // 以後の値は `grid_set_view` の応答が運ぶ。
+                    generation,
                     sheet,
                 },
             }
@@ -1224,6 +1242,9 @@ pub(crate) fn answer_set_view(
     IpcResult::Ok {
         data: GridViewResponse {
             context,
+            // **展開の適用（手順 3）まで終えた時点の世代**である。手順 1 と 3 がそれぞれ進めるので、
+            // 呼び出しの途中の値（手順 2 の直後など）を控えてはならない。
+            generation: generation_text(entry.session.generation()),
             visible_rows: count_to_u32(summary.visible),
             hidden_rows: count_to_u32(summary.hidden),
             violation_total: count_to_u32(entry.session.violation_total()),
@@ -1425,6 +1446,8 @@ pub(crate) fn answer_apply_edit(
             Ok(outcome) => IpcResult::Ok {
                 data: GridEditResponse {
                     context,
+                    // **適用の後**の世代（影響を受けた行があるときだけ進む）。
+                    generation: generation_text(entry.session.generation()),
                     outcome: Some(outcome_to_boundary(&entry.session, &outcome)),
                 },
             },
@@ -1473,12 +1496,17 @@ pub(crate) fn answer_history(
             Ok(Some(outcome)) => IpcResult::Ok {
                 data: GridEditResponse {
                     context,
+                    // **履歴を進めた後**の世代（影響を受けた行があるときだけ進む）。
+                    generation: generation_text(entry.session.generation()),
                     outcome: Some(outcome_to_boundary(&entry.session, &outcome)),
                 },
             },
             Ok(None) => IpcResult::Ok {
                 data: GridEditResponse {
                     context,
+                    // **何も適用していない**ので、世代も据え置きである（画面はこれを採用するだけ
+                    // であり、据え置きかどうかを `outcome` から推し量らない）。
+                    generation: generation_text(entry.session.generation()),
                     outcome: None,
                 },
             },
@@ -1992,7 +2020,9 @@ fn history_menu_path() -> MenuPath {
 /// 2 つの項目は**識別子・表示名・ショートカットだけが違い、経路も活性化の形も同じ**である
 /// （向きは荷が運ぶ）。表にしないのは、向きを 1 つ足したときに**網羅的な `match` が
 /// コンパイルエラーになる**ようにするためである（`type_kind_tag` と同じ規律）。
-fn history_item_parts(direction: GridHistoryDirection) -> (&'static str, &'static str, &'static str) {
+fn history_item_parts(
+    direction: GridHistoryDirection,
+) -> (&'static str, &'static str, &'static str) {
     match direction {
         GridHistoryDirection::Undo => (UNDO_ITEM_ID, UNDO_LABEL, UNDO_ACCELERATOR_SPELLING),
         GridHistoryDirection::Redo => (REDO_ITEM_ID, REDO_LABEL, REDO_ACCELERATOR_SPELLING),
@@ -2812,7 +2842,10 @@ mod tests {
         ));
         assert_eq!(names_of(&collapsed.columns), ["品番", "提供元", "数量"]);
         assert!(
-            collapsed.columns.iter().all(|column| column.path.is_empty()),
+            collapsed
+                .columns
+                .iter()
+                .all(|column| column.path.is_empty()),
             "折りたたむと内側の列は隠れる"
         );
     }
@@ -2820,6 +2853,193 @@ mod tests {
     /// 構成の表示名の並び（**表示の順**。検査の読み口）。
     fn names_of(columns: &[ColumnDescriptor]) -> Vec<&str> {
         columns.iter().map(|column| column.name.as_str()).collect()
+    }
+
+    /// 展開を 1 件だけ持つ表示の指定（提供元 = 文書の列 1 を 1 段）。
+    fn one_expansion() -> GridViewSpec {
+        GridViewSpec {
+            expansion: vec![GridExpansionState {
+                column: 1,
+                expanded: true,
+                depth: 1,
+            }],
+            ..GridViewSpec::default()
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 世代を運ぶのは境界である（タスク 10.1。design.md「世代を進めるのは境界である」）
+    // -----------------------------------------------------------------------
+
+    /// **どの応答も、その時点の世代を 10 進の文字列で運ぶ**（タスク 10.1。要件 1.1、5.1、5.3）。
+    ///
+    /// **1 つのコマンドの内側で世代は複数回進む。** `answer_set_view` は要求に現れない展開の
+    /// 折りたたみ（手順 1）と要求された展開の適用（手順 3）でそれぞれ 1 回進めるので、応答の
+    /// 世代は「画面が成功ごとに +1 した数」では表せない。**適応層が
+    /// `GridSession::generation()` を写した値だけが唯一の源である** — ここが層をまたぐ
+    /// 突き合わせであり、適応層が写さない（定数を返す）変異で落ちる。
+    #[test]
+    fn the_generation_travels_with_the_response() {
+        let scratch = Scratch::new("generation-travels");
+        let path = scratch.file("台帳.jxcel");
+        write_nested_document(&path);
+        let (sessions, label) = documents(&path);
+        let grids = grids();
+
+        // 開く: 応答は**開いた時点**の世代（`Generation::FIRST` ＝ 0）を運ぶ。
+        let opened = data(answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest {
+                sheet: sheet_id(&path),
+            },
+        ));
+        assert_eq!("0", opened.generation, "開いた直後の世代は 0 である");
+        assert_eq!(
+            0,
+            generation_of(&grids, &label),
+            "セッションの世代も 0 である（前提）"
+        );
+
+        // 展開つきの指定: 適用（手順 3）で進み、順序の導出（手順 2）でも進む。
+        let expanded = data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest {
+                view: one_expansion(),
+            },
+        ));
+        let through_expansion = generation_of(&grids, &label);
+        assert!(
+            through_expansion > 1,
+            "展開の適用で世代は 1 回より多く進む（前提: {through_expansion}）"
+        );
+        assert_eq!(
+            through_expansion.to_string(),
+            expanded.generation,
+            "応答の世代はその時点のセッションの世代である（画面の数え上げでは表せない）"
+        );
+
+        // 折りたたみ（手順 1 が 1 回進める経路）でも同じである。
+        let collapsed = data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+        let after_collapse = generation_of(&grids, &label);
+        assert_eq!(
+            after_collapse.to_string(),
+            collapsed.generation,
+            "折りたたみを挟んでも一致する"
+        );
+
+        // 適用（要件 3.3）も同じ規律である。
+        let rows = stored_rows(&path);
+        let edited = data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest {
+                command: set_one(&rows[0], 2, "5"),
+            },
+        ));
+        assert_eq!(
+            generation_of(&grids, &label).to_string(),
+            edited.generation,
+            "適用の応答もその時点の世代を運ぶ"
+        );
+
+        // 履歴（要件 9.2）も同じである。
+        let undone = data(answer_history(
+            &sessions,
+            &grids,
+            &label,
+            &GridHistoryRequest {
+                direction: GridHistoryDirection::Undo,
+            },
+        ));
+        assert_eq!(
+            generation_of(&grids, &label).to_string(),
+            undone.generation,
+            "履歴の応答もその時点の世代を運ぶ"
+        );
+    }
+
+    /// **展開を 1 件適用したあとの窓の要求が、空の窓を受け取らない**（タスク 10.1 の端から端。
+    /// 要件 1.1、5.1。8.5 の欠陥の最小の再現）。
+    ///
+    /// 画面が「`grid_set_view` の成功ごとに +1」で数えると、展開の適用で 2 回進んだセッションの
+    /// 世代に追いつかない。要求の頭の世代は一致しないので、Rust 側は `WindowCodec::is_stale` で
+    /// **空の窓**を返し、セルは永久に読み込み中のままになる（`transport` のモジュール docs
+    /// 「空の窓の表現」）。応答が運ぶ世代をそのまま要求の頭へ載せれば一致し、窓が返る。
+    #[test]
+    fn the_window_after_applying_an_expansion_is_not_empty() {
+        let scratch = Scratch::new("generation-window");
+        let path = scratch.file("台帳.jxcel");
+        write_nested_document(&path);
+        let (sessions, label) = documents(&path);
+        let grids = grids();
+        let sheet = sheet_id(&path);
+
+        data(answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest {
+                sheet: sheet.clone(),
+            },
+        ));
+
+        // **画面の採用の規則そのもの**: 要求の頭へ載せる世代は応答が運んだ文字列である。
+        let expanded = data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest {
+                view: one_expansion(),
+            },
+        ));
+        let claimed: u64 = expanded
+            .generation
+            .parse()
+            .expect("応答の世代は 10 進の文字列である");
+
+        let window = window_bytes(answer_rows_window(
+            &sessions,
+            &grids,
+            &label,
+            &InvokeBody::Raw(window_argument(&sheet, claimed, 0, 2)),
+        ));
+        assert!(
+            !window.is_empty(),
+            "応答の世代を名乗れば空の窓は返らない（採用しないと永久に読み込み中である）"
+        );
+        let decoded = decode_window(&window).expect("窓は復号できる");
+        assert_eq!(
+            claimed,
+            decoded.generation().get(),
+            "窓の頭の世代も一致する"
+        );
+        assert_eq!(2, decoded.row_count(), "要求した 2 行が返る");
+
+        // 対照: **数え上げの規則**（開いた直後の 1 回だけを数えた世代）で名乗ると空の窓になる —
+        // これが 8.5 の欠陥が画面に現れる形である。
+        let naive = claimed
+            .checked_sub(1)
+            .expect("展開の適用は世代を 1 つより多く進める（前提）");
+        assert!(
+            window_bytes(answer_rows_window(
+                &sessions,
+                &grids,
+                &label,
+                &InvokeBody::Raw(window_argument(&sheet, naive, 0, 2)),
+            ))
+            .is_empty(),
+            "1 つ前の世代を名乗る要求は空の窓になる（数え上げでは足りない）"
+        );
     }
 
     /// **要求に現れない展開は折りたたみへ戻る**（要求は完全な記述である。6.1 の規約）。
@@ -3807,7 +4027,11 @@ mod tests {
 
         let model = registry.model();
         let items = model.items();
-        assert_eq!(items.len(), 1, "この module が置くのは複製の 1 件だけである");
+        assert_eq!(
+            items.len(),
+            1,
+            "この module が置くのは複製の 1 件だけである"
+        );
         let node = items[0];
         assert_eq!(node.item(), &MenuItemId::new(COPY_ITEM_ID));
         assert_eq!(node.label(), COPY_LABEL);
@@ -3853,7 +4077,9 @@ mod tests {
             "貼り付けのショートカットを登録していない"
         );
         assert!(
-            items.iter().all(|item| !item.item().as_str().contains("paste")),
+            items
+                .iter()
+                .all(|item| !item.item().as_str().contains("paste")),
             "貼り付けの項目を作っていない"
         );
     }

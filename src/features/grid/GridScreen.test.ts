@@ -141,9 +141,12 @@ function openDocument(sheets: readonly DocumentSheet[]): DocumentStateResponse {
   };
 }
 
-/** シートを開いた応答。 */
-function openedSheet(summary: GridSheetSummary): GridOpenResponse {
-  return { context: CONTEXT, sheet: summary };
+/**
+ * シートを開いた応答。**世代は 10 進の文字列である**（タスク 10.1。開いた直後は
+ * `Generation::FIRST` ＝ 0）。
+ */
+function openedSheet(summary: GridSheetSummary, generation = "0"): GridOpenResponse {
+  return { context: CONTEXT, sheet: summary, generation };
 }
 
 /**
@@ -157,6 +160,8 @@ function derivedView(
   visibleRows: number,
   violationTotal = 0,
   columns: readonly ColumnDescriptor[] = [],
+  /** **応答を組み立てた時点の世代**（10 進の文字列。タスク 10.1）。 */
+  generation = "1",
 ): GridViewResponse {
   return {
     context: CONTEXT,
@@ -164,6 +169,7 @@ function derivedView(
     hidden_rows: 0,
     violation_total: violationTotal,
     columns: [...columns],
+    generation,
   };
 }
 
@@ -489,9 +495,10 @@ describe("画面内の失敗の経路（器に届かない失敗）", () => {
       editing: null,
       violationTotal: 0,
       violation: null,
-      // 表示の指定（8.5）と世代（適用・表示の指定の変更で進む）。開いた直後はどちらも初期値である。
+      // 表示の指定（8.5）と世代（タスク 10.1。境界の応答が運ぶ 10 進の文字列）。開いた直後は
+      // どちらも初期値である。
       view: EMPTY_GRID_VIEW,
-      generation: 1,
+      generation: "1",
       detail: null,
       pendingDelete: null,
     });
@@ -710,8 +717,8 @@ function readyModel(
     readonly violation?: ViolationPresentation | null;
     /** 表示の指定（8.5。展開の状態をここへ入れる）。 */
     readonly view?: GridViewSpec;
-    /** 世代（8.5。適用と表示の指定の変更で進む）。 */
-    readonly generation?: number;
+    /** 世代（10.1。**応答が運ぶ 10 進の文字列**であり、画面は採用するだけである）。 */
+    readonly generation?: string;
     /** 開いている詳細表示（8.5）。 */
     readonly detail?: CellDetail | null;
     /** 絞り込みで隠れている行の数（8.8。要件 8.7）。 */
@@ -733,7 +740,7 @@ function readyModel(
     violation: options.violation ?? null,
     // 8.5 の欄（表示の指定・世代・詳細表示）。既定は「開いた直後」である。
     view: options.view ?? EMPTY_GRID_VIEW,
-    generation: options.generation ?? 1,
+    generation: options.generation ?? "1",
     detail: options.detail ?? null,
     // 8.6 の欄（削除の確認）。既定は「尋ねていない」である。
     pendingDelete: null,
@@ -1017,7 +1024,7 @@ function editingModel(
       violationTotal: 0,
       violation: null,
       view: EMPTY_GRID_VIEW,
-      generation: 1,
+      generation: "1",
       detail: null,
       pendingDelete: null,
     }),
@@ -1026,9 +1033,18 @@ function editingModel(
   );
 }
 
-/** 確定の結果を画面へ反映する（画面が `settleCellEdit` の結果に対して行う遷移そのものである）。 */
-function settled(model: GridScreenModel, outcome: GridEditOutcome | null): GridScreenModel {
-  return gridScreenEditSettled(model, { status: "applied", outcome });
+/**
+ * 確定の結果を画面へ反映する（画面が `settleCellEdit` の結果に対して行う遷移そのものである）。
+ *
+ * 世代は**応答が運ぶ 10 進の文字列**である（タスク 10.1。画面は数えない）。既定は
+ * 「セルの編集で 1 つ進んだ後」に当たる値である。
+ */
+function settled(
+  model: GridScreenModel,
+  outcome: GridEditOutcome | null,
+  generation = "2",
+): GridScreenModel {
+  return gridScreenEditSettled(model, { status: "applied", outcome, generation });
 }
 
 /** `checked` の付いた欄が持つ値の並び（初期値がどの選択肢かを読む）。 */
@@ -1797,7 +1813,7 @@ function nestedModel(
     violationTotal: 0,
     violation: null,
     view: options.view ?? EMPTY_GRID_VIEW,
-    generation: 1,
+    generation: "1",
     detail: null,
     pendingDelete: null,
   });
@@ -1843,11 +1859,13 @@ describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
       visibleRows: SAMPLE_ROWS,
       hiddenRows: 0,
       violationTotal: 0,
+      // **応答が運んだ世代も持ち帰る**（タスク 10.1。画面は数えない）。
+      generation: "1",
     });
   });
 
   it("表示の指定を適用した結果を状態へ反映する（構成と世代が変わる）", async () => {
-    const before = readyModel(initialSelection(), { generation: 1 });
+    const before = readyModel(initialSelection(), { generation: "7" });
     const view = withExpansion(EMPTY_GRID_VIEW, { column: 1, expanded: true, depth: 1 });
 
     const after = gridScreenViewSettled(before, {
@@ -1858,15 +1876,19 @@ describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
       visibleRows: SAMPLE_ROWS,
       hiddenRows: 0,
       violationTotal: 3,
+      // **数え上げでは表せない値を選ぶ。** 展開つきの適用は 1 つのコマンドの内側で 2 回進む
+      // （`answer_set_view` の手順 2 と 3）ので、応答の世代は「直前 + 1」ではない。
+      generation: "9",
     });
 
     if (after.state.status !== "ready") {
       throw new Error("表を描く状態でなくなった");
     }
     expect(after.state.view).toEqual(view);
-    // **境界は世代を運ばない**（7.3 の申し送り）ので画面が数える。`set_view` はつねに進める
-    // （`api.rs` の `set_view`）— 数えないと、以後の窓の要求が古い世代を名乗り、空の窓が返る。
-    expect(after.state.generation).toBe(2);
+    // **画面は応答が運ぶ世代をそのまま採用する**（タスク 10.1）。数え上げ（成功ごとに +1）を
+    // 残すと、展開の適用で 2 回進んだセッションに追いつかず、以後の窓の要求が古い世代を名乗って
+    // 空の窓が返る（`WindowCodec::is_stale`）— セルは永久に読み込み中のままになる。
+    expect(after.state.generation).toBe("9");
     // 応答が運ぶ可視行数と違反の総数も反映する（絞り込みが効けば可視行数は変わる）。
     expect(after.state.visibleRows).toBe(SAMPLE_ROWS);
     expect(after.state.violationTotal).toBe(3);
@@ -1875,7 +1897,7 @@ describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
   });
 
   it("表示の指定を適用できなかったときは、告知を出して前の指定と世代を残す", async () => {
-    const before = readyModel(initialSelection(), { generation: 1 });
+    const before = readyModel(initialSelection(), { generation: "7" });
     const view = withExpansion(EMPTY_GRID_VIEW, { column: 1, expanded: true, depth: 1 });
     const pending = gridScreenViewSettled(before, {
       status: "applied",
@@ -1884,6 +1906,7 @@ describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
       visibleRows: SAMPLE_ROWS,
       hiddenRows: 0,
       violationTotal: 0,
+      generation: "9",
     });
 
     // **失敗は `applyGridView` が作る**（文言もそこが組み立てる）。
@@ -1918,6 +1941,7 @@ describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
       visibleRows: SAMPLE_ROWS,
       hiddenRows: 0,
       violationTotal: 0,
+      generation: "2",
     });
 
     let traversed = gridScreenSelectionChanged(opened, selectionAt({ row: 12, column: 3 }));
@@ -1925,6 +1949,7 @@ describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
     traversed = gridScreenEditSettled(traversed, {
       status: "applied",
       outcome: outcomeOf({ affected: [EDITED_ROW], revalidated_columns: [0] }),
+      generation: "3",
     });
     traversed = gridScreenViolationReason(traversed, { kind: "cleared" });
 
@@ -2005,6 +2030,8 @@ describe("詳細表示（8.5。要件 4.5、5.5、5.7）", () => {
         violations: [{ row: EDITED_ROW, column: 2, path: [] }],
         revalidated_columns: [2],
       }),
+      // **応答が運ぶ世代**（`nestedModel` の 1 から数え上げでは出ない値である）。
+      generation: "9",
     });
     const failed = gridScreenDetailEditSettled(opened, {
       status: "failed",
@@ -2025,8 +2052,8 @@ describe("詳細表示（8.5。要件 4.5、5.5、5.7）", () => {
     // 確定: 報告が出て、面は初期状態へ戻る（要件 3.4、3.5 の提示はセルの編集と同じである）。
     expect(applied.state.detail).toEqual({ position: detail.position, edit: 1 });
     expect(applied.editReport).not.toBeNull();
-    // 適用のあとは世代が進む（以後の窓の要求が古い世代を名乗らない）。
-    expect(applied.state.generation).toBe(2);
+    // **世代は適用の応答が運ぶ値そのものである**（以後の窓の要求が古い世代を名乗らない）。
+    expect(applied.state.generation).toBe("9");
     // 失敗: **面は開いたままである**（適用されていないので、打たれている値を捨てる理由が無い）。
     expect(failed.state.detail).toEqual({ position: detail.position, edit: 0 });
     expect(failed.notice).toContain("編集を適用できませんでした");
@@ -2052,7 +2079,7 @@ describe("表の窓と列の空間（8.5。要件 5.1、8.6）", () => {
       // **描かれる列の並び**（表示順）を渡す（8.8。表示上の列順が写像を決める）。
       columns: summary.columns,
       visibleRows: SAMPLE_ROWS,
-      generation: 1,
+      generation: "1",
       client,
     });
 
@@ -2155,6 +2182,90 @@ describe("表の窓と列の空間（8.5。要件 5.1、8.6）", () => {
 });
 
 /**
+ * **世代は境界が運び、画面は数えない**（タスク 10.1。data-grid 要件 1.1、5.1、5.3）。
+ *
+ * 世代の源が 2 つあると（`GridSession` の `advance_generation` と画面の +1 の数え上げ）、
+ * **展開の適用で必ずずれる** — `answer_set_view` は 1 つのコマンドの内側で 2 回進めるためである
+ * （要求に現れない展開の折りたたみと、要求された展開の適用）。ずれた世代を名乗る窓の要求には
+ * Rust 側が空の窓を返すので（`WindowCodec::is_stale`）、セルは永久に読み込み中のままになる。
+ *
+ * ここが固定するのは 2 つである: ① 応答が運ぶ世代を状態が採用すること（数え直さないこと）、
+ * ② 要求の頭へ載る世代が**その値そのもの**であること。
+ */
+describe("世代は境界が運び、画面は数えない（10.1。要件 1.1、5.1、5.3）", () => {
+  /** 要求の頭から世代を独立に読む（**10 進の文字列**。境界が運ぶ形そのものである）。 */
+  function claimedGeneration(argument: Uint8Array): string {
+    const view = new DataView(argument.buffer, argument.byteOffset, argument.byteLength);
+    return view.getBigUint64(1, true).toString();
+  }
+
+  it("要求の頭に載る世代は、表示の指定の応答が運んだ世代そのものである", () => {
+    const before = readyModel(initialSelection(), { generation: "7" });
+    const after = gridScreenViewSettled(before, {
+      status: "applied",
+      view: EMPTY_GRID_VIEW,
+      columns: SAMPLE_COLUMNS,
+      visibleRows: SAMPLE_ROWS,
+      hiddenRows: 0,
+      violationTotal: 0,
+      // 展開つきの適用では世代は 2 回進むので、応答の値は「直前 + 1」ではない（数え上げは 8 を
+      // 名乗ってしまう）。
+      generation: "9",
+    });
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.generation).toBe("9");
+
+    const claimed: string[] = [];
+    const cache = createGridSurfaceCache({
+      sheet: "s1",
+      columns: after.state.summary.columns,
+      visibleRows: after.state.visibleRows,
+      // **表の面が渡す値そのもの**（状態が持つ世代）。
+      generation: after.state.generation,
+      client: {
+        ...fakeClient({ state: err<DocumentStateResponse>() }),
+        readWindow: async (argument) => {
+          claimed.push(claimedGeneration(argument));
+          // 空の窓（この検査は要求の頭だけを見る）。
+          return new ArrayBuffer(0);
+        },
+      },
+    });
+
+    expect(cache.getCell({ row: 0, column: 0 }).loading).toBe(true);
+    expect(claimed).toEqual(["9"]);
+  });
+
+  it("適用・履歴の応答の世代も、それぞれの遷移でそのまま入る", () => {
+    const before = readyModel(initialSelection(), { generation: "3" });
+    const edited = gridScreenEditSettled(before, {
+      status: "applied",
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: SAMPLE_ROWS }),
+      generation: "8",
+    });
+    const pasted = gridScreenPasteSettled(edited, {
+      status: "applied",
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: SAMPLE_ROWS }),
+      generation: "11",
+    });
+    const undone = gridScreenHistorySettled(pasted, {
+      status: "applied",
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: SAMPLE_ROWS }),
+      affectedRow: null,
+      generation: "12",
+    });
+    if (edited.state.status !== "ready" || pasted.state.status !== "ready" || undone.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(edited.state.generation).toBe("8");
+    expect(pasted.state.generation).toBe("11");
+    expect(undone.state.generation).toBe("12");
+  });
+});
+
+/**
  * **展開した構成の違反の位置**（8.4 と 8.5 の合わせ。要件 4.2、4.4）。
  *
  * 境界の `GridViolationLocation.column` は**文書の列**であり、提示が名乗る列（バーの「M 列目」）
@@ -2181,6 +2292,7 @@ describe("展開した構成の違反の位置（要件 4.2、4.4。8.5 との�
       visibleRows: SAMPLE_ROWS,
       hiddenRows: 0,
       violationTotal: 1,
+      generation: "2",
     });
   }
 
@@ -2286,6 +2398,7 @@ describe("行の増減の反映（8.6。要件 6.2、6.5）", () => {
     const after = gridScreenRowOperationSettled(before, {
       status: "applied",
       outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 7, violation_total: 2 }),
+      generation: "5",
     });
 
     if (after.state.status !== "ready") {
@@ -2298,8 +2411,8 @@ describe("行の増減の反映（8.6。要件 6.2、6.5）", () => {
     // 違反の総数は適用の応答が運ぶ数で置き換わり、いまの提示は取り下げる（要件 4.6）。
     expect(after.state.violationTotal).toBe(2);
     expect(after.state.violation).toBeNull();
-    // 世代は進む（以後の窓の要求が古い世代を名乗らない。`api.rs` の `apply` と同じ規則）。
-    expect(after.state.generation).toBe(2);
+    // **世代は応答が運ぶ値そのものである**（以後の窓の要求が古い世代を名乗らない）。
+    expect(after.state.generation).toBe("5");
 
     const markup = markOf(after);
     expect(markup).toContain('data-row-count="7"');
@@ -2316,6 +2429,7 @@ describe("行の増減の反映（8.6。要件 6.2、6.5）", () => {
     const after = gridScreenRowOperationSettled(before, {
       status: "applied",
       outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 3 }),
+      generation: "2",
     });
 
     if (after.state.status !== "ready") {
@@ -2344,6 +2458,7 @@ describe("行の増減の反映（8.6。要件 6.2、6.5）", () => {
     const after = gridScreenRowOperationSettled(editing, {
       status: "applied",
       outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 3 }),
+      generation: "2",
     });
 
     if (after.state.status !== "ready") {
@@ -2362,6 +2477,7 @@ describe("行の増減の反映（8.6。要件 6.2、6.5）", () => {
     const emptied = gridScreenRowOperationSettled(readyModel(initialSelection()), {
       status: "applied",
       outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 0 }),
+      generation: "2",
     });
 
     if (emptied.state.status !== "ready") {
@@ -2475,6 +2591,7 @@ describe("削除の確認（8.6。要件 6.5）", () => {
     const after = gridScreenRowOperationSettled(asked, {
       status: "applied",
       outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 3 }),
+      generation: "2",
     });
 
     if (after.state.status !== "ready") {
@@ -2493,6 +2610,7 @@ describe("貼り付けの反映（8.7。要件 7.3、7.4、1.7）", () => {
     const after = gridScreenPasteSettled(before, {
       status: "applied",
       outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 22, violation_total: 1 }),
+      generation: "5",
     });
 
     if (after.state.status !== "ready") {
@@ -2501,7 +2619,8 @@ describe("貼り付けの反映（8.7。要件 7.3、7.4、1.7）", () => {
     expect(after.state.visibleRows).toBe(22);
     expect(after.state.summary.row_count).toBe(22);
     expect(after.state.violationTotal).toBe(1);
-    expect(after.state.generation).toBe(2);
+    // **世代は応答が運ぶ値そのものである**（タスク 10.1。画面は数えない）。
+    expect(after.state.generation).toBe("5");
     // 行が増えたので、現在位置（先頭のセル）は寄せられない。
     expect(after.state.selection).toEqual(before.state.status === "ready" ? before.state.selection : null);
     expect(markOf(after)).toContain('data-row-count="22"');
@@ -2516,6 +2635,7 @@ describe("貼り付けの反映（8.7。要件 7.3、7.4、1.7）", () => {
     const after = gridScreenPasteSettled(editing, {
       status: "applied",
       outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 3 }),
+      generation: "2",
     });
 
     if (after.state.status !== "ready") {
@@ -2579,6 +2699,7 @@ describe("取り消しとやり直しの反映（8.9。要件 9.2、9.3、9.8）
       status: "applied",
       outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 3, violation_total: 4 }),
       affectedRow: null,
+      generation: "5",
     });
 
     if (after.state.status !== "ready") {
@@ -2589,7 +2710,8 @@ describe("取り消しとやり直しの反映（8.9。要件 9.2、9.3、9.8）
     expect(after.state.visibleRows).toBe(3);
     expect(after.state.summary.row_count).toBe(3);
     expect(after.state.violationTotal).toBe(4);
-    expect(after.state.generation).toBe(2);
+    // **世代は応答が運ぶ値そのものである**（タスク 10.1。画面は数えない）。
+    expect(after.state.generation).toBe("5");
     expect(markOf(after)).toContain('data-row-count="3"');
   });
 
@@ -2601,6 +2723,7 @@ describe("取り消しとやり直しの反映（8.9。要件 9.2、9.3、9.8）
       status: "applied",
       outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 20 }),
       affectedRow: 7,
+      generation: "2",
     });
 
     if (after.state.status !== "ready") {
@@ -2621,6 +2744,7 @@ describe("取り消しとやり直しの反映（8.9。要件 9.2、9.3、9.8）
       status: "applied",
       outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 20 }),
       affectedRow: 12,
+      generation: "2",
     });
     if (after.state.status !== "ready") {
       throw new Error("表を描く状態でなくなった");
@@ -2659,6 +2783,7 @@ describe("取り消しとやり直しの反映（8.9。要件 9.2、9.3、9.8）
       // 削除の取り消しがこれに当たる（戻ってくる行の識別子は記憶に無い）。
       outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 20 }),
       affectedRow: null,
+      generation: "2",
     });
 
     if (after.state.status !== "ready") {
@@ -2775,14 +2900,16 @@ describe("3 種の操作が同じ 1 つの履歴に乗っている（8.9 の受�
           if (outcome === undefined) {
             throw new Error("適用の応答の台本が尽きた");
           }
-          return { status: "ok", data: { context: CONTEXT, outcome } };
+          // 世代も応答が運ぶ（タスク 10.1。本検査の主題ではないので、台本の位置で決まる
+          // 妥当な値を返す）。
+          return { status: "ok", data: { context: CONTEXT, outcome, generation: "2" } };
         },
         readHistory: async (direction) => {
           directions.push(direction);
           const outcome = historyScript[historyAt];
           historyAt += 1;
           // **尽きたら「進める履歴が無い」である**（失敗ではない。要件 9.2、9.3）。
-          return { status: "ok", data: { context: CONTEXT, outcome: outcome ?? null } };
+          return { status: "ok", data: { context: CONTEXT, outcome: outcome ?? null, generation: "2" } };
         },
       },
       cache: {
@@ -3121,6 +3248,7 @@ describe("表示の操作（8.8。要件 8.1〜8.7）", () => {
         if (answered === 1) {
           return ok<GridViewResponse>({
             context: CONTEXT,
+            generation: "1",
             visible_rows: SAMPLE_ROWS,
             hidden_rows: 0,
             violation_total: 0,
@@ -3133,6 +3261,7 @@ describe("表示の操作（8.8。要件 8.1〜8.7）", () => {
         // 10 と名乗る。数の唯一の源は応答である（`GridViewResponse.hidden_rows`）。
         return ok<GridViewResponse>({
           context: CONTEXT,
+          generation: "2",
           visible_rows: 13,
           hidden_rows: 10,
           violation_total: 0,
@@ -3222,7 +3351,7 @@ describe("表示の操作（8.8。要件 8.1〜8.7）", () => {
     const edited = outcomeOf({ affected: [WINDOW_FIXTURE_ROWS[2]] });
     const base = fakeClient({
       state: err<DocumentStateResponse>(),
-      edit: ok<GridEditResponse>({ context: CONTEXT, outcome: edited }),
+      edit: ok<GridEditResponse>({ context: CONTEXT, outcome: edited, generation: "8" }),
     });
     // 窓は**本物の符号化器が出した固定**である（3 行 4 列・世代 7）。窓が運ぶ行の並びは
     // **ドメインの可視の並び**そのものであり、画面はそれを並べ替えない。
@@ -3240,7 +3369,7 @@ describe("表示の操作（8.8。要件 8.1〜8.7）", () => {
       sheet: "s1",
       columns: drawn,
       visibleRows: 3,
-      generation: 7,
+      generation: "7",
       client,
     });
     // 取得を始める（同期の契約: 未取得は読み込み中を返して要求を始める）。

@@ -202,7 +202,8 @@ interface FakeRow {
 
 /** 偽のサーバが返す窓の指定。 */
 interface FakeWindow {
-  readonly generation: number;
+  /** 世代（**10 進の文字列**。境界の規約であり、窓の頭は u64 である）。 */
+  readonly generation: string;
   readonly start: number;
   readonly rows: readonly FakeRow[];
   readonly columns: number;
@@ -277,7 +278,7 @@ function rowFor(row: number): FakeRow {
 }
 
 /** 偽のサーバの窓（開始序数から `count` 行）。 */
-function windowFor(start: number, count: number, generation: number): FakeWindow {
+function windowFor(start: number, count: number, generation: string): FakeWindow {
   const rows: FakeRow[] = [];
   for (let row = start; row < start + count; row += 1) {
     rows.push(rowFor(row));
@@ -288,7 +289,7 @@ function windowFor(start: number, count: number, generation: number): FakeWindow
 /** 要求の頭から読んだ欄（**検査の側の独立な読み手**。位置とエンディアンを別に書く）。 */
 interface RecordedRequest {
   readonly version: number;
-  readonly generation: number;
+  readonly generation: string;
   readonly start: number;
   readonly count: number;
   readonly sheet: string;
@@ -306,7 +307,8 @@ function readRequest(argument: Uint8Array): RecordedRequest {
   const view = new DataView(argument.buffer, argument.byteOffset, argument.byteLength);
   return {
     version: argument[0] ?? -1,
-    generation: Number(view.getBigUint64(1, true)),
+    // **10 進の文字列として読む**（境界が運ぶ形そのもの。数へ落とす経路を作らない）。
+    generation: view.getBigUint64(1, true).toString(),
     start: Number(view.getBigUint64(9, true)),
     count: Number(view.getBigUint64(17, true)),
     sheet: new TextDecoder().decode(argument.subarray(WINDOW_REQUEST_HEADER_LEN)),
@@ -369,7 +371,7 @@ function cacheWith(options: {
   readonly columns?: ColumnSpace;
   readonly variants?: readonly TypeKindTag[];
   readonly sheet?: string;
-  readonly generation?: number;
+  readonly generation?: string;
   readonly onArrival?: (span: RowSpan) => void;
 }): WindowCache {
   return createWindowCache({
@@ -431,7 +433,7 @@ describe("要求の頭", () => {
         invoke: (command: string, args: unknown) => {
           invocations.push({ command, args });
           return Promise.resolve(
-            windowBytes({ generation: 0, start: 0, rows: [rowFor(0)], columns: 1 }),
+            windowBytes({ generation: "0", start: 0, rows: [rowFor(0)], columns: 1 }),
           );
         },
       },
@@ -455,7 +457,7 @@ describe("要求の頭", () => {
       }
       expect(readRequest(argument)).toEqual({
         version: 1,
-        generation: 0,
+        generation: "0",
         start: 0,
         count: 4,
         sheet: "発注明細",
@@ -482,7 +484,7 @@ describe("窓の復号", () => {
     const window = result.window;
     expect(window.version).toBe(WINDOW_FORMAT_VERSION);
     expect(window.version).toBe(1);
-    expect(window.generation).toBe(7);
+    expect(window.generation).toBe("7");
     expect(window.start).toBe(0);
     expect(window.rowCount).toBe(3);
     expect(window.columnCount).toBe(4);
@@ -506,6 +508,18 @@ describe("窓の復号", () => {
     expect(window.rows[0]?.cells[1]?.marks).toEqual([[]]);
     // 違反でないセルには札が無い。
     expect(window.rows[1]?.cells[1]?.marks).toEqual([]);
+  });
+
+  it("u64 の全体を丸めずに読む（世代は 10 進の文字列である）", () => {
+    // **`Number` へ落とすとここで丸まる**（2^53 を越える値）。境界が運ぶ世代は文字列であり、
+    // 窓の頭の u64 も同じ形で読み戻す（窓の復号の側の丸めの経路を塞ぐ錠前）。
+    const window = windowFor(0, 1, "18446744073709551615");
+    const result = decodeWindow(new Uint8Array(windowBytes(window)));
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error(describeWindowDecodeFailure(result.failure));
+    }
+    expect(result.window.generation).toBe("18446744073709551615");
   });
 
   it("行 0 の窓（頭だけの 33 バイト）は空の窓ではなく、行 0 件の窓として読める", () => {
@@ -692,41 +706,52 @@ describe("同じ区間への要求", () => {
 describe("世代", () => {
   it("世代が変わったあとに届いた応答は記憶に入れない", async () => {
     const harness = harnessOf();
-    const cache = cacheWith({ transport: harness.transport, generation: 3 });
+    const cache = cacheWith({ transport: harness.transport, generation: "3" });
 
     // 移送は要求の時点で答えを確定する（世代 3 の窓）。
     expect(cache.getCell({ row: 0, column: 0 }).loading).toBe(true);
-    expect(harness.calls[0]?.generation).toBe(3);
+    expect(harness.calls[0]?.generation).toBe("3");
 
     // 表示が変わった（編集の適用など）ので、応答が届く**前に**世代を進める。
-    cache.setGeneration(4);
+    cache.setGeneration("4");
     await settle();
 
-    expect(cache.generation).toBe(4);
+    expect(cache.generation).toBe("4");
     expect(cache.windowCount).toBe(0);
     expect(cache.getCell({ row: 0, column: 0 }).loading).toBe(true);
     // 新しい世代で要求し直す。
     expect(harness.calls.map((call) => ({ generation: call.generation, start: call.start }))).toEqual([
-      { generation: 3, start: 0 },
-      { generation: 4, start: 0 },
+      { generation: "3", start: 0 },
+      { generation: "4", start: 0 },
     ]);
   });
 
   it("世代を進めても、影響を受けていない窓の記憶は残る", async () => {
     const harness = harnessOf();
-    const cache = cacheWith({ transport: harness.transport, generation: 1 });
+    const cache = cacheWith({ transport: harness.transport, generation: "1" });
     cache.getCell({ row: 0, column: 0 });
     await settle();
 
-    cache.setGeneration(2);
+    cache.setGeneration("2");
     // 窓の内容は変わっていない（破棄の通知は届いていない）ので、記憶はそのまま使える。
     expect(cache.getCell({ row: 0, column: 0 }).loading).toBe(false);
     expect(harness.calls).toHaveLength(1);
   });
 
+  it("10 進の文字列の世代を丸めずに要求の頭へ載せる（u64 の全体を運ぶ）", () => {
+    const harness = harnessOf();
+    // **2^53 を越える世代**（TS の数へ落とすと上位のバイトが消える値である）。
+    const u64Max = "18446744073709551615";
+    const cache = cacheWith({ transport: harness.transport, generation: u64Max });
+
+    expect(cache.getCell({ row: 0, column: 0 }).loading).toBe(true);
+    expect(harness.calls[0]?.generation).toBe(u64Max);
+    expect(cache.generation).toBe(u64Max);
+  });
+
   it("窓が名乗る世代がいまの世代と違えば捨てる（応答そのものの札を見る）", async () => {
-    const harness = harnessOf((request) => windowBytes(windowFor(request.start, request.count, 4)));
-    const cache = cacheWith({ transport: harness.transport, generation: 5 });
+    const harness = harnessOf((request) => windowBytes(windowFor(request.start, request.count, "4")));
+    const cache = cacheWith({ transport: harness.transport, generation: "5" });
     cache.getCell({ row: 0, column: 0 });
     await settle();
 
@@ -1091,7 +1116,7 @@ describe("空の窓", () => {
   it("窓が要求より短ければ、可視行の末尾に達したことを覚えて再要求しない", async () => {
     // 可視行が 6 行しかないシート（画面が持つ `rowCount` が古い場合）。
     const harness = harnessOf((request) =>
-      windowBytes(windowFor(request.start, Math.max(0, Math.min(request.count, 6 - request.start)), 0)),
+      windowBytes(windowFor(request.start, Math.max(0, Math.min(request.count, 6 - request.start)), "0")),
     );
     const cache = cacheWith({ transport: harness.transport, rowCount: 12 });
 

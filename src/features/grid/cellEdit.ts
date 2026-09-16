@@ -89,7 +89,18 @@ export type CellEditIntent =
  */
 export type CellEditSettlement =
   | { readonly status: "cancelled" }
-  | { readonly status: "applied"; readonly outcome: GridEditOutcome | null }
+  | {
+      readonly status: "applied";
+      readonly outcome: GridEditOutcome | null;
+      /**
+       * **応答を組み立てた時点の世代**（10 進の文字列。`GridEditResponse.generation` そのもの）。
+       *
+       * 画面はこれを採用するだけである — 進み方を `outcome.affected` の空・非空から推し量る
+       * 規則（かつての `generationAfterEdit`）は持たない（規則が 2 つあると、片方だけが正しい
+       * まま残る。design.md「世代を進めるのは境界である」）。
+       */
+      readonly generation: string;
+    }
   | { readonly status: "failed"; readonly message: string };
 
 /**
@@ -167,22 +178,15 @@ export async function settleCellEdit(options: {
   if (answer.data.outcome !== null) {
     options.cache.invalidate(answer.data.outcome.affected);
   }
-  return { status: "applied", outcome: answer.data.outcome };
+  return {
+    status: "applied",
+    outcome: answer.data.outcome,
+    generation: answer.data.generation,
+  };
 }
 
-/**
- * 適用のあとの世代（8.5。**境界が運ばない数を写す**）。
- *
- * `GridSession` は適用で世代を進める（`crates/data-grid/src/api.rs` の `apply`）が、**影響を
- * 受けた行が 1 つも無ければ進めない**（`affected` が空のときは同じ表示のままである）。進んだ
- * ことを画面が写さないと、以後の窓の要求は**古い世代を名乗り**、Rust 側が `WindowCodec::is_stale`
- * で**空の窓を返す** — 取り直した窓は永久に読み込み中のままになる（`store` は空の窓を記憶に
- * 入れない）。
- *
- * **境界の型は世代を運ばない**（7.3 の申し送り）ので、規則をここに 1 つだけ写す。8.9 の
- * 取り消し・やり直し（`grid_history`）も**同じ規則**である（`api.rs` の `undo` / `redo` も
- * `affected` が空でないときだけ進める）。
- */
-export function generationAfterEdit(generation: number, outcome: GridEditOutcome | null): number {
-  return outcome !== null && outcome.affected.length > 0 ? generation + 1 : generation;
-}
+// 世代を数える関数は**ここに無い**（タスク 10.1 が消した）。かつての `generationAfterEdit` は
+// 「`affected` が空でなければ +1」という `GridSession` の規則の写しだったが、規則が 2 つある
+// こと自体が欠陥の温床だった — 展開の適用は 1 つのコマンドの内側で 2 回進むので、数え上げは
+// つねにずれる。いまは `GridEditResponse.generation` をそのまま採用する（`GridOpenResponse` /
+// `GridViewResponse` も同じ欄を持つ）。

@@ -31,7 +31,7 @@ import type {
 } from "../../ipc/bindings";
 import type { IpcClientError } from "../../ipc/client";
 import type { GridClient } from "./gridClient";
-import { generationAfterEdit, settleCellEdit } from "./cellEdit";
+import { settleCellEdit } from "./cellEdit";
 import type { CellPosition } from "./renderer/port";
 
 // ===========================================================================
@@ -57,9 +57,16 @@ function outcomeOf(overrides: Partial<GridEditOutcome>): GridEditOutcome {
   };
 }
 
-/** 成功の封筒（応答の `outcome` は適用ではつねに `Some` である — 生成物の docs）。 */
-function applied(outcome: GridEditOutcome): IpcResult<GridEditResponse, IpcClientError> {
-  return { status: "ok", data: { context: CONTEXT, outcome } };
+/**
+ * 成功の封筒（応答の `outcome` は適用ではつねに `Some` である — 生成物の docs）。
+ *
+ * 世代も応答が運ぶ（タスク 10.1。既定は「1 つ進んだ後」に当たる値である）。
+ */
+function applied(
+  outcome: GridEditOutcome,
+  generation = "2",
+): IpcResult<GridEditResponse, IpcClientError> {
+  return { status: "ok", data: { context: CONTEXT, outcome, generation } };
 }
 
 /** 失敗の封筒（経路の不達）。 */
@@ -434,21 +441,45 @@ describe("宛先の列は文書の列である（8.5。要件 8.6）", () => {
 });
 
 // ===========================================================================
-// 6. 世代（8.5。要件 1.7、11.3）
+// 6. 世代（10.1。要件 1.7、11.3）
 // ===========================================================================
 
-describe("適用のあとの世代（8.5。要件 1.7）", () => {
-  /**
-   * `GridSession` は**適用で世代を進める**（`crates/data-grid/src/api.rs` の `apply`: 影響を
-   * 受けた行が 1 つも無ければ進めない）。進んだことを画面が写さないと、以後の窓の要求は
-   * **古い世代を名乗り、Rust 側が空の窓を返す**（`WindowCodec::is_stale`）— 窓は永久に
-   * 読み込み中のままになる。境界の型は世代を運ばない（7.3 の申し送り）ので、規則を写す。
-   */
-  it("影響を受けた行があるときだけ、世代を 1 つ進める", () => {
-    expect(generationAfterEdit(3, outcomeOf({ affected: [ROW_ID] }))).toBe(4);
-    // **影響が無ければ進まない**（適用の側の規則と同じ。進めると、記憶が要らない取り直しをする）。
-    expect(generationAfterEdit(3, outcomeOf({ affected: [] }))).toBe(3);
-    // 進める履歴が無かった場合（`grid_history` の腕）も据え置きである。
-    expect(generationAfterEdit(3, null)).toBe(3);
+/**
+ * **世代は応答が運ぶ**（`GridEditResponse.generation`。タスク 10.1）。
+ *
+ * 画面はそれをそのまま持ち帰るだけであり、`outcome.affected` の空・非空から進み方を推し量る
+ * 規則（かつての `generationAfterEdit`）は持たない — 規則が 2 つあると、片方だけが正しいまま
+ * 残る（展開の適用は 1 つのコマンドの内側で 2 回進むので、数え上げはつねにずれる）。
+ */
+describe("適用のあとの世代（10.1。要件 1.7）", () => {
+  it("応答が運ぶ世代をそのまま持ち帰る（数え直さない）", async () => {
+    // セッションの世代は 1 回の適用で 1 つ進むとは限らないので、**数え上げでは出ない値**を使う。
+    const client = fakeClient(applied(outcomeOf({ affected: [ROW_ID] }), "9"));
+
+    const settlement = await settleCellEdit({
+      client,
+      cache: fakeCache(ROW_ID),
+      position: POSITION,
+      carrier: "text",
+      intent: { kind: "commit", text: "1" },
+    });
+
+    expect(settlement).toMatchObject({ status: "applied", generation: "9" });
+  });
+
+  it("影響を受けた行が無い適用でも、応答の世代をそのまま持ち帰る", async () => {
+    // 影響が空であることは「世代が進まない」と同義ではない（進めるかどうかを決めるのは
+    // ドメインであり、応答が運ぶ値がそれを語る）。
+    const client = fakeClient(applied(outcomeOf({ affected: [] }), "5"));
+
+    const settlement = await settleCellEdit({
+      client,
+      cache: fakeCache(ROW_ID),
+      position: POSITION,
+      carrier: "text",
+      intent: { kind: "commit", text: "1" },
+    });
+
+    expect(settlement).toMatchObject({ status: "applied", generation: "5" });
   });
 });

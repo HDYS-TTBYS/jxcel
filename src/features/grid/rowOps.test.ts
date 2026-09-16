@@ -112,9 +112,14 @@ function outcomeOf(overrides: Partial<GridEditOutcome>): GridEditOutcome {
   };
 }
 
-/** 成功の封筒。 */
-function applied(outcome: GridEditOutcome): IpcResult<GridEditResponse, IpcClientError> {
-  return { status: "ok", data: { context: CONTEXT, outcome } };
+/**
+ * 成功の封筒。**世代も応答が運ぶ**（タスク 10.1。既定は「1 つ進んだ後」に当たる値である）。
+ */
+function applied(
+  outcome: GridEditOutcome,
+  generation = "2",
+): IpcResult<GridEditResponse, IpcClientError> {
+  return { status: "ok", data: { context: CONTEXT, outcome, generation } };
 }
 
 /**
@@ -307,7 +312,8 @@ describe("挿入は位置と数だけを送る（要件 6.1）", () => {
     expect(Object.keys(client.edits[0] ?? {}).sort()).toEqual(["at", "command", "count"]);
     // 適用のあとは記憶を**新しい行数で**作り直す（既定値は取り直した窓が運ぶ）。
     expect(memory.cleared).toEqual([21]);
-    expect(settlement).toEqual({ status: "applied", outcome });
+    // **世代も応答が運ぶ**（タスク 10.1。画面は数え直さない）。
+    expect(settlement).toEqual({ status: "applied", outcome, generation: "2" });
   });
 
   it("挿入の位置は文書の位置である（可視の序数と一致するのは、並べ替えも絞り込みも無いときだけ）", () => {

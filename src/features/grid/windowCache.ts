@@ -238,8 +238,13 @@ export interface DecodedRow {
 export interface DecodedWindow {
   /** 版（復号できた窓では常に [`WINDOW_FORMAT_VERSION`]）。 */
   readonly version: number;
-  /** 世代（この窓が属する文書・表示の状態）。 */
-  readonly generation: number;
+  /**
+   * 世代（この窓が属する文書・表示の状態）。**10 進の文字列である**（境界の規約そのもの）。
+   *
+   * 窓の頭の欄は u64 であり、TS の数は 2^53 までしか運べない。文字列のまま復号し、いまの世代
+   * （同じく文字列）と**文字列として**比べる — 数へ落とす経路を作らない。
+   */
+  readonly generation: string;
   /** 開始序数（**可視行の序数**であり、文書の位置ではない）。 */
   readonly start: number;
   /** この窓が運ぶ行の数。 */
@@ -309,7 +314,7 @@ function readWindow(bytes: Uint8Array): DecodedWindow {
   if (version !== WINDOW_FORMAT_VERSION) {
     throw new DecodeStop({ kind: "unknownVersion", version });
   }
-  const generation = cursor.u64();
+  const generation = cursor.u64Text();
   const start = cursor.u64();
   const rowCount = cursor.u64();
   const columnCount = cursor.u64();
@@ -390,6 +395,19 @@ class Cursor {
   /** 1 バイト。 */
   u8(): number {
     return this.take(1)[0] ?? 0;
+  }
+
+  /**
+   * リトルエンディアンの u64 を**10 進の文字列**として読む（境界が運ぶ世代の形そのもの）。
+   *
+   * 世代はこの口で読む — [`Cursor.u64`] は `Number.MAX_SAFE_INTEGER` を越える値を `tooLarge`
+   * として拒むが、世代にその上限は無い（u64 の全体が値である）。文字列のまま持ち回れば、
+   * 丸めの経路が 1 つも生まれない。
+   */
+  u64Text(): string {
+    const raw = this.take(8);
+    const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+    return view.getBigUint64(0, true).toString();
   }
 
   /** リトルエンディアンの u64（`Number.MAX_SAFE_INTEGER` を越える値は `tooLarge`）。 */
@@ -536,8 +554,14 @@ export interface WindowCacheOptions {
    * 取り消し）のあとは、[`WindowCache.clear`] へ**新しい数**を渡して作り直す。
    */
   readonly rowCount: number;
-  /** いまの世代（既定は 0。`GridSession` は開いた直後を 0 とする）。 */
-  readonly generation?: number;
+  /**
+   * いまの世代（**10 進の文字列**。既定は `"0"` — `GridSession` は開いた直後を
+   * `Generation::FIRST` とする）。
+   *
+   * 源は境界の応答（`GridOpenResponse` / `GridViewResponse` / `GridEditResponse` の
+   * `generation`）ただ 1 つであり、**画面はそれを採用するだけ**である（数え直さない）。
+   */
+  readonly generation?: string;
   /** 移送（既定は [`defaultTransport`]）。 */
   readonly transport?: WindowTransport;
   /** 1 つの窓が運ぶ行数（既定は [`WINDOW_ROWS`]）。 */
@@ -648,12 +672,12 @@ export interface WindowCache {
    */
   invalidate(affected: readonly string[]): void;
   /**
-   * いまの世代を置き換える（**進めるのは呼び出し側である**）。
+   * いまの世代を置き換える（**値は応答が運ぶ 10 進の文字列である**）。
    *
    * 本記憶は**一致するかどうかだけ**を見る（`WindowCodec::is_stale` と同じ規律。大小では
-   * 見ない）。進めたあとに届いた古い応答は捨てられる。
+   * 見ない）。置き換えたあとに届いた古い応答は捨てられる。
    */
-  setGeneration(generation: number): void;
+  setGeneration(generation: string): void;
   /**
    * 記憶をすべて捨てる（**序数と行の対応、または列の構成が変わったとき**）。
    *
@@ -670,12 +694,23 @@ export interface WindowCache {
   clear(rowCount?: number): void;
   /** 記憶を手放す（画面の片付け。以後の応答は捨てられる）。 */
   dispose(): void;
-  /** いまの世代。 */
-  readonly generation: number;
+  /** いまの世代（**10 進の文字列**）。 */
+  readonly generation: string;
   /** 記憶が保つ窓の数（要件 11.6 の観測）。 */
   readonly windowCount: number;
   /** 進行中の要求の数（同じ区間への要求が 1 本にまとまっていることの観測）。 */
   readonly pendingCount: number;
+}
+
+/**
+ * 10 進の文字列か（**境界が運ぶ世代の形**。`u64` の全体を桁の並びとして運ぶ唯一の形である）。
+ *
+ * 桁以外（空・記号・小数・先頭の `-`）は世代として扱わない — 扱うと、`BigInt` が投げる値や
+ * 丸められた値が要求の頭へ載る経路ができる。**投げずに `false` を返す**（本 module の他の口と
+ * 同じ規律。`getCell` は決して投げない）。
+ */
+function isDecimalGeneration(value: string): boolean {
+  return /^[0-9]+$/.test(value);
 }
 
 /** 記憶が保つ 1 つの窓。 */
@@ -725,9 +760,9 @@ export function createWindowCache(options: WindowCacheOptions): WindowCache {
   const onArrival = options.onArrival;
   const initialRowCount = Math.max(0, Math.floor(options.rowCount));
 
-  /** いまの世代（**一致を見るだけである**）。整数でない指定は 0 として扱う。 */
-  const initialGeneration = options.generation ?? 0;
-  let generation = Number.isInteger(initialGeneration) && initialGeneration >= 0 ? initialGeneration : 0;
+  /** いまの世代（**一致を見るだけである**）。10 進の文字列でない指定は `"0"` として扱う。 */
+  const initialGeneration = options.generation ?? "0";
+  let generation = isDecimalGeneration(initialGeneration) ? initialGeneration : "0";
   /** 記憶（**配列である** — 上限が小さく、引きは毎フレーム走るため、反復の確保を作らない）。 */
   let windows: StoredWindow[] = [];
   /** 進行中の要求の区間の鍵。 */
@@ -789,6 +824,8 @@ export function createWindowCache(options: WindowCacheOptions): WindowCache {
     try {
       response = transport(
         encodeWindowRequest({
+          // **10 進の文字列から u64 へ戻す唯一の場所**である（`setBigUint64` が欄の幅を
+          // 決める）。丸めは起こらない — `BigInt` は桁の文字列をそのまま読む。
           generation: BigInt(generation),
           start: BigInt(span.start),
           count: BigInt(span.count),
@@ -1063,8 +1100,8 @@ export function createWindowCache(options: WindowCacheOptions): WindowCache {
     }
   };
 
-  const setGeneration = (value: number): void => {
-    if (!Number.isInteger(value) || value === generation) {
+  const setGeneration = (value: string): void => {
+    if (!isDecimalGeneration(value) || value === generation) {
       return;
     }
     generation = value;
@@ -1100,7 +1137,7 @@ export function createWindowCache(options: WindowCacheOptions): WindowCache {
     setGeneration,
     clear,
     dispose,
-    get generation(): number {
+    get generation(): string {
       return generation;
     },
     get windowCount(): number {

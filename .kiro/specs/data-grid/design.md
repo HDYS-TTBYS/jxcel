@@ -680,10 +680,10 @@ impl<'a> UndoRedo<'a> {
 
 | コマンド | 要求の中身 | 応答の中身 |
 |---|---|---|
-| `grid_open_sheet` | `sheet`（**シートの識別子の文字列**。`DocumentSheet.id` をそのまま渡す） | `context` と `GridSheetSummary` |
-| `grid_set_view` | `view: GridViewSpec`（並べ替え・絞り込み・展開の**完全な記述**） | `context`、**導出後の列の構成**（`ColumnDescriptor` の並び。左から右への表示順）、可視行数、隠された行数、違反の総数 |
-| `grid_apply_edit` | `command: GridEditCommand` | `context` と `GridEditOutcome`（`null` は取り得ない） |
-| `grid_history` | `direction`（`undo` / `redo` の閉じた列挙） | `context` と `GridEditOutcome \| null`（`null` は「進める履歴が無い」） |
+| `grid_open_sheet` | `sheet`（**シートの識別子の文字列**。`DocumentSheet.id` をそのまま渡す） | `context`、**この応答を組み立てた時点の世代**（10 進の文字列。10.1）、`GridSheetSummary` |
+| `grid_set_view` | `view: GridViewSpec`（並べ替え・絞り込み・展開の**完全な記述**） | `context`、**この応答を組み立てた時点の世代**（10.1。1 つの呼び出しの内側で複数回進みうる）、**導出後の列の構成**（`ColumnDescriptor` の並び。左から右への表示順）、可視行数、隠された行数、違反の総数 |
+| `grid_apply_edit` | `command: GridEditCommand` | `context`、**この応答を組み立てた時点の世代**（10.1）、`GridEditOutcome`（`null` は取り得ない） |
+| `grid_history` | `direction`（`undo` / `redo` の閉じた列挙） | `context`、**この応答を組み立てた時点の世代**（10.1）、`GridEditOutcome \| null`（`null` は「進める履歴が無い」） |
 | `grid_find_violation` | `from`（可視行の序数）と `direction`（`forward` / `backward`） | `context` と、見つかった違反（位置と理由）または `null` |
 
 6.2 が決めた点と、その根拠:
@@ -702,6 +702,14 @@ impl<'a> UndoRedo<'a> {
 - **`GridViolationResponse` 以外は空の結果を持たない。** 「これ以上違反が無い」だけが
   `null` であり、`grid_open_sheet` の 2 つの空の状態（列が無い・行が無い）は
   `GridSheetSummary` の形が表す（要件 1.5、1.6）
+- **3 つの応答が世代を運ぶ**（`generation`。10.1 が足した）。**1 つのコマンドの内側で世代は
+  複数回進む** — `grid_set_view` は要求に現れない展開の折りたたみと要求された展開の適用で
+  それぞれ進める。したがって「呼び出し側が成功ごとに +1 で数える」形は**原理的に一致しない**
+  （数え上げを信じた画面は、展開を 1 件適用した時点で恒久的に遅れ、以後の窓の要求が空の窓を
+  受け取る）。源は `GridSession::generation()` ただ 1 つであり、適応層は**応答を組み立てる
+  直前に写す**（呼び出しの途中の値を控えない）。**10 進の文字列で運ぶ**のは境界の規約
+  （文字列と 32 ビット以下の整数）であり、u64 を数値として出すと生成物の TS の数（2^53 まで）
+  で上位のバイトが消える — 詳しくは 7.3 の「世代を進めるのは境界である」と 8.5 の表
 - **`grid_set_view` の応答が導出後の列の構成を運ぶ**（`GridViewResponse.columns`。8.5 の
   申し送り 2 の修復。下の「申し送り 2 の修復」節）。**構成を導出するのは `grid_set_view`
   そのもの**（`GridSession::set_view` と展開の適用）であるため、その結果を運ぶのは同じ
@@ -1170,13 +1178,27 @@ export interface GridRendererPort {
 予算に対して 1 往復で収まる、④ 窓の数は上限で頭打ちなので要件 11.6 を満たす。
 **7.6 / 9.x がフレーム時間の標本を入れたら、この 2 つの数をそこから決め直すこと。**
 
-**世代を進めるのは画面である**（7.3 が確定させた申し送り）: 要求の頭は世代を運ぶが、
-**境界の型は世代を運ばない**（6.1 の `GridOpenResponse` / `GridViewResponse` /
-`GridEditResponse` に世代の欄が無い）。したがって画面が `GridSession` と同じ規則で数える —
-開いた直後が 0、`grid_set_view` の成功ごとに +1、`grid_apply_edit` / `grid_history` は
-**`outcome.affected` が空でないときだけ** +1（`crates/data-grid/src/api.rs` の
-`advance_generation` の呼び出し条件が唯一の源）。**食い違うと窓はつねに空になる**
-（Rust 側は一致しない世代へ空の窓を返すため、画面は読み込み中のまま再試行を続ける）。
+**世代を進めるのは境界である**（10.1 が 7.3 の申し送りを閉じた）: 要求の頭は世代を運び、
+**境界の型も世代を運ぶ**（6.1 の `GridOpenResponse` / `GridViewResponse` / `GridEditResponse` の
+`generation`。**10 進の文字列**である — u64 を数値として境界へ出すと、生成物のフロントエンド
+（TS の数は 2^53 まで）で上位のバイトが消える。`document-format` の窓の世代と同じ規約）。源は
+`GridSession::generation()` ただ 1 つであり、適応層が**応答を組み立てる直前に写す**。**画面は
+それを採用するだけである** — 数え直す規則を持たない。
+
+**かつては画面が数えていた**（7.3 が申し送りとして残し、8.5 が「`grid_set_view` の成功ごとに +1」
+として実装した）。その規則は**1 つのコマンドの内側で世代が複数回進む**ことを表せない:
+`answer_set_view` は要求に現れない展開の折りたたみ（手順 1）と要求された展開の適用（手順 3）で
+それぞれ進めるので、**展開を 1 件適用した時点で画面の世代は恒久的に遅れる**。以後の窓の要求は
+一致しない世代を名乗り、Rust 側は空の窓を返す（`WindowCodec::is_stale`）— セルは永久に
+読み込み中のままになる。10.1 がこれを閉じた（層をまたぐ検査は `src-tauri/src/commands/grid.rs` の
+`the_generation_travels_with_the_response` と `the_window_after_applying_an_expansion_is_not_empty`。
+画面の側は `GridScreen.test.ts` と `windowCache.test.ts`）。
+
+**フロントエンドは世代を 10 進の文字列のまま持ち回る**: 状態（`ready.generation`）も窓の記憶
+（`WindowCache` の `generation`）も文字列であり、要求の頭へ載せるときだけ `BigInt(...)` で u64 へ
+戻す（`setBigUint64`）。記憶は応答の窓が名乗る世代を**文字列として**比べる — 数へ落とす経路を
+作らない（2^53 を越える世代でも丸めない）。
+
 記憶は世代が変わっても**影響を受けていない窓を捨てない**（捨てるのは `invalidate` の
 通知が名指す行の窓だけである）— 世代は「応答を受け入れるか」の判断にだけ使う。
 
@@ -1276,7 +1298,7 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 | **要件 1.6（列 0 本）の判定** | **`grid_open_sheet` を呼ばず**、`document_state` の `DocumentSheet.columns === 0` で決める | 列 0 本の計画を `GridSession::open` は `SchemaUnusable` として拒む。したがって 1.6 は**開く呼び出しの応答では届かない** — 画面が「表を描かない」をセッション無しで示す（起動観測で実測: 記録に `grid_open_sheet` が現れない）|
 | **要件 1.5（列はあるが行 0 件）の判定** | `grid_open_sheet` の応答の `GridSheetSummary.row_count === 0`（かつ `columns` が非空） | 6.1 の `GridSheetSummary` の doc と同じ規則（**列の数が 2 つを区別する**）。行数だけでは区別できない |
 | **可視行の順序の導出** | 開いた直後に **`grid_set_view` に空の指定を 1 度だけ**渡す | `GridSession` は可視行の順序をこの呼び出しで導出する（`set_view` が `recompute_order` を行う）。**呼ばないと窓はつねに行 0 件（頭だけの 33 バイト）で返り、表は読み込み中のまま**になる（起動観測で実測: 呼ぶ前 33 バイト → 呼んだ後 4773 バイト）。操作ではないので 8.8（並べ替え・絞り込み）と重ならない |
-| 世代の整合 | 画面が `GridSession` と同じ規則で数える（開いた直後 0、`grid_set_view` の成功ごとに +1） | 境界の型は世代を運ばない（7.3 の申し送り）。開いた直後の 1 回の後は 1 である |
+| 世代の整合 | **境界の応答が運ぶ値をそのまま入れる**（`grid_open_sheet` の応答は 0 を運ぶが、**状態が持つのはその直後の `grid_set_view` の応答が運ぶ値**である — 開いた直後に必ず 1 度送るので 0 は状態へ入る前に置き換わる。10.1） | 1 つの `grid_set_view` の内側で世代は複数回進む（折りたたみ・順序の導出・展開の適用）ため、**画面が数える規則は存在しない** — かつての「成功ごとに +1」は展開を 1 件適用した時点で遅れる（10.1）。境界は**10 進の文字列**で運ぶ（u64 を数値で出さない） |
 | 記憶へ渡す行数 | `grid_set_view` の応答の**可視行数**（シートの行数ではない） | 窓の区間は可視行の序数である（`RowSpan` の doc）。空の指定では両者は一致するが、絞り込みが効けば食い違う |
 | 取り込み口 | `./gridClient` の口（`readDocumentState` / `openSheet` / `setView` / `readWindow`。**8.3 が `applyEdit` を足して 5 つ**）| 画面は `invoke` もコマンド名も知らない。**要求は `request` という名前の引数で包む**（Tauri が縛る鍵は引数の名前である。包まないと**コマンドへ届く前に復号が失敗**し、封筒の失敗ではなく `invoke` の拒否として現れる — 起動観測で実測した誤りであり、`gridClient.test.ts` が固定する）|
 | 移植口の 5 つの操作 | **結線しない**（8.3〜8.9）。届いた通知は**画面内の告知 1 行**へ流す（内容は消さない。再試行も出さない） | 黙って何もしない実装にしない（`onCopy` が空文字を返せばクリップボードが空になり、`onPaste` が黙って捨てれば貼り付けが消える）。**選択の 3 つは操作ではない**（`selection` / `onSelectionChange` / `onVisibleSpanChange`）— 8.1 は選択を使わないが、**8.2 が結線した**（下の「8.2 が広げた面」）。**編集の起動（`onActivateEditor`）は 8.3 が結線した**（下の「8.3 が確定させたもの」）。残る 4 つは 8.4〜8.9 である |
@@ -1409,7 +1431,7 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 | **確定の文字の運び手**（7.4 の申し送り 4。**設計の改訂**） | `CellEditorRegistration` に `carrier: EditCarrier`（`"text"` = `SetCells` / `"structure"` = `SetNested`）を**必須**で足し、`CellEditorRegistry.resolveCarrier` が答える。`editors/index.ts` が `Object` / `Array` を `"structure"` と宣言し、`./cellEdit` が運び手で命令を選ぶ。**画面は列の札で経路を選ばない**（`editors/index.ts` の `columnEditor` が成分と運び手を 1 度に引く） | 入れ子の面が組み立てる構造表現を `SetCells` に載せると、`Text` → `object` / `array` の変換の行が無いため**必ず違反になる**。画面が型で分岐すると要件 10.3 と衝突するので、**登録が宣言する**形にした（design.md の Revalidation Triggers「確定の文字の運び手を登録に足す設計の改訂」の決着。`custom-types` は自分の登録で宣言する） |
 | **展開の状態の置き場**（要件 5.3） | **`ready` の腕が `view: GridViewSpec` を持つ**（並べ替え・絞り込み・展開の完全な記述）。押された 1 件は `./nestedInspector` の `withExpansion` が**いまの指定へ足す** | ドメインは**要求に現れない展開を折りたたみへ戻す**（`answer_set_view` の規約）ので、押された 1 件だけを送ると前に展開した列が黙って折りたたまれる。走査（現在位置の移動・窓の取り直し）は `view` に触れないので、要件 5.3 はこの構造で満たされる |
 | **列ごとの操作の源**（要件 5.1、5.2、5.4、5.6） | `./nestedInspector` の `nestedColumnControls` が記述の印（`expandability` / `element_count`）**だけ**から導く。`available` は展開（内側の位置では段数を 1 つ深くする）、`capped` は**「詳細表示へ」**、`element_count` は要素数の宣言 | **型の札（`kind`）を見ない** — ユーザー定義型の列も同じ扱いになる（要件 10.3）。移植口に見出しの操作を受け取る口が無いので、表の上の 1 行に並べる |
-| **世代の数え方**（8.5 が足した是正） | `ready` の腕が `generation` を持ち、`grid_set_view` の成功（つねに +1）と適用（`affected` が空でないときだけ +1。`./cellEdit` の `generationAfterEdit`）で進める。`GridSurface` が**組み直さずに**記憶へ下ろす（`setGeneration`） | 進まないと、以後の窓の要求が古い世代を名乗り、Rust 側が `WindowCodec::is_stale` で**空の窓を返す** — 取り直した窓は永久に読み込み中のままになる。**8.3 の経路（適用）でも同じずれが起きていた**（単体テストの偽の移送は世代を強制しないので見えない。実起動の観測は 8.3 も 8.5 も未実施である） |
+| **世代**（8.5 が足した是正を 10.1 が差し替えた） | `ready` の腕が `generation`（**10 進の文字列**）を持ち、**境界の応答が運ぶ値をそのまま入れる**（`grid_set_view`・適用・履歴・行の操作・貼り付け・開くのすべて）。`GridSurface` が**組み直さずに**記憶へ下ろす（`setGeneration`） | 入れないと、以後の窓の要求が古い世代を名乗り、Rust 側が `WindowCodec::is_stale` で**空の窓を返す** — 取り直した窓は永久に読み込み中のままになる。**8.5 の数え上げ（`grid_set_view` の成功ごとに +1 と `./cellEdit` の `generationAfterEdit`）は誤りだった**: 展開の適用は 1 つのコマンドの内側で 2 回進むので、画面は恒久的に遅れる（10.1 が閉じた。7.3 の「世代を進めるのは境界である」）。**単体テストの偽の移送は世代を強制しないので見えない** — 層をまたぐ検査（`src-tauri`）が要った |
 | **構成が変わったときの詳細表示**（申し送り 2 の修復が露わにした論点） | **開いたままにする。**位置（`CellDetail.position`）は**表示の位置**であり、構成の変化で指す列が変わりうる。閉じる規則は足さない | 8.5 の時点では構成が変わらなかったため、この帰結は現れなかった。展開のあとの詳細表示は**そのとき表示の位置にある列**（画面は新しい構成から名前と面を引く）を詳しく見せるので、**描かれている値と食い違わない**。閉じる側に倒すと、利用者が開いた面を構成の変化だけで奪うことになる（閉じるのは利用者の操作である） |
 | 詳細表示の中の編集の規律（要件 5.7） | **`gridScreenDetailEditSettled` が `gridScreenEditSettled` をそのまま呼ぶ**（報告・告知・世代・取消の扱いを 2 度書かない）。違いは、面を初期状態へ戻す鍵（`CellDetail.edit`）を進めることだけである | 確定では報告が出て面が戻り、取消では何も送られず面が戻り、失敗では**面が開いたまま**である（セルの編集と同じ規律） |
 

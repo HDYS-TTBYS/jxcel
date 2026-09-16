@@ -31,6 +31,8 @@ const OPEN_RESPONSE: { status: "ok"; data: GridOpenResponse } = {
   status: "ok",
   data: {
     context: { window: "main" },
+    // 世代（タスク 10.1。開いた直後は `Generation::FIRST`）。
+    generation: "0",
     sheet: {
       columns: [
         { column: 0, path: [], name: "名前", kind: "Text", element_count: null, expandability: "leaf" },

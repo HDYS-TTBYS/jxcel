@@ -338,6 +338,87 @@
   - _Requirements: 11.1, 11.2, 11.3, 12.2, 12.3_
   - _Depends: 7.6_
 
+- [ ] 10. 修復: 機能レベルの検証（`/kiro-validate-impl data-grid`、2026-09-17）が確定した欠陥を閉じる
+
+  **この群は 9.1〜9.3 より先に実施する。** 9.2 の台本は入れ子の展開・貼り付け・取り消しの後の現在位置を筋書きに含むため、10.1・10.5・10.8 が入るまで恒久の観測を書けない（先に書くと、観測が既知の欠陥を踏む）。指摘の出所は検証レポートの REMEDIATION 1〜8 である。
+
+- [x] 10.1 世代を境界が運び、画面は数えない
+  - `GridOpenResponse` / `GridViewResponse` / `GridEditResponse` に、**その応答を組み立てた時点の世代**を足す。境界の規約（文字列と 32 ビット以下の整数）に従い、**10 進の文字列**で運ぶ（u64 を数値として境界へ出さない — `document-format` の窓と同じ規約）
+  - 適応層が `GridSession::generation()` を写す。**1 つのコマンドの内側で世代が何回進んでも、応答の値が唯一の源である**（`answer_set_view` は展開の適用で複数回進む）
+  - 画面は応答の世代を**採用する**。`GENERATION_AFTER_OPEN` と `grid_set_view の成功ごとに +1`、`generationAfterEdit` の**数え上げを消す**。世代は**10 進の文字列のまま**持ち回り（比較は文字列の一致）、要求の頭へ載せるときだけ `BigInt` で u64 に戻して `setBigUint64` へ渡す（丸めの経路を作らない）
+  - **検査（層をまたぐ）**: 展開つきの `grid_set_view` の直後に、画面が持つ世代 = セッションの世代。**変異**: 適応層が世代を写さない（定数にする）と落ちる
+  - **検査（端から端）**: 入れ子の展開を 1 件適用したあとの窓の要求が、**空の窓を受け取らない**（`src-tauri` の実起動に準ずる検査。8.5 の欠陥の最小の再現）
+  - design.md「世代を進めるのは画面である」の節と 8.5 の「世代の数え方」の表を差し替える（設計が正典。画面が数える前提の記述を残さない）
+  - _Requirements: 1.1, 5.1, 5.3_
+  - _Boundary: crates/app-shell/src/ipc/grid.rs, src/ipc/bindings.ts, src-tauri/src/commands/grid.rs, src/features/grid/, crates/data-grid/src/api.rs, .kiro/specs/data-grid/design.md_
+
+- [ ] 10.2 履歴をドキュメント単位へ移す
+  - `UndoStack` の所有者を `GridSession` から降ろし、**同じウィンドウでシートを切り替えても履歴が失われない**ようにする（要件 9.5。いまは `answer_open` がセッションごと作り直すため消える）
+  - `GridSession` は履歴を所有せず、`apply` / `undo` / `redo` が**可変参照で受け取る**（`set_view`・`encode_window` は履歴に触れない）
+  - **文書が差し替わったときは履歴を捨てる**（新規・開く・破棄）。判定は既存の経路（保持しているシートが文書に無い）に揃え、**その状態で古い履歴を決して適用しない**
+  - **検査**: 2 つのシートを持つ文書で、シート A を編集 → シート B を開く → シート A を開き直す → 取り消しが A の編集を戻す（`src-tauri` の検査）
+  - **検査**: 文書を差し替えたあと、履歴が空であり、古い命令が新しい文書へ適用されない
+  - design.md の「`UndoStack`」「履歴はドキュメント単位」の記述を差し替え、`formula-engine` / `macro-runtime` の再検証トリガとして記録する
+  - _Requirements: 9.5, 9.6, 9.7_
+  - _Boundary: crates/data-grid/src/api.rs, crates/data-grid/src/history/mod.rs, crates/data-grid/tests/, src-tauri/src/commands/grid.rs, .kiro/specs/data-grid/design.md_
+
+- [ ] 10.3 境界に列の材料（選択肢・参照先・入れ子の宣言）を足す
+  - `ColumnDescriptor` に、その列の**宣言**から導ける材料を足す: ①選択肢を持つ型の値と名の一覧（`Enum`）②入れ子の型の内側のフィールドの宣言（名・型の札・内側の位置。**展開していない列でも読めること**）③参照の型の参照先のシートの名
+  - **ユーザー定義型の識別子**（`Custom` の列がどの型かを登録簿へ引く鍵）と、**値なしを許すか**（`nullable`）も、宣言から写して境界が運ぶ。**いまは `nullable` をつねに真として渡しており、値なしを許さない列でも「値なしへ戻す」道が出ている**（design.md「7.4 が定めた `ColumnConstraints`」の申し送り 3・5）
+  - 参照先の行を**頁ごとに読むコマンドを 1 本足す**（要求: 文書の列の添字・検索の文字・開始位置・件数。応答: 識別子と表示の名の一覧・総数）。**6 本のコマンドと同じ 3 点セットを揃える**（名前の定数を単一の源へ、登録の根へ 1 行、**専用の権限ブロックを定義して与える集合へ所属させる**）
+  - 入れ子の宣言は**深さの上限**で切る（5.4 と同じ規律。再帰する宣言を無限に広げない）
+  - 画面は `ColumnConstraints` の `choices` / `reference` / `members` を**境界の材料から組み立てる**（独自に作らない）。`editors/enum.tsx` / `editors/ref.tsx` / `editors/nested.tsx` は材料が渡る経路で一覧・位置ごとの面になる
+  - **検査**: 選択肢を持つ列の面が一覧になり、選ぶとその値が確定する
+  - **検査**: 入れ子の列（折りたたみ中）の詳細表示が**内側のフィールドを名と型で並べる**（`declaredInnerPositions` が空でない）
+  - **検査**: 参照の列の面が参照先の行を一覧し、選ぶとその行の識別子が確定する。**参照先が 1 万行でも一度に全部を読まない**（応答は頁の大きさで上限が付く）
+  - _Requirements: 3.1, 3.2, 3.8, 5.4, 5.5, 5.7, 10.3_
+  - _Boundary: crates/app-shell/src/ipc/grid.rs, crates/app-shell/src/ipc/command_names.rs, src/ipc/bindings.ts, src-tauri/src/commands/grid.rs, src-tauri/permissions/app.toml, crates/data-grid/src/view/, crates/data-grid/src/api.rs, src/features/grid/, .kiro/specs/data-grid/design.md_
+  - _Depends: 6.1, 6.2, 6.3_
+
+- [ ] 10.4 行の対象を識別子と可視の序数の双方で指せるようにする
+  - 行の対象（削除・複製）を、**識別子の一覧**と**可視の序数の区間**のいずれでも指定できるようにする。序数はドメインが `RowOrder` で解決する（画面が写像を持たない）
+  - 位置を指定した追加の位置を、**文書の位置**ではなく**対象の行の識別子に対する前後**または**可視の序数**で指定できるようにする（並べ替え・絞り込みが効いていても送れる形）
+  - 画面は並べ替え・絞り込み中でも位置指定の追加と範囲削除を送る（「送らずに理由を提示する」経路を消す）。**推測した位置へ挿す経路は作らない**
+  - **検査**: 並べ替えた表示で 4 番目の位置へ追加すると、その表示位置の行の隣に入る（文書の位置ではない）
+  - **検査**: 10 万行で列の全体を選んで削除しても、窓の記憶が保つ範囲に依らず**選択されたすべての行が消える**（要件 6.2）。確認に出る行数と実際に消える行数が一致する
+  - _Requirements: 6.1, 6.2, 6.3, 8.6_
+  - _Boundary: crates/app-shell/src/ipc/grid.rs, src/ipc/bindings.ts, src-tauri/src/commands/grid.rs, crates/data-grid/src/edit/, crates/data-grid/tests/, src/features/grid/rowOps.ts, .kiro/specs/data-grid/design.md_
+
+- [ ] 10.5 適用と履歴の応答が、影響を受けた行の表示の序数を運ぶ
+  - `GridEditOutcome` に、**整えたあとの表示の序数**（影響を受けた行の並び）を足す。適応層が `RowOrder` から写す（画面は写像を持たない）
+  - 画面はそれを使って現在位置を移す。**`history.ts` の `firstResolvableOrdinal` を消す**（窓が保つかどうかに依存しない）
+  - **検査**: 行の追加のやり直しで現在位置が対象の行へ移り、追随が走る（8.9 のレビューが実測した最小の再現）
+  - **検査**: 応答が運ぶ序数が、その時点の表示の序数と一致し、可視の範囲の外を名乗らない
+  - _Requirements: 9.2, 9.3, 9.8_
+  - _Boundary: crates/app-shell/src/ipc/grid.rs, src/ipc/bindings.ts, src-tauri/src/commands/grid.rs, crates/data-grid/src/edit/, src/features/grid/history.ts, src/features/grid/GridScreen.tsx, .kiro/specs/data-grid/design.md_
+
+- [ ] 10.6 指定したセルの違反の理由を返す
+  - `GridViolationRequest` に**文書の列の添字**を足し、`grid_find_violation` が**その位置の違反**を返す（指定が無いときは今の「行の最小の違反列」）
+  - 索引に「行と列を指定して引く」口を足す（入れ子の内側の位置を保つ）
+  - 画面は要求したセルの列を送る（`ColumnSpace` を通した文書の列）。**列を指定できないときは推測せず、位置を名乗る現在の提示に留める**
+  - **検査**: 同じ行の 2 列が違反しているとき、右の列を指定すると**右の理由**が返る
+  - **検査**: 違反していないセルを指定すると「違反が無い」が返る（別のセルの理由を名乗らない）
+  - _Requirements: 4.1, 4.2, 4.5_
+  - _Boundary: crates/app-shell/src/ipc/grid.rs, src/ipc/bindings.ts, src-tauri/src/commands/grid.rs, crates/data-grid/src/view/violations.rs, crates/data-grid/src/api.rs, src/features/grid/, .kiro/specs/data-grid/design.md_
+
+- [ ] 10.7 文書の差し替えと破棄を画面が追随する（要件 1.7 のうち本機能が閉じられる部分）
+  - 画面が `DOCUMENT_SESSION_CHANGED_EVENT` を購読し、`document_state` を取り直す。文書が差し替わった／無くなったときは、保持しているセッションと窓の記憶を捨て、提示を「文書なし」「シートなし」へ移す（**古い表を残さない**）
+  - **内容だけが本機能以外の経路で変わった場合の検出は本機能では閉じられない**（`document_state` が版を運ばないため）。**上流（`document-session`。`Slot` は既に版を持っている）へ差し戻し、design.md の Revalidation Triggers と Implementation Notes に記録する。**画面側の推測（定期的な全件再読など）で代用しない（要件 11.6 に反する）
+  - **検査**: 文書を差し替えたあと、画面が古い行を描かずに新しい状態へ移る
+  - **検査**: 文書を破棄したあと、表が残らず「文書なし」の提示になる
+  - _Requirements: 1.7_
+  - _Boundary: src/features/grid/, src-tauri/src/commands/grid.rs, .kiro/specs/data-grid/design.md_
+
+- [ ] 10.8 貼り付けのメニュー項目とクリップボードの読み口（**利用者の決定: 公式プラグインを追加する**）
+  - `tauri-plugin-clipboard-manager` を `src-tauri` に追加し、**読み取りは Rust 側だけで使う**（フロントエンドへ新しい Tauri の取り込みを足さない。`design.md`「生成物経由でのみ境界を越える」を保つ）。`cargo audit` と `scripts/check-forbidden-plugins.sh` が通ることを確かめ、依存の理由を `src-tauri/Cargo.toml` の依存方針へ書く
+  - メニューに「貼り付け」を 1 件登録する。**アクセラレータは付けない**（付けると DOM の `paste` から打鍵を奪い、動いている打鍵の経路が壊れる）。起動は既存のイベントの形（生成物の定数 + 荷）で画面へ届き、**既存の貼り付けの入口**へ流す（入口を 2 つに割らない）
+  - 複製の書き出しは既存の経路（`RendererHandle.copySelection`）のままにする。**システムクリップボードとの往復**（複製 → 貼り付けで同じ内容へ戻る）は 9.2 の観測の筋書きで確かめる
+  - `scripts/check-menu-shortcut.sh` の項目数と一覧を同じ作業で更新する
+  - **検査**: メニューの「貼り付け」から、クリップボードの文字が選択範囲へ適用される（読み口は検査で差し替える）
+  - **検査**: `Ctrl+V` の項目を登録していないこと（打鍵の経路を奪っていない）
+  - _Requirements: 7.2, 7.3, 7.8_
+  - _Boundary: src-tauri/Cargo.toml, src-tauri/src/, src-tauri/permissions/app.toml, src-tauri/capabilities/, crates/app-shell/src/ipc/, src/ipc/bindings.ts, src/features/grid/, scripts/check-menu-shortcut.sh, .kiro/specs/data-grid/design.md_
+
 ## Implementation Notes
 
 - **環境（2026-09-14 に判明）**: このマシンの `~/.local/bin/pkg-config` は `/tmp/tsroot/root` を指す古いシムであり、`/tmp` の掃除でそれが消えたため、**GTK の sys クレート（`src-tauri` 経由）を含むビルドが失敗する**。動く sysroot はリポジトリ直下の `.devsys/root` である。ワークスペース全体を走らせるときは次を前置する（`cargo test -p data-grid` は GTK を要さないため不要なことが多い）:

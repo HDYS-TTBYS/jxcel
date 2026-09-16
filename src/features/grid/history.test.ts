@@ -66,9 +66,14 @@ function outcomeOf(overrides: Partial<GridEditOutcome>): GridEditOutcome {
   };
 }
 
-/** 成功の封筒。 */
-function ok(data: GridEditResponse): IpcResult<GridEditResponse, IpcClientError> {
-  return { status: "ok", data };
+/**
+ * 成功の封筒（**世代は応答が運ぶ**。タスク 10.1。既定は「1 つ進んだ後」に当たる値である）。
+ */
+function ok(
+  outcome: GridEditOutcome | null,
+  generation = "2",
+): IpcResult<GridEditResponse, IpcClientError> {
+  return { status: "ok", data: { context: CONTEXT, outcome, generation } };
 }
 
 /** 失敗の封筒。 */
@@ -158,7 +163,7 @@ function droppingCache(options: {
 
 describe("履歴を 1 つ進める（要件 9.2、9.3）", () => {
   it("向きをそのまま境界へ渡す（取り消しとやり直しは同じ 1 つの口を通る）", async () => {
-    const client = fakeClient(() => ok({ context: CONTEXT, outcome: outcomeOf({}) }));
+    const client = fakeClient(() => ok(outcomeOf({})));
     const memory = droppingCache({ held: new Map() });
 
     expect((await applyHistory({ client, cache: memory.cache, direction: "undo" })).status).toBe(
@@ -175,7 +180,7 @@ describe("履歴を 1 つ進める（要件 9.2、9.3）", () => {
   it("適用のあとは、応答の行数で記憶を作り直す（要件 1.7）", async () => {
     // **行数が変わる取り消し**（行の追加の取り消し ＝ 4 行へ戻る）。
     const client = fakeClient(() =>
-      ok({ context: CONTEXT, outcome: outcomeOf({ affected: [RESTORED_ROW], row_count: 4 }) }),
+      ok(outcomeOf({ affected: [RESTORED_ROW], row_count: 4 })),
     );
     const memory = droppingCache({ held: new Map([[RESTORED_ROW, 6]]) });
 
@@ -188,7 +193,7 @@ describe("履歴を 1 つ進める（要件 9.2、9.3）", () => {
   });
 
   it("影響を受けた行が無ければ記憶を触らない（何も変わっていない）", async () => {
-    const client = fakeClient(() => ok({ context: CONTEXT, outcome: outcomeOf({}) }));
+    const client = fakeClient(() => ok(outcomeOf({})));
     const memory = droppingCache({ held: new Map([[EDITED_ROW, 2]]) });
 
     await applyHistory({ client, cache: memory.cache, direction: "undo" });
@@ -197,7 +202,7 @@ describe("履歴を 1 つ進める（要件 9.2、9.3）", () => {
   });
 
   it("進める履歴が無いことは失敗ではない（何も動かさない）", async () => {
-    const client = fakeClient(() => ok({ context: CONTEXT, outcome: null }));
+    const client = fakeClient(() => ok(null));
     const memory = droppingCache({ held: new Map([[EDITED_ROW, 2]]) });
 
     const settlement = await applyHistory({ client, cache: memory.cache, direction: "undo" });
@@ -226,7 +231,7 @@ describe("履歴を 1 つ進める（要件 9.2、9.3）", () => {
 describe("対象となった範囲へ現在位置を移す（要件 9.8）", () => {
   it("影響を受けた行の表示の序数を、**捨てる前に**引く", async () => {
     const client = fakeClient(() =>
-      ok({ context: CONTEXT, outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 12 }) }),
+      ok(outcomeOf({ affected: [EDITED_ROW], row_count: 12 })),
     );
     const memory = droppingCache({ held: new Map([[EDITED_ROW, 7]]) });
 
@@ -237,13 +242,15 @@ describe("対象となった範囲へ現在位置を移す（要件 9.8）", () 
       status: "applied",
       outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 12 }),
       affectedRow: 7,
+      // **世代も応答が運ぶ**（タスク 10.1。画面は数え直さない）。
+      generation: "2",
     });
     expect(memory.cleared).toEqual([12]);
   });
 
   it("見つかった最初の行を採る（影響を受けた並びの順である）", async () => {
     const client = fakeClient(() =>
-      ok({ context: CONTEXT, outcome: outcomeOf({ affected: [RESTORED_ROW, EDITED_ROW] }) }),
+      ok(outcomeOf({ affected: [RESTORED_ROW, EDITED_ROW] })),
     );
     // 2 つ目だけが記憶にある（1 つ目は削除された行である）。
     const memory = droppingCache({ held: new Map([[EDITED_ROW, 3]]) });
@@ -257,7 +264,7 @@ describe("対象となった範囲へ現在位置を移す（要件 9.8）", () 
     // 削除の取り消しがこれに当たる: 戻ってくる行の識別子は、削除の時点の `clear` で記憶から
     // 消えている（**境界は行の識別子しか運ばない**ので、序数を求める手段が無い）。
     const client = fakeClient(() =>
-      ok({ context: CONTEXT, outcome: outcomeOf({ affected: [RESTORED_ROW], row_count: 6 }) }),
+      ok(outcomeOf({ affected: [RESTORED_ROW], row_count: 6 })),
     );
     const memory = droppingCache({ held: new Map([[EDITED_ROW, 3]]) });
 
@@ -361,7 +368,7 @@ describe("メニューの活性化を 1 つの入口へ渡す（要件 9.9）", 
 describe("解決した序数は表示の位置である", () => {
   it("序数（可視行の添字）をそのまま返す（文書の位置ではない）", async () => {
     const client = fakeClient(() =>
-      ok({ context: CONTEXT, outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 20 }) }),
+      ok(outcomeOf({ affected: [EDITED_ROW], row_count: 20 })),
     );
     const memory = droppingCache({ held: new Map([[EDITED_ROW, 0]]) });
 

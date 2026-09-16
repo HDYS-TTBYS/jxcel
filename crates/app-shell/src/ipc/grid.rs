@@ -602,10 +602,22 @@ pub struct GridOpenRequest {
 /// 区別する**（[`GridSheetSummary`] の doc を参照）。
 ///
 /// **表示の指定はここに無い。** 絞り込み・並べ替え・展開は [`GridViewResponse`] が運ぶ。
+///
+/// **世代（`generation`）は「この応答を組み立てた時点の世代」である**（タスク 10.1）。源は
+/// `GridSession::generation()` ただ 1 つであり、画面はこれを**採用するだけ**である（数え直さない）。
+/// 境界の規約（文字列と 32 ビット以下の整数）に従い、**10 進の文字列**で運ぶ — u64 を数値として
+/// 出すと、生成物のフロントエンド（TS の数は 2^53 まで）で上位のバイトが消える
+/// （`document-format` の窓の世代と同じ規約）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct GridOpenResponse {
     /// 呼び出し元ウィンドウの文脈。
     pub context: WindowContext,
+    /// **この応答を組み立てた時点の世代**（10 進の文字列。タスク 10.1）。
+    ///
+    /// 開いた直後は [`Generation::FIRST`] の 10 進表現（`"0"`）である。以後の窓の要求は
+    /// **つねにこの値**（または [`GridViewResponse`] / [`GridEditResponse`] が運ぶより新しい値）
+    /// を名乗らなければならない — 一致しない世代には `transport` が空の窓を返す。
+    pub generation: String,
     /// 開いたシートの要約（列の構成と行数）。
     pub sheet: GridSheetSummary,
 }
@@ -652,6 +664,15 @@ pub struct GridViewRequest {
 pub struct GridViewResponse {
     /// 呼び出し元ウィンドウの文脈。
     pub context: WindowContext,
+    /// **この応答を組み立てた時点の世代**（10 進の文字列。タスク 10.1）。
+    ///
+    /// **画面はこれを採用し、数え直さない。** 本コマンドは 1 つの呼び出しの内側で世代を
+    /// **複数回**進める — 要求に現れない展開の折りたたみ（適応層の手順 1）と、要求された展開の
+    /// 適用（同 3）がそれぞれ 1 回ずつ進め、順序の導出（同 2。`set_view`）も進める。したがって
+    /// 「成功ごとに +1」という数え方ではこの値に追いつけない。ずれると、以後の窓の要求が空の窓を
+    /// 受け取り（`WindowCodec::is_stale`）、取り直したセルは**永久に読み込み中**のままになる
+    /// （design.md「世代を進めるのは境界である」）。
+    pub generation: String,
     /// 表示の指定を適用したあとの可視行数（要件 8.7）。
     pub visible_rows: u32,
     /// 絞り込みによって表示されていない行数（要件 8.7）。
@@ -691,6 +712,14 @@ pub struct GridEditRequest {
 pub struct GridEditResponse {
     /// 呼び出し元ウィンドウの文脈。
     pub context: WindowContext,
+    /// **この応答を組み立てた時点の世代**（10 進の文字列。タスク 10.1）。
+    ///
+    /// 適用（[`GridEditRequest`]）と履歴（[`GridHistoryRequest`]）のどちらも、**影響を受けた行が
+    /// あるときだけ**世代を進める（`GridSession::apply` / `undo` / `redo`）。`outcome` が `None`
+    /// である腕は何も適用していないので、この値も据え置きである。画面はこれを採用するだけであり、
+    /// `outcome.affected` の空・非空から進み方を推し量る規則を持たない（規則が 2 つあると、
+    /// 片方だけが正しいまま残る）。
+    pub generation: String,
     /// 適用された操作の要約。`None` は「進める履歴が無く、何も変わらなかった」（要件 9.2、9.3）。
     pub outcome: Option<GridEditOutcome>,
 }
