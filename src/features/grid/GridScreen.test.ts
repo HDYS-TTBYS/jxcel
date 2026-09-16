@@ -65,6 +65,8 @@ import {
   createGridRendererSpec,
   createGridSurfaceCache,
   followSelection,
+  gridScreenDeleteCancelled,
+  gridScreenDeleteRequested,
   gridScreenDetailClosed,
   gridScreenDetailEditSettled,
   gridScreenDetailOpened,
@@ -77,6 +79,7 @@ import {
   gridScreenLoaded,
   gridScreenNoticeDismissed,
   gridScreenRetried,
+  gridScreenRowOperationSettled,
   gridScreenSelectionChanged,
   gridScreenViewSettled,
   initialGridScreenModel,
@@ -90,6 +93,7 @@ import { createColumnSpace } from "./columnSpace";
 import { withExpansion } from "./nestedInspector";
 import { followTarget, initialSelection, selectionAt } from "./selection";
 import type { GridClient } from "./gridClient";
+import type { DeleteConfirmation } from "./rowOps";
 import type { CellPosition, RendererSelection, VisibleSpan } from "./renderer/port";
 import { nextViolation, reasonInRow, type ViolationPresentation } from "./violations";
 
@@ -262,6 +266,10 @@ function markOf(model: GridScreenModel): string {
       onDetailOpened: () => undefined,
       onDetailEditSettled: () => undefined,
       onDetailClosed: () => undefined,
+      onDeleteRequested: () => undefined,
+      onDeleteCancelled: () => undefined,
+      onRowOperationSettled: () => undefined,
+      onRefused: () => undefined,
     }),
   );
 }
@@ -437,6 +445,7 @@ describe("画面内の失敗の経路（器に届かない失敗）", () => {
       view: EMPTY_GRID_VIEW,
       generation: 1,
       detail: null,
+      pendingDelete: null,
     });
 
     const withNotice = gridScreenFailed(ready, "この操作はまだ結線されていない: 列の幅");
@@ -591,6 +600,8 @@ function readyModel(
     view: options.view ?? EMPTY_GRID_VIEW,
     generation: options.generation ?? 1,
     detail: options.detail ?? null,
+    // 8.6 の欄（削除の確認）。既定は「尋ねていない」である。
+    pendingDelete: null,
   });
 }
 
@@ -850,6 +861,7 @@ function editingModel(
       view: EMPTY_GRID_VIEW,
       generation: 1,
       detail: null,
+      pendingDelete: null,
     }),
     position,
     initialText,
@@ -1622,6 +1634,7 @@ function nestedModel(
     view: options.view ?? EMPTY_GRID_VIEW,
     generation: 1,
     detail: null,
+    pendingDelete: null,
   });
 }
 
@@ -2076,10 +2089,244 @@ describe("展開した構成の違反の位置（要件 4.2、4.4。8.5 との�
   });
 });
 
+// ===========================================================================
+// 8.6 行の追加・削除・複製（要件 6.1、6.2、6.3、6.5）
+// ===========================================================================
+
+/**
+ * **行数の提示**（要件 6.2。
+ * 画面の位置の提示が直ちに更新されること）。
+ *
+ * 表そのもの（移植口）は `node` の環境では走らないので、**提示は 2 つに分けて読む** —
+ * 表の面が出す行数（この検査）と、器が描く行の番号（実起動。9.2）。前者が据え置かれると、
+ * 後者は何も変わらない。
+ */
+describe("行の増減の反映（8.6。要件 6.2、6.5）", () => {
+  /** 3 つの操作が画面に出ている（要件 6.1、6.2、6.3 の入口である）。 */
+  function rowOperationIdsIn(markup: string): readonly string[] {
+    return [
+      "jxcel-grid-insert-row",
+      "jxcel-grid-delete-rows",
+      "jxcel-grid-duplicate-rows",
+    ].filter((id) => markup.includes(id));
+  }
+
+  it("行の操作と、提示する行数が画面に出る（要件 6.1、6.2、6.3）", () => {
+    const markup = markOf(readyModel(initialSelection()));
+
+    expect(markup).toContain("jxcel-grid-row-ops");
+    expect(rowOperationIdsIn(markup)).toHaveLength(3);
+    // **行数は開いたときの要約である**（`grid_open_sheet` の `GridSheetSummary.row_count`）。
+    expect(markup).toContain('data-row-count="20"');
+    expect(markup).toContain("行数 20");
+  });
+
+  it("適用のあと、提示する行数と窓が覆う行数が新しい数になる", () => {
+    const before = readyModel(initialSelection());
+
+    const after = gridScreenRowOperationSettled(before, {
+      status: "applied",
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 7, violation_total: 2 }),
+    });
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // **窓が覆う行数**（移植口へ渡す行数）と**提示する行数**（要約）の両方が動く。片方だけでは
+    // 足りない — 前者だけなら提示が古い数のままになり、後者だけなら増えた行を永久に読めない。
+    expect(after.state.visibleRows).toBe(7);
+    expect(after.state.summary.row_count).toBe(7);
+    // 違反の総数は適用の応答が運ぶ数で置き換わり、いまの提示は取り下げる（要件 4.6）。
+    expect(after.state.violationTotal).toBe(2);
+    expect(after.state.violation).toBeNull();
+    // 世代は進む（以後の窓の要求が古い世代を名乗らない。`api.rs` の `apply` と同じ規則）。
+    expect(after.state.generation).toBe(2);
+
+    const markup = markOf(after);
+    expect(markup).toContain('data-row-count="7"');
+    expect(markup).toContain("行数 7");
+  });
+
+  it("行数が減ったとき、現在位置と選択が新しい表の範囲へ寄る", () => {
+    // 行 7..9 の選択（現在位置は 9）。行が 3 件になれば、**描かれる表の外**である。
+    const before = readyModel({
+      current: { row: 9, column: 0 },
+      range: { start: { row: 7, column: 0 }, end: { row: 9, column: 0 } },
+    });
+
+    const after = gridScreenRowOperationSettled(before, {
+      status: "applied",
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 3 }),
+    });
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // 寄せが無ければ、数え上げの行は「現在位置 10 行」と名乗るのに表は 3 行しか無い — 利用者に
+    // 見える食い違いである（8.5 の列の側で実測したのと同じ形の欠陥）。
+    expect(after.state.selection.current).toEqual({ row: 2, column: 0 });
+    expect(after.state.selection.range).toEqual({
+      start: { row: 2, column: 0 },
+      end: { row: 2, column: 0 },
+    });
+    const markup = markOf(after);
+    expect(markup).toContain("現在位置 3 行 1 列");
+    expect(markup).toContain('data-current-row="2"');
+  });
+
+  it("行が消えたら、その行に開いていた面は閉じる", () => {
+    // 行 9 を編集中で、同じ行の詳細表示も開いている（消えるのはその行である）。
+    const editing = gridScreenEditStarted(
+      gridScreenDetailOpened(readyModel(initialSelection()), { row: 9, column: 0 }),
+      { row: 9, column: 0 },
+      "打ちかけ",
+    );
+
+    const after = gridScreenRowOperationSettled(editing, {
+      status: "applied",
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 3 }),
+    });
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // **描かれていないセルを編集・表示しない**（面は位置を持つので、消えた行を指したまま残ると
+    // 確定が行の識別子を引けず、「まだ届いていない」という誤った理由になる）。
+    expect(after.state.editing).toBeNull();
+    expect(after.state.detail).toBeNull();
+  });
+
+  it("行が 1 件も無いときは、位置の提示が行数を偽らない", () => {
+    // すべての行を消した（要件 6.2 の行き着く先である）。**表を描く状態のままにする** — ここで
+    // `no-rows` へ移ると、入り口（開いたときの提示）は同じでも、**行を足す手段が無くなる**
+    // （要件 6 の目的は記録を足し続けられることである）。
+    const emptied = gridScreenRowOperationSettled(readyModel(initialSelection()), {
+      status: "applied",
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 0 }),
+    });
+
+    if (emptied.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(emptied.state.visibleRows).toBe(0);
+    const markup = markOf(emptied);
+    expect(markup).toContain('data-row-count="0"');
+    // **「現在位置 1 行 1 列」と名乗らない**（描かれている行は 0 件である）。行を足す操作は
+    // 残る（`at == 行数 == 0` への追加は妥当である）。
+    expect(markup).toContain("行がありません");
+    expect(markup).not.toContain("現在位置");
+    expect(rowOperationIdsIn(markup)).toHaveLength(3);
+  });
+});
+
+describe("削除の確認（8.6。要件 6.5）", () => {
+  /** 削除する行数を示す確認（**閾値を超えたときだけ出る**。閾値の判断は `./rowOps`）。 */
+  const CONFIRMATION: DeleteConfirmation = { first: 0, last: 11, count: 12 };
+
+  it("確認を求めると、削除する行数を示す確認が出る", () => {
+    const asked = gridScreenDeleteRequested(readyModel(initialSelection()), CONFIRMATION);
+
+    if (asked.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(asked.state.pendingDelete).toEqual(CONFIRMATION);
+
+    const markup = markOf(asked);
+    expect(markup).toContain("jxcel-grid-delete-confirm");
+    // **削除する行数を示す**（要件 6.5 の本体である）。
+    expect(markup).toContain("12 行");
+    expect(markup).toContain("jxcel-grid-delete-confirm-yes");
+    expect(markup).toContain("jxcel-grid-delete-confirm-cancel");
+  });
+
+  it("確認は出ていないときは、削除する行数を名乗らない", () => {
+    const markup = markOf(readyModel(initialSelection()));
+    expect(markup).not.toContain("jxcel-grid-delete-confirm");
+  });
+
+  it("取り消すと、確認を取り下げるだけである（文書も表示も動かない）", () => {
+    // 確定の報告と告知が付いている状態から始める（**取り消しがそれらを動かさない**ことまで見る）。
+    const reported = settled(
+      readyModel(initialSelection()),
+      outcomeOf({
+        affected: [EDITED_ROW],
+        coercions: [{ cell: { row: EDITED_ROW, column: 0 }, before: "12.50", after: "12.5" }],
+        revalidated_columns: [0],
+      }),
+    );
+    const withNotice = gridScreenFailed(reported, "この操作はまだ使えません: 列の幅の変更");
+    const asked = gridScreenDeleteRequested(withNotice, CONFIRMATION);
+
+    const after = gridScreenDeleteCancelled(asked);
+
+    if (after.state.status !== "ready" || asked.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.pendingDelete).toBeNull();
+    // **文書を触っていないので、報告も告知もそのままである**（送る経路に載っていない）。
+    expect(after.editReport).toEqual(asked.editReport);
+    expect(after.notice).toBe(asked.notice);
+    expect(after.state).toEqual({ ...asked.state, pendingDelete: null });
+    expect(markOf(after)).not.toContain("jxcel-grid-delete-confirm");
+  });
+
+  it("適用できなかったときは、確認を開いたままにして、理由を告知へ出す", () => {
+    // **適用されていないので、確認を取り下げる理由が無い**（セルの編集が入力手段を開いたままに
+    // するのと同じ規律である）。
+    const asked = gridScreenDeleteRequested(readyModel(initialSelection()), CONFIRMATION);
+
+    const after = gridScreenRowOperationSettled(asked, {
+      status: "failed",
+      message: "ドキュメントの失敗: 経路が不達である",
+    });
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.pendingDelete).toEqual(CONFIRMATION);
+    expect(after.notice).toBe("行の操作を適用できませんでした: ドキュメントの失敗: 経路が不達である");
+    expect(markOf(after)).toContain("jxcel-grid-delete-confirm");
+  });
+
+  it("選択が動けば確認を取り下げる（確認は選択についてのものである）", () => {
+    const asked = gridScreenDeleteRequested(readyModel(initialSelection()), CONFIRMATION);
+    if (asked.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    const askedSelection = asked.state.selection;
+
+    // 別のセルへ移った（**数が変わりうる**ので、古い数を掲げたままにしない）。
+    const moved = gridScreenSelectionChanged(asked, selectionAt({ row: 4, column: 0 }));
+
+    if (moved.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(moved.state.pendingDelete).toBeNull();
+    // 選択が同じ値のまま報せられたときは取り下げない（据え置きの判定と同じ規律である）。
+    const again = gridScreenSelectionChanged(asked, askedSelection);
+    if (again.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(again.state.pendingDelete).toEqual(CONFIRMATION);
+  });
+
+  it("行数が変われば確認を取り下げる（適用された対象はもう無い）", () => {
+    const asked = gridScreenDeleteRequested(readyModel(initialSelection()), CONFIRMATION);
+
+    const after = gridScreenRowOperationSettled(asked, {
+      status: "applied",
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 3 }),
+    });
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.pendingDelete).toBeNull();
+  });
+});
+
 describe("画面の契約（受け取るのは器が渡す引数だけ）", () => {
   it("`ScreenProps` だけで描ける（それ以外の props を要求しない）", () => {
-    // 型の水準の証明: 登録簿が要求する形（`ComponentType<ScreenProps>`）へそのまま代入できる。
-    // 余分な props を必須にすれば、この代入が型検査で落ちる（`npm run typecheck`）。
     const registered: ComponentType<ScreenProps> = GridScreen;
 
     const markup = renderToStaticMarkup(

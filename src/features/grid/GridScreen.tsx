@@ -90,7 +90,7 @@
  * | 2.3 矩形・行の全体・列の全体 | 同じ module の 3 つの規則。ポインタの操作（行見出し・見出し）は移植口の通知として届く |
  * | 2.4 表示範囲の追随 | `followTarget` が宛先を決め、`handle.scrollTo` が動かす。可視の区間は `RendererSpec.onVisibleSpanChange` が知らせる（**8.2 が移植口へ足した口である**） |
  * | 2.5 行数・列数・セル数 | `selectionCounts` を表の上の 1 行に出す |
- * | 2.6 確定した選択を複製・貼り付け・削除・取り消しの対象にする | **`ready.selection` がその口である**（8.6 / 8.7 / 8.9 が読む）。本 module は操作そのものを実装しない |
+ * | 2.6 確定した選択を複製・貼り付け・削除・取り消しの対象にする | **`ready.selection` がその口である**（8.6 / 8.7 / 8.9 が読む）。**行の削除・複製は 8.6 が実装した**（`./rowOps` が選択の行を対象にする）。**範囲の複製・貼り付けは 8.7、取り消し・やり直しは 8.9** である |
  *
  * # 8.3 が足したもの（セルの編集と、確定の報告）
  *
@@ -225,6 +225,41 @@
  * 元の 1 本に戻る）。**要件 5.5 の「構造の全体」は依然として届かない**（申し送り 1）ので、
  * 詳細表示は「宣言が読めません」と書く。
  *
+ * # 8.6 が足したもの（行の追加・削除・複製。`./rowOps`）
+ *
+ * **判断と往復は `./rowOps` が持ち、状態を持つのは本 module である**（8.3 のセルの編集と同じ
+ * 分担である）。本 module が足したのは、① 状態の欄 1 つ（`ready.pendingDelete`）、② その遷移
+ * （`gridScreenDeleteRequested` / `gridScreenDeleteCancelled` / `gridScreenRowOperationSettled`）、
+ * ③ 表の面から入口へ渡す材料（表示の指定・行数・**1 画面に見えている行数**）と、
+ * ④ 3 つの操作と確認の面（`RowOperations`）である。
+ *
+ * | 論点 | 決定 | どこが担うか |
+ * |---|---|---|
+ * | 3 つの操作の置き場所 | **表の面の上に行として出す**（打鍵・メニューの結線は要件 7.8 / 9.9 の担当であり、**8.7 が足す**）。3 つの操作が要するのは窓の記憶と選択であり、その両方を持つのは表だからである | `GridSurface` の中の `RowOperations` |
+ * | 足す位置の意味（要件 6.1） | **現在位置の行の位置へ 1 行**（その行の**上**に入る。表計算の「上に行を挿入」と同じである）。数はつねに 1 である（まとめて足すのは貼り付けの補充であり、`PasteRange` が担う） | `./rowOps` の `InsertRows` の組み立て |
+ * | **挿入の位置の座標空間**（要件 8.6） | 境界の `at` は**文書の位置**である。写せるのは**並べ替えも絞り込みも無いとき**だけであり、効いていれば**送らずに理由を出す** | `./rowOps` の `insertPositionIsDocumentOrder` と `planRowOperation` |
+ * | 追加した行の既定値（要件 6.1） | **画面は値を 1 つも作らない**（`InsertRows` は位置と数しか運ばない）。既定値を書くのは宣言（`CompiledSchema::default_row`）であり、画面は**取り直した窓がそれを運ぶ**ように行数を作り直す | `./rowOps` の `applyRowOperation` |
+ * | 削除の確認（要件 6.5） | 閾値は**いま 1 画面に見えている行数**（移植口の `onVisibleSpanChange` が報せた区間。**先読みの幅ではない**）。超えるときは**送らずに**数を示して尋ねる。**選択が動けば取り下げる**（尋ねた数と消える数が食い違わない） | `./rowOps` の `deleteNeedsConfirmation`、`ready.pendingDelete`、`RowOperations` |
+ * | 確認への取り消し | **境界へ 1 つも送らない**（`./rowOps` の計画の腕であり、往復へ載らない）。報告・告知も動かさない | `gridScreenDeleteCancelled` |
+ * | 行数が変わったあと（要件 1.7） | **新しい行数で記憶を作り直す**（`WindowCache.clear(row_count)`）。窓の区間は序数であるため、`invalidate` では足りない | `./rowOps` の `applyRowOperation` |
+ * | 行の位置の提示（要件 6.5） | ① **窓が覆う行数**（`visibleRows` → 移植口の `rowCount`）② **提示する行数**（`summary.row_count`）③ 現在位置と選択の**寄せ**（`clampSelection`）、の 3 つを同じ遷移で置き換える | `gridScreenRowOperationSettled` |
+ *
+ * **`clear` を呼ぶ理由（表の面は記憶を組み直すのに、なぜ要るか）。**表の面は可視行数を依存に
+ * 持つ効果で器と記憶を組み直す（**移植口へ行数を渡す唯一の口が組み立てである** —
+ * `RendererHandle` に行数を押し込む口は無い）ので、いまの結線では記憶はその組み直しでも新しく
+ * なる。それでも `clear` を呼ぶのは、**記憶の契約が「行数が変わったら新しい数を渡して作り直せ」
+ * だからである**（7.3 の申し送り。引数の無い `clear` は組み立て時の数へ戻り、**増えた行は
+ * 永久に読み込み中のまま**になり、減った先は古い窓のまま配られる）。組み直しに頼ると、同じ
+ * 記憶を使い続ける呼び出し（器を組み直さない経路）で増えた行が読めなくなる。
+ *
+ * **単体テストが観測しないもの（8.6）。**① **実際に文書へ行が足され・消え、既定値が入ること**
+ * は Rust 側の契約である（`crates/data-grid` の検査）— 本 module は「何を送ったか」までしか
+ * 主張しない。② **確認の面が現れ、押下が届くこと**（`onClick` の配線）は `node` の環境
+ * （DOM なし。`jsdom` も `@testing-library` も足していない — `vitest.config.ts` の判断）では
+ * 観測できない。③ **移植口が新しい行数を描くこと**（行の番号が増減すること）も同じであり、
+ * 単体テストは「状態と提示の数が変わること」までである。観測の場所は実起動（9.2 の台本と
+ * `smoke-port-probe`。**標本の面は行の番号を描いている**）である。
+ *
  * # 8.3〜8.9 への申し送り（本 module が足す予定の場所）
  *
  * - **8.5〜8.9**: 移植口の 4 つの**操作**（`onColumnResize` / `onColumnMove` / `onCopy` /
@@ -232,10 +267,18 @@
  *   `onUnavailable` へ流すだけである
  *   （**黙って何もしない実装にしない** — `onCopy` が空文字を返せばクリップボード
  *   が空になり、`onPaste` が黙って捨てれば貼り付けが消える。無反応より悪い）
+ * - **8.7（範囲の複製・貼り付けと、メニュー・打鍵）**: 本 module が 8.6 で出した 3 つの操作は
+ *   **表の面の上に行として在るだけ**であり、**メニューからの選択とキーボードからの指示は
+ *   まだ無い**（要件 7.8 / 9.9 が要求する「いずれによっても」は 8.7 が満たす）。8.7 が足すのは、
+ *   ① 器の登録口（`app-shell` のメニュー登録）へ項目を登録すること、② プラットフォームで解決した
+ *   綴りのショートカットを渡すこと、③ 3 つの操作（追加・削除・複製）も同じ登録へ載せること、
+ *   ④ 移植口の `onCopy` / `onPaste` を結線することである。**8.6 の入口
+ *   （`RowOperationTarget` を渡す 1 つの関数）はそのまま使える** — 打鍵から来る指示も同じ
+ *   判断（`./rowOps` の `planRowOperation`）を通すこと
  * - **8.4（違反の提示）**: 実装済みである（上の「8.4 が確定させたもの」）。本 module が受け取る
  *   `violation_total` は 6.2 の時点で既に**シート全体**の数であり、広げる作業は無かった
- * - **8.6（行の増減）**: 行数が変わったら `WindowCache.clear(rowCount)`（7.3 の申し送り）。
- *   `SetCells` は行数を変えないので、本 module の経路では要らない
+ * - **8.6（行の増減）**: 実装済みである（下の「8.6 が足したもの」）。7.3 の申し送り（行数が
+ *   変わったら `WindowCache.clear(rowCount)`）は `./rowOps` が担う
  * - **8.8（列幅・列順）**: 列幅と表示上の列順は `createDisplayState`（7.5）が持つ。変化は
  *   **次の `mount` の仕様**に載せる（`RendererHandle` に幅や順を押し込む口は無い。7.2 の申し送り）。
  * - **列の添字の恒等が崩れるのは 2 つである（8.5 が 1 つ目を閉じた）**: 崩すのは ① 8.8 の列順
@@ -296,6 +339,16 @@ import {
   withExpansion,
 } from "./nestedInspector";
 import { WINDOW_ROWS, createWindowCache, type WindowCache } from "./windowCache";
+import {
+  applyRowOperation,
+  planRowOperation,
+  rowTargets,
+  runRowOperationPlan,
+  type DeleteConfirmation,
+  type RowOperationSettlement,
+  type RowOperationTarget,
+  type RowSendIntent,
+} from "./rowOps";
 import { createGlideAdapter } from "./renderer/glideAdapter";
 import {
   clampSelection,
@@ -439,6 +492,17 @@ export type GridScreenState =
        * 表であり、値を読むにはそこが要る）。
        */
       readonly detail: CellDetail | null;
+      /**
+       * 削除の確認を待っている対象（8.6。要件 6.5）。`null` なら尋ねていない。
+       *
+       * **この腕が持つ**ことが「描かれている表の行についての確認である」を型で表している
+       * （他の腕は表を持たないので、消す行も無い）。求めるかどうかを決めるのは `./rowOps` の
+       * 閾値であり（**いま 1 画面に見えている行数**）、状態はその答えを掲げるだけである。
+       *
+       * **選択が動けば取り下げる**（数が変わりうるので、古い数を掲げたまま尋ねない）。
+       * **行数が変わったときも取り下げる**（尋ねた対象はもう無い）。
+       */
+      readonly pendingDelete: DeleteConfirmation | null;
     };
 
 /**
@@ -560,7 +624,14 @@ export function gridScreenSelectionChanged(
     // **動いたら違反の提示を取り下げる**（要件 4.2 の理由は「いまの位置のもの」である。
     // 取り下げないと、動く前に見ていたセルの理由が新しいセルへ貼られたままになる。引き直しは
     // 表が行う — 窓の印を読むには記憶（`./windowCache`）が要るためである）。
-    state: { ...model.state, selection: next, violation: moved ? null : model.state.violation },
+    // **削除の確認も取り下げる**（8.6。確認は「その選択を消す」という問いであり、範囲が
+    // 変われば数も変わる — 古い数を掲げたまま尋ね続けると、尋ねた数と消える数が食い違う）。
+    state: {
+      ...model.state,
+      selection: next,
+      violation: moved ? null : model.state.violation,
+      pendingDelete: sameSelection(model.state.selection, next) ? model.state.pendingDelete : null,
+    },
     notice: model.notice,
     editReport: model.editReport,
   };
@@ -570,6 +641,17 @@ export function gridScreenSelectionChanged(
 function currentPositionMoved(before: RendererSelection, after: RendererSelection): boolean {
   return (
     before.current.row !== after.current.row || before.current.column !== after.current.column
+  );
+}
+
+/** **選択の全体**（現在位置と矩形の両端）が同じか。据え置きの判定と、確認の取り下げに使う。 */
+function sameSelection(before: RendererSelection, after: RendererSelection): boolean {
+  return (
+    !currentPositionMoved(before, after) &&
+    before.range.start.row === after.range.start.row &&
+    before.range.start.column === after.range.start.column &&
+    before.range.end.row === after.range.end.row &&
+    before.range.end.column === after.range.end.column
   );
 }
 
@@ -817,6 +899,13 @@ export function gridScreenViewSettled(
             rowCount: settlement.visibleRows,
             columnCount: settlement.columns.length,
           }),
+          // **行の集合が変われば確認を取り下げる**（8.6。並べ替え・絞り込みは「何番目の行が
+          // どの行か」を変えるので、尋ねた対象はもう同じ行ではない）。行数が動かない指定
+          // （入れ子の展開）では据え置く。
+          pendingDelete:
+            settlement.visibleRows === model.state.visibleRows
+              ? model.state.pendingDelete
+              : null,
           // 世代は**進めることだけが契約である**（`api.rs` の `set_view` はつねに +1 する）。
           generation: model.state.generation + 1,
           // 詳細表示は**開いたままにする**（構成が変わったことを理由に閉じる理由が無い。位置は
@@ -1032,6 +1121,140 @@ function reportOf(outcome: GridEditOutcome | null): CellEditReport | null {
 }
 
 // ===========================================================================
+// 2.6 行の増減（8.6。要件 6.1、6.2、6.3、6.5）
+// ===========================================================================
+
+/**
+ * 削除の確認を掲げる（要件 6.5）。**境界へは何も送らない** — 数を示して尋ねるだけである。
+ *
+ * 尋ねるかどうかを決めるのは `./rowOps` の閾値であり（**いま 1 画面に見えている行数**）、
+ * この遷移はその答えを状態へ置くだけである（表を描いていないときは何もしない — 描かれていない
+ * 表の行は消せない）。
+ */
+export function gridScreenDeleteRequested(
+  model: GridScreenModel,
+  confirmation: DeleteConfirmation,
+): GridScreenModel {
+  if (model.state.status !== "ready") {
+    return model;
+  }
+  return { ...model, state: { ...model.state, pendingDelete: confirmation } };
+}
+
+/**
+ * 確認への取り消し（要件 6.5）。**境界へ 1 つも送らない** — 取り消しは「適用しない」ことで
+ * あり、適用する操作は文書へ届いていない（`./rowOps` の取り消しの腕は送る腕を持たない）。
+ * 窓の記憶も触らない（表示は変わっていない）。
+ *
+ * 文書を触っていないので、**確定の報告と告知も動かさない**（`./cellEdit` の取消と同じ規律で
+ * ある。取消は「直前の操作が何か」を変えない）。
+ */
+export function gridScreenDeleteCancelled(model: GridScreenModel): GridScreenModel {
+  return withPendingDelete(model, null);
+}
+
+/**
+ * 行の操作の 1 往復（`./rowOps`）の結果を画面へ反映する（要件 6.1、6.2、6.3、6.5、1.7）。
+ *
+ * | 結果 | 何が起きるか |
+ * |---|---|
+ * | 適用された | **行数・可視行数・提示する数を置き換え**、現在位置と選択を新しい表の範囲へ寄せ、**確認を取り下げる** |
+ * | 適用できなかった | **確認は開いたままにする。**適用されていないので、取り下げる理由が無い（理由は 8.1 の告知として出す） |
+ *
+ * **取り消しはこの遷移を通らない**（`./rowOps` の計画の腕であり、往復を 1 つも起こさない
+ * — [`gridScreenDeleteCancelled`] がそれである）。
+ *
+ * 行数を置き換えるのは**2 つの値**である。① **窓が覆う行数**（`visibleRows`。移植口へ渡す
+ * 数であり、これが据え置かれると増えた行を永久に読めない）② **提示する行数**（`summary.row_count`。
+ * 要件 6.2 が示す数である）。絞り込みが無い間は両者は等しい（可視の順序は文書の順序そのもので
+ * ある）ので、**境界が運ぶのはシートの行数のほう**であり（`GridEditOutcome.row_count`）、
+ * それを両方へ置く。8.8 が絞り込みを結線するときは、可視行数を別に取り直すこと（絞り込みが
+ * 隠した行を足したときに、この等式は崩れる）。
+ *
+ * 現在位置と選択を寄せるのは**列の側で 8.5 が直したのと同じ欠陥**を閉じるためである — 行が
+ * 減ったのに位置が残ると、数え上げの行は「現在位置 10 行」と名乗るのに描かれている行は 3 行、
+ * という**利用者に見える食い違い**になる。
+ *
+ * 消えた行に開いている面（入力手段・詳細表示）は**閉じる**。開いたまま残すと、確定の宛先
+ * （行の識別子。窓にしか無い）を引けず、「まだ届いていない」という**理由として誤った**告知に
+ * なる（消えたのである）。
+ */
+export function gridScreenRowOperationSettled(
+  model: GridScreenModel,
+  settlement: RowOperationSettlement,
+): GridScreenModel {
+  switch (settlement.status) {
+    case "failed":
+      // **適用されていない。**確認を取り下げる理由が無いので、開いたままにする（セルの編集が
+      // 失敗したときに入力手段を開いたままにするのと同じ規律である）。
+      return gridScreenFailed(model, `行の操作を適用できませんでした: ${settlement.message}`);
+    case "applied":
+      return appliedRowOperation(model, settlement.outcome);
+    default:
+      return assertNever(settlement, "行の操作の結果の分岐が網羅されていない");
+  }
+}
+
+/** 確認を入れ替える（**表を描いていないときは何もしない**）。 */
+function withPendingDelete(
+  model: GridScreenModel,
+  confirmation: DeleteConfirmation | null,
+): GridScreenModel {
+  if (model.state.status !== "ready" || model.state.pendingDelete === confirmation) {
+    return model;
+  }
+  return { ...model, state: { ...model.state, pendingDelete: confirmation } };
+}
+
+/** 適用の結果を行の状態へ反映する（[`gridScreenRowOperationSettled`] の本体）。 */
+function appliedRowOperation(
+  model: GridScreenModel,
+  outcome: GridEditOutcome | null,
+): GridScreenModel {
+  if (model.state.status !== "ready") {
+    return model;
+  }
+  if (outcome === null) {
+    // 適用では起こらない（生成物の doc。`grid_history` の腕である）。**何も動かさず、確認だけ
+    // 取り下げる** — 尋ねた対象が適用されたかどうかは、この腕では言えない。
+    return withPendingDelete(model, null);
+  }
+  const state = model.state;
+  const rowCount = outcome.row_count;
+  const columnCount = state.summary.columns.length;
+  return {
+    attempt: model.attempt,
+    state: {
+      ...state,
+      // 提示する行数（要件 6.2 の数）。同じ数なら前の値を据え置く（要約の同一性は表の面の
+      // 組み直しの判断に効く）。
+      summary:
+        state.summary.row_count === rowCount
+          ? state.summary
+          : { ...state.summary, row_count: rowCount },
+      // **窓が覆う行数も新しい行数である**（絞り込みが無い間、可視の順序は文書の順序そのもので
+      // ある。上の doc）。
+      visibleRows: rowCount,
+      // **縮んだ表へ現在位置と選択を寄せる**（要件 6.5 の「行の位置の提示が直ちに更新される」）。
+      selection: clampSelection(state.selection, { rowCount, columnCount }),
+      // 消えた行に開いていた面は閉じる（`rowCount === 0` なら両方とも閉じる）。
+      editing:
+        state.editing !== null && state.editing.position.row >= rowCount ? null : state.editing,
+      detail: state.detail !== null && state.detail.position.row >= rowCount ? null : state.detail,
+      pendingDelete: null,
+      // 違反の総数は適用の応答が運ぶ数（**シート全体**）で置き換え、いまの提示は取り下げる
+      // （要件 4.6。解消されたかどうかは、窓の印の取り直しと境界への問い合わせで決まる）。
+      violationTotal: outcome.violation_total,
+      violation: null,
+      // 行が変われば窓の要求が名乗る世代も進む（`api.rs` の `apply` と同じ規則）。
+      generation: generationAfterEdit(state.generation, outcome),
+    },
+    notice: model.notice,
+    editReport: model.editReport,
+  };
+}
+
+// ===========================================================================
 // 2. 開く流れ（純粋な非同期関数。効果はこれを呼ぶだけである）
 // ===========================================================================
 
@@ -1125,6 +1348,8 @@ export async function loadGridScreenState(client: GridClient): Promise<GridScree
     generation: GENERATION_AFTER_OPEN,
     // 開いた直後は詳細表示を開いていない（要件 5.5。開くのは利用者の操作である）。
     detail: null,
+    // 開いた直後は削除の確認を待っていない（8.6。尋ねるのは利用者の操作の後である）。
+    pendingDelete: null,
   };
 }
 
@@ -1266,6 +1491,28 @@ const SELECTION_STYLE = {
   color: `var(${APPEARANCE_VARS.screenMuted})`,
 } as const;
 
+/** 行の操作の行（8.6。要件 6.1、6.2、6.3、6.5）。**数え上げの行の隣に出す**。 */
+const ROW_OPS_STYLE = {
+  display: "flex",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: "0.5rem",
+} as const;
+
+/**
+ * 削除の確認（要件 6.5）。**その場に出す**（器の外の対話を開かない）。
+ *
+ * 枠線は器の配色の 1 本だけを参照する（画面は自前の配色を持たない — module doc の契約 4）。
+ */
+const CONFIRM_STYLE = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "0.5rem",
+  border: `1px solid var(${APPEARANCE_VARS.controlBorder})`,
+  borderRadius: "0.25rem",
+  padding: "0.25rem 0.5rem",
+} as const;
+
 /**
  * 窓の記憶がまだ無いときに返すセルの札（8.5）。**「値なし」ではなく「未取得」である**
  * （`RenderCell.loading` の doc。空文字は値なしと区別がつかない）。
@@ -1294,6 +1541,12 @@ interface GridSurfaceProps {
   /** 開いている詳細表示（8.5。要件 5.5）。`null` なら開いていない。 */
   readonly detail: CellDetail | null;
   /**
+   * いまの表示の指定（8.6）。**挿入の位置を写せるかを決める**（`./rowOps` の判断に渡す）。
+   */
+  readonly view: GridViewSpec;
+  /** 削除の確認を待っている対象（8.6。要件 6.5）。`null` なら尋ねていない。 */
+  readonly pendingDelete: DeleteConfirmation | null;
+  /**
    * 境界の口。**編集の 1 往復（`./cellEdit`）が使う** — カードの記憶（下）と組にするのは、
    * 確定が宛先（窓の行の識別子）と、適用のあとの作り直し（影響を受けた行の窓を捨てる）の
    * 両方を要するためである。
@@ -1321,6 +1574,19 @@ interface GridSurfaceProps {
   readonly onViolationRead: (reading: ViolationReading) => void;
   /** 器が捕まえない失敗を画面内へ流す口。 */
   readonly onUnavailable: (operation: string) => void;
+  /**
+   * 行の操作（8.6。要件 6.1、6.2、6.3）を画面へ上げる口。
+   *
+   * **表が行うのは判断と往復だけであり、状態を持つのは画面である**（`./cellEdit` が確定の
+   * 結果を `onEditSettled` で上げるのと同じ形である）。
+   */
+  readonly onRowOperationSettled: (settlement: RowOperationSettlement) => void;
+  /** 削除の確認を求める（要件 6.5。**送っていない**。数を示して尋ねるだけである）。 */
+  readonly onDeleteRequested: (confirmation: DeleteConfirmation) => void;
+  /** 確認への取り消し（**送らない**）。 */
+  readonly onDeleteCancelled: () => void;
+  /** 送らずに理由を告げる（挿入の位置を写せない・対象の行の識別子が届いていない）。 */
+  readonly onRefused: (message: string) => void;
 }
 
 /**
@@ -1400,6 +1666,8 @@ function GridSurface({
   selection,
   editing,
   detail,
+  view,
+  pendingDelete,
   client,
   onSelectionChange,
   onEditStarted,
@@ -1408,6 +1676,10 @@ function GridSurface({
   onDetailClosed,
   onViolationRead,
   onUnavailable,
+  onRowOperationSettled,
+  onDeleteRequested,
+  onDeleteCancelled,
+  onRefused,
 }: GridSurfaceProps): ReactElement {
   const containerRef = useRef<HTMLDivElement | null>(null);
   // 移植口の取っ手。**窓の到着（非同期）と選択の効果が使う**ので、効果の外に置く。
@@ -1435,6 +1707,15 @@ function GridSurface({
    * 組み直すことになる。値は移植口の知らせ（`onVisibleSpanChange`）が書き換える。
    */
   const visibleRef = useRef<VisibleSpan | null>(null);
+  /**
+   * **いま 1 画面に見えている行数**（8.6。要件 6.5 の閾値）。移植口の知らせだけが書き、
+   * `null` は「まだ知らない」である。
+   *
+   * [`visibleRef`] と別に持つのは、**開いた直後の見当が「1 画面」ではない**ためである —
+   * あれは窓の先読みの幅（`WINDOW_ROWS` ＝ 256 行）であり、画面の高さではない。代用すると、
+   * 1 画面に収まらない削除（要件 6.5）が確認を求めなくなる。
+   */
+  const viewportRowsRef = useRef<number | null>(null);
   /**
    * いまの選択（**移植口の知らせの中から最新の値を読むため**の写し）。
    *
@@ -1579,6 +1860,9 @@ function GridSurface({
         // 同時に窓の先読みの材料でもある（この行が 8.1 の申し送りの答えである）。
         onVisibleSpanChange: (span) => {
           visibleRef.current = span;
+          // **1 画面に見えている行数**（8.6 の閾値。要件 6.5）。移植口が報せた区間だけが源で
+          // ある — 開いた直後の見当（上の `openingSpan`）は先読みの幅であり、画面の高さではない。
+          viewportRowsRef.current = span.rows.count;
           cache.setVisibleSpan(span.rows);
         },
         onUnavailable,
@@ -1707,10 +1991,102 @@ function GridSurface({
     );
   };
 
+  /**
+   * 行の操作の 1 往復（8.6。要件 6.1、6.2、6.3）。**宛先を引くのは境界ではなく窓の記憶である**
+   * （行の識別子は窓にしか無い。`./rowOps` の判断が `rowId` を通して引く）ので、往復はここから
+   * 起動する（セルの編集と同じ配置である）。
+   *
+   * 器がまだ無いときは往復を起こさない — そのとき識別子は 1 つも引けず、判断は「届いていない」
+   * として拒む（`rowId` に `null` を返させる）。**投げない**（`applyRowOperation` が投げない）。
+   */
+  const runRowOperation = (intent: RowSendIntent): void => {
+    const cache = cacheRef.current;
+    if (cache === null) {
+      return;
+    }
+    void applyRowOperation({ client, cache, intent }).then((settlement) => {
+      onRowOperationSettled(settlement);
+      if (settlement.status !== "applied") {
+        return;
+      }
+      // **適用のあとは違反を引き直す**（要件 4.6。セルの編集と同じ規律である）。消えた行の
+      // 違反は消え、残っている行の理由は新しく出る。**窓は捨てられている**（行数が変わった）ので、
+      // いまの位置が未取得なら到着でもう一度引く（`refreshViolation` が予約する）。行が消えて
+      // 位置が新しい範囲へ寄った場合は、選択の効果が新しい位置で引き直す。
+      refreshViolation(selectionRef.current.current, true);
+    });
+  };
+
+  /**
+   * 行の操作の入口（8.6。要件 6.1、6.2、6.3、6.5）。**判断は `./rowOps` が行う** — 表が担うのは
+   * 材料（表示の指定・行数・**1 画面に見えている行数**・識別子を引く口）を揃えることと、答えを
+   * 4 つの行き先へ渡すことだけである（閾値も座標空間の判断もここには書かない）。
+   *
+   * **取り消しもこの入口を通る**（確認の面の 2 つの口が 1 つの経路で終わる）。取り消しの腕は
+   * 送る腕へ載らないので、境界へは 1 つも行かない（`./rowOps` の
+   * [`runRowOperationPlan`]）。
+   */
+  const requestRowOperation = (target: RowOperationTarget): void => {
+    const cache = cacheRef.current;
+    runRowOperationPlan(
+      planRowOperation(target, {
+        view,
+        visibleRows,
+        // **移植口が報せた区間だけが源である**（開いた直後の見当は先読みの幅である）。
+        viewportRows: viewportRowsRef.current,
+        // 器がまだ無ければ識別子は引けない（**推測で答えない**）。
+        rowId: (position) => cache?.rowId(position) ?? null,
+      }),
+      {
+        send: runRowOperation,
+        confirm: onDeleteRequested,
+        refuse: onRefused,
+        cancel: onDeleteCancelled,
+      },
+    );
+  };
+
+  /** 選択の行を対象にする操作（**表の外の行は対象にしない**。対象が無ければ何もしない）。 */
+  const requestRows = (kind: "delete" | "duplicate"): void => {
+    const targets = rowTargets(selection, visibleRows);
+    if (targets === null) {
+      return;
+    }
+    requestRowOperation(
+      kind === "delete" ? { kind: "delete", targets } : { kind: "duplicate", targets },
+    );
+  };
+
   return (
     // 窓の到着の回数を属性にも出す（**描き直しを起こした数の観測**であり、`arrivals` を使う
     // 唯一の場所である）。
     <div data-window-arrivals={arrivals} style={SURFACE_STYLE}>
+      {/*
+        行の操作と、その対象の数（8.6。要件 6.1、6.2、6.3、6.5）。**表の上に出す** — 消す行も
+        足す位置も**いまの選択**であり、その提示（数え上げの行）の隣に在るのが読める位置である。
+        行数は要件 6.2 が示す数（`summary.row_count`）であり、行が増減すればここが直ちに変わる。
+      */}
+      <RowOperations
+        rowCount={summary.row_count}
+        pendingDelete={pendingDelete}
+        onInsert={() => {
+          requestRowOperation({ kind: "insert", at: selection.current.row });
+        }}
+        onDelete={() => {
+          requestRows("delete");
+        }}
+        onDuplicate={() => {
+          requestRows("duplicate");
+        }}
+        onConfirm={() => {
+          if (pendingDelete === null) {
+            return;
+          }
+          // **確認の答えである**（閾値を見ない — 尋ねるのは 1 度だけである）。
+          requestRowOperation({ kind: "confirmDelete", targets: pendingDelete });
+        }}
+        onCancel={onDeleteCancelled}
+      />
       {/*
         選択の数え上げ（要件 2.5）。**利用者に見える数は 1 起点である**（内部の序数は 0 起点）。
         読み手（検査）のために、生の数を属性にも出しておく。
@@ -1724,7 +2100,13 @@ function GridSurface({
         data-current-column={selection.current.column}
         style={SELECTION_STYLE}
       >
-        {`現在位置 ${String(selection.current.row + 1)} 行 ${String(selection.current.column + 1)} 列 ／ 選択 ${String(counts.rows)} 行 × ${String(counts.columns)} 列 = ${String(counts.cells)} セル`}
+        {visibleRows === 0
+          ? // **行が 1 件も無いときは位置を名乗らない**（すべての行を消した後である）。描かれて
+            // いる行が 0 件なのに「現在位置 1 行 1 列」と名乗るのは、利用者に見える食い違いで
+            // ある（要件 6.5 の「行の位置の提示が直ちに更新される」は、消し切ったときこの形に
+            // なる）。**足す操作は残る** — `at == 行数` への追加は妥当である。
+            "行がありません"
+          : `現在位置 ${String(selection.current.row + 1)} 行 ${String(selection.current.column + 1)} 列 ／ 選択 ${String(counts.rows)} 行 × ${String(counts.columns)} 列 = ${String(counts.cells)} セル`}
       </p>
       {editing === null ? null : (
         <CellEditorPanel
@@ -1837,6 +2219,105 @@ function CellEditorPanel({
           onCancel(carrier);
         }}
       />
+    </div>
+  );
+}
+
+/**
+ * 行の操作と、その対象の数、削除の確認（8.6。要件 6.1、6.2、6.3、6.5）。
+ *
+ * **表の面が描く**のは、3 つの操作が要するものが**窓の記憶と選択**だからである（行の識別子は
+ * 窓にしか無く、対象はいまの選択である）。呼び出し側（`GridSurface`）が判断と往復を持ち、
+ * この面は**操作と数を出すだけ**である（数え上げの行や編集の面と同じ分担である）。
+ *
+ * 操作を**メニューと打鍵の双方から**実行できるようにするのは要件 7.8 / 9.9 であり、それは 8.7 が
+ * この面の隣へ足す（本タスクは操作そのものである — 要件 6.1、6.2、6.3 は操作の入口を
+ * 指定していない）。
+ *
+ * 確認（要件 6.5）は**その場に出す**（`window.confirm` のような器の外の対話にしない）: 画面は
+ * 器の中の 1 つの面であり、`node` の環境では観測できないものを増やさない。数を示すのは
+ * **尋ねた時点の対象の数**であり、選択が動けば画面の側が取り下げる（`GridScreenState` の
+ * `pendingDelete`）。
+ */
+function RowOperations({
+  rowCount,
+  pendingDelete,
+  onInsert,
+  onDelete,
+  onDuplicate,
+  onConfirm,
+  onCancel,
+}: {
+  /** 提示する行数（要件 6.2。シートの行数であり、行の増減で直ちに変わる）。 */
+  readonly rowCount: number;
+  /** 確認を待っている対象（8.6。`null` なら尋ねていない）。 */
+  readonly pendingDelete: DeleteConfirmation | null;
+  /** 現在位置の行の位置へ 1 行足す（要件 6.1）。 */
+  readonly onInsert: () => void;
+  /** 選択した行を消す（**閾値を超えていれば確認を求める**。要件 6.2、6.5）。 */
+  readonly onDelete: () => void;
+  /** 選択した行と同じ値の行を足す（要件 6.3）。 */
+  readonly onDuplicate: () => void;
+  /** 確認に答える（**尋ねるのは 1 度だけである**）。 */
+  readonly onConfirm: () => void;
+  /** 確認を取り消す（**境界へ何も送らない**）。 */
+  readonly onCancel: () => void;
+}): ReactElement {
+  return (
+    <div data-testid="jxcel-grid-row-ops" style={ROW_OPS_STYLE}>
+      <button
+        type="button"
+        data-testid="jxcel-grid-insert-row"
+        onClick={onInsert}
+        style={BUTTON_STYLE}
+      >
+        行を追加
+      </button>
+      <button
+        type="button"
+        data-testid="jxcel-grid-delete-rows"
+        onClick={onDelete}
+        style={BUTTON_STYLE}
+      >
+        行を削除
+      </button>
+      <button
+        type="button"
+        data-testid="jxcel-grid-duplicate-rows"
+        onClick={onDuplicate}
+        style={BUTTON_STYLE}
+      >
+        行を複製
+      </button>
+      {/*
+        行数（要件 6.2）。**行が増減すれば直ちにこの数が変わる**（状態が要約の数を置き換える）。
+      */}
+      <span data-testid="jxcel-grid-row-count" data-row-count={rowCount} style={MESSAGE_STYLE}>
+        {`行数 ${String(rowCount)}`}
+      </span>
+      {pendingDelete === null ? null : (
+        <span data-testid="jxcel-grid-delete-confirm" role="alert" style={CONFIRM_STYLE}>
+          <span style={MESSAGE_STYLE}>
+            {`${String(pendingDelete.count)} 行を削除します。よろしいですか？`}
+          </span>
+          <button
+            type="button"
+            data-testid="jxcel-grid-delete-confirm-yes"
+            onClick={onConfirm}
+            style={BUTTON_STYLE}
+          >
+            削除する
+          </button>
+          <button
+            type="button"
+            data-testid="jxcel-grid-delete-confirm-cancel"
+            onClick={onCancel}
+            style={BUTTON_STYLE}
+          >
+            取り消す
+          </button>
+        </span>
+      )}
     </div>
   );
 }
@@ -1971,6 +2452,10 @@ function GridScreenBody({
   onDetailOpened,
   onDetailEditSettled,
   onDetailClosed,
+  onRowOperationSettled,
+  onDeleteRequested,
+  onDeleteCancelled,
+  onRefused,
 }: {
   readonly model: GridScreenModel;
   /** 境界の口（表を描く腕が、編集の 1 往復に使う）。 */
@@ -1992,6 +2477,14 @@ function GridScreenBody({
   readonly onDetailEditSettled: (settlement: CellEditSettlement) => void;
   /** 詳細表示を閉じる（**値も文書も動かない**）。 */
   readonly onDetailClosed: () => void;
+  /** 行の操作の 1 往復の結果（8.6。要件 6.1、6.2、6.3）。 */
+  readonly onRowOperationSettled: (settlement: RowOperationSettlement) => void;
+  /** 削除の確認を求める（8.6。要件 6.5。**送っていない**）。 */
+  readonly onDeleteRequested: (confirmation: DeleteConfirmation) => void;
+  /** 確認への取り消し（8.6。**送らない**）。 */
+  readonly onDeleteCancelled: () => void;
+  /** 送らずに理由を告げる（8.6。挿入の位置を写せない・識別子が届いていない）。 */
+  readonly onRefused: (message: string) => void;
 }): ReactElement {
   const state = model.state;
   switch (state.status) {
@@ -2075,6 +2568,8 @@ function GridScreenBody({
             selection={state.selection}
             editing={state.editing}
             detail={state.detail}
+            view={state.view}
+            pendingDelete={state.pendingDelete}
             client={client}
             onSelectionChange={onSelectionChange}
             onEditStarted={onEditStarted}
@@ -2083,6 +2578,10 @@ function GridScreenBody({
             onDetailClosed={onDetailClosed}
             onViolationRead={onViolationRead}
             onUnavailable={onUnavailable}
+            onRowOperationSettled={onRowOperationSettled}
+            onDeleteRequested={onDeleteRequested}
+            onDeleteCancelled={onDeleteCancelled}
+            onRefused={onRefused}
           />
         </>
       );
@@ -2136,6 +2635,14 @@ export interface GridScreenViewProps {
   readonly onDetailEditSettled: (settlement: CellEditSettlement) => void;
   /** 詳細表示を閉じる（8.5）。 */
   readonly onDetailClosed: () => void;
+  /** 行の操作の 1 往復の結果（8.6。要件 6.1、6.2、6.3、6.5）。 */
+  readonly onRowOperationSettled: (settlement: RowOperationSettlement) => void;
+  /** 削除の確認を求める（8.6。要件 6.5。**送っていない**）。 */
+  readonly onDeleteRequested: (confirmation: DeleteConfirmation) => void;
+  /** 確認への取り消し（8.6。**送らない**）。 */
+  readonly onDeleteCancelled: () => void;
+  /** 送らずに理由を告げる（8.6）。 */
+  readonly onRefused: (message: string) => void;
 }
 
 /**
@@ -2158,6 +2665,10 @@ export function GridScreenView({
   onDetailOpened,
   onDetailEditSettled,
   onDetailClosed,
+  onRowOperationSettled,
+  onDeleteRequested,
+  onDeleteCancelled,
+  onRefused,
 }: GridScreenViewProps): ReactElement {
   return (
     <section data-testid="jxcel-grid-screen" aria-label="グリッド" style={ROOT_STYLE}>
@@ -2245,6 +2756,10 @@ export function GridScreenView({
         onDetailOpened={onDetailOpened}
         onDetailEditSettled={onDetailEditSettled}
         onDetailClosed={onDetailClosed}
+        onRowOperationSettled={onRowOperationSettled}
+        onDeleteRequested={onDeleteRequested}
+        onDeleteCancelled={onDeleteCancelled}
+        onRefused={onRefused}
       />
     </section>
   );
@@ -2389,6 +2904,27 @@ export function GridScreen(): ReactElement {
     // セルの編集と同じ規律である（違うのは、面を初期状態へ戻す鍵が進むことだけである）。
     setModel((current) => gridScreenDetailEditSettled(current, settlement));
   }, []);
+  /**
+   * 行の操作の 1 往復の結果（8.6。要件 6.1、6.2、6.3、6.5）。
+   *
+   * **非同期の結果である**（`ScreenBoundary` は効果の同期の例外しか捕まえない）。遷移は全域で
+   * あり、投げない（`gridScreenRowOperationSettled`）。
+   */
+  const settleRowOperation = useCallback((settlement: RowOperationSettlement) => {
+    setModel((current) => gridScreenRowOperationSettled(current, settlement));
+  }, []);
+  /** 削除の確認を求める（**送っていない。**数を示して尋ねるだけである。要件 6.5）。 */
+  const requestDelete = useCallback((confirmation: DeleteConfirmation) => {
+    setModel((current) => gridScreenDeleteRequested(current, confirmation));
+  }, []);
+  /** 確認への取り消し（**境界へ 1 つも送らない**。文書も表示も動かない）。 */
+  const cancelDelete = useCallback(() => {
+    setModel(gridScreenDeleteCancelled);
+  }, []);
+  /** 行の操作を送らなかった理由（識別子が届いていない・位置を写せない）を告知へ出す。 */
+  const refuseRowOperation = useCallback((message: string) => {
+    setModel((current) => gridScreenFailed(current, message));
+  }, []);
 
   return (
     <GridScreenView
@@ -2407,6 +2943,10 @@ export function GridScreen(): ReactElement {
       onDetailOpened={openDetail}
       onDetailEditSettled={settleDetailEdit}
       onDetailClosed={closeDetail}
+      onRowOperationSettled={settleRowOperation}
+      onDeleteRequested={requestDelete}
+      onDeleteCancelled={cancelDelete}
+      onRefused={refuseRowOperation}
     />
   );
 }

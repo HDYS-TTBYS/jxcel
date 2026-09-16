@@ -1474,6 +1474,74 @@ design.md の File Structure Plan が名指ししており、実際に 3 つの�
   （親の列そのものを構成へ残すか、位置の一覧を運ぶか）が要る。**件数として現れるのは総数だけで
   あり**（行を持たない違反を数えるのと同じ穴である）、提示は名乗れないものを出さない側へ倒した
 
+## 実測と固定: 行の追加・削除・複製（タスク 8.6）
+
+要件 6.1、6.2、6.3、6.5。**赤 → 緑**で実装した（**機能フラグは使っていない** — 本タスクは画面の
+機能であり、段の切り替えを要する分岐が無い。ビルドの切り替えを見る `scripts/check-shipping-bundle.sh`
+の対象にも新しい識別子は足していない）。追加したのは `rowOps.ts`（+ 同 `.test.ts`）であり、
+`GridScreen.tsx` / `GridScreen.test.ts` を変更した（境界の型・Rust の側は 1 バイトも変えていない）。
+
+### 赤 → 緑（実測）
+
+| 段 | 実測 |
+|---|---|
+| 赤（module） | `rowOps.ts` が無い状態で `rowOps.test.ts` が `Error: Cannot find module './rowOps'`（`0 test`）で落ちる |
+| 赤（画面） | 遷移と状態の欄が無い状態で `GridScreen.test.ts` が **10 件落ちる**（`gridScreenDeleteRequested is not a function` ほか。`Tests 10 failed ／ 68 passed (78)`） |
+| 緑 | 実装後、`src/features/grid/` の **409 件**が通る（`rowOps.test.ts` 20 件、`GridScreen.test.ts` 78 件） |
+
+### 決めたこと（**根拠は読んだ源である**）
+
+| 論点 | 決定 | 実測の根拠 |
+|---|---|---|
+| **挿入の位置の座標空間** | `at` は文書の位置であり、可視の序数を渡せるのは**並べ替えも絞り込みも無いとき**だけ。効いていれば送らずに理由を出す | `crates/data-grid/src/edit/mod.rs` の `EditCommand::InsertRows` の doc が「`at` は可視の序数ではなく文書の行順に対する位置であり、`at == 行数` は末尾への追加」と定める。**可視の序数から文書の位置へ写す口は 6.1 の 6 本のコマンドに無い**（`crates/app-shell/src/ipc/grid.rs` の `GridEditCommand` のうち行を増減する 3 つは位置と識別子だけを受け、窓が運ぶのは `RowId` の生 16 バイトである — `transport/mod.rs` の `encode` は `row.ulid().to_bytes()` を書く）。可視の順序が文書の順序と一致するのは `ViewState` の仕様が並べ替えも絞り込みも持たないときだけである（順序を導出するのは `recompute_order` であり、`derive_layout` が読むのは展開だけである — 前者は行、後者は列である） |
+| **追加した行の既定値** | 画面は値を 1 つも作らない（`InsertRows` は `at` と `count` だけを運ぶ） | 既定値を書くのは `edit` 層である — `insert_rows_with_inverse` が `self.schema.default_row()` を 1 つ作り、挿入した行へ `set_row_values` で書く（同 module の docs「既定値の適用」）。生成物の型（`GridEditCommand::InsertRows`）に値の欄が無いことがその写しである |
+| **削除・複製の対象** | 行の識別子（`WindowCache.rowId`）で決める。1 つでも引けなければ送らない | 同上（宛先は `RowId` である）。識別子は表示の並びに依らないので、並べ替え・絞り込みの下でも成り立つ（要件 8.6） |
+| **削除の確認の閾値** | **いま 1 画面に見えている行数**（移植口が報せた可視の区間の行数）。超えるときだけ送らずに数を示して尋ねる。知らないうちは尋ねる | `src/features/grid/renderer/glideAdapter.tsx` の `onVisibleRegionChanged` が Glide の `Rectangle` をそのまま渡し（Glide が行見出しのぶんを内部で補正する）、`range.height` が**見えている行数**である（`renderer/port.ts` の `VisibleSpan` の doc）。**先読みの幅（`WINDOW_ROWS` ＝ 256 行）ではない** — 代用すると 1 画面に収まらない削除が確認を求めなくなる（本節の変異試験 2） |
+| **行数が変わったあとの記憶** | `clear(row_count)` を**応答の行数をそのまま**渡して呼ぶ。失敗と、影響を受けた行が無い適用では呼ばない | 7.3 の申し送り（`design.md`「行数が変わる編集は画面が `clear` を呼ぶ」）と `WindowCache.clear` の doc（引数の無い `clear` は組み立て時の数へ戻り、増えた行は永久に読み込み中のまま、減った先は古い窓のまま配られる）。伝搬の意味論は `windowCache.test.ts` の 2 件が既に固定している（本タスクは**結線**を固定した） |
+| **世代と順序の再導出** | 反映で世代を `generationAfterEdit` の規則（`affected` が空でないときだけ +1）で進める | `crates/data-grid/src/api.rs` の `apply` が `is_structural`（`InsertRows` / `RemoveRows` / `DuplicateRows`）と行数の比較で `settle` の順序再導出を決め、`!outcome.affected.is_empty()` のときだけ `advance_generation()` を呼ぶ。**構造の命令は順序を導出し直す**ので、増えた行は窓の対象に入る |
+| 行が 1 件も無くなったとき | `ready` のままにし、位置の行を「行がありません」と書く（3 つの操作は残す） | 要件 1.5 の `no-rows` は**開いたときの判定**であり（`loadGridScreenState`。`grid_open_sheet` を呼んでから決める）、そこへ移すと**行を足す手段が無くなる**（要件 6 の目的は記録を足し続けられることである）。`at == 行数 == 0` への追加は妥当である（`edit` 層の事前検査） |
+| `clear` を呼ぶ理由（面は記憶を組み直すのに） | 呼ぶ。**記憶の契約がそれだからである** | `GridSurface` の組み立ての効果は `[sheet, summary, visibleRows, onUnavailable]` を依存に持ち、行数が変われば記憶も器も組み直る（移植口へ行数を渡す口は組み立てだけである — `RendererHandle` に行数を押し込む口が無い）。**組み直しに頼ると、同じ記憶を使い続ける呼び出しで壊れる** — 記憶の側の契約（`clear(rowCount)`）を満たすのは画面の仕事である |
+
+### 変異試験（md5 は記録時のバイト。**変異前 = 復帰後**）
+
+変異前の md5: `rowOps.ts` = `38e28f80d2893ac32ccc1a8b3c4da421`、
+`GridScreen.tsx` = `769759dfa18a785c7170234e294bed91`（復帰のたびに一致することを確かめた。
+`GridScreen.tsx` の md5 は変異試験の**後に** 1 箇所（行の操作の適用後に違反を引き直す 1 行を
+`runRowOperation` へ足した）を変更した時点の値であり、その変更の後で変異 4 を**もう一度**実施して
+同じ検査が落ちることを確かめてある）。
+
+| # | 変異 | 落ちた検査 | 結果 |
+|---|---|---|---|
+| 1 | `clear(outcome.row_count)` → `clear()`（行数を渡さない） | `rowOps.test.ts` **5 件**（「行が増えたとき、増えた行を要求して読める」＝増えた行が要求されない／「行が減ったとき、減った先は読まず要求もしない」を含む） | 期待どおり落ちる |
+| 2 | `deleteNeedsConfirmation` → `false`（つねに尋ねない） | `rowOps.test.ts` 4 件（閾値と、確認を求める 3 件） | 期待どおり落ちる |
+| 3 | `runRowOperationPlan` の `cancelled` の腕を `send` へ載せる | `rowOps.test.ts`「確認への取り消しは、境界へ何も送らない」（送る腕が投げる） | 期待どおり落ちる |
+| 4 | 反映で `clampSelection` を外す（`selection: state.selection`） | `GridScreen.test.ts`「行数が減ったとき、現在位置と選択が新しい表の範囲へ寄る」 | 期待どおり落ちる |
+| 5 | `insertPositionIsDocumentOrder` → `true`（つねに可視の序数を文書の位置として送る） | `rowOps.test.ts` 2 件（座標空間の 2 件） | 期待どおり落ちる |
+| 6 | 引けない識別子を空文字で埋めて送る（`rows.push(id ?? "")`） | `rowOps.test.ts`「識別子が引けない行があれば送らない」 | 期待どおり落ちる |
+| 7 | `affected` が空でも `clear` する | `rowOps.test.ts`「何も変わらなかった適用（影響を受けた行が無い）でも記憶を捨てない」 | 期待どおり落ちる |
+
+### 残るリスク（**実物の起動でしか観測できないもの**）
+
+- **実際に文書へ行が足され・消え、既定値が入ることは、この段では観測していない** — 送る命令の
+  形（位置と数だけであり、値の欄が無いこと）と、Rust 側の契約（`default_row`）までである。
+  `node` の環境には Rust が無い（`crates/data-grid` の検査と 9.2 の台本の領分）
+- **確認の面が現れ、押下が届くこと**は観測していない（`node` の環境には DOM が無い。
+  `jsdom` も `@testing-library` も足していない — 7.2 / `vitest.config.ts` の判断）。単体テストは
+  `renderToStaticMarkup` で**何が DOM へ出るか**と、`runRowOperationPlan` の振り分け
+  （取消が送る腕へ載らないこと）までを固定する
+- **移植口が新しい行数を描くこと**（行の番号が増減すること）も同じである。単体テストは
+  状態の `visibleRows` と提示の数までである。観測の場所は 9.2 の台本と `smoke-port-probe`
+  （標本の面は行の番号を描いている）
+- **並べ替え・絞り込みの下での挿入は、本タスクでは成立しない**（写す口が境界に無いため、
+  送らずに理由を出す）。8.8 が指定を結線するときに、`RowOrder` 側の写す口を 1 本足すこと
+- **絞り込みが入ると、`visibleRows` を `outcome.row_count` で置き換える規則は崩れる**（境界の
+  `GridEditResponse` はシートの行数しか運ばない）。8.8 は可視行数を別に取り直すこと
+- **識別子が窓に無い行を含む選択は、送らずに拒否する**（部分的な対象を送らない側へ倒した帰結で
+  ある）。窓が保つのは `MAX_WINDOWS`（12）× `WINDOW_ROWS`（256）＝ 3072 行であり、それを
+  超えて走査した選択では古い窓が追い出されている — 拒否の理由は告知に出るので、利用者は
+  走査し直して試せる。序数から識別子を引く口が境界に 1 本あれば（`grid_rows` のような読み口）、
+  この制限は消える
+
 ## References
 
 - [Glide Data Grid](https://github.com/glideapps/glide-data-grid) — MIT、canvas、`getCellContent` が引きに来る形
