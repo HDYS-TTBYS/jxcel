@@ -48,6 +48,7 @@ import type {
   GridSheetSummary,
   GridViolationResponse,
   GridViewResponse,
+  GridViewSpec,
   IpcResult,
   TypeKindTag,
 } from "../../ipc/bindings";
@@ -60,8 +61,13 @@ import {
   GRID_SCREEN_ID,
   GridScreen,
   GridScreenView,
+  applyGridView,
   createGridRendererSpec,
+  createGridSurfaceCache,
   followSelection,
+  gridScreenDetailClosed,
+  gridScreenDetailEditSettled,
+  gridScreenDetailOpened,
   gridScreenEditReportDismissed,
   gridScreenNextViolation,
   gridScreenViolationReason,
@@ -72,11 +78,16 @@ import {
   gridScreenNoticeDismissed,
   gridScreenRetried,
   gridScreenSelectionChanged,
+  gridScreenViewSettled,
   initialGridScreenModel,
   loadGridScreenState,
+  type CellDetail,
   type GridScreenModel,
   type GridScreenState,
 } from "./GridScreen";
+import { EMPTY_GRID_VIEW } from "./gridClient";
+import { createColumnSpace } from "./columnSpace";
+import { withExpansion } from "./nestedInspector";
 import { initialSelection, selectionAt } from "./selection";
 import type { GridClient } from "./gridClient";
 import type { CellPosition, RendererSelection, VisibleSpan } from "./renderer/port";
@@ -239,6 +250,10 @@ function markOf(model: GridScreenModel): string {
       onEditSettled: () => undefined,
       onNextViolation: () => undefined,
       onViolationRead: () => undefined,
+      onExpansion: () => undefined,
+      onDetailOpened: () => undefined,
+      onDetailEditSettled: () => undefined,
+      onDetailClosed: () => undefined,
     }),
   );
 }
@@ -410,6 +425,10 @@ describe("画面内の失敗の経路（器に届かない失敗）", () => {
       editing: null,
       violationTotal: 0,
       violation: null,
+      // 表示の指定（8.5）と世代（適用・表示の指定の変更で進む）。開いた直後はどちらも初期値である。
+      view: EMPTY_GRID_VIEW,
+      generation: 1,
+      detail: null,
     });
 
     const withNotice = gridScreenFailed(ready, "この操作はまだ結線されていない: 列の幅");
@@ -536,6 +555,12 @@ function readyModel(
     readonly visibleRows?: number;
     readonly violationTotal?: number;
     readonly violation?: ViolationPresentation | null;
+    /** 表示の指定（8.5。展開の状態をここへ入れる）。 */
+    readonly view?: GridViewSpec;
+    /** 世代（8.5。適用と表示の指定の変更で進む）。 */
+    readonly generation?: number;
+    /** 開いている詳細表示（8.5）。 */
+    readonly detail?: CellDetail | null;
   } = {},
 ): GridScreenModel {
   const visibleRows = options.visibleRows ?? SAMPLE_ROWS;
@@ -548,6 +573,10 @@ function readyModel(
     editing: null,
     violationTotal: options.violationTotal ?? 0,
     violation: options.violation ?? null,
+    // 8.5 の欄（表示の指定・世代・詳細表示）。既定は「開いた直後」である。
+    view: options.view ?? EMPTY_GRID_VIEW,
+    generation: options.generation ?? 1,
+    detail: options.detail ?? null,
   });
 }
 
@@ -804,6 +833,9 @@ function editingModel(
       editing: null,
       violationTotal: 0,
       violation: null,
+      view: EMPTY_GRID_VIEW,
+      generation: 1,
+      detail: null,
     }),
     position,
     initialText,
@@ -1479,6 +1511,321 @@ describe("違反のバーと巡回（8.4。要件 4.1〜4.4、4.6）", () => {
   });
 });
 
+// ===========================================================================
+// 2.6 入れ子の展開と詳細表示（8.5。要件 4.5、5.1〜5.7）
+// ===========================================================================
+
+/** 入れ子の列（`kind` は `Object` で、展開の可否を指定する）。 */
+function nestedDescriptor(
+  column: number,
+  name: string,
+  expandability: ColumnDescriptor["expandability"],
+): ColumnDescriptor {
+  return { column, path: [], name, kind: "Object", element_count: null, expandability };
+}
+
+/** 同一の型の並びの列（要素数の宣言つき。要件 5.6）。 */
+function listDescriptor(column: number, name: string): ColumnDescriptor {
+  return {
+    column,
+    path: [],
+    name,
+    kind: "Array",
+    element_count: { items: "Int", min: 1, max: 8 },
+    expandability: "leaf",
+  };
+}
+
+/**
+ * 入れ子を持つ標本の構成（4 列）。
+ *
+ * | 表示の位置 | 記述 | 期待する操作 |
+ * |---|---|---|
+ * | 0 | 葉（`Text`） | 無し |
+ * | 1 | 展開できる | 展開 |
+ * | 2 | 段数の上限に達している | **詳細表示へ** |
+ * | 3 | 同一の型の並び | 詳細表示（要素数を示す） |
+ */
+const NESTED_COLUMNS: readonly ColumnDescriptor[] = [
+  descriptor(0, "名前"),
+  nestedDescriptor(1, "提供元", "available"),
+  nestedDescriptor(2, "深い入れ子", "capped"),
+  listDescriptor(3, "明細"),
+];
+
+/** 入れ子を持つ標本を開いた応答。 */
+function nestedOpened(): GridOpenResponse {
+  return openedSheet({ columns: [...NESTED_COLUMNS], row_count: SAMPLE_ROWS });
+}
+
+/** 入れ子を持つ標本の表を描いている状態（選択と表示の指定を指定できる）。 */
+function nestedModel(
+  options: { readonly selection?: RendererSelection; readonly view?: GridViewSpec } = {},
+): GridScreenModel {
+  const visibleRows = SAMPLE_ROWS;
+  return gridScreenLoaded(initialGridScreenModel(), {
+    status: "ready",
+    sheet: "s1",
+    summary: { columns: [...NESTED_COLUMNS], row_count: visibleRows },
+    visibleRows,
+    selection: options.selection ?? initialSelection(),
+    editing: null,
+    violationTotal: 0,
+    violation: null,
+    view: options.view ?? EMPTY_GRID_VIEW,
+    generation: 1,
+    detail: null,
+  });
+}
+
+describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
+  it("展開できる列には展開の操作が出て、押された列の展開を指定として送る", async () => {
+    const client = fakeClient({
+      state: ok(openDocument([sheetOf("s1", "標本シート", 4, SAMPLE_ROWS)])),
+      open: ok(nestedOpened()),
+      view: ok(derivedView(SAMPLE_ROWS)),
+    });
+
+    const state = await loadGridScreenState(client);
+    expect(state.status).toBe("ready");
+
+    const markup = markOfState(state);
+    expect(markup).toContain("jxcel-grid-column-controls");
+    expect(markup).toContain("jxcel-grid-expansion-1");
+    expect(markup).toContain(">展開<");
+    // 段数の上限の列には展開の操作を出さない（それ以上降りられない）。
+    expect(markup).not.toContain("jxcel-grid-expansion-2");
+
+    // **送るのは完全な記述である**（並べ替え・絞り込みも載る）。開いた直後の 1 回のあとに
+    // もう 1 度呼ばれる（8.1 の「開いた直後の 1 回」に足して 2 回目である）。
+    const settlement = await applyGridView(
+      client,
+      withExpansion(EMPTY_GRID_VIEW, { column: 1, expanded: true, depth: 1 }),
+    );
+
+    expect(client.calls).toEqual([
+      "document_state",
+      "grid_open_sheet:s1",
+      "grid_set_view:000",
+      "grid_set_view:001",
+    ]);
+    expect(settlement).toEqual({
+      status: "applied",
+      view: withExpansion(EMPTY_GRID_VIEW, { column: 1, expanded: true, depth: 1 }),
+      visibleRows: SAMPLE_ROWS,
+      violationTotal: 0,
+    });
+  });
+
+  it("表示の指定を適用した結果を状態へ反映する（世代が進む）", async () => {
+    const before = readyModel(initialSelection(), { generation: 1 });
+    const view = withExpansion(EMPTY_GRID_VIEW, { column: 1, expanded: true, depth: 1 });
+
+    const after = gridScreenViewSettled(before, {
+      status: "applied",
+      view,
+      visibleRows: SAMPLE_ROWS,
+      violationTotal: 3,
+    });
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.view).toEqual(view);
+    // **境界は世代を運ばない**（7.3 の申し送り）ので画面が数える。`set_view` はつねに進める
+    // （`api.rs` の `set_view`）— 数えないと、以後の窓の要求が古い世代を名乗り、空の窓が返る。
+    expect(after.state.generation).toBe(2);
+    // 応答が運ぶ可視行数と違反の総数も反映する（絞り込みが効けば可視行数は変わる）。
+    expect(after.state.visibleRows).toBe(SAMPLE_ROWS);
+    expect(after.state.violationTotal).toBe(3);
+  });
+
+  it("表示の指定を適用できなかったときは、告知を出して前の指定と世代を残す", async () => {
+    const before = readyModel(initialSelection(), { generation: 1 });
+    const view = withExpansion(EMPTY_GRID_VIEW, { column: 1, expanded: true, depth: 1 });
+    const pending = gridScreenViewSettled(before, {
+      status: "applied",
+      view,
+      visibleRows: SAMPLE_ROWS,
+      violationTotal: 0,
+    });
+
+    // **失敗は `applyGridView` が作る**（文言もそこが組み立てる）。
+    const failure = await applyGridView(
+      fakeClient({ state: err<DocumentStateResponse>() }),
+      view,
+    );
+    const after = gridScreenViewSettled(pending, failure);
+
+    if (after.state.status !== "ready" || pending.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // **適用されていないので、状態は 1 つも動かさない**（世代も進めない — 進めると、窓の要求が
+    // 存在しない世代を名乗る。進んだのは直前の適用の 1 つだけである）。
+    expect(after.state.view).toEqual(pending.state.view);
+    expect(after.state.generation).toBe(pending.state.generation);
+    expect(after.notice).toContain("表示の指定を適用できませんでした");
+  });
+
+  it("展開の状態は走査で失われない（列ごとに保たれ、指定は完全な記述である）", () => {
+    // 開いた直後の状態から、2 列を展開し、そのあと**走査に相当する遷移**（現在位置の移動・
+    // 確定の反映・違反の提示の取り下げ）を通す。
+    const view = withExpansion(
+      withExpansion(EMPTY_GRID_VIEW, { column: 1, expanded: true, depth: 1 }),
+      { column: 3, expanded: true, depth: 1 },
+    );
+    const opened = gridScreenViewSettled(nestedModel(), {
+      status: "applied",
+      view,
+      visibleRows: SAMPLE_ROWS,
+      violationTotal: 0,
+    });
+
+    let traversed = gridScreenSelectionChanged(opened, selectionAt({ row: 12, column: 3 }));
+    traversed = gridScreenSelectionChanged(traversed, selectionAt({ row: 0, column: 0 }));
+    traversed = gridScreenEditSettled(traversed, {
+      status: "applied",
+      outcome: outcomeOf({ affected: [EDITED_ROW], revalidated_columns: [0] }),
+    });
+    traversed = gridScreenViolationReason(traversed, { kind: "cleared" });
+
+    if (traversed.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(traversed.state.view.expansion).toEqual([
+      { column: 1, expanded: true, depth: 1 },
+      { column: 3, expanded: true, depth: 1 },
+    ]);
+    // もう 1 列を展開すると、**前の 2 つを載せたまま** 3 つ目が足される（押された 1 件だけを
+    // 送ると、ドメインは要求に現れない展開を折りたたみへ戻す）。
+    const three = withExpansion(traversed.state.view, { column: 0, expanded: true, depth: 1 });
+    expect(three.expansion).toHaveLength(3);
+    expect(three.expansion.map((entry) => entry.column)).toEqual([1, 3, 0]);
+  });
+
+  it("段数の上限に達した列は、詳細表示へ誘導する（要件 5.4）", () => {
+    const markup = markOf(nestedModel());
+
+    // 記述の印（`expandability` が `capped`）から「詳細表示へ」が出る。
+    expect(markup).toContain("jxcel-grid-detail-2");
+    expect(markup).toContain("詳細表示へ");
+    // 展開できる列の入口は「詳細表示」である（誘導ではない）。
+    expect(markup).toContain(">詳細表示<");
+    // 葉の列（`element_count` も無い）には詳細表示の入口を出さない。
+    expect(markup).not.toContain("jxcel-grid-detail-0");
+  });
+
+  it("同一の型の並びの列では、要素数が示される（要件 5.6）", () => {
+    const markup = markOf(nestedModel());
+
+    expect(markup).toContain("要素数: 1..=8（要素の型: Int）");
+  });
+});
+
+describe("詳細表示（8.5。要件 4.5、5.5、5.7）", () => {
+  it("開くと、その位置の入れ子の詳細が出る（閉じると消える）", () => {
+    const before = nestedModel();
+    const position: CellPosition = { row: 4, column: 2 };
+
+    const opened = gridScreenDetailOpened(before, position);
+
+    if (opened.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // **どの位置を詳しく見ているかが状態に載る**（描かれるものは表の面の中であり、窓の記憶を
+    // 持つ側が描く — 状態に載らないと、開いていることを検査から観測できない）。
+    expect(opened.state.detail).toEqual({ position, edit: 0 });
+    const markup = markOf(opened);
+    expect(markup).toContain("jxcel-grid-nested-inspector");
+    expect(markup).toContain('data-detail-row="4"');
+    expect(markup).toContain('data-detail-column="2"');
+
+    const closed = gridScreenDetailClosed(opened);
+    if (closed.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(closed.state.detail).toBeNull();
+    expect(markOf(closed)).not.toContain("jxcel-grid-nested-inspector");
+  });
+
+  it("詳細表示の中の編集は、確定・取消・失敗のいずれもセルの編集と同じ規律で扱われる", () => {
+    // **同じ遷移（`gridScreenEditSettled`）を通る** — 違うのは、確定・取消で編集の面を作り直す
+    // 鍵が進むことだけである（面は打たれた文字を自分の状態に持つので、作り直さないと確定した
+    // のに打ちかけの文字が残る）。
+    const detail: CellDetail = { position: { row: 4, column: 2 }, edit: 0 };
+    const opened = gridScreenDetailOpened(nestedModel(), detail.position);
+
+    const cancelled = gridScreenDetailEditSettled(opened, { status: "cancelled" });
+    const applied = gridScreenDetailEditSettled(opened, {
+      status: "applied",
+      // 変換も違反も無い確定では報告を出さない（`reportOf` の規則）ので、違反を 1 つ残した
+      // 結果を渡す（**提示が出ることを見る**）。
+      outcome: outcomeOf({
+        affected: [EDITED_ROW],
+        violation_total: 1,
+        violations: [{ row: EDITED_ROW, column: 2, path: [] }],
+        revalidated_columns: [2],
+      }),
+    });
+    const failed = gridScreenDetailEditSettled(opened, {
+      status: "failed",
+      message: "ドキュメントの失敗: 経路が不達である",
+    });
+
+    if (
+      cancelled.state.status !== "ready" ||
+      applied.state.status !== "ready" ||
+      failed.state.status !== "ready"
+    ) {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // 取消: 文書は 1 バイトも変わらず、面は初期状態へ戻る（告知も報告も動かない）。
+    expect(cancelled.state.detail).toEqual({ position: detail.position, edit: 1 });
+    expect(cancelled.notice).toBeNull();
+    expect(cancelled.editReport).toBeNull();
+    // 確定: 報告が出て、面は初期状態へ戻る（要件 3.4、3.5 の提示はセルの編集と同じである）。
+    expect(applied.state.detail).toEqual({ position: detail.position, edit: 1 });
+    expect(applied.editReport).not.toBeNull();
+    // 適用のあとは世代が進む（以後の窓の要求が古い世代を名乗らない）。
+    expect(applied.state.generation).toBe(2);
+    // 失敗: **面は開いたままである**（適用されていないので、打たれている値を捨てる理由が無い）。
+    expect(failed.state.detail).toEqual({ position: detail.position, edit: 0 });
+    expect(failed.notice).toContain("編集を適用できませんでした");
+  });
+});
+
+describe("表の窓と列の空間（8.5。要件 5.1、8.6）", () => {
+  it("窓の記憶は、構成が定める列の写像で組まれる（恒等を仮定しない）", () => {
+    // 表の面が組む窓の記憶を**同じ関数で**組み、その写像を読む（効果の中にしか無いと、
+    // 「画面が恒等で組んでいないこと」を検査から観測できない）。
+    const summary: GridSheetSummary = {
+      columns: [
+        { column: 0, path: [{ segment: "Field", name: "city" }], name: "place.city", kind: "Text", element_count: null, expandability: "leaf" },
+        { column: 0, path: [{ segment: "Field", name: "zip" }], name: "place.zip", kind: "Text", element_count: null, expandability: "leaf" },
+        { column: 1, path: [], name: "name", kind: "Text", element_count: null, expandability: "leaf" },
+      ],
+      row_count: SAMPLE_ROWS,
+    };
+    const client = fakeClient({ state: err<DocumentStateResponse>() });
+
+    const cache = createGridSurfaceCache({
+      sheet: "s1",
+      summary,
+      visibleRows: SAMPLE_ROWS,
+      generation: 1,
+      client,
+    });
+
+    // **表示の位置 2 は文書の列 1 である**（恒等なら 2 になる）。読みも書きもこの 1 つの写像を使う
+    // （`WindowCache.getCell` と `./cellEdit` の宛先）。
+    expect(cache.documentColumn({ row: 0, column: 0 })).toBe(0);
+    expect(cache.documentColumn({ row: 0, column: 1 })).toBe(0);
+    expect(cache.documentColumn({ row: 0, column: 2 })).toBe(1);
+    // 恒等を仮定していないことは、同じ構成から作った写像そのもので確かめる（`./columnSpace`）。
+    expect(createColumnSpace(summary.columns).documentColumn(2)).toBe(1);
+  });
+});
+
 describe("画面の契約（受け取るのは器が渡す引数だけ）", () => {
   it("`ScreenProps` だけで描ける（それ以外の props を要求しない）", () => {
     // 型の水準の証明: 登録簿が要求する形（`ComponentType<ScreenProps>`）へそのまま代入できる。
@@ -1603,9 +1950,10 @@ describe("自前の配色を持たない（器が与える変数のみを参照�
 const SOURCE_PATHS = [
   "/src/features/grid/GridScreen.tsx",
   "/src/features/grid/violationBar.tsx",
+  "/src/features/grid/nestedInspector.tsx",
 ] as const;
 
-const SOURCES = import.meta.glob("/src/features/grid/{GridScreen,violationBar}.tsx", {
+const SOURCES = import.meta.glob("/src/features/grid/{GridScreen,violationBar,nestedInspector}.tsx", {
   query: "?raw",
   import: "default",
   eager: true,

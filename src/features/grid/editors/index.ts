@@ -49,7 +49,13 @@
  */
 import type { ComponentType } from "react";
 
-import type { CellEditorProps, CellEditorRegistration, CellEditorRegistry } from "../editorRegistry";
+import type { ColumnDescriptor } from "../../../ipc/bindings";
+import type {
+  CellEditorProps,
+  CellEditorRegistration,
+  CellEditorRegistry,
+  EditCarrier,
+} from "../editorRegistry";
 import { createEditorRegistry } from "../editorRegistry";
 import { AnyEditor } from "./any";
 import { BoolEditor } from "./bool";
@@ -66,21 +72,30 @@ import { TextEditor } from "./text";
  * 組込の登録（上の表そのもの。要件 10.2）。
  *
  * 入れ子の面だけは**登録簿を受け取って作る**ので、引数で受け取る（`nested`）。
+ *
+ * **運び手（`carrier`）は面ごとに宣言する**（8.5 が足した設計の改訂。`editorRegistry.ts` の
+ * [`EditCarrier`]）。`Object` / `Array` の面が確定する文字は**構造表現（JSON）**であり、
+ * `SetCells` の「打たれた文字」ではない — `Text` → `object` / `array` の変換の行が
+ * `schema-engine` の変換の表に無いため、`SetCells` に載せると**必ず違反になる**（7.4 が実測）。
+ * 残る 10 種の面が渡すのは打たれた文字そのものであり、解釈は判定層が行う（要件 3.3）。
+ *
+ * この 1 箇所が**型と運び手の対応の唯一の源**である（画面も入れ子の面も、自分の運び手を
+ * 自分では決めない — 登録簿へ問い合わせる）。
  */
 function builtinRegistrations(nested: ComponentType<CellEditorProps>): readonly CellEditorRegistration[] {
   return [
-    { kind: "Int", component: NumberEditor },
-    { kind: "Float", component: NumberEditor },
-    { kind: "Decimal", component: DecimalEditor },
-    { kind: "Text", component: TextEditor },
-    { kind: "Bool", component: BoolEditor },
-    { kind: "Date", component: DateEditor },
-    { kind: "DateTime", component: DateTimeEditor },
-    { kind: "Enum", component: EnumEditor },
-    { kind: "Ref", component: RefEditor },
-    { kind: "Object", component: nested },
-    { kind: "Array", component: nested },
-    { kind: "Any", component: AnyEditor },
+    { kind: "Int", component: NumberEditor, carrier: "text" },
+    { kind: "Float", component: NumberEditor, carrier: "text" },
+    { kind: "Decimal", component: DecimalEditor, carrier: "text" },
+    { kind: "Text", component: TextEditor, carrier: "text" },
+    { kind: "Bool", component: BoolEditor, carrier: "text" },
+    { kind: "Date", component: DateEditor, carrier: "text" },
+    { kind: "DateTime", component: DateTimeEditor, carrier: "text" },
+    { kind: "Enum", component: EnumEditor, carrier: "text" },
+    { kind: "Ref", component: RefEditor, carrier: "text" },
+    { kind: "Object", component: nested, carrier: "structure" },
+    { kind: "Array", component: nested, carrier: "structure" },
+    { kind: "Any", component: AnyEditor, carrier: "text" },
   ];
 }
 
@@ -104,3 +119,25 @@ export function createBuiltinEditorRegistry(): CellEditorRegistry {
  * 拡張する側はここへ登録し、画面はここから引く — 同じ器を共有する（要件 10.1、10.2）。
  */
 export const editorRegistry: CellEditorRegistry = createBuiltinEditorRegistry();
+
+/**
+ * **列の記述から、その列の入力手段と運び手を 1 度に引く**（8.5 が足した）。
+ *
+ * この関数が要るのは、画面と詳細表示の**両方**が同じ問いをするためである:「この列を編集する面は
+ * 何であり、その面の文字はどの命令へ載せるのか」。2 箇所で別々に引くと、**成分と運び手が別の
+ * 登録を指す**経路ができる（面は入れ子の面なのに、文字は `SetCells` へ載る — 必ず違反になる）。
+ *
+ * 札が読めない列（宣言が壊れている）は `"Any"` として引く（7.4 の事後条件。**面は必ず出る**）。
+ * `members`（位置ごとの宣言）は境界に材料が無いので、入れ子の面は位置ごとの面を出さず、値を
+ * そのまま扱う面へ落ちる（7.4 の申し送り 6）。
+ */
+export function columnEditor(column: ColumnDescriptor | null): {
+  readonly component: ComponentType<CellEditorProps>;
+  readonly carrier: EditCarrier;
+} {
+  const kind = column?.kind ?? "Any";
+  return {
+    component: editorRegistry.resolve(kind),
+    carrier: editorRegistry.resolveCarrier(kind),
+  };
+}

@@ -38,7 +38,7 @@ import { describe, expect, it } from "vitest";
 
 import type { TypeKindTag } from "../../ipc/bindings";
 import { EditorRegistrationError, createEditorRegistry } from "./editorRegistry";
-import type { CellEditorProps, ColumnConstraints } from "./editorRegistry";
+import type { CellEditorProps, CellEditorRegistration, ColumnConstraints, EditCarrier } from "./editorRegistry";
 import { createBuiltinEditorRegistry, editorRegistry } from "./editors";
 import { AnyEditor } from "./editors/any";
 import { BoolEditor } from "./editors/bool";
@@ -148,19 +148,19 @@ describe("登録簿の意味論（要件 10.1、10.2、10.5）", () => {
     expect(registeredTags).toHaveLength(12);
 
     for (const kind of registeredTags) {
-      expect(() => registry.register({ kind, component: TextEditor })).toThrow(EditorRegistrationError);
+      expect(() => registry.register({ kind, component: TextEditor, carrier: "text" })).toThrow(EditorRegistrationError);
     }
     // 届かない 2 種は空いている（登録が通る）。`Attachment` の実体の選択は本スペックの対象外
     // （requirements.md の Boundary Context）であり、`Custom` は拡張する側が登録する（要件 10.1）。
-    expect(() => registry.register({ kind: "Attachment", component: TextEditor })).not.toThrow();
-    expect(() => registry.register({ kind: "Custom", customTypeId: "com.example.述語", component: TextEditor }))
+    expect(() => registry.register({ kind: "Attachment", component: TextEditor, carrier: "text" })).not.toThrow();
+    expect(() => registry.register({ kind: "Custom", customTypeId: "com.example.述語", component: TextEditor, carrier: "text" }))
       .not.toThrow();
   });
 
   it("登録した成分が resolve から返る", () => {
     const registry = createEditorRegistry();
     const replacement: ComponentType<CellEditorProps> = () => null;
-    registry.register({ kind: "Enum", component: replacement });
+    registry.register({ kind: "Enum", component: replacement, carrier: "text" });
 
     expect(registry.resolve("Enum")).toBe(replacement);
   });
@@ -208,11 +208,11 @@ describe("全性と既定（要件 3.1、10.2、10.4）", () => {
 describe("重複登録の検出（要件 10.6）", () => {
   it("同じ札への 2 度目の登録は、登録側へ報告される", () => {
     const registry = createEditorRegistry();
-    registry.register({ kind: "Text", component: TextEditor });
+    registry.register({ kind: "Text", component: TextEditor, carrier: "text" });
 
     let reported: unknown = null;
     try {
-      registry.register({ kind: "Text", component: AnyEditor });
+      registry.register({ kind: "Text", component: AnyEditor, carrier: "text" });
     } catch (error) {
       reported = error;
     }
@@ -228,8 +228,8 @@ describe("重複登録の検出（要件 10.6）", () => {
 
   it("Custom の鍵は customTypeId ごとに別である", () => {
     const registry = createEditorRegistry();
-    registry.register({ kind: "Custom", customTypeId: "com.example.温度", component: NumberEditor });
-    registry.register({ kind: "Custom", customTypeId: "com.example.色", component: TextEditor });
+    registry.register({ kind: "Custom", customTypeId: "com.example.温度", component: NumberEditor, carrier: "text" });
+    registry.register({ kind: "Custom", customTypeId: "com.example.色", component: TextEditor, carrier: "text" });
 
     expect(registry.resolve("Custom", "com.example.温度")).toBe(NumberEditor);
     expect(registry.resolve("Custom", "com.example.色")).toBe(TextEditor);
@@ -239,20 +239,92 @@ describe("重複登録の検出（要件 10.6）", () => {
 
   it("同じ (Custom, customTypeId) の重複は報告される", () => {
     const registry = createEditorRegistry();
-    registry.register({ kind: "Custom", customTypeId: "com.example.温度", component: NumberEditor });
+    registry.register({ kind: "Custom", customTypeId: "com.example.温度", component: NumberEditor, carrier: "text" });
 
-    expect(() => registry.register({ kind: "Custom", customTypeId: "com.example.温度", component: TextEditor }))
+    expect(() => registry.register({ kind: "Custom", customTypeId: "com.example.温度", component: TextEditor, carrier: "text" }))
       .toThrow(EditorRegistrationError);
     expect(registry.resolve("Custom", "com.example.温度")).toBe(NumberEditor);
   });
 
   it("Custom 以外と Custom の札は別の鍵である", () => {
     const registry = createEditorRegistry();
-    registry.register({ kind: "Custom", customTypeId: "Text", component: NumberEditor });
-    registry.register({ kind: "Text", component: TextEditor });
+    registry.register({ kind: "Custom", customTypeId: "Text", component: NumberEditor, carrier: "text" });
+    registry.register({ kind: "Text", component: TextEditor, carrier: "text" });
 
     expect(registry.resolve("Text")).toBe(TextEditor);
     expect(registry.resolve("Custom", "Text")).toBe(NumberEditor);
+  });
+});
+
+describe("確定の文字の運び手（8.5 が足した設計の改訂。要件 5.5、5.7、10.3）", () => {
+  /**
+   * 運び手は**登録が宣言する**（design.md の Revalidation Triggers「確定の文字の運び手を登録に
+   * 足す設計の改訂」）。`commit(text)` の口は 1 本しかないが、入れ子の列の文字は `SetCells` では
+   * 適合しない（`Text` → `object` / `array` の変換の行が無い。7.4 が実測）ので、**その文字を
+   * どの命令へ載せるか**を面の側が宣言する。
+   */
+  it("登録が宣言した運び手を返す", () => {
+    const registry = createEditorRegistry();
+    const component: ComponentType<CellEditorProps> = () => null;
+    registry.register({ kind: "Object", component, carrier: "structure" });
+    registry.register({ kind: "Text", component, carrier: "text" });
+
+    expect(registry.resolveCarrier("Object")).toBe("structure");
+    expect(registry.resolveCarrier("Text")).toBe("text");
+    // **成分と運び手は同じ 1 件の登録から来る**（片方だけが別の登録を指す経路が無い）。
+    expect(registry.resolve("Object")).toBe(component);
+  });
+
+  it("登録の無い札の運び手は text である（既定の面は値をそのまま扱う。要件 10.4）", () => {
+    const registry = createEditorRegistry();
+
+    expect(registry.resolveCarrier("Attachment")).toBe("text");
+    expect(registry.resolveCarrier("Custom", "com.example.温度")).toBe("text");
+    // `resolve` と同じ事後条件である（**必ず何かを返す**。投げない）。
+    for (const kind of ALL_TYPE_KIND_TAGS) {
+      expect(["text", "structure"]).toContain(registry.resolveCarrier(kind));
+    }
+  });
+
+  it("組込で構造表現を運ぶのは Object と Array だけである（画面は型で分岐しない）", () => {
+    // **画面はこの区別を自分で持たない** — 登録簿へ問い合わせるだけである（要件 10.3）。
+    // 表の側の期待をここに逐語で書く（登録簿の内部から導くと、表が入れ替わっても緑になる）。
+    const structural = ALL_TYPE_KIND_TAGS.filter(
+      (kind) => editorRegistry.resolveCarrier(kind) === "structure",
+    );
+
+    expect(structural).toEqual(NESTED_TAGS);
+  });
+
+  it("Custom の運び手も登録ごとに決まる（拡張する側が宣言する）", () => {
+    const registry = createBuiltinEditorRegistry();
+    const component: ComponentType<CellEditorProps> = () => null;
+    registry.register({
+      kind: "Custom",
+      customTypeId: "com.example.住所",
+      component,
+      carrier: "structure",
+    });
+
+    expect(registry.resolveCarrier("Custom", "com.example.住所")).toBe("structure");
+    // 別の `customTypeId` は既定のままである（鍵は `(kind, customTypeId)` の対）。
+    expect(registry.resolveCarrier("Custom", "com.example.温度")).toBe("text");
+  });
+
+  it("運び手を持たない登録・知らない運び手の登録は、登録側の誤りとして報告される", () => {
+    const registry = createEditorRegistry();
+    const stale = { kind: "Text", component: TextEditor } as CellEditorRegistration;
+    const unknown = {
+      kind: "Text" as TypeKindTag,
+      component: TextEditor,
+      carrier: "色" as EditCarrier,
+    };
+
+    // **型検査は通らないが、実行時の登録側は通ってしまう**（拡張は JS からも来る）。
+    // 黙って既定へ落ちると、その面の文字は必ず違反になる経路へ流れる。
+    expect(() => registry.register(stale)).toThrow(EditorRegistrationError);
+    expect(() => registry.register(unknown)).toThrow(EditorRegistrationError);
+    expect(registry.resolveCarrier("Text")).toBe("text");
   });
 });
 
@@ -262,7 +334,7 @@ describe("前提条件（kind が Custom のときのみ customTypeId を伴う�
 
     let reported: unknown = null;
     try {
-      registry.register({ kind: "Custom", component: TextEditor });
+      registry.register({ kind: "Custom", component: TextEditor, carrier: "text" });
     } catch (error) {
       reported = error;
     }
@@ -278,7 +350,7 @@ describe("前提条件（kind が Custom のときのみ customTypeId を伴う�
 
     let reported: unknown = null;
     try {
-      registry.register({ kind: "Text", customTypeId: "com.example.温度", component: TextEditor });
+      registry.register({ kind: "Text", customTypeId: "com.example.温度", component: TextEditor, carrier: "text" });
     } catch (error) {
       reported = error;
     }

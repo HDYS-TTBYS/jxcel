@@ -26,6 +26,8 @@ import * as displayStateModule from "./displayState";
 import { DEFAULT_COLUMN_WIDTH, createDisplayState } from "./displayState";
 // 契約は名前のある型で受ける（`ReturnType<typeof …>` で実装へ結び付けない）。
 import type { DisplayStateStore } from "./displayState";
+import { createColumnSpace } from "./columnSpace";
+import type { ColumnDescriptor } from "../../ipc/bindings";
 // 7.3 の窓の記憶（**本 file は読むだけである**）。tasks.md 7.5 の受け入れは「窓の要求の内容が
 // 変わらないこと」であり、その記録の道具（偽のサーバと要求の読み手）をここでも使う。
 import {
@@ -372,7 +374,18 @@ async function settle(): Promise<void> {
 function cacheWith(harness: RequestHarness): WindowCache {
   return createWindowCache({
     sheet: "発注明細",
-    variants: ["Text", "Int", "Text", "Int"],
+    // **列の空間である**（8.5 が `variants` をこれへ置き換えた）。本検査は列の写像を主題に
+    // しないので、札の並びから恒等の写像を組む。
+    columns: createColumnSpace(
+      (["Text", "Int", "Text", "Int"] as const).map((kind, column): ColumnDescriptor => ({
+        column,
+        path: [],
+        name: `列${String(column)}`,
+        kind,
+        element_count: null,
+        expandability: "leaf",
+      })),
+    ),
     rowCount: 12,
     windowRows: 4,
     transport: harness.transport,

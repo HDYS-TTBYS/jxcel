@@ -38,8 +38,8 @@
  * （`transport` のモジュール docs「何を運び、何を運ばないか」）。
  */
 // **型だけの取り込みである**（`verbatimModuleSyntax` により `import type` が要る）。
-import type { TypeKindTag } from "../../ipc/bindings";
 import { invokeRaw } from "../../ipc/client";
+import type { ColumnSpace } from "./columnSpace";
 import type { CellPosition, RenderCell, RowSpan } from "./renderer/port";
 
 // ===========================================================================
@@ -518,13 +518,17 @@ export interface WindowCacheOptions {
    */
   readonly sheet: string;
   /**
-   * 列ごとの**葉の型の札**（列の添字の順）。`GridOpenResponse.columns[i].kind`
-   * （生成物 `ColumnDescriptor.kind`）が源であり、`null` の列は `"Any"` へ落とす。
+   * 列の空間（**表示の位置から文書の列への写像**。8.5 が足した）。
    *
-   * **窓はこの札を運ばない** — 窓が運ぶのは値の変種（`Int` / `Text` / `Date` のような宣言の
-   * 型ではない）であるため、移植口が要求する「葉の型の札」は列の宣言から取る。
+   * 窓が運ぶのは**文書の列**（宣言の列数。`transport` の `WindowCodec::encode`）である一方、
+   * 呼び出し側（移植口と選択）が持つのは**表示の位置**である。入れ子の展開が 1 つでもあると
+   * 2 つは一致しない（`./columnSpace` の module doc）ので、**この 1 つの値**から両方を引く —
+   * 読み（[`WindowCache.getCell`]）も書き（[`WindowCache.documentColumn`]）も同じ写像である。
+   *
+   * **既定を置かない。**恒等を既定にすると、展開が入った日に古い前提が黙って生き残る
+   * （呼び出し側が写像を渡し忘れても気づけない）。
    */
-  readonly variants: readonly TypeKindTag[];
+  readonly columns: ColumnSpace;
   /**
    * 可視行の総数（窓の要求をこの数へ切り詰める。絞り込みの適用後の数）。
    *
@@ -579,6 +583,32 @@ export interface WindowCache {
    * 口である）。
    */
   rowId(position: CellPosition): string | null;
+  /**
+   * その**表示の位置**が指す文書の列の添字（`./columnSpace` の写像そのもの）。答えられなければ
+   * `null`。
+   *
+   * **編集の宛先（生成物の `GridCellAddress.column`）を組むための口である**（tasks.md 8.5。
+   * 要件 5.7、8.6）。画面は**表示の位置しか持たない**（選択も移植口の座標も表示の位置である）が、
+   * 送る先は文書の列である。写像を呼び出し側で書き直すと、**読みと書きが別の規則で列を決める**
+   * 経路ができる（展開が入ると、片方だけが正しいまま残る）— したがって本記憶が持つ 1 つの
+   * 写像を、この口を通して**そのまま**使う。
+   *
+   * `null` は「その位置に列が無い」である（範囲の外・整数でない位置）。**推測で答えては
+   * ならない** — 呼び出し側はそれを文書の位置として使う（[`WindowCache.rowId`] と同じ規律）。
+   */
+  documentColumn(position: CellPosition): number | null;
+  /**
+   * そのセルが**違反している内側の位置**（窓の違反の札。要件 4.5）。`null` は**未取得**である。
+   *
+   * 空の並びは「違反していない」であり、`null`（まだ分からない）と区別する — 8.4 が
+   * `RenderCell.violated` を門番にしたのと同じ規律である（未取得を「違反なし」と読むと、
+   * 窓が届いたときに提示が変わる）。内側の位置そのものを提示するのは入れ子の詳細表示であり、
+   * 移植口はこれを運ばない（`RenderCell` は違反の有無の 1 ビットだけである。8.4 の申し送り）。
+   *
+   * **[`WindowCache.getCell`] と同じく、要求を始める**（未取得なら窓を取りに行く）。詳細表示は
+   * 描画の外（利用者の操作）から開かれるため、その行の窓はまだ無いことがある。
+   */
+  nestedMarks(position: CellPosition): readonly (readonly NestedSegment[])[] | null;
   /**
    * 可視範囲が変わったことを報せる（窓の要求と先読みの起点）。
    *
@@ -668,8 +698,11 @@ export function createWindowCache(options: WindowCacheOptions): WindowCache {
   const transport = options.transport ?? defaultTransport;
   const windowRows = Math.max(1, Math.floor(options.windowRows ?? WINDOW_ROWS));
   const maxWindows = Math.max(1, Math.floor(options.maxWindows ?? MAX_WINDOWS));
-  const variants = options.variants;
   const sheet = options.sheet;
+  /** 列の空間（**表示の位置 → 文書の列**。窓の列の添字と編集の宛先の唯一の源である）。 */
+  const space = options.columns;
+  /** 表示の位置ごとの札（この並びの長さが**表示の列の数**である）。 */
+  const variants = space.variants;
   const onArrival = options.onArrival;
   const initialRowCount = Math.max(0, Math.floor(options.rowCount));
 
@@ -849,20 +882,20 @@ export function createWindowCache(options: WindowCacheOptions): WindowCache {
   };
 
   const getCell = (position: CellPosition): RenderCell => {
-    const column = position.column;
+    const display = position.column;
     // 列が範囲の外であるときは列の札も決まらないので、既定の入力へ落ちる札（`Any`）を使う。
-    const variant = variants[column] ?? "Any";
+    const variant = variants[display] ?? "Any";
     const row = position.row;
+    // **表示の位置 → 文書の列**（窓が運ぶのは文書の列だけである。`./columnSpace` の module doc）。
+    const column = space.documentColumn(display);
     if (
       !Number.isInteger(row) ||
       row < 0 ||
       row >= end ||
-      !Number.isInteger(column) ||
-      column < 0 ||
-      column >= variants.length
+      column === null
     ) {
-      // 範囲の外（負・行数以上・列数以上・整数でない）。**取得もしない**（存在しない序数を
-      // 要求しない）。
+      // 範囲の外（負・行数以上・列数以上・整数でない・列が無い）。**取得もしない**（存在しない
+      // 序数を要求しない）。
       // 読み込み中として返すのは、範囲の外を描かない描き手にとって観測されない札であり、
       // 空白（値なし）と取り違えられないためである。
       return { text: "", variant, violated: false, loading: true };
@@ -899,6 +932,37 @@ export function createWindowCache(options: WindowCacheOptions): WindowCache {
     }
     const decoded = entry.rows[row - entry.span.start];
     return decoded === undefined ? null : rowKeyText(decoded.key);
+  };
+
+  /**
+   * 表示の位置が指す**文書の列**（`./columnSpace` の写像そのもの。8.5）。
+   *
+   * 記憶の側で写像を書き直さない（**同じ 1 つの値を、読みと書きの両方が引く**）。行の範囲は
+   * 見ない — 列の写像は行に依らないためであり、見ると「窓が未取得だから列も分からない」という
+   * 誤った答えになる（宛先を組む呼び出し側は、行の識別子の `null` と列の `null` を別々に扱う）。
+   */
+  const documentColumn = (position: CellPosition): number | null =>
+    space.documentColumn(position.column);
+
+  /**
+   * そのセルの違反の札（**内側の位置**。要件 4.5）。
+   *
+   * `getCell` と同じ引き方をする（窓が無ければ要求を始めて `null` を返す）。**セルの本体を
+   * 読むのと同じ写像を使う**ので、表示の位置と文書の列が食い違う構成でも同じセルを指す。
+   */
+  const nestedMarks = (position: CellPosition): readonly (readonly NestedSegment[])[] | null => {
+    const row = position.row;
+    const column = space.documentColumn(position.column);
+    if (!Number.isInteger(row) || row < 0 || row >= end || column === null) {
+      return null;
+    }
+    const entry = covering(row);
+    if (entry === undefined) {
+      requestAt(windowStartFor(row));
+      return null;
+    }
+    const cell = entry.rows[row - entry.span.start]?.cells[column];
+    return cell === undefined ? null : cell.marks;
   };
 
   const setVisibleSpan = (span: RowSpan): void => {
@@ -984,6 +1048,8 @@ export function createWindowCache(options: WindowCacheOptions): WindowCache {
   return {
     getCell,
     rowId,
+    documentColumn,
+    nestedMarks,
     setVisibleSpan,
     invalidate,
     setGeneration,

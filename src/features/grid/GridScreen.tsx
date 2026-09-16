@@ -183,14 +183,13 @@
  * 遅れて届いた答えは捨てる（世代の印）。現在位置がもう違うのに、前の位置の理由を出す経路を
  * 作らない。
  *
- * ## 4.5（入れ子の内側の位置）は 8.5 である
+ * ## 4.5（入れ子の内側の位置）は 8.5 が実装した
  *
  * 窓はセルごとに**内側の位置の札**を運ぶ（`transport` の `marks`）が、移植口の `RenderCell` は
- * それを運ばない（`violated` の 1 ビットだけである）。本 module が扱う
- * `GridViolationLocation.path` も、**理由の文言の中にしか現れない**（適応層が内側の位置を
- * 含めて組み立てる）。内側の位置そのものの提示（要件 4.5 の「どの位置が違反しているか」）は
- * `NestedInspector`（8.5）の担当であり、**本タスクは移植口を広げていない**（広げると、8.5 が
- * 入れ子の詳細表示を設計するときに 2 つの案がぶつかる）。
+ * それを運ばない（`violated` の 1 ビットだけである）。8.4 はこの提示を 8.5 へ送り、
+ * **移植口を広げなかった**。8.5 は同じ判断を保ったまま実装した: 内側の位置は
+ * [`WindowCache.nestedMarks`]（8.5 が記憶へ足した口）から読み、`./nestedInspector` の
+ * `NestedInspector` が `a.b` / `tags[2]` / 「セル直下」を書き分けて示す（要件 4.5）。
  *
  * ## 単体テストが観測しないもの（実物の起動で観測する）
  *
@@ -203,6 +202,26 @@
  * `scripts/check-port-interaction.sh`。**標本の面は既に違反の帯を描いている** — `probeCell` が
  * `row % 7 === 3` を違反として返す。帯の中の画素を 1 つ読めば色の主張を足せる）と、9.2 の
  * 台本である。
+ *
+ * # 8.5 が確定させたもの（入れ子の展開と詳細表示。`./nestedInspector` / `./columnSpace`）
+ *
+ * **入れ子に閉じた決定は `./nestedInspector` が持ち、列の写像は `./columnSpace` が持つ。**
+ * 本 module が足したのは、① 状態の欄 3 つ（`view` / `generation` / `detail`）、② その遷移
+ * （`gridScreenViewSettled` / `gridScreenDetailOpened` / `gridScreenDetailClosed` /
+ * `gridScreenDetailEditSettled`）、③ 境界へ送る純粋な非同期関数（`applyGridView`）、
+ * ④ 表の面が窓の記憶を組む口（`createGridSurfaceCache`）である。
+ *
+ * | 論点 | 決定 | どこが担うか |
+ * |---|---|---|
+ * | 展開の操作（要件 5.1、5.2） | **押された 1 件を、いまの指定へ足した完全な記述として送る**（`withExpansion`）。送っている途中の押下は `pendingViewRef` へ積む | `GridScreen` の `expand` と `./nestedInspector` |
+ * | 展開の状態の保持（要件 5.3） | `ready.view` が持つ。**走査はここへ触れない**ので失われない | `GridScreenState` の `view` |
+ * | 段数の上限の誘導（要件 5.4） | 記述の印（`expandability` が `capped`）から「詳細表示へ」を出し、押すと**現在位置の行のその列**の詳細表示を開く | `./nestedInspector` の `nestedColumnControls` と `gridScreenDetailOpened` |
+ * | 詳細表示（要件 4.5、5.5、5.6） | 値を読むのは**表**（窓の記憶を持つ側）であり、開いている位置は状態が持つ。**同じ遷移でセルの編集と同一の規律**（`gridScreenDetailEditSettled` が `gridScreenEditSettled` を呼ぶ） | `GridSurface` の中の `NestedInspector` |
+ * | 世代（8.5 が足した是正） | `grid_set_view` の成功と、影響を伴う適用で進める。**組み直さずに**記憶へ下ろす | `ready.generation` と `GridSurface` の効果 |
+ *
+ * **要件 5.5 の「構造の全体」と、要件 5.1 / 5.2 の見える結果は、境界に読む口が無いため届かない**
+ * （`design.md`「8.5 が確定させたもの」の申し送り 1・2）。本 module はその事実を利用者にも示す
+ * （詳細表示は「宣言が読めません」と書き、展開は指定を送るが**描かれる列は変わらない**）。
  *
  * # 8.3〜8.9 への申し送り（本 module が足す予定の場所）
  *
@@ -217,12 +236,11 @@
  *   `SetCells` は行数を変えないので、本 module の経路では要らない
  * - **8.8（列幅・列順）**: 列幅と表示上の列順は `createDisplayState`（7.5）が持つ。変化は
  *   **次の `mount` の仕様**に載せる（`RendererHandle` に幅や順を押し込む口は無い。7.2 の申し送り）。
- * - **列の添字の恒等が崩れるのは 2 つである（8.8 と 8.5）**: いまの並びは恒等であり、入力手段の
- *   選択（`summary.columns` の添字）・編集の宛先（`./cellEdit`）・窓の記憶の列の添字は同じ前提に
- *   立っている。**崩すのは ① 8.8 の列順 ② 8.5 の入れ子の展開**（展開すると `ColumnDescriptor`
- *   の並びが文書の列の添字と一致しなくなる — `view/mod.rs` の `push_column`）。どちらが入る
- *   ときも、**この 3 つを同じ 1 箇所で揃えること**（揃わないと、描かれている値と編集の宛先が
- *   別の列を指す）
+ * - **列の添字の恒等が崩れるのは 2 つである（8.5 が 1 つ目を閉じた）**: 崩すのは ① 8.8 の列順
+ *   ② 入れ子の展開であり、**②は 8.5 が閉じた**（写像は `./columnSpace` の 1 つであり、窓の読み
+ *   `WindowCache.getCell` と編集の宛先 `WindowCache.documentColumn` が同じ値を引く）。①（8.8）
+ *   は**同じ 1 つへ揃える**こと — 列の並びの変更は窓の中身を変えないので、揃えるのは `getCell`
+ *   へ渡す位置の側である（8.8 の担当）
  */
 import {
   useCallback,
@@ -239,10 +257,17 @@ import type {
   ColumnDescriptor,
   GridCoercionNotice,
   GridEditOutcome,
+  GridExpansionState,
   GridSheetSummary,
   GridViolationLocation,
+  GridViewSpec,
 } from "../../ipc/bindings";
-import { settleCellEdit, type CellEditIntent, type CellEditSettlement } from "./cellEdit";
+import {
+  generationAfterEdit,
+  settleCellEdit,
+  type CellEditIntent,
+  type CellEditSettlement,
+} from "./cellEdit";
 import { ViolationBar } from "./violationBar";
 import {
   nextViolation,
@@ -252,8 +277,15 @@ import {
   type ViolationReading,
 } from "./violations";
 import { createDisplayState } from "./displayState";
-import { editorRegistry } from "./editors";
-import type { ColumnConstraints } from "./editorRegistry";
+import { columnEditor } from "./editors";
+import type { ColumnConstraints, EditCarrier } from "./editorRegistry";
+import { createColumnSpace } from "./columnSpace";
+import {
+  NestedColumnControls,
+  NestedInspector,
+  declaredInnerPositions,
+  withExpansion,
+} from "./nestedInspector";
 import { WINDOW_ROWS, createWindowCache, type WindowCache } from "./windowCache";
 import { createGlideAdapter } from "./renderer/glideAdapter";
 import {
@@ -272,6 +304,7 @@ import type {
   RendererSelection,
   RendererSpec,
   RowMarkerMode,
+  RowSpan,
   VisibleSpan,
 } from "./renderer/port";
 import { EMPTY_GRID_VIEW, createGridClient, type GridClient } from "./gridClient";
@@ -357,7 +390,7 @@ export type GridScreenState =
        */
       readonly violationTotal: number;
       /**
-       * いま出している違反の提示（要件 4.2、4.4）。`null` なら出すものが無い。
+       * いまの違反の提示（要件 4.2、4.4）。`null` なら出すものが無い。
        *
        * [`ViolationPresentation`] の 2 つの腕は**別の出来事**である — `reason` はいまの位置の
        * 違反の理由（要件 4.2。表が窓の印を見て引く）、`exhausted` は巡回が尽きたこと
@@ -367,7 +400,49 @@ export type GridScreenState =
        * **現在位置が動けば取り下げる**（提示は「いまの位置についてのもの」だからである）。
        */
       readonly violation: ViolationPresentation | null;
+      /**
+       * いまの表示の指定（**完全な記述**。8.5 が足した）。
+       *
+       * 並べ替え・絞り込み・展開の 3 つを 1 つの形で持つ（生成物の `GridViewSpec`）。**展開の
+       * 状態はここに住む**ので、走査（現在位置の移動・窓の取り直し）では失われない
+       * （要件 5.3）。`grid_set_view` へ送るのはつねに**この値に 1 件を足したもの**である
+       * （`./nestedInspector` の `withExpansion`）— 押された 1 件だけを送ると、ドメインは
+       * 要求に現れない展開を折りたたみへ戻す（`answer_set_view` の規約）。
+       */
+      readonly view: GridViewSpec;
+      /**
+       * `GridSession` が持つ**世代**の写し（8.5。**境界は世代を運ばない** — 7.3 の申し送り）。
+       *
+       * 進むのは 2 つの出来事である: ① `grid_set_view`（つねに +1。`api.rs` の `set_view`）、
+       * ② 適用（影響を受けた行があるときだけ +1。同 `apply`。規則は `./cellEdit` の
+       * [`generationAfterEdit`]）。**写さないと、以後の窓の要求が古い世代を名乗り、Rust 側が
+       * 空の窓を返す**（`WindowCodec::is_stale`）— 取り直した窓は永久に読み込み中のままになる。
+       *
+       * 開いた直後は 1 である（8.1 が開く流れで `grid_set_view` を 1 度呼ぶ）。
+       */
+      readonly generation: number;
+      /**
+       * 開いている詳細表示（8.5。`null` なら開いていない）。**この腕が持つ**ことが、描かれて
+       * いる表のセルにしか詳細表示が無いことを型で表している。
+       *
+       * 状態に載せる理由は、**入れ子の詳細が表の面の中に描かれる**ためである（窓の記憶を持つのは
+       * 表であり、値を読むにはそこが要る）。
+       */
+      readonly detail: CellDetail | null;
     };
+
+/**
+ * 開いている詳細表示（8.5。要件 4.5、5.5、5.7）。
+ *
+ * `position` は**表示の位置**である（見出しに 1 起点で名乗る。列の内側の位置は列の記述が持つ）。
+ * `edit` は**編集の面の世代**である — 面は打たれた文字を自分の状態に持つので、確定・取消の
+ * たびにこの数を進めて作り直す（確定したのに打ちかけの文字が残る、という食い違いを作らない。
+ * 失敗では進めない — 適用されていないので、打たれている値を捨てる理由が無い）。
+ */
+export interface CellDetail {
+  readonly position: CellPosition;
+  readonly edit: number;
+}
 
 /**
  * 編集中の 1 セル（要件 3.1）。
@@ -580,6 +655,10 @@ export function gridScreenEditReportDismissed(model: GridScreenModel): GridScree
  * 境界への問い合わせ（`./violations` の `reasonInRow`）であり、どちらもこの遷移の外で起きる。
  * **取り下げておけば、解消された違反の提示が残ることはない**（残ると要件 4.6 が満たされない）。
  *
+ * 世代もここで進める（8.5）。規則は `./cellEdit` の [`generationAfterEdit`] であり、**適用が
+ * 行の値を変えたときだけ**進む（`api.rs` の `apply` と同じ）。進めないと、以後の窓の要求が
+ * 古い世代を名乗り、**取り直した窓が永久に読み込み中のまま**になる。
+ *
  * 結果が無い（`None`。`grid_history` の腕）ときは**何も動かさない** — 適用していないので、
  * 総数を変える根拠が無い（生成物の doc が「適用では `None` を取り得ない」と定めている）。
  */
@@ -587,7 +666,174 @@ function stateAfterEdit(state: GridScreenState, outcome: GridEditOutcome | null)
   if (state.status !== "ready" || outcome === null) {
     return state;
   }
-  return { ...state, violationTotal: outcome.violation_total, violation: null };
+  return {
+    ...state,
+    violationTotal: outcome.violation_total,
+    violation: null,
+    generation: generationAfterEdit(state.generation, outcome),
+  };
+}
+
+// ===========================================================================
+// 2.5 入れ子の展開と詳細表示（8.5。要件 4.5、5.1〜5.7）
+// ===========================================================================
+
+/**
+ * 表示の指定を送った結果（**画面が状態を決めるのに要るものだけ**）。
+ *
+ * 成功の腕は**送った指定をそのまま持ち帰る** — 状態へ入れるのは「境界が受け取った指定」で
+ * なければならない（組み立て直すと、送ったものと入れたものが食い違いうる）。
+ */
+export type GridViewSettlement =
+  | {
+      readonly status: "applied";
+      readonly view: GridViewSpec;
+      /** 可視行数（絞り込みが効けばシートの行数と違う）。窓が覆う行数である。 */
+      readonly visibleRows: number;
+      /** **シート全体**の違反の総数（要件 4.3）。 */
+      readonly violationTotal: number;
+    }
+  | { readonly status: "failed"; readonly message: string };
+
+/**
+ * 表示の指定を境界へ送る（要件 5.1、5.2、8.3、8.4）。**開く流れと同じ規律の純粋な非同期関数である**
+ * （効果はこれを呼ぶだけであり、検査は偽の境界を渡して「何を送ったか」を読める）。
+ *
+ * 例外を投げない（`GridClient` の口は封筒の失敗を値で返す）。
+ */
+export async function applyGridView(
+  client: GridClient,
+  view: GridViewSpec,
+): Promise<GridViewSettlement> {
+  const answer = await client.setView(view);
+  if (answer.status === "error") {
+    return {
+      status: "failed",
+      message: `表示の指定を適用できませんでした: ${describeIpcError(answer.error)}`,
+    };
+  }
+  return {
+    status: "applied",
+    view,
+    visibleRows: answer.data.visible_rows,
+    violationTotal: answer.data.violation_total,
+  };
+}
+
+/**
+ * 表示の指定の適用を画面へ反映する（要件 5.1、5.2、5.3）。
+ *
+ * | 結果 | 何が起きるか |
+ * |---|---|
+ * | 適用された | **送った指定をそのまま状態へ入れる**（展開の状態がここに住むので、走査では失われない）。可視行数・違反の総数を置き換え、**世代を 1 つ進める** |
+ * | 適用できなかった | **状態を 1 つも動かさず**、理由を告知として出す（世代も進めない — 進めると、窓の要求が存在しない世代を名乗る） |
+ *
+ * 窓の記憶は捨てない（**組み直しもしない**）。表示の指定のうち展開は**窓が運ぶ列を変えない**
+ * ので、記憶している窓の内容はそのまま正しい（変わったのは世代だけである — `GridSurface` が
+ * 世代を記憶へ下ろす）。並べ替え・絞り込みのように**行の並びを変える**指定は、8.8 が
+ * `WindowCache.clear` を伴って足す。
+ */
+export function gridScreenViewSettled(
+  model: GridScreenModel,
+  settlement: GridViewSettlement,
+): GridScreenModel {
+  if (model.state.status !== "ready") {
+    return model;
+  }
+  switch (settlement.status) {
+    case "applied":
+      return {
+        attempt: model.attempt,
+        state: {
+          ...model.state,
+          view: settlement.view,
+          visibleRows: settlement.visibleRows,
+          violationTotal: settlement.violationTotal,
+          // 世代は**進めることだけが契約である**（`api.rs` の `set_view` はつねに +1 する）。
+          generation: model.state.generation + 1,
+          // 詳細表示は**開いたままにする**（構成が変わったことを理由に閉じる理由が無い）。
+        },
+        notice: model.notice,
+        editReport: model.editReport,
+      };
+    case "failed":
+      // **適用されていないので、状態は 1 つも動かさない**（打たれた指定を捨てる理由が無い）。
+      return gridScreenFailed(model, settlement.message);
+    default:
+      return assertNever(settlement, "表示の指定の結果の分岐が網羅されていない");
+  }
+}
+
+/**
+ * 詳細表示を開く（要件 4.5、5.5）。**表を描いていないときは何もしない**（描かれていない表の
+ * セルに詳細表示は無い）。
+ *
+ * 同じ位置を開き直したときは**編集の面の世代を進める**（作り直す）— 前に打ちかけた文字を
+ * 持ち越さない。
+ */
+export function gridScreenDetailOpened(
+  model: GridScreenModel,
+  position: CellPosition,
+): GridScreenModel {
+  if (model.state.status !== "ready") {
+    return model;
+  }
+  const current = model.state.detail;
+  const edit = current !== null && samePosition(current.position, position) ? current.edit + 1 : 0;
+  return {
+    attempt: model.attempt,
+    state: { ...model.state, detail: { position, edit } },
+    notice: model.notice,
+    editReport: model.editReport,
+  };
+}
+
+/** 詳細表示を閉じる（**値も文書も動かない** — 表示を消すだけである）。 */
+export function gridScreenDetailClosed(model: GridScreenModel): GridScreenModel {
+  if (model.state.status !== "ready" || model.state.detail === null) {
+    return model;
+  }
+  return {
+    attempt: model.attempt,
+    state: { ...model.state, detail: null },
+    notice: model.notice,
+    editReport: model.editReport,
+  };
+}
+
+/**
+ * 詳細表示の中の編集の 1 往復を画面へ反映する（要件 5.7）。**規律はセルの編集と同一である**
+ * — 遷移そのものが [`gridScreenEditSettled`] である（報告・告知・世代・取消の扱いを 2 度
+ * 書かない）。
+ *
+ * 違うのは 1 点だけである: セルの編集は**入力手段を閉じる**が、詳細表示は**面を初期状態へ
+ * 戻す**（鍵を進める）。取消と確定の両方で戻す — どちらも「その編集は終わった」であり、
+ * 打ちかけの文字を次の編集へ持ち越さない。失敗では戻さない（適用されていないので、打たれて
+ * いる値を捨てる理由が無い — セルの編集と同じである）。
+ */
+export function gridScreenDetailEditSettled(
+  model: GridScreenModel,
+  settlement: CellEditSettlement,
+): GridScreenModel {
+  const settled = gridScreenEditSettled(model, settlement);
+  if (settled.state.status !== "ready" || settled.state.detail === null) {
+    return settled;
+  }
+  if (settlement.status === "failed") {
+    return settled;
+  }
+  return {
+    ...settled,
+    state: {
+      ...settled.state,
+      detail: { position: settled.state.detail.position, edit: settled.state.detail.edit + 1 },
+    },
+  };
+}
+
+/** 同じセルか（表示の位置どうしの比較）。 */
+function samePosition(before: CellPosition, after: CellPosition): boolean {
+  return before.row === after.row && before.column === after.column;
 }
 
 /**
@@ -797,6 +1043,13 @@ export async function loadGridScreenState(client: GridClient): Promise<GridScree
     violationTotal: derived.data.violation_total,
     // 開いた直後は出すべき違反の理由が 1 つも無い（表が現在位置を読んでから引く）。
     violation: null,
+    // 開いた直後の表示の指定は空である（絞り込み無し・並べ替え無し・展開無し。要件 5.1 の
+    // 展開は利用者の操作で足す）。
+    view: EMPTY_GRID_VIEW,
+    // いま `grid_set_view` を 1 度呼んだところである（世代は 0 から 1 へ進んだ）。
+    generation: GENERATION_AFTER_OPEN,
+    // 開いた直後は詳細表示を開いていない（要件 5.5。開くのは利用者の操作である）。
+    detail: null,
   };
 }
 
@@ -938,6 +1191,12 @@ const SELECTION_STYLE = {
   color: `var(${APPEARANCE_VARS.screenMuted})`,
 } as const;
 
+/**
+ * 窓の記憶がまだ無いときに返すセルの札（8.5）。**「値なし」ではなく「未取得」である**
+ * （`RenderCell.loading` の doc。空文字は値なしと区別がつかない）。
+ */
+const UNKNOWN_CELL: RenderCell = { text: "", variant: "Any", violated: false, loading: true };
+
 /** 表を組み立てる指定。 */
 interface GridSurfaceProps {
   /** 開いたシートの識別子（窓の要求が名乗る。`grid_open_sheet` に渡した文字列と同一である）。 */
@@ -946,10 +1205,19 @@ interface GridSurfaceProps {
   readonly summary: GridSheetSummary;
   /** 可視行の数（窓が覆う行数）。 */
   readonly visibleRows: number;
+  /**
+   * いまの世代（8.5。`grid_set_view` と適用で進む）。
+   *
+   * **依存には入れない**（入れると、編集のたびに器を組み直して走査の位置を失う）。組み立ての
+   * 時点の値として読み、以後の変化は専用の効果が記憶へ下ろす。
+   */
+  readonly generation: number;
   /** 選択（現在位置と矩形）。**画面の状態が持つ唯一の値である**（写しをここに作らない）。 */
   readonly selection: RendererSelection;
   /** 編集中のセル（要件 3.1）。`null` なら編集していない。 */
   readonly editing: CellEdit | null;
+  /** 開いている詳細表示（8.5。要件 5.5）。`null` なら開いていない。 */
+  readonly detail: CellDetail | null;
   /**
    * 境界の口。**編集の 1 往復（`./cellEdit`）が使う** — カードの記憶（下）と組にするのは、
    * 確定が宛先（窓の行の識別子）と、適用のあとの作り直し（影響を受けた行の窓を捨てる）の
@@ -962,6 +1230,13 @@ interface GridSurfaceProps {
   readonly onEditStarted: (position: CellPosition, initialText: string) => void;
   /** 確定の 1 往復の結果を画面へ上げる口（要件 3.3、3.4、3.5、3.6）。 */
   readonly onEditSettled: (settlement: CellEditSettlement) => void;
+  /**
+   * 詳細表示の中の編集の結果を画面へ上げる口（要件 5.7）。**セルの編集と同じ遷移を使う**
+   * （`./cellEdit` の 1 往復は同一であり、違うのは反映の遷移だけである）。
+   */
+  readonly onDetailEditSettled: (settlement: CellEditSettlement) => void;
+  /** 詳細表示を閉じる（8.5。**値も文書も動かない**）。 */
+  readonly onDetailClosed: () => void;
   /**
    * いまの位置の違反の読み取りを画面へ上げる口（要件 4.2、4.6）。
    *
@@ -978,10 +1253,47 @@ interface GridSurfaceProps {
  *
  * 画面は `GridSession` と同じ規則で世代を数える（**境界の型は世代を運ばない**ため。design.md
  * 「世代を進めるのは画面である」）: 開いた直後が 0（`Generation::FIRST`）であり、
- * `grid_set_view` の成功ごとに 1 つ進む。**食い違うと窓はつねに空になる**（Rust 側は一致
+ * `grid_set_view` の成功ごとに 1 つ進む（8.5 は**適用でも進む**ことを足した。
+ * `./cellEdit` の `generationAfterEdit`）。**食い違うと窓はつねに空になる**（Rust 側は一致
  * しない世代へ空の窓を返すため、画面は読み込み中のまま再試行を続ける）。
+ *
+ * 以後の世代は [`GridScreenState`] の `generation` が持ち、この定数は**開いた直後の値**だけを
+ * 表す。
  */
 const GENERATION_AFTER_OPEN = 1;
+
+/**
+ * 表の面が使う窓の記憶を組む（**効果の外に出した純粋な部分である**）。
+ *
+ * 効果（`useEffect`）の中で組み立てると、検査は「画面がどの列の写像で記憶を組んだか」を観測
+ * できない（`node` の環境には DOM が無く、効果は走らない）。8.1 が移植口の仕様
+ * （[`createGridRendererSpec`]）と追随（[`followSelection`]）を同じ理由で外へ出している。
+ *
+ * **列の写像をここで 1 度だけ引く**（`./columnSpace`）— 表示の位置から文書の列への写像は、
+ * 窓の読み（`getCell`）と編集の宛先（`./cellEdit` が [`WindowCache.documentColumn`] を通して
+ * 読む）の**両方**がこれを使う。8.5 の申し送り（8.3 のレビューが実測）はこれを求めていた。
+ */
+export function createGridSurfaceCache(options: {
+  readonly sheet: string;
+  readonly summary: GridSheetSummary;
+  readonly visibleRows: number;
+  /** いまの世代（`grid_set_view` と適用で進む）。 */
+  readonly generation: number;
+  readonly client: GridClient;
+  /** 窓が記憶に入ったときの通知（区間は実際に記憶した範囲）。 */
+  readonly onArrival?: (span: RowSpan) => void;
+}): WindowCache {
+  return createWindowCache({
+    sheet: options.sheet,
+    // 構成の並びがそのまま表示の位置の空間である（入れ子の展開を含む）。
+    columns: createColumnSpace(options.summary.columns),
+    // **窓が覆うのは可視行である**（絞り込みが効いていればシートの行数と食い違う）。
+    rowCount: options.visibleRows,
+    generation: options.generation,
+    transport: (argument) => options.client.readWindow(argument),
+    ...(options.onArrival === undefined ? {} : { onArrival: options.onArrival }),
+  });
+}
 
 /**
  * 表そのもの。**開いたシート 1 つぶんの窓の記憶（7.3）と移植口（7.1 / 7.2）を組み立て、
@@ -991,27 +1303,47 @@ const GENERATION_AFTER_OPEN = 1;
  * 応答は捨てられる）。**列の並びは表示状態（7.5）から組む**ので、8.8 が列幅・列順を変えたときは
  * 新しい仕様でマウントし直すことになる（`RendererHandle` に幅や順を押し込む口が無い）。
  *
- * 効果は 3 つである: ① 器の組み立て（依存はシートと列の構成と可視行数だけ — **選択を依存に
+ * 効果は 4 つである: ① 器の組み立て（依存はシートと列の構成と可視行数だけ — **選択を依存に
  * 入れない**。入れると打鍵のたびに器を組み直し、React の根と Glide の部品を作り直して走査の
- * 位置を失う）、② 選択を移植口へ下ろし、必要なら追随させる（依存は選択だけ）、③ なし —
- * 見えている区間は ref に置く（描き直しが要らないためである）。
+ * 位置を失う）、② 選択を移植口へ下ろし、必要なら追随させる（依存は選択だけ）、③ **世代を
+ * 記憶へ下ろす**（8.5。組み直さない — 適用も表示の指定の変更も世代を進めるので、組み直すと
+ * 走査の位置まで失われる）、④ 現在位置の違反の理由を引く（要件 4.2）。
+ *
+ * **詳細表示（8.5）もここが描く。**値を読むには窓の記憶が要り、記憶を持つのは表だからである
+ * （8.4 が違反の理由を読むのと同じ理由）。開いている位置そのものは画面の状態（`detail`）が持つ
+ * — そうしないと、開いていることを検査から観測できない。
  */
 function GridSurface({
   sheet,
   summary,
   visibleRows,
+  generation,
   selection,
   editing,
+  detail,
   client,
   onSelectionChange,
   onEditStarted,
   onEditSettled,
+  onDetailEditSettled,
+  onDetailClosed,
   onViolationRead,
   onUnavailable,
 }: GridSurfaceProps): ReactElement {
   const containerRef = useRef<HTMLDivElement | null>(null);
   // 移植口の取っ手。**窓の到着（非同期）と選択の効果が使う**ので、効果の外に置く。
   const handleRef = useRef<RendererHandle | null>(null);
+  /**
+   * 窓が届いた回数（**React の描き直しを起こすためだけの数である**）。
+   *
+   * 窓の到着は移植口の描き直し（`RendererHandle.invalidate`）を起こすが、**React の描き直しは
+   * 起こさない**。詳細表示の中身（要約と、違反している内側の位置）は窓が運ぶので、届いたことを
+   * 画面の側へも伝えないと、**未取得のままの表示が残る**（次の無関係な描き直しまで）。
+   *
+   * 到着は走査で 256 行ごとにしか起きない（`WINDOW_ROWS`）ので、開いていないときにも数える
+   * 費用は無視できる（描き直すのは十数の要素である）。
+   */
+  const [arrivals, setArrivals] = useState(0);
   /**
    * 窓の記憶。**描画（編集の面）からも使う**ので ref に置く — 組み立てはマウントの効果の中で
    * 行われるが、確定は利用者の操作（描画の外の出来事）から来る。
@@ -1119,18 +1451,19 @@ function GridSurface({
     };
     visibleRef.current = openingSpan;
 
-    const cache = createWindowCache({
+    const cache = createGridSurfaceCache({
       sheet,
-      // 葉の型の札は**列の宣言から取る**（窓は値の変種しか運ばない。7.3 の指定の doc）。
-      variants: summary.columns.map((column) => column.kind ?? "Any"),
+      summary,
       // **窓が覆うのは可視行である**（絞り込みが効いていればシートの行数と食い違う）。
-      rowCount: visibleRows,
-      // 開いた直後に `grid_set_view` を 1 度呼んだ後の世代（上の定数）。
-      generation: GENERATION_AFTER_OPEN,
-      transport: (argument) => DEFAULT_CLIENT.readWindow(argument),
+      visibleRows,
+      // 組み立ての時点の世代。以後の変化は下の効果が記憶へ下ろす（**組み直さない**）。
+      generation,
+      client,
       // 窓が届いたら、その区間を描き直させる（移植口は知らせが無ければ描き直さない）。
       onArrival: (span) => {
         handleRef.current?.invalidate(span);
+        // **画面の側にも知らせる**（詳細表示の中身は窓が運ぶ。上の `arrivals` の doc）。
+        setArrivals((count) => count + 1);
         // 印を読み直す約束をしていたなら、いまの位置についてもう一度引く（要件 4.2、4.6）。
         if (violationWaitingRef.current) {
           refreshViolation(selectionRef.current.current);
@@ -1173,6 +1506,19 @@ function GridSurface({
   }, [sheet, summary, visibleRows, onUnavailable]);
 
   /**
+   * **世代を記憶へ下ろす**（8.5）。**組み直さない** — `grid_set_view` も適用も世代を進めるので、
+   * 組み直すと移植口を作り直すことになり、走査の位置（表示範囲）と Glide の部品まで失われる。
+   * 下ろすだけで足りるのは、進んだ世代が変えるのが**窓の要求が名乗る数**だけだからである
+   * （記憶している窓の中身は、行の並びを変えない指定では正しいままである）。
+   *
+   * 下ろさないと、以後の要求は古い世代を名乗り、Rust 側が `WindowCodec::is_stale` で**空の窓を
+   * 返す** — 取り直した窓は永久に読み込み中のままになる（`store` は空の窓を記憶に入れない）。
+   */
+  useEffect(() => {
+    cacheRef.current?.setGeneration(generation);
+  }, [generation]);
+
+  /**
    * 選択を移植口へ下ろし、必要なら表示範囲を追随させる（要件 2.2、2.4）。
    *
    * **下ろす値と数え上げの値は同じ 1 つである**（`selection`）— 画面に出ている数と、描かれて
@@ -1203,20 +1549,43 @@ function GridSurface({
   const counts = selectionCounts(selection);
 
   /**
-   * 入力手段の 2 つの口を、境界への 1 往復へ渡す（要件 3.3、3.6）。
+   * 詳細表示に渡すもの（8.5）。**源ごとに分けて組む** — 列の記述は構成から、要約と違反の内側の
+   * 位置は窓の記憶から、内側の宣言は構成からである。
+   *
+   * `cacheRef.current` は**描画の中では組み立ての効果のあとの値**である（表を描いている状態で
+   * なければ詳細表示は開けない）。`getCell` は未取得なら要求も始めるので、開いた時点で窓が
+   * 無い行でも、到着（`arrivals`）で中身が埋まる。
+   */
+  const detailColumn = detail === null ? null : (summary.columns[detail.position.column] ?? null);
+  const detailCell =
+    detail === null ? UNKNOWN_CELL : (cacheRef.current?.getCell(detail.position) ?? UNKNOWN_CELL);
+  const detailMarks = detail === null ? null : (cacheRef.current?.nestedMarks(detail.position) ?? null);
+
+  /**
+   * 入力手段の 2 つの口を、境界への 1 往復へ渡す（要件 3.3、3.6、5.7）。
    *
    * **画面の状態を変えるのは結果を受け取った側である**（`onEditSettled`）。ここが担うのは
-   * 往復そのものであり、窓の記憶を要する（宛先の行の識別子と、適用のあとの作り直し）。
+   * 往復そのものであり、窓の記憶を要する（宛先の行の識別子と列、適用のあとの作り直し）。
    * 例外を投げない — `settleCellEdit` が投げないので、この非同期の経路も投げない。
+   *
+   * **運び手（`carrier`）は呼び出し側（面）が登録簿から引いて渡す**（要件 10.3）。表はそれを
+   * そのまま `./cellEdit` へ渡すだけである — ここで列の型を見て経路を選ぶと、要件 10.3 と
+   * 衝突する（8.3 の申し送り 4）。
    */
-  const settle = (position: CellPosition, intent: CellEditIntent): void => {
+  const settle = (
+    position: CellPosition,
+    intent: CellEditIntent,
+    carrier: EditCarrier,
+    /** 結果の反映先（**セルの編集と詳細表示の編集で違う遷移である**）。 */
+    onSettled: (settlement: CellEditSettlement) => void,
+  ): void => {
     const cache = cacheRef.current;
     if (cache === null) {
       // 器がまだ無い（描かれていない）。編集も開いていないので、ここへは来ない。
       return;
     }
-    void settleCellEdit({ client, cache, position, intent }).then((settlement) => {
-      onEditSettled(settlement);
+    void settleCellEdit({ client, cache, position, intent, carrier }).then((settlement) => {
+      onSettled(settlement);
       if (settlement.status !== "applied") {
         return;
       }
@@ -1227,8 +1596,27 @@ function GridSurface({
     });
   };
 
+  /**
+   * 詳細表示の中の編集の取消（要件 5.7）。**セルの編集と同じ関数である** — 違うのは、結果を
+   * 反映する遷移が詳細表示の面を初期状態へ戻すことだけである。
+   *
+   * 取消の腕でも運び手を渡すが、**取消はそれを読まない**（`./cellEdit` は運び手を見る前に取消を
+   * 返す）。`settleCellEdit` の形を 2 つに割らないために、同じ 1 つの口から引いた値をそのまま
+   * 渡す。
+   */
+  const settleDetailCancel = (position: CellPosition): void => {
+    settle(
+      position,
+      { kind: "cancel" },
+      columnEditor(summary.columns[position.column] ?? null).carrier,
+      onDetailEditSettled,
+    );
+  };
+
   return (
-    <div style={SURFACE_STYLE}>
+    // 窓の到着の回数を属性にも出す（**描き直しを起こした数の観測**であり、`arrivals` を使う
+    // 唯一の場所である）。
+    <div data-window-arrivals={arrivals} style={SURFACE_STYLE}>
       {/*
         選択の数え上げ（要件 2.5）。**利用者に見える数は 1 起点である**（内部の序数は 0 起点）。
         読み手（検査）のために、生の数を属性にも出しておく。
@@ -1248,12 +1636,39 @@ function GridSurface({
         <CellEditorPanel
           edit={editing}
           column={summary.columns[editing.position.column] ?? null}
-          onCommit={(text) => {
-            settle(editing.position, { kind: "commit", text });
+          onCommit={(text, carrier) => {
+            settle(editing.position, { kind: "commit", text }, carrier, onEditSettled);
+          }}
+          onCancel={(carrier) => {
+            settle(editing.position, { kind: "cancel" }, carrier, onEditSettled);
+          }}
+        />
+      )}
+      {/*
+        入れ子の値の詳細表示（8.5。要件 4.5、5.5、5.7）。**値を読むのはここである** — 窓の記憶
+        （`getCell` の要約と `nestedMarks` の内側の位置）を持つのは表だからである。開いている
+        位置そのものは画面の状態（`detail`）が持つ。
+      */}
+      {detail === null ? null : (
+        <NestedInspector
+          position={detail.position}
+          column={detailColumn}
+          declared={
+            detailColumn === null ? [] : declaredInnerPositions(summary.columns, detailColumn.column)
+          }
+          summary={detailCell.text}
+          loading={detailCell.loading}
+          // 未取得は `null` であり、空の並び（違反なし）と区別する（要件 4.5）。
+          innerViolations={detailMarks}
+          editKey={detail.edit}
+          onCommit={(text, carrier) => {
+            // **運び手は面が登録簿から引いたものである**（要件 10.3。表は型を見ない）。
+            settle(detail.position, { kind: "commit", text }, carrier, onDetailEditSettled);
           }}
           onCancel={() => {
-            settle(editing.position, { kind: "cancel" });
+            settleDetailCancel(detail.position);
           }}
+          onClose={onDetailClosed}
         />
       )}
       <div
@@ -1285,12 +1700,16 @@ function CellEditorPanel({
   readonly edit: CellEdit;
   /** その列の宣言（表示位置の列）。使用不能な列は `null`（札が読めない）。 */
   readonly column: ColumnDescriptor | null;
-  readonly onCommit: (text: string) => void;
-  readonly onCancel: () => void;
+  /** 確定（**運び手つきで上げる**。`./cellEdit` がそれで命令を選ぶ。要件 5.7）。 */
+  readonly onCommit: (text: string, carrier: EditCarrier) => void;
+  /** 取消（**境界へ何も送らない**。要件 3.6）。 */
+  readonly onCancel: (carrier: EditCarrier) => void;
 }): ReactElement {
+  // 入力手段と、その面が確定する文字の**運び手**（8.5。要件 5.5、10.3）。`columnEditor` が登録簿を
+  // 通して 1 度に引く（成分と運び手が同じ 1 件の登録から来る）。
+  const { component: Editor, carrier } = columnEditor(column);
   // 札が読めない列は `Any`（値をそのまま扱う面）として登録簿へ来る（7.4 の module doc）。
   const kind = column?.kind ?? "Any";
-  const Editor = editorRegistry.resolve(kind);
   /**
    * 入力手段が読む宣言（要件 3.1、3.7）。
    *
@@ -1308,6 +1727,7 @@ function CellEditorPanel({
       data-editor-row={edit.position.row}
       data-editor-column={edit.position.column}
       data-editor-kind={kind}
+      data-editor-carrier={carrier}
       style={EDITOR_STYLE}
     >
       <span style={MESSAGE_STYLE}>
@@ -1316,8 +1736,12 @@ function CellEditorPanel({
       <Editor
         initialText={edit.initialText}
         constraints={constraints}
-        commit={onCommit}
-        cancel={onCancel}
+        commit={(text: string) => {
+          onCommit(text, carrier);
+        }}
+        cancel={() => {
+          onCancel(carrier);
+        }}
       />
     </div>
   );
@@ -1449,6 +1873,10 @@ function GridScreenBody({
   onEditSettled,
   onNextViolation,
   onViolationRead,
+  onExpansion,
+  onDetailOpened,
+  onDetailEditSettled,
+  onDetailClosed,
 }: {
   readonly model: GridScreenModel;
   /** 境界の口（表を描く腕が、編集の 1 往復に使う）。 */
@@ -1462,6 +1890,14 @@ function GridScreenBody({
   readonly onNextViolation: () => void;
   /** 表が読んだ違反の提示（要件 4.2、4.6）。 */
   readonly onViolationRead: (reading: ViolationReading) => void;
+  /** 列の展開の操作（要件 5.1、5.2）。**送るのはいまの指定に足した完全な記述である。** */
+  readonly onExpansion: (state: GridExpansionState) => void;
+  /** 詳細表示の入口（要件 5.4、5.5）。 */
+  readonly onDetailOpened: (position: CellPosition) => void;
+  /** 詳細表示の中の編集の結果（要件 5.7）。 */
+  readonly onDetailEditSettled: (settlement: CellEditSettlement) => void;
+  /** 詳細表示を閉じる（**値も文書も動かない**）。 */
+  readonly onDetailClosed: () => void;
 }): ReactElement {
   const state = model.state;
   switch (state.status) {
@@ -1524,16 +1960,33 @@ function GridScreenBody({
             presentation={state.violation}
             onNext={onNextViolation}
           />
+          {/*
+            列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）。**表の上に出す** — 移植口に「見出しの
+            操作を受け取る口」は無く（`RendererSpec` の列の知らせは幅と並びだけである）、列の
+            名前と操作を並べる方が、どの列の操作かが読める。
+          */}
+          <NestedColumnControls
+            columns={state.summary.columns}
+            view={state.view}
+            // 詳細表示は**現在位置の行**の値について開く。
+            currentRow={state.selection.current.row}
+            onExpansion={onExpansion}
+            onDetail={onDetailOpened}
+          />
           <GridSurface
             sheet={state.sheet}
             summary={state.summary}
             visibleRows={state.visibleRows}
+            generation={state.generation}
             selection={state.selection}
             editing={state.editing}
+            detail={state.detail}
             client={client}
             onSelectionChange={onSelectionChange}
             onEditStarted={onEditStarted}
             onEditSettled={onEditSettled}
+            onDetailEditSettled={onDetailEditSettled}
+            onDetailClosed={onDetailClosed}
             onViolationRead={onViolationRead}
             onUnavailable={onUnavailable}
           />
@@ -1581,6 +2034,14 @@ export interface GridScreenViewProps {
   readonly onNextViolation: () => void;
   /** 表が読んだ違反の提示（要件 4.2、4.6）。 */
   readonly onViolationRead: (reading: ViolationReading) => void;
+  /** 列の展開の操作（8.5。要件 5.1、5.2）。 */
+  readonly onExpansion: (state: GridExpansionState) => void;
+  /** 詳細表示の入口（8.5。要件 5.4、5.5）。 */
+  readonly onDetailOpened: (position: CellPosition) => void;
+  /** 詳細表示の中の編集の結果（8.5。要件 5.7）。 */
+  readonly onDetailEditSettled: (settlement: CellEditSettlement) => void;
+  /** 詳細表示を閉じる（8.5）。 */
+  readonly onDetailClosed: () => void;
 }
 
 /**
@@ -1599,6 +2060,10 @@ export function GridScreenView({
   onEditSettled,
   onNextViolation,
   onViolationRead,
+  onExpansion,
+  onDetailOpened,
+  onDetailEditSettled,
+  onDetailClosed,
 }: GridScreenViewProps): ReactElement {
   return (
     <section data-testid="jxcel-grid-screen" aria-label="グリッド" style={ROOT_STYLE}>
@@ -1682,6 +2147,10 @@ export function GridScreenView({
         onEditSettled={onEditSettled}
         onNextViolation={onNextViolation}
         onViolationRead={onViolationRead}
+        onExpansion={onExpansion}
+        onDetailOpened={onDetailOpened}
+        onDetailEditSettled={onDetailEditSettled}
+        onDetailClosed={onDetailClosed}
       />
     </section>
   );
@@ -1707,6 +2176,20 @@ export function GridScreen(): ReactElement {
    * 動いた現在位置を巻き戻さない）。
    */
   const traversalRef = useRef(0);
+  /**
+   * 表示の指定を送った世代。**遅れて届いた答えを捨てる**（巡回と同じ規律。二度押しの 1 つ目が
+   * 後から届いても、その間に組んだ指定を巻き戻さない）。
+   */
+  const viewRef = useRef(0);
+  /**
+   * 送る途中の表示の指定（**まだ応答が返っていない押下を畳む**）。
+   *
+   * 指定は**完全な記述**である（生成物の `GridViewSpec` の doc）ので、2 つの押下が続くと
+   * 2 つ目は 1 つ目の**応答を待たずに**組まれる。そのとき `ready.view` を起点にすると、1 つ目の
+   * 押下が指定から消える（ドメインは要求に現れない展開を折りたたみへ戻す）。押された指定を
+   * ここへ積んでから送る。
+   */
+  const pendingViewRef = useRef<GridViewSpec | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1772,6 +2255,44 @@ export function GridScreen(): ReactElement {
     });
   }, [model]);
 
+  /**
+   * 列の展開の操作（要件 5.1、5.2、5.3）。**送るのは「いまの指定に 1 件を足した」完全な記述で
+   * ある**（ドメインは要求に現れない展開を折りたたみへ戻す）。
+   *
+   * 送る途中の指定は [`pendingViewRef`] へ積む — 2 つの押下が続くと、2 つ目は 1 つ目の応答を
+   * 待たずに組まれるので、`ready.view` を起点にすると**1 つ目の押下が指定から消える**。
+   */
+  const expand = useCallback(
+    (expansion: GridExpansionState) => {
+      const state = model.state;
+      if (state.status !== "ready") {
+        return;
+      }
+      const token = (viewRef.current += 1);
+      const next = withExpansion(pendingViewRef.current ?? state.view, expansion);
+      pendingViewRef.current = next;
+      void applyGridView(DEFAULT_CLIENT, next).then((settlement) => {
+        if (token !== viewRef.current) {
+          return;
+        }
+        // 応答が返った（適用されたか、失敗したか）。**次の押下は状態を起点に組む。**
+        pendingViewRef.current = null;
+        setModel((current) => gridScreenViewSettled(current, settlement));
+      });
+    },
+    [model],
+  );
+  const openDetail = useCallback((position: CellPosition) => {
+    setModel((current) => gridScreenDetailOpened(current, position));
+  }, []);
+  const closeDetail = useCallback(() => {
+    setModel(gridScreenDetailClosed);
+  }, []);
+  const settleDetailEdit = useCallback((settlement: CellEditSettlement) => {
+    // セルの編集と同じ規律である（違うのは、面を初期状態へ戻す鍵が進むことだけである）。
+    setModel((current) => gridScreenDetailEditSettled(current, settlement));
+  }, []);
+
   return (
     <GridScreenView
       model={model}
@@ -1785,6 +2306,10 @@ export function GridScreen(): ReactElement {
       onEditSettled={settleEdit}
       onNextViolation={goToNextViolation}
       onViolationRead={readViolation}
+      onExpansion={expand}
+      onDetailOpened={openDetail}
+      onDetailEditSettled={settleDetailEdit}
+      onDetailClosed={closeDetail}
     />
   );
 }

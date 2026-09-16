@@ -1358,6 +1358,36 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 | 1 | **違反の可視行の序数**（`GridViolationResponse` は行の識別子と列と理由しか運ばない） | 4.4 | `crates/app-shell/src/ipc/grid.rs` の `GridViolation` に欄を 1 つ足し、`src-tauri/src/commands/grid.rs` の `answer_find_violation` で埋める。**値は既にそこにある** — `ViolationIndex::find` は序数を鍵とする写像（`ordinals`）から引いており、いまは行の識別子へ写して捨てている（`crates/data-grid/src/view/violations.rs`）。**足せば画面の二分探索（10 万行で 17 往復）が 1 往復になる** |
 | 2 | 行ごとの違反の**列の一覧**（索引は行の最小の列しか返さない） | 4.2 | 索引の保持（`RowViolations.columns`）は既に列の並びを持つので、応答の型を広げれば足りる。**満たないままでも 4.2 は成立する**（位置を名乗るので、事実と食い違う提示にはならない） |
 
+##### 8.5 が確定させたもの（入れ子の展開と詳細表示。`src/features/grid/nestedInspector.tsx` / `columnSpace.ts`）
+
+**2 つの申し送りをここで閉じた**（8.3 の「宛先の文書の位置」の写像と、7.4 の申し送り 4 の
+「確定の文字の運び手」）。実測と固定の記録は `research.md`「実測と固定: 入れ子の展開と詳細表示
+（タスク 8.5）」にある。
+
+| 論点 | 決定 | 根拠 |
+|---|---|---|
+| **表示の位置と文書の列の写像**（8.3 の申し送り） | **`./columnSpace` の `ColumnSpace` が唯一の源である。**`WindowCache` がそれを受け取り（`columns` の指定）、`getCell` の読みも `documentColumn` の答えも**同じ 1 つの写像**から引く。`./cellEdit` の宛先の列も `WindowCache.documentColumn` を通す | 入れ子の展開は `ColumnDescriptor` の並びを文書の列の添字から離す（`crates/data-grid/src/view/mod.rs` の `push_column` は内側の位置を親と同じ文書の列の下へ並べる）。恒等を仮定した写像が 2 つあると、**片方だけが直り、描かれている値と編集の宛先が別の列を指す**（要件 8.6）。`windowCache.test.ts` / `cellEdit.test.ts` が**離れた構成で**（表示の位置 2 が文書の列 1 を指す）固定する |
+| **確定の文字の運び手**（7.4 の申し送り 4。**設計の改訂**） | `CellEditorRegistration` に `carrier: EditCarrier`（`"text"` = `SetCells` / `"structure"` = `SetNested`）を**必須**で足し、`CellEditorRegistry.resolveCarrier` が答える。`editors/index.ts` が `Object` / `Array` を `"structure"` と宣言し、`./cellEdit` が運び手で命令を選ぶ。**画面は列の札で経路を選ばない**（`editors/index.ts` の `columnEditor` が成分と運び手を 1 度に引く） | 入れ子の面が組み立てる構造表現を `SetCells` に載せると、`Text` → `object` / `array` の変換の行が無いため**必ず違反になる**。画面が型で分岐すると要件 10.3 と衝突するので、**登録が宣言する**形にした（design.md の Revalidation Triggers「確定の文字の運び手を登録に足す設計の改訂」の決着。`custom-types` は自分の登録で宣言する） |
+| **展開の状態の置き場**（要件 5.3） | **`ready` の腕が `view: GridViewSpec` を持つ**（並べ替え・絞り込み・展開の完全な記述）。押された 1 件は `./nestedInspector` の `withExpansion` が**いまの指定へ足す** | ドメインは**要求に現れない展開を折りたたみへ戻す**（`answer_set_view` の規約）ので、押された 1 件だけを送ると前に展開した列が黙って折りたたまれる。走査（現在位置の移動・窓の取り直し）は `view` に触れないので、要件 5.3 はこの構造で満たされる |
+| **列ごとの操作の源**（要件 5.1、5.2、5.4、5.6） | `./nestedInspector` の `nestedColumnControls` が記述の印（`expandability` / `element_count`）**だけ**から導く。`available` は展開（内側の位置では段数を 1 つ深くする）、`capped` は**「詳細表示へ」**、`element_count` は要素数の宣言 | **型の札（`kind`）を見ない** — ユーザー定義型の列も同じ扱いになる（要件 10.3）。移植口に見出しの操作を受け取る口が無いので、表の上の 1 行に並べる |
+| **世代の数え方**（8.5 が足した是正） | `ready` の腕が `generation` を持ち、`grid_set_view` の成功（つねに +1）と適用（`affected` が空でないときだけ +1。`./cellEdit` の `generationAfterEdit`）で進める。`GridSurface` が**組み直さずに**記憶へ下ろす（`setGeneration`） | 進まないと、以後の窓の要求が古い世代を名乗り、Rust 側が `WindowCodec::is_stale` で**空の窓を返す** — 取り直した窓は永久に読み込み中のままになる。**8.3 の経路（適用）でも同じずれが起きていた**（単体テストの偽の移送は世代を強制しないので見えない。実起動の観測は 8.3 も 8.5 も未実施である） |
+| 詳細表示の中の編集の規律（要件 5.7） | **`gridScreenDetailEditSettled` が `gridScreenEditSettled` をそのまま呼ぶ**（報告・告知・世代・取消の扱いを 2 度書かない）。違いは、面を初期状態へ戻す鍵（`CellDetail.edit`）を進めることだけである | 確定では報告が出て面が戻り、取消では何も送られず面が戻り、失敗では**面が開いたまま**である（セルの編集と同じ規律） |
+
+**申し送り（境界に足りないもの。8.5 が実測した）**
+
+| # | 何が足りないか | どの要件か | どこへ足すか |
+|---|---|---|---|
+| 1 | **値の構造そのもの**（本設計は「構造そのものは詳細表示の要求時に JSON として別途取得する」と定めているが、6.1 の 6 本のコマンドに読む口が無い） | 5.5 | 境界に読み口を 1 本足す（`grid_nested_json` など。`crates/app-shell/src/ipc/grid.rs` の型と `src-tauri/src/commands/grid.rs` の適応）。**それまでは詳細表示の編集の初期値も空であり、確定は構造表現の打ち込みに限る**（値を捨てないための制限である） |
+| 2 | **展開の結果の列の構成**（`grid_set_view` の応答は可視行数・隠れた行数・違反の総数だけで、導出後の構成を運ばない。`grid_open_sheet` はセッションを作り直す（`answer_open` が `GridSession::open` で新しいセッションを置く）ので、開き直しても展開後の構成は得られない） | 5.1、5.2、5.4 | `GridViewResponse` に導出後の列の構成を足す（または `grid_open_sheet` が既存のセッションの表示の指定を保つ）。**それまでは、展開を指定しても描かれる列は変わらない**（ドメインは展開を保持するが、画面はその結果を読めない）。**深さの上限の印（`Capped`）も同じ理由で届かない** — 展開した構成にしか現れないためである（画面側の扱いは実装済みで、検査は `Capped` の記述を直接与えて固定している） |
+| 3 | **内側の位置ごとの宣言**（7.4 の申し送り 6。`members`） | 5.1、5.5 | 境界用の型、または位置の一覧を返す経路。**それまでは入れ子の面が既定の文字の面へ落ちる**（位置ごとの面を出さない） |
+
+**単体テストが観測しないもの（実物の起動で観測する。8.1〜8.4 と同じ規律）**: ① **展開・折りたたみ
+の操作が実際に押せること**（移植口の見出しではなく画面の 1 行に出る）、② **詳細表示の面が実際に
+現れ、打鍵がその面へ届くこと**、③ **`SetNested` の往復が実物の Rust を相手に成立すること**。
+観測の場所は 9.2 の台本（`scripts/ci/`）と、8.1 が使った段（検証用のビルドを
+`JXCEL_VERIFICATION_INITIAL_SCREEN=grid` で起動し、a11y の木と `jxcel.log` を読む）である。
+**本タスクは起動の観測を行っていない**（申し送り 2 により、展開の結果は実物でも観測できない）。
+
 ## Data Models
 
 ### 窓の二進形式

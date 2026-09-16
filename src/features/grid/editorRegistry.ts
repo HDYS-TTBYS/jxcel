@@ -165,22 +165,67 @@ export interface CellEditorProps {
   readonly cancel: () => void;
 }
 
-/** 登録の 1 件（design.md の `CellEditorRegistration`。**逐語で固定されている**）。 */
+/**
+ * **確定の文字をどの命令へ載せるか**（tasks.md 8.5 が足した設計の改訂。design.md の
+ * Revalidation Triggers「確定の文字の運び手を登録に足す設計の改訂」）。
+ *
+ * 入力手段が出す口は `commit(text)` の 1 本である（`CellEditorProps`。design.md が逐語で
+ * 固定している）。ところがその文字の**意味**は 2 通りある。
+ *
+ * | 運び手 | 何を運ぶか | 宛先の命令 |
+ * |---|---|---|
+ * | `text` | **打たれた文字そのもの**（型の解釈は `schema-engine` が行う。要件 3.3） | `SetCells`（`GridEditCommand`） |
+ * | `structure` | セル値の**構造表現**（JSON。要件 5.5、5.7） | `SetNested` |
+ *
+ * **`structure` が要る理由**（7.4 の申し送り 4 の実測）: `Text` → `object` / `array` の変換の行が
+ * `schema-engine` の変換の表に無く（`crates/schema-engine/src/coerce/mod.rs` の `_` の腕）、
+ * `object` の列が受理するのは `Object` の値だけである（同 `types/mod.rs` の
+ * `accepted_variants`）。したがって入れ子の面が組み立てた構造表現を `SetCells` に載せると
+ * **必ず違反になる** — 正しい運び手は `SetNested` である。
+ *
+ * **画面は列の札で経路を選ばない。**どちらの命令へ載せるかは**登録が宣言する**ので、画面は
+ * 登録簿へ問い合わせるだけでよい（要件 10.3「入力手段の追加は登録簿への登録のみで成立する」。
+ * 画面が型ごとに分岐すると、ユーザー定義型の面が自分の運び手を宣言できなくなる）。
+ */
+export type EditCarrier = "text" | "structure";
+
+/** 登録の 1 件（design.md の `CellEditorRegistration`。**8.5 が `carrier` を足した**）。 */
 export interface CellEditorRegistration {
   readonly kind: TypeKindTag;
   /** `kind` が `"Custom"` のときだけ伴う（前提条件）。 */
   readonly customTypeId?: string;
   readonly component: ComponentType<CellEditorProps>;
+  /**
+   * この面が確定する文字を、**どの命令へ載せるか**（上の [`EditCarrier`]）。
+   *
+   * **必須である。**既定を置くと、運び手を宣言し忘れた登録が黙って `SetCells` へ流れ、
+   * その面の確定が**必ず違反になる**（入れ子の場合）— 気づけるのは利用者が違反を見たときで
+   * ある。登録を行った側（拡張の実装者）にその場で報告するのが、7.4 の重複の報告と同じ規律で
+   * ある（要件 10.6）。
+   */
+  readonly carrier: EditCarrier;
 }
 
-/** 登録簿の公開面（design.md の `CellEditorRegistry`。**逐語で固定されている**）。 */
+/** 登録簿の公開面（design.md の `CellEditorRegistry`。**8.5 が `resolveCarrier` を足した**）。 */
 export interface CellEditorRegistry {
   register(registration: CellEditorRegistration): void;
   resolve(kind: TypeKindTag, customTypeId?: string): ComponentType<CellEditorProps>;
+  /**
+   * その札の面が確定する文字の**運び手**（上の [`EditCarrier`]）。
+   *
+   * [`CellEditorRegistry.resolve`] と**同じ 1 件の登録**を引く（成分と運び手が別の登録を指す
+   * 経路を作らない）。未登録の札は `"text"` である — 既定の面（[`TextEditor`]）は値をそのまま
+   * 扱う面であり、その文字は `SetCells` の「打たれた文字」である（要件 10.4）。
+   */
+  resolveCarrier(kind: TypeKindTag, customTypeId?: string): EditCarrier;
 }
 
 /** 登録が拒まれた理由（要件 10.6 と、design.md の前提条件）。 */
-export type EditorRegistrationFailure = "duplicate" | "customTypeIdRequired" | "customTypeIdForbidden";
+export type EditorRegistrationFailure =
+  | "duplicate"
+  | "customTypeIdRequired"
+  | "customTypeIdForbidden"
+  | "unknownCarrier";
 
 /**
  * 登録が拒まれたこと（要件 10.6「重複を検出し、登録を行った側へ報告する」）。
@@ -209,11 +254,11 @@ export class EditorRegistrationError extends Error {
  * `resolve` は**必ず成分を返す**（事後条件）。未登録は既定の文字入力へ落ちる（要件 10.4）。
  */
 export function createEditorRegistry(): CellEditorRegistry {
-  const components = new Map<string, ComponentType<CellEditorProps>>();
+  const registrations = new Map<string, CellEditorRegistration>();
 
   return {
     register(registration: CellEditorRegistration): void {
-      const { kind, customTypeId, component } = registration;
+      const { kind, customTypeId, carrier } = registration;
       // 前提条件（design.md「Preconditions」）。**伴うのは Custom のときだけ**であり、
       // どちらの破り方も登録側の誤りである。
       if (kind === "Custom" && customTypeId === undefined) {
@@ -222,15 +267,24 @@ export function createEditorRegistry(): CellEditorRegistry {
       if (kind !== "Custom" && customTypeId !== undefined) {
         throw new EditorRegistrationError("customTypeIdForbidden", kind, customTypeId);
       }
+      // 運び手も登録側の誤りである（拡張は JS からも来るため、型検査だけでは足りない）。
+      if (carrier !== "text" && carrier !== "structure") {
+        throw new EditorRegistrationError("unknownCarrier", kind, customTypeId);
+      }
       const key = registrationKey(kind, customTypeId);
-      if (components.has(key)) {
+      if (registrations.has(key)) {
         throw new EditorRegistrationError("duplicate", kind, customTypeId);
       }
-      components.set(key, component);
+      registrations.set(key, registration);
     },
 
     resolve(kind: TypeKindTag, customTypeId?: string): ComponentType<CellEditorProps> {
-      return components.get(registrationKey(kind, customTypeId)) ?? TextEditor;
+      return registrations.get(registrationKey(kind, customTypeId))?.component ?? TextEditor;
+    },
+
+    resolveCarrier(kind: TypeKindTag, customTypeId?: string): EditCarrier {
+      // 未登録は既定の面（値をそのまま扱う）の運び手である（要件 10.4）。
+      return registrations.get(registrationKey(kind, customTypeId))?.carrier ?? "text";
     },
   };
 }
@@ -256,5 +310,9 @@ function describeRegistrationFailure(
       return `Custom の入力手段には customTypeId が要る: ${kind}`;
     case "customTypeIdForbidden":
       return `${kind} の入力手段に customTypeId は付けられない: ${customTypeId ?? "未指定"}`;
+    case "unknownCarrier":
+      // **値そのものは載せない**（載せるには誤り型の欄を増やすことになる。拡張を書いた側は
+      // 自分が何を書いたかを知っており、要るのは「どの鍵の登録が拒まれたか」である）。
+      return `${kind} の入力手段の運び手が text / structure のどちらでもない`;
   }
 }

@@ -52,7 +52,8 @@ import { describe, expect, it, vi } from "vitest";
 // ファイルを実行時に開く口（`node:fs`）を使わないのは、検査の環境を node の API へ結び付けない
 // ためである（`vitest.config.ts` のヘッダ「環境が node であること」）。
 import fixtureText from "../../../crates/data-grid/tests/fixtures/window_protocol.txt?raw";
-import type { TypeKindTag } from "../../ipc/bindings";
+import type { ColumnDescriptor, TypeKindTag } from "../../ipc/bindings";
+import { createColumnSpace, type ColumnSpace } from "./columnSpace";
 import { createGlideWiring } from "./renderer/glideAdapter";
 import type { CellPosition, RendererSpec, RowSpan } from "./renderer/port";
 import {
@@ -142,6 +143,47 @@ const FIXTURE_CELLS: readonly (readonly (readonly [string, number, boolean])[])[
 // 検査の側の偽のサーバ（形式の真ではない。ヘッダの注釈を参照）
 // ---------------------------------------------------------------------------
 
+/** 偽のサーバが返すセルの違反の札（内側の位置の段。wire の `SEGMENT_FIELD` / `SEGMENT_INDEX`）。 */
+type FakeSegment =
+  | { readonly kind: "field"; readonly name: string }
+  | { readonly kind: "index"; readonly index: number };
+
+/**
+ * wire のバイトの値（**検査の側が独立に持つ**。`crates/data-grid/src/transport/mod.rs` の表が
+ * 唯一の源である）。復号の実装から取り込むと、両方が同じ誤りを共有していても緑になる。
+ */
+const VIOLATED_NO = 0;
+const VIOLATED_YES = 1;
+const SEGMENT_FIELD = 0;
+const SEGMENT_INDEX = 1;
+
+/** リトルエンディアンの u64 1 つぶんのバイト列。 */
+function u64(value: number): Uint8Array {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setBigUint64(0, BigInt(value), true);
+  return bytes;
+}
+
+/** バイト列を繋ぐ（**検査の側の組み立て**であり、費用は問わない）。 */
+function concat(parts: readonly Uint8Array[]): Uint8Array {
+  const bytes = new Uint8Array(parts.reduce((total, part) => total + part.byteLength, 0));
+  let at = 0;
+  for (const part of parts) {
+    bytes.set(part, at);
+    at += part.byteLength;
+  }
+  return bytes;
+}
+
+/** 内側の位置の段 1 つぶんのバイト列（種類のバイトと本体。表のとおりの並びである）。 */
+function segmentBytes(segment: FakeSegment, encoder: TextEncoder): Uint8Array {
+  if (segment.kind === "index") {
+    return concat([new Uint8Array([SEGMENT_INDEX]), u64(segment.index)]);
+  }
+  const name = encoder.encode(segment.name);
+  return concat([new Uint8Array([SEGMENT_FIELD]), u64(name.byteLength), name]);
+}
+
 /** 偽のサーバが返す行。 */
 interface FakeRow {
   readonly key: Uint8Array;
@@ -150,6 +192,11 @@ interface FakeRow {
     readonly tag: number;
     readonly text: string;
     readonly violated?: boolean;
+    /**
+     * 違反している内側の位置（要件 4.5）。**指定するとその並びのまま書く**（`violated` を
+     * 省いても違反の有無のバイトは 1 になる）。空の並び 1 つはセル直下の違反である。
+     */
+    readonly marks?: readonly (readonly FakeSegment[])[];
   }[];
 }
 
@@ -161,34 +208,38 @@ interface FakeWindow {
   readonly columns: number;
 }
 
-/** 窓のバイト列を組み立てる（**偽のサーバ**。u64 はすべてリトルエンディアン）。 */
+/**
+ * 窓のバイト列を組み立てる（**偽のサーバ**。u64 はすべてリトルエンディアン）。
+ *
+ * セルの並びは実物と同じである: 変種の札・違反の有無・（違反ありなら）札の数と各札の段・
+ * 表示文字列の長さ・本体。**`marks` を指定しないセルは違反なしとして書く**（`violated: true` の
+ * 既存の呼び出しは「セル直下の違反 1 つ」＝段 0 の札 1 つになる）。
+ */
 function windowBytes(window: FakeWindow): ArrayBuffer {
   const encoder = new TextEncoder();
   const bodies: Uint8Array[] = [];
-  let length = WINDOW_HEADER_LEN;
   for (const row of window.rows) {
     bodies.push(row.key);
-    length += row.key.byteLength;
     for (const cell of row.cells) {
       const text = encoder.encode(cell.text);
-      const violated = cell.violated === true;
-      const head = new Uint8Array(violated ? 2 + 8 + 8 + 8 : 2 + 8);
-      head[0] = cell.tag;
-      head[1] = violated ? 1 : 0;
-      const view = new DataView(head.buffer);
-      if (violated) {
-        // 札 1 つ・段 0（セル直下の違反）。
-        view.setBigUint64(2, 1n, true);
-        view.setBigUint64(10, 0n, true);
-        view.setBigUint64(18, BigInt(text.byteLength), true);
-      } else {
-        view.setBigUint64(2, BigInt(text.byteLength), true);
+      const marks: readonly (readonly FakeSegment[])[] | null =
+        cell.marks ?? (cell.violated === true ? [[]] : null);
+      bodies.push(new Uint8Array([cell.tag, marks === null ? VIOLATED_NO : VIOLATED_YES]));
+      if (marks !== null) {
+        // 札の数と、各札の段（`readMark` の読み方と同じ順である）。
+        bodies.push(u64(marks.length));
+        for (const segments of marks) {
+          bodies.push(u64(segments.length));
+          for (const segment of segments) {
+            bodies.push(segmentBytes(segment, encoder));
+          }
+        }
       }
-      bodies.push(head, text);
-      length += head.byteLength + text.byteLength;
+      bodies.push(u64(text.byteLength), text);
     }
   }
 
+  const length = WINDOW_HEADER_LEN + bodies.reduce((total, body) => total + body.byteLength, 0);
   const bytes = new Uint8Array(length);
   const view = new DataView(bytes.buffer);
   bytes[0] = WINDOW_FORMAT_VERSION;
@@ -290,12 +341,32 @@ async function settle(): Promise<void> {
   }
 }
 
+/**
+ * 展開の無い構成（**表示の位置がそのまま文書の列である**）を作る。
+ *
+ * 大多数の検査は列の写像を主題にしないので、札の並びから恒等の写像を組む。
+ */
+function identitySpace(kinds: readonly TypeKindTag[]): ColumnSpace {
+  return createColumnSpace(
+    kinds.map((kind, column): ColumnDescriptor => ({
+      column,
+      path: [],
+      name: `列${String(column)}`,
+      kind,
+      element_count: null,
+      expandability: "leaf",
+    })),
+  );
+}
+
 /** 記憶を組み立てる（検査ごとの既定: 4 行 1 窓・12 行・列 1 本）。 */
 function cacheWith(options: {
   readonly transport: WindowTransport;
   readonly rowCount?: number;
   readonly windowRows?: number;
   readonly maxWindows?: number;
+  /** 表示の位置から文書の列への写像（既定は渡された札の並びの恒等）。 */
+  readonly columns?: ColumnSpace;
   readonly variants?: readonly TypeKindTag[];
   readonly sheet?: string;
   readonly generation?: number;
@@ -303,7 +374,7 @@ function cacheWith(options: {
 }): WindowCache {
   return createWindowCache({
     sheet: options.sheet ?? "発注明細",
-    variants: options.variants ?? ["Text"],
+    columns: options.columns ?? identitySpace(options.variants ?? ["Text"]),
     rowCount: options.rowCount ?? 12,
     windowRows: options.windowRows ?? 4,
     transport: options.transport,
@@ -368,7 +439,7 @@ describe("要求の頭", () => {
     try {
       const cache = createWindowCache({
         sheet: "発注明細",
-        variants: ["Text"],
+        columns: identitySpace(["Text"]),
         rowCount: 4,
         windowRows: 4,
       });
@@ -1156,5 +1227,144 @@ describe("移植口を通した読み込み中", () => {
     // 到着は呼び出し側へ報せる（画面が `RendererHandle.invalidate` を呼べるように）。
     // 区間は**実際に記憶した範囲**（要求した窓そのもの）である。
     expect(arrivals).toEqual(["0:4"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8.5 列の空間（表示の位置 → 文書の列）と、違反している内側の位置
+// ---------------------------------------------------------------------------
+
+/**
+ * 展開した構成（**表示の位置が文書の列から離れている**）。
+ *
+ * 宣言は 2 列であり（`place` / `name`）、列 0 の `place` を展開した構成である。構成の並びは
+ * `place.city` / `place.zip` / `name` なので、**表示の位置 0 と 1 が同じ文書の列（0）を指し、
+ * 表示の位置 2 が文書の列 1 を指す**。恒等を仮定すると、表示の位置 2 で文書の列 2 を読み、
+ * 存在しないセル（空文字）を描く。
+ */
+const EXPANDED_SPACE: ColumnSpace = createColumnSpace([
+  {
+    column: 0,
+    path: [{ segment: "Field", name: "city" }],
+    name: "place.city",
+    kind: "Text",
+    element_count: null,
+    expandability: "leaf",
+  },
+  {
+    column: 0,
+    path: [{ segment: "Field", name: "zip" }],
+    name: "place.zip",
+    kind: "Text",
+    element_count: null,
+    expandability: "leaf",
+  },
+  { column: 1, path: [], name: "name", kind: "Text", element_count: null, expandability: "leaf" },
+]);
+
+/** 文書の列が 2 本の窓を返す移送（`place` のセルと `name` のセル）。 */
+function twoColumnHarness(): WindowHarness {
+  return harnessOf((request) =>
+    windowBytes({
+      generation: request.generation,
+      start: request.start,
+      columns: 2,
+      rows: [
+        {
+          key: keyFor(0),
+          cells: [
+            {
+              tag: 5,
+              text: "2項目",
+              marks: [[{ kind: "field", name: "tags" }, { kind: "index", index: 2 }]],
+            },
+            { tag: 5, text: "Ada" },
+          ],
+        },
+      ],
+    }),
+  );
+}
+
+describe("列の空間（8.5。要件 5.1、8.6）", () => {
+  it("展開した構成では、表示の位置ではなく**文書の列**のセルを読む", async () => {
+    const harness = twoColumnHarness();
+    const cache = cacheWith({
+      transport: harness.transport,
+      columns: EXPANDED_SPACE,
+      rowCount: 1,
+      windowRows: 1,
+    });
+
+    // 表示の位置 2 は文書の列 1 である（**恒等ではない**）。
+    expect(cache.getCell({ row: 0, column: 2 })).toMatchObject({ loading: true });
+    await settle();
+
+    // 恒等で読むと `cells[2]` は存在せず空文字になる（この検査はその取り違えを捕まえる）。
+    expect(cache.getCell({ row: 0, column: 2 })).toMatchObject({ text: "Ada", loading: false });
+    // 内側の位置（表示の位置 0 と 1）は、どちらも親と同じ文書の列 0 を読む。
+    expect(cache.getCell({ row: 0, column: 0 })).toMatchObject({ text: "2項目", loading: false });
+    expect(cache.getCell({ row: 0, column: 1 })).toMatchObject({ text: "2項目", loading: false });
+  });
+
+  it("編集の宛先と窓の添字は、同じ 1 つの写像から来る", async () => {
+    const harness = twoColumnHarness();
+    const cache = cacheWith({
+      transport: harness.transport,
+      columns: EXPANDED_SPACE,
+      rowCount: 1,
+      windowRows: 1,
+    });
+
+    // この口が `./cellEdit` の宛先の列になる（**表示の位置をそのまま送らない**）。
+    expect(cache.documentColumn({ row: 0, column: 0 })).toBe(0);
+    expect(cache.documentColumn({ row: 0, column: 1 })).toBe(0);
+    expect(cache.documentColumn({ row: 0, column: 2 })).toBe(1);
+    // 表示の列は 3 本である（4 本目は無い）。**行の序数は写像に依らない。**
+    expect(cache.documentColumn({ row: 9, column: 3 })).toBeNull();
+  });
+
+  it("範囲の外の表示の位置では、取得も始めない", async () => {
+    const harness = twoColumnHarness();
+    const cache = cacheWith({
+      transport: harness.transport,
+      columns: EXPANDED_SPACE,
+      rowCount: 1,
+      windowRows: 1,
+    });
+
+    // 存在しない表示の位置である。**要求を起こさない**（存在しない列のために窓を取らない）。
+    expect(cache.getCell({ row: 0, column: 3 })).toMatchObject({ text: "", loading: true });
+    expect(cache.nestedMarks({ row: 0, column: 3 })).toBeNull();
+    expect(harness.calls).toEqual([]);
+  });
+
+  it("違反している内側の位置を、窓の札から答える（要件 4.5）", async () => {
+    const harness = twoColumnHarness();
+    const cache = cacheWith({
+      transport: harness.transport,
+      columns: EXPANDED_SPACE,
+      rowCount: 1,
+      windowRows: 1,
+    });
+
+    // **未取得では答えない**（`null`。空の並びは「違反なし」であり、区別が要る）。
+    expect(cache.nestedMarks({ row: 0, column: 0 })).toBeNull();
+    await settle();
+
+    // 内側の位置は、**同じ文書の列**のセルの札を答える（表示の位置 0 でも 1 でも同じである）。
+    expect(cache.nestedMarks({ row: 0, column: 0 })).toEqual([
+      [
+        { kind: "field", name: "tags" },
+        { kind: "index", index: 2 },
+      ],
+    ]);
+    expect(cache.nestedMarks({ row: 0, column: 1 })).toEqual(
+      cache.nestedMarks({ row: 0, column: 0 }),
+    );
+    // 違反の札を持たないセルは空の並びである（`null` ではない）。
+    expect(cache.nestedMarks({ row: 0, column: 2 })).toEqual([]);
+    // 範囲の外の行も `null` である（推測しない）。
+    expect(cache.nestedMarks({ row: 9, column: 0 })).toBeNull();
   });
 });

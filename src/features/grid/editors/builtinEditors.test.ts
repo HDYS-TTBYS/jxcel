@@ -494,7 +494,7 @@ describe("拡張の届く範囲", () => {
     // **拡張を混ぜない隔離**（既定の登録簿を汚さない）。入れ子の面は渡された登録簿を使うので、
     // この隔離がそのまま効く — どの登録簿の拡張が内側へ届くかは登録簿を作った側が決める。
     const registry = createBuiltinEditorRegistry();
-    registry.register({ kind: "Custom", customTypeId: "com.example.温度", component: CustomEditor });
+    registry.register({ kind: "Custom", customTypeId: "com.example.温度", component: CustomEditor, carrier: "text" });
 
     expect(registry.resolve("Custom", "com.example.温度")).toBe(CustomEditor);
 

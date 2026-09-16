@@ -31,7 +31,7 @@ import type {
 } from "../../ipc/bindings";
 import type { IpcClientError } from "../../ipc/client";
 import type { GridClient } from "./gridClient";
-import { settleCellEdit } from "./cellEdit";
+import { generationAfterEdit, settleCellEdit } from "./cellEdit";
 import type { CellPosition } from "./renderer/port";
 
 // ===========================================================================
@@ -97,9 +97,18 @@ function fakeClient(answer: IpcResult<GridEditResponse, IpcClientError>): FakeCl
   };
 }
 
-/** 偽の窓の記憶（要る 2 つの口だけ。**識別子が引けない場合は `null` を返す**）。 */
-function fakeCache(rowId: string | null): {
+/**
+ * 偽の窓の記憶（要る 3 つの口だけ。**識別子が引けない場合は `null` を返す**）。
+ *
+ * `documentColumn` は**表示の位置 → 文書の列の写像**である（8.5）。既定は恒等（展開の無い
+ * 構成）であり、展開した構成の検査は写像を渡して**取り違えを捕まえる**。
+ */
+function fakeCache(
+  rowId: string | null,
+  documentColumn: (position: CellPosition) => number | null = (position) => position.column,
+): {
   readonly rowId: (position: CellPosition) => string | null;
+  readonly documentColumn: (position: CellPosition) => number | null;
   readonly invalidate: (affected: readonly string[]) => void;
   readonly invalidated: readonly (readonly string[])[];
   readonly asked: readonly CellPosition[];
@@ -113,6 +122,7 @@ function fakeCache(rowId: string | null): {
       asked.push(position);
       return rowId;
     },
+    documentColumn,
     invalidate: (affected) => {
       invalidated.push([...affected]);
     },
@@ -135,6 +145,7 @@ describe("確定が境界へ送るもの（要件 3.3）", () => {
       client,
       cache,
       position: POSITION,
+      carrier: "text",
       intent: { kind: "commit", text: "12.50" },
     });
 
@@ -155,6 +166,7 @@ describe("確定が境界へ送るもの（要件 3.3）", () => {
       client,
       cache,
       position: POSITION,
+      carrier: "text",
       intent: { kind: "commit", text: "" },
     });
 
@@ -184,6 +196,7 @@ describe("確定が境界へ送るもの（要件 3.3）", () => {
       client,
       cache,
       position: POSITION,
+      carrier: "text",
       intent: { kind: "commit", text: "存在しない名前" },
     });
 
@@ -213,6 +226,7 @@ describe("取消（要件 3.6）", () => {
       client,
       cache,
       position: POSITION,
+      carrier: "text",
       intent: { kind: "cancel" },
     });
 
@@ -238,6 +252,7 @@ describe("適用のあとの表示の作り直し（要件 1.7）", () => {
       client,
       cache,
       position: POSITION,
+      carrier: "text",
       intent: { kind: "commit", text: "1" },
     });
 
@@ -254,6 +269,7 @@ describe("適用のあとの表示の作り直し（要件 1.7）", () => {
       client,
       cache,
       position: POSITION,
+      carrier: "text",
       intent: { kind: "commit", text: "1" },
     });
 
@@ -273,6 +289,7 @@ describe("適用のあとの表示の作り直し（要件 1.7）", () => {
       client,
       cache,
       position: POSITION,
+      carrier: "text",
       intent: { kind: "commit", text: "1" },
     });
 
@@ -285,5 +302,152 @@ describe("適用のあとの表示の作り直し（要件 1.7）", () => {
     expect(settlement.message).toContain("識別子");
     expect(client.edits).toEqual([]);
     expect(cache.invalidated).toEqual([]);
+  });
+});
+
+// ===========================================================================
+// 4. 確定の文字の運び手（8.5。要件 5.5、5.7）
+// ===========================================================================
+
+describe("確定の文字の運び手（8.5。要件 5.5、5.7）", () => {
+  it("構造の運び手では、構造表現を SetNested で送る", async () => {
+    // **入れ子のセルの文字は `SetCells` では適合しない**（`Text` → `object` / `array` の変換の
+    // 行が無い）。どちらの命令へ載せるかを決めるのは画面ではなく**登録**であり、その答えが
+    // ここへ `carrier` として届く（`./editorRegistry` の `EditCarrier`）。
+    const client = fakeClient(applied(outcomeOf({ affected: [ROW_ID], revalidated_columns: [2] })));
+    const cache = fakeCache(ROW_ID);
+
+    const settlement = await settleCellEdit({
+      client,
+      cache,
+      position: POSITION,
+      carrier: "structure",
+      intent: { kind: "commit", text: '{"a":1}' },
+    });
+
+    expect(client.edits).toEqual([
+      { command: "SetNested", cell: { row: ROW_ID, column: 2 }, json: '{"a":1}' },
+    ]);
+    expect(settlement.status).toBe("applied");
+    // 適用のあとの作り直しは**同じ経路**である（運び手で規律が変わらない。要件 5.7）。
+    expect(cache.invalidated).toEqual([[ROW_ID]]);
+  });
+
+  it("取消はどの運び手でも何も送らない（要件 5.7、3.6）", async () => {
+    const client = fakeClient(applied(outcomeOf({})));
+    const cache = fakeCache(ROW_ID);
+
+    const settlement = await settleCellEdit({
+      client,
+      cache,
+      position: POSITION,
+      carrier: "structure",
+      intent: { kind: "cancel" },
+    });
+
+    expect(settlement).toEqual({ status: "cancelled" });
+    expect(client.edits).toEqual([]);
+    expect(cache.invalidated).toEqual([]);
+  });
+
+  it("構造表現として読めない文字も、捨てずにそのまま送る（判定は境界が返す）", async () => {
+    // 読めない構造表現は `GridError::NestedDecode` として**適用が拒む**（1 つのセルも書かない）。
+    // 本 module が「読めないから送らない」判断をすると、その規則が 2 箇所に現れる。
+    const client = fakeClient(FAILURE);
+    const cache = fakeCache(ROW_ID);
+
+    const settlement = await settleCellEdit({
+      client,
+      cache,
+      position: POSITION,
+      carrier: "structure",
+      intent: { kind: "commit", text: "これは JSON ではない" },
+    });
+
+    expect(client.edits).toEqual([
+      { command: "SetNested", cell: { row: ROW_ID, column: 2 }, json: "これは JSON ではない" },
+    ]);
+    expect(settlement.status).toBe("failed");
+  });
+});
+
+// ===========================================================================
+// 5. 宛先の列は文書の列である（8.5。要件 8.6）
+// ===========================================================================
+
+describe("宛先の列は文書の列である（8.5。要件 8.6）", () => {
+  /**
+   * 展開した構成の写像（**表示の位置 2 が文書の列 1 を指す**）。
+   *
+   * `place` を展開した構成では、表示の位置 0 と 1 が同じ文書の列（0）を指し、表示の位置 2 が
+   * 文書の列 1 を指す（`./columnSpace` の module doc）。表示の位置をそのまま送ると**別の列へ
+   * 書く** — 要件 8.6 の「取り違えると別の行を編集する」の列版である。
+   */
+  const EXPANDED: (position: CellPosition) => number | null = (position) => {
+    if (position.column === 0 || position.column === 1) {
+      return 0;
+    }
+    return position.column === 2 ? 1 : null;
+  };
+
+  it("表示の位置ではなく、記憶が答える文書の列を宛先にする", async () => {
+    const client = fakeClient(applied(outcomeOf({ affected: [ROW_ID] })));
+    const cache = fakeCache(ROW_ID, EXPANDED);
+
+    await settleCellEdit({
+      client,
+      cache,
+      position: { row: 4, column: 2 },
+      carrier: "text",
+      intent: { kind: "commit", text: "Ada" },
+    });
+
+    // 恒等で書くと列 2 へ送る（この検査はその取り違えを捕まえる）。
+    expect(client.edits).toEqual([
+      { command: "SetCells", cells: [{ cell: { row: ROW_ID, column: 1 }, text: "Ada" }] },
+    ]);
+    // **同じ写像が読みにも使われる**（窓の記憶の列の添字と、この宛先が 1 箇所から来る）。
+    expect(cache.asked).toEqual([{ row: 4, column: 2 }]);
+  });
+
+  it("写像が答えられない位置では送らない（推測で別の列へ書かない）", async () => {
+    const client = fakeClient(applied(outcomeOf({})));
+    const cache = fakeCache(ROW_ID, EXPANDED);
+
+    const settlement = await settleCellEdit({
+      client,
+      cache,
+      position: { row: 4, column: 3 },
+      carrier: "text",
+      intent: { kind: "commit", text: "1" },
+    });
+
+    expect(settlement.status).toBe("failed");
+    if (settlement.status !== "failed") {
+      throw new Error("失敗として返らなかった");
+    }
+    expect(settlement.message).toContain("列");
+    expect(client.edits).toEqual([]);
+    expect(cache.invalidated).toEqual([]);
+  });
+});
+
+// ===========================================================================
+// 6. 世代（8.5。要件 1.7、11.3）
+// ===========================================================================
+
+describe("適用のあとの世代（8.5。要件 1.7）", () => {
+  /**
+   * `GridSession` は**適用で世代を進める**（`crates/data-grid/src/api.rs` の `apply`: 影響を
+   * 受けた行が 1 つも無ければ進めない）。進んだことを画面が写さないと、以後の窓の要求は
+   * **古い世代を名乗り、Rust 側が空の窓を返す**（`WindowCodec::is_stale`）— 窓は永久に
+   * 読み込み中のままになる。境界の型は世代を運ばない（7.3 の申し送り）ので、規則を写す。
+   */
+  it("影響を受けた行があるときだけ、世代を 1 つ進める", () => {
+    expect(generationAfterEdit(3, outcomeOf({ affected: [ROW_ID] }))).toBe(4);
+    // **影響が無ければ進まない**（適用の側の規則と同じ。進めると、記憶が要らない取り直しをする）。
+    expect(generationAfterEdit(3, outcomeOf({ affected: [] }))).toBe(3);
+    // 進める履歴が無かった場合（`grid_history` の腕）も据え置きである。
+    expect(generationAfterEdit(3, null)).toBe(3);
   });
 });

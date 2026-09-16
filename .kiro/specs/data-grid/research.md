@@ -1312,6 +1312,47 @@ design.md の File Structure Plan が名指ししており、実際に 3 つの�
   **総数が 0 でないのに「これ以上違反はありません」と出る**ことがありうる。これは境界の性質で
   あり、バーの doc に書いてある（総数が 0 でも操作を消さない理由もそこにある）
 
+## 実測と固定: 入れ子の展開と詳細表示（タスク 8.5）
+
+要件 4.5、5.1〜5.7。**赤 → 緑**で実装した（機能フラグは使っていない — 本タスクは画面の機能で
+あり、段の切り替えを要する分岐が無い）。追加したのは `columnSpace.ts`（+ 同 `.test.ts`）と
+`nestedInspector.tsx`（+ 同 `.test.tsx`）であり、`windowCache.ts` / `cellEdit.ts` /
+`editorRegistry.ts` / `editors/index.ts` / `GridScreen.tsx` を変更した。
+
+### 決めたこと
+
+| 論点 | 決定 | 実測の根拠 |
+|---|---|---|
+| 表示の位置と文書の列の写像 | `ColumnSpace` を唯一の源にし、`WindowCache` が読み（`getCell`）と書き（`documentColumn`）の両方をそこから引く | `crates/data-grid/src/transport/mod.rs` の `WindowCodec::encode` は**宣言の列数**ぶんのセルを運ぶ（窓は文書の列の空間であり、表示の位置ではない）。`api.rs` の `encode_window` も同じ。`view/mod.rs` の `push_column` は展開したオブジェクトの内側の位置を**親と同じ文書の列**の下へ並べる |
+| 確定の文字の運び手 | 登録が `carrier` を宣言する（`Object`/`Array` は `"structure"` = `SetNested`）。`cellEdit` がそれで命令を選ぶ | `crates/schema-engine/src/coerce/mod.rs` の `_` の腕に `Text` → `object`/`array` の行が無く、`types/mod.rs` の `accepted_variants` は `Object` の値だけを受ける（7.4 の実測の再確認） |
+| 世代の数え方 | `grid_set_view` は +1、適用は `affected` が空でないときだけ +1（`api.rs` の `set_view` / `apply` と同じ規則） | `api.rs`: `set_view` は `advance_generation()` を無条件に呼び、`apply` / `undo` / `redo` は `!outcome.affected.is_empty()` のときだけ呼ぶ。**画面はこの数を写していなかった**（8.3 の経路で、適用のあとの窓の要求が古い世代を名乗る） |
+| 展開を送る形 | 押された 1 件を**いまの指定へ足した完全な記述**として送る（`withExpansion`） | `src-tauri/src/commands/grid.rs` の `answer_set_view` が「要求に現れない展開を折りたたみへ戻す」 |
+| 段数の上限の扱い | `expandability` が `capped` の列にだけ「詳細表示へ」を出す（`nestedColumnControls`） | `crates/data-grid/src/view/mod.rs` の `expandability` は `depth >= MAX_EXPANSION_DEPTH` のときだけ `Capped` を立てる（利用者が指定した段数で止まっている位置には立てない） |
+
+### 変異試験（md5 は記録時のバイト）
+
+| 変異 | 落ちた検査 | md5（変異前 = 復帰後） |
+|---|---|---|
+| `windowCache.getCell` の写像を恒等（`const column = display;`）へ戻す | `windowCache.test.ts` 3 件（「展開した構成では、表示の位置ではなく文書の列のセルを読む」ほか） | `ff85d8b9fd45cf0eb2ac14ed3dd43ae1` |
+| `cellEdit` の宛先を表示の位置のままにする | `cellEdit.test.ts` 2 件（「表示の位置ではなく、記憶が答える文書の列を宛先にする」ほか） | `4b8c8aee1eb1ee869155485261bdb8e7` |
+| `withExpansion` を「1 件だけの指定」にする（`findIndex` を `-1` に固定） | `nestedInspector.test.tsx` / `GridScreen.test.ts` 3 件 | `3946301fe4557359ff3f542a768214ad` |
+| 段数の上限でも「詳細表示」とだけ書く | 同 2 件 | `3946301fe4557359ff3f542a768214ad` |
+| 要素数の宣言を出さない | 同 4 件 | `3946301fe4557359ff3f542a768214ad` |
+
+### 残るリスク（**実物の起動でしか観測できないもの**）
+
+- **展開しても描かれる列は変わらない**（申し送り 2）。`grid_set_view` の応答が導出後の列の構成を
+  運ばず、`grid_open_sheet` はセッションを作り直すためである。**要件 5.1 / 5.2 の見える結果と、
+  5.4 の `Capped` の印が届くことは、実起動でも観測できない**（画面側の扱いは実装済みで、
+  検査は `capped` の記述を直接与えて固定している）
+- **値の構造そのものが読めない**（申し送り 1）ため、詳細表示の編集は構造表現の打ち込みであり、
+  初期値は空である（**値を捨てないための制限**であり、その旨を画面にも書いてある）
+- 展開・折りたたみの操作が実際に押せること、詳細表示の面へ打鍵が届くこと、`SetNested` の往復が
+  実物の Rust を相手に成立することは、`node` の環境（DOM なし）では観測していない — 9.2 の台本と
+  8.1 の段（`JXCEL_VERIFICATION_INITIAL_SCREEN=grid`）の領分である
+- **本タスクは起動の観測を行っていない。**骨組みの中にグリッド画面を開く筋書きが無いためである
+  （8.4 のレビューが同じ隙間を記録している）
+
 ## References
 
 - [Glide Data Grid](https://github.com/glideapps/glide-data-grid) — MIT、canvas、`getCellContent` が引きに来る形
@@ -1322,3 +1363,4 @@ design.md の File Structure Plan が名指ししており、実際に 3 つの�
 - [Tauri の Linux 描画の手引き](https://v2.tauri.app/develop/debug/linux-graphics/) — 回避の環境変数の順序と、WebKit がレンダラ文字列を伏せる旨
 - [WebKit bug 262607](https://bugs.webkit.org/show_bug.cgi?id=262607) — DMA-BUF の無効化要求が WONTFIX で終了
 - [tauri-apps/tauri#15936](https://github.com/tauri-apps/tauri/issues/15936) — WebKitGTK 2.52.3 で「DOM はあるが何も塗られない」再現報告（2026-08-29）
+
