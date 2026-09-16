@@ -3,12 +3,13 @@
  *
  * # ここで固定するもの
  *
- * 1. **送る命令の形**（要件 6.1、6.2、6.3）。追加は `InsertRows`（**位置と数だけを運び、値を
+ * 1. **送る命令の形**（要件 6.1、6.2、6.3）。追加は `InsertRows`（**錨と数だけを運び、値を
  *    運ばない** — 既定値は宣言が供給する）、削除は `RemoveRows`、複製は `DuplicateRows`（どちらも
- *    **行の識別子**で対象を決める）
- * 2. **挿入の位置の座標空間**（要件 8.6 の取り違え）。`InsertRows.at` は**文書の位置**であり、
- *    可視の序数ではない。両者が一致するのは**並べ替えも絞り込みも無いとき**だけであり、
- *    一致しない指定では**送らない**（推測した位置へ足すより、理由を返す方が正しい）
+ *    **可視の序数の区間**で対象を決める）
+ * 2. **座標空間は可視の序数である**（タスク 10.4。要件 8.6 の取り違え）。削除・複製の対象は
+ *    `{ target: "Ordinals", from, count }` であり、挿入の位置は `{ anchor: "Before", ordinal }`
+ *    （末尾は `{ anchor: "End" }`）である。**文書の位置も行の識別子も送らない** — 写すのは
+ *    ドメイン（可視の並びを持つ側）であり、画面が写しを持てば 2 つの写しが食い違う
  * 3. **削除の確認**（要件 6.5）。閾値は**いま 1 画面に見えている行数**である。それを超えるときは
  *    削除する行数を示して確認を求める。**確認への取り消しは境界へ何も送らない** — 計画の腕と、
  *    腕を振り分ける関数（`runRowOperationPlan`）の両方で固定する
@@ -32,17 +33,15 @@ import type {
   GridEditCommand,
   GridEditOutcome,
   GridEditResponse,
-  GridViewSpec,
   IpcResult,
 } from "../../ipc/bindings";
 import type { IpcClientError } from "../../ipc/client";
-import { EMPTY_GRID_VIEW, type GridClient } from "./gridClient";
+import type { GridClient } from "./gridClient";
 import { createColumnSpace } from "./columnSpace";
 import { createWindowCache, type WindowCache } from "./windowCache";
 import {
   applyRowOperation,
   deleteNeedsConfirmation,
-  insertPositionIsDocumentOrder,
   planRowOperation,
   rowTargets,
   runRowOperationPlan,
@@ -50,7 +49,7 @@ import {
   type RowOperationPlan,
   type RowSendIntent,
 } from "./rowOps";
-import type { CellPosition, RendererSelection } from "./renderer/port";
+import type { RendererSelection } from "./renderer/port";
 
 // ===========================================================================
 // 道具（偽の境界・偽の窓の記憶・偽の窓のサーバ）
@@ -77,24 +76,11 @@ const ROW_IDS: readonly string[] = [
   "01ARZ3NDEKTSV4RRFFQ69G5FB0",
 ];
 
-/** 可視の序数 `row` の識別子（6 件目以降は同じ形で綴りを進める）。 */
-function rowIdOf(row: number): string {
-  return ROW_IDS[row] ?? `01ARZ3NDEKTSV4RRFFQ69G5G${String(row).padStart(4, "0")}`;
-}
-
-/** 序数 `first`..`last` の識別子を答える口（範囲の外は `null` ＝ 窓がまだ届いていない）。 */
-function rowIdsFor(first: number, last: number): (position: CellPosition) => string | null {
-  return (position) =>
-    position.row >= first && position.row <= last ? rowIdOf(position.row) : null;
-}
-
-/** 計画の文脈（既定は「並べ替えも絞り込みも無い・可視行 20・1 画面 10 行・識別子は可視行の数だけ」）。 */
+/** 計画の文脈（既定は「可視行 20・1 画面 10 行」）。 */
 function contextOf(overrides: Partial<RowOperationContext> = {}): RowOperationContext {
   return {
-    view: EMPTY_GRID_VIEW,
     visibleRows: 20,
     viewportRows: 10,
-    rowId: rowIdsFor(0, 19),
     ...overrides,
   };
 }
@@ -182,9 +168,6 @@ function planOf(plan: RowOperationPlan): {
     },
     confirm: (confirmation) => {
       reached.push(`confirm:${String(confirmation.count)}`);
-    },
-    refuse: (message) => {
-      reached.push(`refuse:${message}`);
     },
     cancel: () => {
       reached.push("cancel");
@@ -307,7 +290,9 @@ describe("挿入は位置と数だけを送る（要件 6.1）", () => {
       intent: sentOf(planRowOperation({ kind: "insert", at: 3 }, contextOf())),
     });
 
-    expect(client.edits).toEqual([{ command: "InsertRows", at: 3, count: 1 }]);
+    expect(client.edits).toEqual([
+      { command: "InsertRows", at: { anchor: "Before", ordinal: 3 }, count: 1 },
+    ]);
     // **運ぶ欄はこの 3 つだけである**（値の欄が増えればここが落ちる。既定値は宣言が供給する
     // — `CompiledSchema::default_row`）。
     expect(Object.keys(client.edits[0] ?? {}).sort()).toEqual(["at", "command", "count"]);
@@ -317,54 +302,25 @@ describe("挿入は位置と数だけを送る（要件 6.1）", () => {
     expect(settlement).toEqual({ status: "applied", outcome, generation: "2" });
   });
 
-  it("挿入の位置は文書の位置である（可視の序数と一致するのは、並べ替えも絞り込みも無いときだけ）", () => {
-    expect(insertPositionIsDocumentOrder(EMPTY_GRID_VIEW)).toBe(true);
-    // 入れ子の展開は**列**の構成を変えるだけであり、行の並びを変えない（要件 5.1、5.3）。
-    expect(
-      insertPositionIsDocumentOrder({
-        ...EMPTY_GRID_VIEW,
-        expansion: [{ column: 0, expanded: true, depth: 1 }],
-      }),
-    ).toBe(true);
-    // 並べ替えと絞り込みは「何番目の行がどの行か」を変える（要件 8.3、8.7）。
-    expect(
-      insertPositionIsDocumentOrder({
-        ...EMPTY_GRID_VIEW,
-        sort: [{ column: 0, descending: false }],
-      }),
-    ).toBe(false);
-    expect(
-      insertPositionIsDocumentOrder({
-        ...EMPTY_GRID_VIEW,
-        filters: [{ filter: "IsNotEmpty", column: 0 }],
-      }),
-    ).toBe(false);
-  });
-
-  it("並べ替え・絞り込みが効いている間は送らない（推測した位置へ足さない）", () => {
-    // 起点は**可視の序数 3** であり、その行の文書の位置が 3 である保証は無い。写す口が境界に
-    // 無いので、一致を仮定して送ることは**取り違えそのものである**（要件 8.6）。
-    const views: readonly GridViewSpec[] = [
-      { ...EMPTY_GRID_VIEW, sort: [{ column: 0, descending: true }] },
-      { ...EMPTY_GRID_VIEW, filters: [{ filter: "IsNotEmpty", column: 0 }] },
-    ];
-    for (const view of views) {
-      const plan = planOf(planRowOperation({ kind: "insert", at: 3 }, contextOf({ view })));
-      expect(plan.sent).toEqual([]);
-      expect(plan.reached).toHaveLength(1);
-      expect(plan.reached[0]).toContain("refuse:");
-      expect(plan.reached[0]).toContain("並べ替え");
-    }
+  it("挿入の位置は**可視の序数**で送る（文書の位置へ写さない。要件 8.6）", () => {
+    // 起点は**可視の序数 3** である。その行の文書の位置が 3 である保証は無い（並べ替え・
+    // 絞り込みが効いていれば食い違う）が、**写すのはドメイン**なので、画面は序数をそのまま
+    // 送る。文書の位置を送れば、利用者が指したのとは別の行の隣に入る。
+    expect(sentOf(planRowOperation({ kind: "insert", at: 3 }, contextOf()))).toEqual({
+      kind: "insert",
+      anchor: { kind: "before", ordinal: 3 },
+    });
   });
 
   it("挿入の位置は可視行の数までに収める（末尾への追加は妥当である）", () => {
     const at = (row: number, visibleRows: number): RowSendIntent =>
       sentOf(planRowOperation({ kind: "insert", at: row }, contextOf({ visibleRows })));
-    // 末尾の次の位置（`at == 行数`）への追加は妥当である（`edit` 層の事前検査と同じ）。
-    expect(at(20, 20)).toEqual({ kind: "insert", at: 20 });
+    // 末尾の次の位置（`at == 可視行数`）への追加は**文書の末尾**への追加である
+    // （`edit` 層の事前検査と同じ。可視の最後の行の直後とは限らない）。
+    expect(at(20, 20)).toEqual({ kind: "insert", anchor: { kind: "end" } });
     // 表の外を指す指定は**末尾へ寄せる**（負の値は先頭へ）。
-    expect(at(24, 20)).toEqual({ kind: "insert", at: 20 });
-    expect(at(-1, 20)).toEqual({ kind: "insert", at: 0 });
+    expect(at(24, 20)).toEqual({ kind: "insert", anchor: { kind: "end" } });
+    expect(at(-1, 20)).toEqual({ kind: "insert", anchor: { kind: "before", ordinal: 0 } });
   });
 });
 
@@ -372,8 +328,8 @@ describe("挿入は位置と数だけを送る（要件 6.1）", () => {
 // 2. 削除と複製は行の識別子で対象を決める（要件 6.2、6.3）
 // ===========================================================================
 
-describe("削除と複製は行の識別子で対象を決める（要件 6.2、6.3）", () => {
-  it("削除は選択の行の識別子を送る（可視の序数ではない）", async () => {
+describe("削除と複製は可視の序数の区間で対象を決める（要件 6.2、6.3）", () => {
+  it("削除は選択の可視の序数の区間を送る（文書の位置でも識別子でもない）", async () => {
     const client = fakeClient(applied(outcomeOf({ affected: [ROW_IDS[1] ?? ""], row_count: 19 })));
     const memory = fakeClear();
 
@@ -385,14 +341,15 @@ describe("削除と複製は行の識別子で対象を決める（要件 6.2、
       ),
     });
 
-    // 識別子は**記憶が答えたもの**である（序数から組み立てた綴りではない）。
+    // **可視の序数の区間そのものである。**文書の位置へ解くのはドメインであり、画面は
+    // 識別子を 1 つも引き集めない（窓の記憶に依らない）。
     expect(client.edits).toEqual([
-      { command: "RemoveRows", rows: [ROW_IDS[1], ROW_IDS[2], ROW_IDS[3]] },
+      { command: "RemoveRows", target: { target: "Ordinals", from: 1, count: 3 } },
     ]);
     expect(memory.cleared).toEqual([19]);
   });
 
-  it("複製は同じ識別子を送る（値はドメインが写す）", async () => {
+  it("複製は同じ可視の序数の区間を送る（値はドメインが写す）", async () => {
     const client = fakeClient(applied(outcomeOf({ affected: [ROW_IDS[2] ?? ""], row_count: 21 })));
     const memory = fakeClear();
 
@@ -407,22 +364,25 @@ describe("削除と複製は行の識別子で対象を決める（要件 6.2、
       ),
     });
 
-    expect(client.edits).toEqual([{ command: "DuplicateRows", rows: [ROW_IDS[2]] }]);
+    expect(client.edits).toEqual([
+      { command: "DuplicateRows", target: { target: "Ordinals", from: 2, count: 1 } },
+    ]);
     expect(memory.cleared).toEqual([21]);
   });
 
-  it("識別子が引けない行があれば送らない（推測で別の行を消さない）", () => {
-    // 窓がまだ届いていない行が 1 つでも混ざれば、**対象の全体が決まらない**（部分的な削除は
-    // 利用者が指した選択とは別のものを消す）。
+  it("窓の記憶が保っていない行を含む選択でも、そのまま送る（識別子を引き集めない）", () => {
+    // 以前は窓の記憶から識別子を引き集めていたため、**保っていない行が 1 つでもあれば操作
+    // そのものができなかった**（10 万行で 1 画面に収まらない範囲を選ぶと起きる）。
+    // 序数で指せば、保っているかどうかに関わりなく選択の全体が送られる。
     const plan = planOf(
       planRowOperation(
-        { kind: "delete", targets: { first: 0, last: 3, count: 4 } },
-        contextOf({ rowId: rowIdsFor(0, 2) }),
+        { kind: "delete", targets: { first: 0, last: 99_999, count: 100_000 } },
+        contextOf({ visibleRows: 100_000, viewportRows: 100_000 }),
       ),
     );
-    expect(plan.sent).toEqual([]);
-    expect(plan.reached).toEqual([
-      "refuse:対象の行の識別子がまだ届いていないため、この操作はできません",
+    expect(plan.reached).toEqual([]);
+    expect(plan.sent).toEqual([
+      { kind: "delete", range: { from: 0, count: 100_000 } },
     ]);
   });
 
@@ -484,9 +444,7 @@ describe("削除の確認は、1 画面に見えている行数を閾値にす�
       ),
     );
     expect(plan.reached).toEqual([]);
-    expect(plan.sent).toEqual([
-      { kind: "delete", rows: [ROW_IDS[0], ROW_IDS[1], ROW_IDS[2], ROW_IDS[3], ROW_IDS[4]] },
-    ]);
+    expect(plan.sent).toEqual([{ kind: "delete", range: { from: 0, count: 5 } }]);
   });
 
   it("画面に見えている行数を知らないうちは、確認を求める", () => {
@@ -514,15 +472,8 @@ describe("削除の確認は、1 画面に見えている行数を閾値にす�
   });
 
   it("確認への取り消しは、境界へ何も送らない", () => {
-    // **計画そのものが送る腕を返さない。**識別子を引く口は、取消のときに呼ばれれば落ちる。
-    const plan = planRowOperation(
-      { kind: "cancel" },
-      contextOf({
-        rowId: () => {
-          throw new Error("取消は識別子を引かない");
-        },
-      }),
-    );
+    // **計画そのものが送る腕を返さない**（取消は対象も位置も持たない）。
+    const plan = planRowOperation({ kind: "cancel" }, contextOf());
     expect(plan).toEqual({ kind: "cancelled" });
 
     // 振り分けでも**送る腕へは載らない**（送る腕は例外を投げる — 取消が載れば落ちる）。
@@ -533,9 +484,6 @@ describe("削除の確認は、1 画面に見えている行数を閾値にす�
       },
       confirm: () => {
         reached.push("confirm");
-      },
-      refuse: () => {
-        reached.push("refuse");
       },
       cancel: () => {
         reached.push("cancel");
@@ -634,7 +582,7 @@ describe("行数が変わったあとの記憶（要件 1.7）", () => {
     const settlement = await applyRowOperation({
       client,
       cache: memory.cache,
-      intent: { kind: "delete", rows: [ROW_IDS[0] ?? ""] },
+      intent: { kind: "delete", range: { from: 0, count: 1 } },
     });
 
     expect(settlement.status).toBe("failed");
@@ -650,7 +598,11 @@ describe("行数が変わったあとの記憶（要件 1.7）", () => {
     const client = fakeClient(applied(outcomeOf({ affected: [] })));
     const memory = fakeClear();
 
-    await applyRowOperation({ client, cache: memory.cache, intent: { kind: "delete", rows: [] } });
+    await applyRowOperation({
+      client,
+      cache: memory.cache,
+      intent: { kind: "delete", range: { from: 0, count: 0 } },
+    });
 
     expect(memory.cleared).toEqual([]);
   });
@@ -666,15 +618,14 @@ describe("閾値の源", () => {
     // 計画が読むのは文脈の `viewportRows` だけである（移植口の `onVisibleSpanChange` が
     // その源であり、先読みの窓の幅 `WINDOW_ROWS` は 1 画面の行数ではない）。
     const targets = { first: 0, last: 39, count: 40 };
-    const many = { rowId: rowIdsFor(0, 39) };
     expect(
       planOf(
-        planRowOperation({ kind: "delete", targets }, contextOf({ ...many, viewportRows: 30 })),
+        planRowOperation({ kind: "delete", targets }, contextOf({ viewportRows: 30 })),
       ).reached,
     ).toEqual(["confirm:40"]);
     expect(
       planOf(
-        planRowOperation({ kind: "delete", targets }, contextOf({ ...many, viewportRows: 200 })),
+        planRowOperation({ kind: "delete", targets }, contextOf({ viewportRows: 200 })),
       ).reached,
     ).toEqual([]);
   });

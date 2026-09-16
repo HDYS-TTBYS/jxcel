@@ -8,44 +8,39 @@
  *
  * | 指示 | 送る命令 | どの要件か |
  * |---|---|---|
- * | 追加（位置を指定した 1 行） | `InsertRows`（**位置と数だけ**） | 6.1 |
- * | 削除（選択した行すべて） | `RemoveRows`（**行の識別子**） | 6.2 |
- * | 複製（選択した行と同じ値） | `DuplicateRows`（**行の識別子**） | 6.3 |
+ * | 追加（位置を指定した 1 行） | `InsertRows`（**可視の序数と数だけ**） | 6.1 |
+ * | 削除（選択した行すべて） | `RemoveRows`（**可視の序数の区間**） | 6.2 |
+ * | 複製（選択した行と同じ値） | `DuplicateRows`（**可視の序数の区間**） | 6.3 |
  * | 1 画面に収まらない削除 | 送る前に**削除する行数を示して確認を求める** | 6.5 |
  * | 確認への取り消し | **何も送らない** | 6.5 |
  *
  * 判断（[`planRowOperation`]）と往復（[`applyRowOperation`]）を分けてあるのは、**画面の状態を
  * 決めるのに要るものが境界への往復を待たない**ためである — 確認を求めるかどうか、どの位置へ
- * 足すか、どの行を消すかは、窓の記憶と表示の指定だけで決まる（`./cellEdit` が判定と反映を
+ * 足すか、どの行を消すかは、可視行の数と表示の位置だけで決まる（`./cellEdit` が判定と反映を
  * 分けているのと同じ形である）。**判断は純粋であり、境界も窓の記憶も触らない**ので、
- * 取り違え（下の「挿入の位置」）と閾値（下の「削除の確認」）は `node` の環境でそのまま検査できる。
+ * 座標空間（下の「座標空間」）と閾値（下の「削除の確認」）は `node` の環境でそのまま検査できる。
  *
- * # 挿入の位置は**文書の位置**である（可視の序数ではない。要件 8.6 の取り違え）
+ * # 座標空間は**可視の序数**である（タスク 10.4。要件 8.6）
  *
- * 生成物の `InsertRows.at` の doc が定めるとおり、`at` は**適用前の文書の行順に対する添字**で
- * あり、**可視行の序数ではない**。8.5 の入れ子の展開が示したとおり、この 2 つの空間は現に
- * 食い違う（列では `./columnSpace` の写像が要った）。
+ * 生成物の `GridEditCommand` は、行の対象（`RemoveRows` / `DuplicateRows`）と挿入の位置
+ * （`InsertRows`）を**2 つの空間**で指せる（`GridRowTarget` / `GridRowAnchor`）。本 module は
+ * **可視の序数の腕だけ**を使う:
  *
- * 画面が指せるのは**表示の位置**だけであり（選択も移植口の座標も表示の位置である）、
- * **可視の序数から文書の位置へ写す口は境界に無い**（6.1 の 6 本のコマンドは、行の識別子から
- * 文書の位置を言う口を持たない。窓が運ぶのは行の識別子であって、文書の位置ではない）。
- * したがって本 module は、写せる根拠があるときだけ送る:
- *
- * | 表示の指定 | 2 つの空間 | どうするか |
+ * | 指示 | 送る腕 | なぜか |
  * |---|---|---|
- * | 並べ替えも絞り込みも無い（入れ子の展開だけは**列**の話である） | 可視の順序は文書の順序そのものである（`RowOrder` が導出し直すだけで並びは変わらない） | 可視の序数をそのまま `at` として送る |
- * | 並べ替えまたは絞り込みがある | 一致しない（`RowOrder` が並びを決める） | **送らない。**理由を返す |
+ * | 追加（現在位置の行の位置へ 1 行） | `{ anchor: "Before", ordinal }`（末尾は `{ anchor: "End" }`） | 画面が指せるのは**表示の位置**だけである |
+ * | 削除・複製（選択した行） | `{ target: "Ordinals", from, count }` | 同上。範囲は `RendererSelection` そのものである |
  *
- * **一致を仮定して送るのが取り違えである。**文書の位置 3 へ足しても、利用者が指した行は
- * 別の行でありうる（並べ替えでは順序が変わり、絞り込みでは隠れた行が数に入る）。境界に写す口が
- * 足りないうちは、**推測した位置へ足すより理由を返す方が正しい**（`./cellEdit` が行の識別子を
- * 引けないときに送らないのと同じ規律である）。8.8 が並べ替え・絞り込みを結線するときに、
- * 写す口（`RowOrder` の側の 1 本）をここへ足すこと。
+ * **写像は本 module に無い。**可視の序数を文書の識別子・位置へ解くのは**ドメイン**（適用の
+ * 直前。`RowOrder` を持つ `data-grid`）ただ 1 つである。画面が写しを持てば、並べ替え・絞り込みの
+ * 下で 2 つの写しが食い違い、**利用者が指したのとは別の行を消す**（要件 8.6 の取り違え）。
  *
- * 一方、**削除と複製は並べ替え・絞り込みの下でも成り立つ** — 対象は行の識別子であり
- * （[`WindowCache.rowId`] が答える。要件 2.6 が「確定した選択を対象にする」と定めた値である）、
- * 識別子は表示の並びに依らない。**この非対称は意図である**（位置を指す命令と、対象を指す命令の
- * 違いである）。
+ * したがって、**窓の記憶が保っている範囲に依らない** — 10 万行のうち 1 画面に収まらない範囲を
+ * 選んでも、選択の全体がそのまま送られる（以前は識別子を窓から引き集めていたため、窓が
+ * 保っていない行が 1 つでもあれば操作そのものができなかった。tasks.md 10.4）。
+ *
+ * **確認に出す数と、実際に消える数は一致する**: 範囲は可視の序数であり、ドメインはその区間の
+ * 可視行をそのまま解く（[`rowTargets`] が表の外の分を落とすので、範囲はつねに可視行の中にある）。
  *
  * # 足す位置は「現在位置の行の位置」である（**その行の上に入る**）
  *
@@ -105,10 +100,10 @@
  * 「何を送ったか」までしか主張しない。② **確認の面が現れ、押下が届くこと**は `node` の環境
  * （DOM なし）では観測できない — 実起動（9.2）と `smoke-port-probe` の領分である。
  */
-import type { GridEditCommand, GridEditOutcome, GridViewSpec } from "../../ipc/bindings";
+import type { GridEditCommand, GridEditOutcome, GridRowAnchor } from "../../ipc/bindings";
 import { assertNever, describeIpcError } from "../../ipc/client";
 import type { GridClient } from "./gridClient";
-import type { CellPosition, RendererSelection } from "./renderer/port";
+import type { RendererSelection } from "./renderer/port";
 import type { WindowCache } from "./windowCache";
 
 /**
@@ -160,14 +155,12 @@ export type RowOperationTarget =
   | { readonly kind: "cancel" };
 
 /**
- * 判断の材料。**境界も窓の記憶も持たない**（表示の指定と数と、識別子を引く口だけである）。
+ * 判断の材料。**境界も窓の記憶も持たない**（数だけである）。
  *
- * `rowId` を口として渡すのは、判断を純粋に保ったまま、**識別子の源が窓の記憶 1 つである**
- * ことを崩さないためである（`./cellEdit` が `WindowCache.rowId` をそのまま使うのと同じ規律）。
+ * **表示の指定も識別子の口も要らない。**序数で指すため、送る形は材料から直ちに決まる
+ * （2 つの空間を写す口が消えたことが、この型の小ささに現れている。タスク 10.4）。
  */
 export interface RowOperationContext {
-  /** いまの表示の指定（**挿入の位置の座標空間を決める**）。 */
-  readonly view: GridViewSpec;
   /** 可視行の数（表示の順序の行数。挿入の位置の上限である）。 */
   readonly visibleRows: number;
   /**
@@ -177,47 +170,68 @@ export interface RowOperationContext {
    * 画面の高さではなく、代用すると 1 画面に収まらない削除が確認を求めなくなる。
    */
   readonly viewportRows: number | null;
-  /** 可視行の序数 → 文書の行の識別子。**引けなければ `null`**（推測で答えてはならない）。 */
-  readonly rowId: (position: CellPosition) => string | null;
 }
 
 /**
- * 境界へ送る対象。**文書の同一性である**（表示の位置は 1 つも現れない）。
+ * 可視の序数の半開区間（境界の `GridRowTarget` の `Ordinals` そのものである）。
+ *
+ * **`from` も `count` も可視の序数・可視行の数である**（文書の位置ではない。要件 8.6）。
+ */
+export interface RowRange {
+  /** 対象の先頭の可視行（含む）。 */
+  readonly from: number;
+  /** 対象の行数。 */
+  readonly count: number;
+}
+
+/**
+ * 挿入の位置（境界の `GridRowAnchor` のうち、画面が使う 2 つ）。
+ *
+ * `before` は**可視の序数 `ordinal` の行の直前**であり、`end` は**文書の末尾**である
+ * （可視の最後の行の直後ではない。末尾へ足せるのは、現在位置が表の最後の行より後ろを指した
+ * ときだけである）。
+ */
+export type RowSendAnchor =
+  | { readonly kind: "before"; readonly ordinal: number }
+  | { readonly kind: "end" };
+
+/**
+ * 境界へ送る対象。**座標空間は可視の序数である**（文書の位置も行の識別子も現れない）。
  *
  * **取り消しの腕を持たない**ことが「取り消しは送れない」の型の水準の表現である — 取り消しは
  * 計画（[`RowOperationPlan`]）の腕であり、往復へは載らない。
  */
 export type RowSendIntent =
-  | { readonly kind: "insert"; readonly at: number }
-  | { readonly kind: "delete"; readonly rows: readonly string[] }
-  | { readonly kind: "duplicate"; readonly rows: readonly string[] };
+  | { readonly kind: "insert"; readonly anchor: RowSendAnchor }
+  | { readonly kind: "delete"; readonly range: RowRange }
+  | { readonly kind: "duplicate"; readonly range: RowRange };
 
 /**
- * 判断の結果。**4 つの行き先と、何もしない腕である。**
+ * 判断の結果。**3 つの行き先と、何もしない腕である。**
  *
  * | 腕 | 画面は何をするか |
  * |---|---|
  * | `send` | 境界へ 1 命令を送る（[`applyRowOperation`]） |
  * | `confirm` | **送らずに**確認を求める（数を示す。要件 6.5） |
- * | `refused` | 送らずに理由を告知へ出す（挿入の位置を写せない・識別子が届いていない） |
  * | `cancelled` | 確認を取り下げる（**送らない**） |
  * | `nothing` | 何もしない（対象が無い） |
+ *
+ * **「送らずに理由を提示する」腕は無い**（タスク 10.4 が消した）。画面が指せる対象はつねに
+ * 可視の序数であり、それを解けるのはドメインであるため、**写せないことを理由に断る場面が
+ * 無くなった**（断れば利用者は操作そのものをできない。それこそが 10.4 の指摘である）。
  */
 export type RowOperationPlan =
   | { readonly kind: "send"; readonly intent: RowSendIntent }
   | { readonly kind: "confirm"; readonly confirmation: DeleteConfirmation }
-  | { readonly kind: "refused"; readonly message: string }
   | { readonly kind: "cancelled" }
   | { readonly kind: "nothing" };
 
-/** 計画の 4 つの行き先（**送る腕だけが境界へ行く**）。 */
+/** 計画の 3 つの行き先（**送る腕だけが境界へ行く**）。 */
 export interface RowOperationSinks {
   /** 境界へ送る（**この腕に載った命令だけが文書を変える**）。 */
   readonly send: (intent: RowSendIntent) => void;
   /** 確認を求める（まだ送らない）。 */
   readonly confirm: (confirmation: DeleteConfirmation) => void;
-  /** 送らずに理由を告げる。 */
-  readonly refuse: (message: string) => void;
   /** 確認を取り下げる（**送らない**）。 */
   readonly cancel: () => void;
 }
@@ -241,16 +255,6 @@ export function rowTargets(selection: RendererSelection, visibleRows: number): R
 }
 
 /**
- * 可視の順序が文書の順序そのものであるか（**挿入の位置を写せる根拠である**）。
- *
- * 入れ子の展開は**列**の構成を変えるだけであり（要件 5.1、5.3）、行の並びを変えない。
- * 並べ替えと絞り込みは「何番目の行がどの行か」を変える（要件 8.3、8.7）。
- */
-export function insertPositionIsDocumentOrder(view: GridViewSpec): boolean {
-  return view.sort.length === 0 && view.filters.length === 0;
-}
-
-/**
  * 削除の確認を求めるか（要件 6.5）。閾値は**いま 1 画面に見えている行数**である。
  *
  * 見えている行数を知らない（`null`）ときは**求める** — 「収まると言えない」ときに尋ねないと、
@@ -267,20 +271,16 @@ export function planRowOperation(
 ): RowOperationPlan {
   switch (target.kind) {
     case "cancel":
-      // **境界も窓の記憶も触らない**（識別子も引かない — 取り消す対象は既に決まっている）。
+      // **境界も窓の記憶も触らない**（取り消す対象は既に決まっている）。
       return { kind: "cancelled" };
     case "insert": {
-      if (!insertPositionIsDocumentOrder(context.view)) {
-        // **推測した位置へ足さない**（module doc「挿入の位置は文書の位置である」）。
-        return {
-          kind: "refused",
-          message:
-            "並べ替えまたは絞り込みが効いている間は、指した位置を文書の位置へ写せないため、行を追加できません",
-        };
-      }
-      // 表の外を指す指定は端へ寄せる（末尾の次の位置＝ `at == 行数` は妥当な追加である）。
+      // 表の外を指す指定は端へ寄せる（末尾の次の位置＝ `at == 行数` は末尾への追加である）。
       const at = Math.max(0, Math.min(target.at, context.visibleRows));
-      return { kind: "send", intent: { kind: "insert", at } };
+      // **可視の序数で指す**（文書の位置へ写すのはドメインである。要件 8.6）。並べ替えや
+      // 絞り込みが効いていても、そのまま送れる。
+      const anchor: RowSendAnchor =
+        at < context.visibleRows ? { kind: "before", ordinal: at } : { kind: "end" };
+      return { kind: "send", intent: { kind: "insert", anchor } };
     }
     case "delete":
     case "confirmDelete":
@@ -288,23 +288,17 @@ export function planRowOperation(
       if (target.targets.count <= 0) {
         return { kind: "nothing" };
       }
-      const rows = resolveRows(target.targets, context.rowId);
-      if (rows === null) {
-        // **1 つでも引けなければ送らない。**部分的な対象を送ると、利用者が指した選択とは
-        // 別のものを消す（`./cellEdit` の「推測で書かない」と同じ規律である）。
-        return {
-          kind: "refused",
-          message: "対象の行の識別子がまだ届いていないため、この操作はできません",
-        };
-      }
-      if (target.kind === "delete" && deleteNeedsConfirmation(rows.length, context.viewportRows)) {
-        // **送らずに数を示して尋ねる**（要件 6.5）。尋ねた数は対象から数え直さず、そのまま置く。
+      if (target.kind === "delete" && deleteNeedsConfirmation(target.targets.count, context.viewportRows)) {
+        // **送らずに数を示して尋ねる**（要件 6.5）。尋ねた数は対象から数え直さず、そのまま置く
+        // （対象は可視の序数の範囲であり、`rowTargets` が表の外を落としているため、尋ねた数と
+        // 実際に解かれる行の数は一致する）。
         return { kind: "confirm", confirmation: target.targets };
       }
       // **尋ねるのは 1 度だけである**（`confirmDelete` は確認の答えであり、閾値を見ない）。
+      const range: RowRange = { from: target.targets.first, count: target.targets.count };
       return target.kind === "duplicate"
-        ? { kind: "send", intent: { kind: "duplicate", rows } }
-        : { kind: "send", intent: { kind: "delete", rows } };
+        ? { kind: "send", intent: { kind: "duplicate", range } }
+        : { kind: "send", intent: { kind: "delete", range } };
     }
     default:
       return assertNever(target, "行の操作の対象の分岐が網羅されていない");
@@ -312,7 +306,7 @@ export function planRowOperation(
 }
 
 /**
- * 計画を 4 つの行き先へ振り分ける（**画面の内側では、これが唯一の振り分けである**）。
+ * 計画を 3 つの行き先へ振り分ける（**画面の内側では、これが唯一の振り分けである**）。
  *
  * 取り消しが**送る腕へ載らない**ことは、この関数の形が表している（`cancelled` の腕は
  * [`RowOperationSinks.cancel`] を呼び、`send` を呼ばない）。検査は偽の受け口を渡して
@@ -325,9 +319,6 @@ export function runRowOperationPlan(plan: RowOperationPlan, sinks: RowOperationS
       return;
     case "confirm":
       sinks.confirm(plan.confirmation);
-      return;
-    case "refused":
-      sinks.refuse(plan.message);
       return;
     case "cancelled":
       sinks.cancel();
@@ -383,35 +374,37 @@ export async function applyRowOperation(options: {
   return { status: "applied", outcome, generation: answer.data.generation };
 }
 
+/** 挿入の位置を、生成物の錨へ写す（可視の序数と末尾の 2 つだけである）。 */
+function anchorOf(anchor: RowSendAnchor): GridRowAnchor {
+  switch (anchor.kind) {
+    case "before":
+      return { anchor: "Before", ordinal: anchor.ordinal };
+    case "end":
+      return { anchor: "End" };
+    default:
+      return assertNever(anchor, "挿入の位置の分岐が網羅されていない");
+  }
+}
+
 /** 対象を、生成物の編集命令へ写す（**値を運ばない 3 つの命令だけである**）。 */
 function commandOf(intent: RowSendIntent): GridEditCommand {
   switch (intent.kind) {
     case "insert":
       // 足す行は**つねに 1 行**である（画面の入口が「現在位置の行の位置へ 1 行」である）。
       // まとめて足す口が要るのは貼り付けの補充であり、そちらは `PasteRange` が担う（8.7、8.9）。
-      return { command: "InsertRows", at: intent.at, count: 1 };
+      return { command: "InsertRows", at: anchorOf(intent.anchor), count: 1 };
     case "delete":
-      return { command: "RemoveRows", rows: [...intent.rows] };
+      // **可視の序数の区間である。**解くのはドメインであり、本 module は写像を持たない。
+      return {
+        command: "RemoveRows",
+        target: { target: "Ordinals", from: intent.range.from, count: intent.range.count },
+      };
     case "duplicate":
-      return { command: "DuplicateRows", rows: [...intent.rows] };
+      return {
+        command: "DuplicateRows",
+        target: { target: "Ordinals", from: intent.range.from, count: intent.range.count },
+      };
     default:
       return assertNever(intent, "行の操作の命令の分岐が網羅されていない");
   }
-}
-
-/** 範囲の行の識別子（**1 つでも引けなければ `null`** — 部分的な対象は送らない）。 */
-function resolveRows(
-  targets: RowTargets,
-  rowId: (position: CellPosition) => string | null,
-): string[] | null {
-  const rows: string[] = [];
-  for (let row = targets.first; row <= targets.last; row += 1) {
-    // 列は問わない（行の識別子は行そのものの身元である。`WindowCache.rowId` の doc）。
-    const id = rowId({ row, column: 0 });
-    if (id === null) {
-      return null;
-    }
-    rows.push(id);
-  }
-  return rows;
 }

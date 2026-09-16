@@ -85,8 +85,10 @@
 //!
 //! タスク 3.2 が [`EditCommand`] へ行の構造を変える 3 つの命令
 //! （`InsertRows` / `RemoveRows` / `DuplicateRows`）を足した（要件 6.1, 6.2, 6.3, 6.4）。
-//! 挿入位置は**文書の位置**として読む（可視の序数ではない。画面の位置に挿入したい呼び出し側が
-//! [`RowOrder`] で写す）。挿入する行の値は宣言が供給し（`CompiledSchema::default_row`）、
+//! 行の対象と挿入の位置は、タスク 10.4 が**識別子と可視の序数の双方**で指せるようにした
+//! （[`RowTarget`] / [`RowAnchor`]。序数は適用の直前に [`RowOrder`] で解く — 解くのは
+//! 本層であり、画面も境界も写像を持たない。`edit` のモジュール docs）。挿入する行の値は
+//! 宣言が供給し（`CompiledSchema::default_row`）、
 //! 複製する行の値はドキュメントから写す — **どちらも打たれた文字ではない**ため、この経路は
 //! 判定を呼ばず、**すべての列**を指定した再検証を 1 回だけ呼ぶ（要件 11.4 が禁じるのは
 //! 1 セルの編集についての全件検証であり、行の集合を変える命令はそれに当たらない。全列を
@@ -227,8 +229,13 @@ pub use view::{CellViolations, ColumnViolations, RowViolations, ViolationIndex};
 // 「本番が呼んでいない模擬」しか数えられない（`structure.md`「一括メソッドを置くだけでは
 // 足りない」）。本番の具象（`SchemaEngineQuery`）も同じ理由で公開する。
 pub use edit::{
-    CoercionNotice, EditApply, EditCommand, EditOutcome, EditSchemaQuery, SchemaEngineQuery,
+    CoercionNotice, EditApply, EditCommand, EditOutcome, EditSchemaQuery, RowAnchor, RowTarget,
+    SchemaEngineQuery,
 };
+// `edit` 層の行の指し方（タスク 10.4）: 行の集合（削除・複製の対象）を**識別子の一覧**と
+// **可視の序数の区間**のいずれでも指せるようにし、挿入の位置を**文書の位置**と**可視の序数**
+// のいずれでも指せるようにする。**解決は適用の直前（`EditApply`）が 1 回だけ行う**ので、
+// どちらの空間の指定も同じ道を通る（境界の適応層は 2 つの空間を写すだけである）。
 // `edit` 層の表形式テキストの相互変換（タスク 3.4）: 表形式テキストとセル値の矩形の相互変換。
 // 5.2 の `GridSession` が選択範囲の複製（要件 7.2）と貼り付けの受理（要件 7.3）の双方に
 // **この 1 つの写し**を使う（貼り付けの適用そのものは `EditCommand::PasteRange` が担う）。

@@ -3149,7 +3149,7 @@ describe("3 種の操作が同じ 1 つの履歴に乗っている（8.9 の受�
     const inserted = await applyRowOperation({
       client: tool.client,
       cache: tool.cache,
-      intent: { kind: "insert", at: 2 },
+      intent: { kind: "insert", anchor: { kind: "before", ordinal: 2 } },
     });
     expect(inserted.status).toBe("applied");
     model = gridScreenRowOperationSettled(model, inserted);

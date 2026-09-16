@@ -67,9 +67,9 @@ use std::sync::{Arc, Mutex};
 use common::sample::{sample, Sample, SampleEditParts, SampleOptions};
 use data_grid::{
     decode_window, derive_layout, display_text, CellAddress, ColumnIndex, EditCommand, EditOutcome,
-    EditSchemaQuery, ExpansionState, FilterSpec, Generation, GridError, GridSession, RowOrder,
-    RowOrdinal, RowSpan, SchemaEngineQuery, SearchDirection, SortKey, UndoStack, ViewSpec,
-    ViewSummary, DEFAULT_UNDO_LIMIT, WINDOW_FORMAT_VERSION,
+    EditSchemaQuery, ExpansionState, FilterSpec, Generation, GridError, GridSession, RowAnchor,
+    RowOrder, RowOrdinal, RowSpan, RowTarget, SchemaEngineQuery, SearchDirection, SortKey,
+    UndoStack, ViewSpec, ViewSummary, DEFAULT_UNDO_LIMIT, WINDOW_FORMAT_VERSION,
 };
 use document_format::{
     to_json_bytes, CellValue, Document, NestedValue, Row, RowId, SchemaPart, SheetId,
@@ -1427,7 +1427,10 @@ fn a_value_edit_does_not_move_rows_while_a_structural_edit_does() {
 
     // 行を末尾へ足すと、行の集合が変わるので順序が導出し直される。
     let at = RowOrdinal::new(fixture.rows());
-    let outcome = fixture.apply(EditCommand::InsertRows { at, count: 1 });
+    let outcome = fixture.apply(EditCommand::InsertRows {
+        at: RowAnchor::Document(at),
+        count: 1,
+    });
     assert_eq!(1, outcome.affected.len());
     assert_eq!(
         visible_before + 1,
@@ -1452,7 +1455,7 @@ fn a_value_edit_does_not_move_rows_while_a_structural_edit_does() {
     // 行を消すと、消えた行を窓が引かない（順序が導出し直されている）。
     let removed = fixture.row(0);
     let outcome = fixture.apply(EditCommand::RemoveRows {
-        rows: vec![removed],
+        target: RowTarget::Ids(vec![removed]),
     });
     assert_eq!(vec![removed], outcome.affected);
     assert_eq!(
@@ -1878,7 +1881,10 @@ fn undoing_a_row_structure_change_rebuilds_the_order() {
 
     // 1. 行を足し、その取り消しで**文書から消える行**を作る。
     let at = RowOrdinal::new(document_ids(fixture.document(), fixture.sheet()).len());
-    let inserted = fixture.apply(EditCommand::InsertRows { at, count: 1 });
+    let inserted = fixture.apply(EditCommand::InsertRows {
+        at: RowAnchor::Document(at),
+        count: 1,
+    });
     assert_eq!(1, inserted.affected.len(), "足した行を運ぶ");
     let added = inserted.affected[0];
     assert!(
@@ -1902,7 +1908,7 @@ fn undoing_a_row_structure_change_rebuilds_the_order() {
     // 2. 行を消し、その取り消しで**文書へ戻る行**を作る。
     let removed = fixture.row(0);
     let removal = fixture.apply(EditCommand::RemoveRows {
-        rows: vec![removed],
+        target: RowTarget::Ids(vec![removed]),
     });
     assert_eq!(vec![removed], removal.affected, "消した行を運ぶ");
     assert!(
@@ -2018,7 +2024,10 @@ fn history_operations_advance_the_generation() {
     // 何も書かない命令（0 行の挿入）は進めない。
     let at = RowOrdinal::new(document_ids(fixture.document(), fixture.sheet()).len());
     let baseline = fixture.session.generation();
-    let idle = fixture.apply(EditCommand::InsertRows { at, count: 0 });
+    let idle = fixture.apply(EditCommand::InsertRows {
+        at: RowAnchor::Document(at),
+        count: 0,
+    });
     assert!(idle.affected.is_empty(), "前提: 0 行の挿入は何も書かない");
     assert_eq!(
         baseline,

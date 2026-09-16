@@ -55,8 +55,8 @@ mod common;
 use common::sample::{sample, Sample, SampleEditParts, SampleOptions};
 use data_grid::{
     CellAddress, ColumnIndex, EditApply, EditCommand, EditOutcome, FilterSpec, GridError,
-    HistoryCommand, HistoryPair, RowOrder, RowOrdinal, SortKey, UndoEntry, UndoLabel, UndoRedo,
-    UndoStack, ViewSpec,
+    HistoryCommand, HistoryPair, RowAnchor, RowOrder, RowOrdinal, RowTarget, SortKey, UndoEntry,
+    UndoLabel, UndoRedo, UndoStack, ViewSpec,
 };
 use document_format::{CellValue, Document, RowId, SchemaPart, SheetId};
 use schema_engine::{
@@ -256,7 +256,11 @@ fn add_short_row(apply: &mut EditApply, fixture: &mut Fixture, text: &str) -> Ro
         .add_row(sheet)
         .expect("行を追加できない");
     apply
-        .apply(fixture.document_mut(), set_cell(row, INT_COLUMN, text))
+        .apply(
+            fixture.document_mut(),
+            set_cell(row, INT_COLUMN, text),
+            &RowOrder::default(),
+        )
         .expect("適合する値の書き込みは成功する");
     assert!(
         fixture.values_of(row).len() < fixture.plan.column_count(),
@@ -353,7 +357,11 @@ fn a_cell_edit_is_undone_to_the_values_read_at_apply_time() {
         );
 
         let (outcome, pair) = apply
-            .apply_with_inverse(fixture.document_mut(), set_cell(row, column, "うっかり"))
+            .apply_with_inverse(
+                fixture.document_mut(),
+                set_cell(row, column, "うっかり"),
+                &RowOrder::default(),
+            )
             .expect("編集は適用できる");
         assert_eq!(vec![row], outcome.affected, "編集した行が報告される");
         let pair = pair.expect("状態を変える適用は対を持つ");
@@ -381,7 +389,7 @@ fn a_cell_edit_is_undone_to_the_values_read_at_apply_time() {
 
         // 逆命令の適用が適用前の状態を復元する（識別子・値・位置）。
         apply
-            .apply_history(fixture.document_mut(), &pair.inverse)
+            .apply_history(fixture.document_mut(), &pair.inverse, &RowOrder::default())
             .expect("逆命令は適用できる");
         assert_eq!(
             before,
@@ -416,20 +424,28 @@ fn an_inverse_keeps_the_value_it_read_and_is_not_affected_by_later_edits() {
     let before = fixture.snapshot();
 
     let (_, first) = apply
-        .apply_with_inverse(fixture.document_mut(), set_cell(row, INT_COLUMN, "1"))
+        .apply_with_inverse(
+            fixture.document_mut(),
+            set_cell(row, INT_COLUMN, "1"),
+            &RowOrder::default(),
+        )
         .expect("1 回目の編集は適用できる");
     let first = first.expect("1 回目の適用は状態を変える");
     assert_eq!(CellValue::Int(1), fixture.value_at(row, INT_COLUMN));
 
     // 2 回目の編集は同じセルを別の値にする（1 回目の対の材料を上書きしない）。
     let (_, second) = apply
-        .apply_with_inverse(fixture.document_mut(), set_cell(row, INT_COLUMN, "2"))
+        .apply_with_inverse(
+            fixture.document_mut(),
+            set_cell(row, INT_COLUMN, "2"),
+            &RowOrder::default(),
+        )
         .expect("2 回目の編集は適用できる");
     assert!(second.is_some(), "2 回目の適用も状態を変える");
 
     // 1 回目の逆命令は、2 回目の編集の結果（1）ではなく、1 回目の適用の前の値へ戻す。
     apply
-        .apply_history(fixture.document_mut(), &first.inverse)
+        .apply_history(fixture.document_mut(), &first.inverse, &RowOrder::default())
         .expect("1 回目の逆命令は適用できる");
     assert_eq!(
         original,
@@ -450,11 +466,15 @@ fn an_empty_command_changes_nothing_and_leaves_no_pair() {
     let empties = vec![
         EditCommand::SetCells { cells: Vec::new() },
         EditCommand::InsertRows {
-            at: RowOrdinal::new(0),
+            at: RowAnchor::Document(RowOrdinal::new(0)),
             count: 0,
         },
-        EditCommand::RemoveRows { rows: Vec::new() },
-        EditCommand::DuplicateRows { rows: Vec::new() },
+        EditCommand::RemoveRows {
+            target: RowTarget::Ids(Vec::new()),
+        },
+        EditCommand::DuplicateRows {
+            target: RowTarget::Ids(Vec::new()),
+        },
         EditCommand::PasteRange {
             anchor: CellAddress::new(fixture.row(0), ColumnIndex::new(0)),
             rows: fixture.parts.row_ids.clone(),
@@ -463,7 +483,11 @@ fn an_empty_command_changes_nothing_and_leaves_no_pair() {
     ];
     for command in empties {
         let (_, pair) = apply
-            .apply_with_inverse(fixture.document_mut(), command.clone())
+            .apply_with_inverse(
+                fixture.document_mut(),
+                command.clone(),
+                &RowOrder::default(),
+            )
             .expect("空の命令も成功する");
         assert_eq!(None, pair, "空の命令は対を持たない: {command:?}");
     }
@@ -486,14 +510,18 @@ fn an_inserted_row_is_undone_by_removing_the_added_rows() {
         .apply_with_inverse(
             fixture.document_mut(),
             EditCommand::InsertRows {
-                at: RowOrdinal::new(at),
+                at: RowAnchor::Document(RowOrdinal::new(at)),
                 count: 2,
             },
+            &RowOrder::default(),
         )
         .expect("行の追加は適用できる");
     assert_eq!(10, outcome.row_count, "適用後の行数");
     let pair = pair.expect("状態を変える適用は対を持つ");
-    let HistoryCommand::Edit(EditCommand::RemoveRows { rows }) = &pair.inverse else {
+    let HistoryCommand::Edit(EditCommand::RemoveRows {
+        target: RowTarget::Ids(rows),
+    }) = &pair.inverse
+    else {
         panic!(
             "行の追加の逆命令は追加された行の削除である: {:?}",
             pair.inverse
@@ -531,7 +559,7 @@ fn an_inserted_row_is_undone_by_removing_the_added_rows() {
     );
 
     apply
-        .apply_history(fixture.document_mut(), &pair.inverse)
+        .apply_history(fixture.document_mut(), &pair.inverse, &RowOrder::default())
         .expect("逆命令は適用できる");
     assert_eq!(
         before,
@@ -553,8 +581,9 @@ fn a_removed_row_is_restored_with_the_same_identifier_values_and_position() {
         .apply_with_inverse(
             fixture.document_mut(),
             EditCommand::RemoveRows {
-                rows: removed_ids.clone(),
+                target: RowTarget::Ids(removed_ids.clone()),
             },
+            &RowOrder::default(),
         )
         .expect("行の削除は適用できる");
     assert_eq!(6, outcome.row_count, "2 行減る");
@@ -590,7 +619,7 @@ fn a_removed_row_is_restored_with_the_same_identifier_values_and_position() {
     );
 
     apply
-        .apply_history(fixture.document_mut(), &pair.inverse)
+        .apply_history(fixture.document_mut(), &pair.inverse, &RowOrder::default())
         .expect("逆命令は適用できる");
     assert_eq!(
         before,
@@ -600,7 +629,7 @@ fn a_removed_row_is_restored_with_the_same_identifier_values_and_position() {
 
     // やり直しは同じ識別子をもう一度取り除く（発行済みの行を指しているため、そのまま使える）。
     apply
-        .apply_history(fixture.document_mut(), &pair.redo)
+        .apply_history(fixture.document_mut(), &pair.redo, &RowOrder::default())
         .expect("やり直しは適用できる");
     assert_eq!(6, ids_of(fixture.document(), fixture.sheet()).len());
 }
@@ -616,12 +645,18 @@ fn a_duplicated_row_is_undone_by_removing_the_copies() {
     let (outcome, pair) = apply
         .apply_with_inverse(
             fixture.document_mut(),
-            EditCommand::DuplicateRows { rows: sources },
+            EditCommand::DuplicateRows {
+                target: RowTarget::Ids(sources),
+            },
+            &RowOrder::default(),
         )
         .expect("行の複製は適用できる");
     assert_eq!(10, outcome.row_count, "2 行増える");
     let pair = pair.expect("状態を変える適用は対を持つ");
-    let HistoryCommand::Edit(EditCommand::RemoveRows { rows }) = &pair.inverse else {
+    let HistoryCommand::Edit(EditCommand::RemoveRows {
+        target: RowTarget::Ids(rows),
+    }) = &pair.inverse
+    else {
         panic!("行の複製の逆命令は複製の削除である: {:?}", pair.inverse);
     };
     assert_eq!(&outcome.affected, rows, "逆命令は複製の識別子を保持する");
@@ -643,7 +678,7 @@ fn a_duplicated_row_is_undone_by_removing_the_copies() {
     }
 
     apply
-        .apply_history(fixture.document_mut(), &pair.inverse)
+        .apply_history(fixture.document_mut(), &pair.inverse, &RowOrder::default())
         .expect("逆命令は適用できる");
     assert_eq!(before, fixture.snapshot(), "適用前の状態へ戻る");
 }
@@ -662,8 +697,9 @@ fn the_restore_material_does_not_depend_on_the_order_of_the_request() {
         .apply_with_inverse(
             fixture.document_mut(),
             EditCommand::RemoveRows {
-                rows: request.clone(),
+                target: RowTarget::Ids(request.clone()),
             },
+            &RowOrder::default(),
         )
         .expect("行の削除は適用できる");
     let pair = pair.expect("状態を変える適用は対を持つ");
@@ -698,7 +734,11 @@ fn one_paste_is_one_undo_operation() {
     let before = fixture.snapshot();
 
     let (outcome, pair) = apply
-        .apply_with_inverse(fixture.document_mut(), command.clone())
+        .apply_with_inverse(
+            fixture.document_mut(),
+            command.clone(),
+            &RowOrder::default(),
+        )
         .expect("貼り付けは適用できる");
     assert_eq!(
         10, outcome.row_count,
@@ -735,7 +775,7 @@ fn one_paste_is_one_undo_operation() {
         "取り消しは積んだ貼り付けの逆命令そのものである"
     );
     apply
-        .apply_history(fixture.document_mut(), &inverse)
+        .apply_history(fixture.document_mut(), &inverse, &RowOrder::default())
         .expect("貼り付けの逆命令は適用できる");
     assert_eq!(
         before,
@@ -747,7 +787,7 @@ fn one_paste_is_one_undo_operation() {
     // やり直しも 1 つの対である（補充した行を差し戻してから、覆ったセルの値を書き戻す）。
     let redone = stack.redo().expect("やり直しの対象がある").clone();
     apply
-        .apply_history(fixture.document_mut(), &redone)
+        .apply_history(fixture.document_mut(), &redone, &RowOrder::default())
         .expect("やり直しは適用できる");
     assert_eq!(
         snapshot(fixture.document(), fixture.sheet()).len(),
@@ -765,7 +805,7 @@ fn one_paste_is_one_undo_operation() {
     };
     let before = fixture.snapshot();
     let (_, pair) = apply
-        .apply_with_inverse(fixture.document_mut(), command)
+        .apply_with_inverse(fixture.document_mut(), command, &RowOrder::default())
         .expect("貼り付けは適用できる");
     let pair = pair.expect("状態を変える適用は対を持つ");
     assert!(
@@ -774,7 +814,7 @@ fn one_paste_is_one_undo_operation() {
         pair.inverse
     );
     apply
-        .apply_history(fixture.document_mut(), &pair.inverse)
+        .apply_history(fixture.document_mut(), &pair.inverse, &RowOrder::default())
         .expect("逆命令は適用できる");
     assert_eq!(before, fixture.snapshot(), "適用前の状態へ戻る");
 }
@@ -839,6 +879,7 @@ fn a_paste_round_trip_under_a_filter_restores_the_rows_it_actually_wrote() {
                 rows: displayed.clone(),
                 text,
             },
+            &RowOrder::default(),
         )
         .expect("貼り付けは適用できる");
     let pair = pair.expect("状態を変える適用は対を持つ");
@@ -847,7 +888,7 @@ fn a_paste_round_trip_under_a_filter_restores_the_rows_it_actually_wrote() {
     // **適用前の状態へ戻ること**が本検査の本体である（表示と文書が食い違うと、材料を文書の
     // 位置で引く実装は別の行を戻し、実際に書いた行は変わったまま残る）。
     apply
-        .apply_history(fixture.document_mut(), &pair.inverse)
+        .apply_history(fixture.document_mut(), &pair.inverse, &RowOrder::default())
         .expect("逆命令は適用できる");
     assert_eq!(
         before,
@@ -927,12 +968,13 @@ fn a_paste_round_trip_under_a_sort_restores_the_rows_it_actually_wrote() {
                 rows: displayed.clone(),
                 text: "q\tr\ns\tt".to_owned(),
             },
+            &RowOrder::default(),
         )
         .expect("貼り付けは適用できる");
     let pair = pair.expect("状態を変える適用は対を持つ");
 
     apply
-        .apply_history(fixture.document_mut(), &pair.inverse)
+        .apply_history(fixture.document_mut(), &pair.inverse, &RowOrder::default())
         .expect("逆命令は適用できる");
     assert_eq!(
         before,
@@ -961,13 +1003,16 @@ fn a_removed_short_row_is_restored_with_its_original_width() {
     let (_, pair) = apply
         .apply_with_inverse(
             fixture.document_mut(),
-            EditCommand::RemoveRows { rows: vec![short] },
+            EditCommand::RemoveRows {
+                target: RowTarget::Ids(vec![short]),
+            },
+            &RowOrder::default(),
         )
         .expect("行の削除は適用できる");
     let pair = pair.expect("状態を変える適用は対を持つ");
 
     apply
-        .apply_history(fixture.document_mut(), &pair.inverse)
+        .apply_history(fixture.document_mut(), &pair.inverse, &RowOrder::default())
         .expect("逆命令は適用できる");
     assert_eq!(
         before,
@@ -997,7 +1042,10 @@ fn a_duplicated_short_row_keeps_its_width_through_undo_and_redo() {
     let (outcome, pair) = apply
         .apply_with_inverse(
             fixture.document_mut(),
-            EditCommand::DuplicateRows { rows: vec![short] },
+            EditCommand::DuplicateRows {
+                target: RowTarget::Ids(vec![short]),
+            },
+            &RowOrder::default(),
         )
         .expect("行の複製は適用できる");
     let copy = outcome.affected[0];
@@ -1013,11 +1061,16 @@ fn a_duplicated_short_row_keeps_its_width_through_undo_and_redo() {
         .apply_history(
             fixture.document_mut(),
             &pair.as_ref().expect("対がある").inverse,
+            &RowOrder::default(),
         )
         .expect("逆命令は適用できる");
     assert_eq!(before, fixture.snapshot(), "適用前の状態へ戻る");
     apply
-        .apply_history(fixture.document_mut(), &pair.expect("対がある").redo)
+        .apply_history(
+            fixture.document_mut(),
+            &pair.expect("対がある").redo,
+            &RowOrder::default(),
+        )
         .expect("やり直しは適用できる");
     assert_eq!(
         copied,
@@ -1048,13 +1101,20 @@ fn a_removed_zero_width_row_is_restored_with_zero_width() {
     let (outcome, pair) = apply
         .apply_with_inverse(
             fixture.document_mut(),
-            EditCommand::RemoveRows { rows: vec![zero] },
+            EditCommand::RemoveRows {
+                target: RowTarget::Ids(vec![zero]),
+            },
+            &RowOrder::default(),
         )
         .expect("行の削除は適用できる");
     assert_eq!(row_count, outcome.row_count, "前提: 1 行減った");
 
     apply
-        .apply_history(fixture.document_mut(), &pair.expect("対がある").inverse)
+        .apply_history(
+            fixture.document_mut(),
+            &pair.expect("対がある").inverse,
+            &RowOrder::default(),
+        )
         .expect("逆命令は適用できる");
     assert_eq!(
         before,
@@ -1085,7 +1145,11 @@ fn an_undo_of_an_edit_that_widened_a_short_row_restores_its_original_width() {
 
     // 錨から遠い列（列 5）へ書くと、その行の幅は 6 へ**広がる**。
     let (_, pair) = apply
-        .apply_with_inverse(fixture.document_mut(), set_cell(short, 5, "ひろげる"))
+        .apply_with_inverse(
+            fixture.document_mut(),
+            set_cell(short, 5, "ひろげる"),
+            &RowOrder::default(),
+        )
         .expect("編集は適用できる");
     let pair = pair.expect("状態を変える適用は対を持つ");
     // 前提: 幅が実際に広がった（本検査の対象そのもの）。
@@ -1096,7 +1160,7 @@ fn an_undo_of_an_edit_that_widened_a_short_row_restores_its_original_width() {
     );
 
     apply
-        .apply_history(fixture.document_mut(), &pair.inverse)
+        .apply_history(fixture.document_mut(), &pair.inverse, &RowOrder::default())
         .expect("逆命令は適用できる");
     assert_eq!(before, fixture.snapshot(), "適用前の状態へ戻る");
     assert_eq!(
@@ -1128,6 +1192,7 @@ fn an_undo_of_a_paste_that_widened_a_short_row_restores_its_original_width() {
                 rows: displayed,
                 text: "A\tB".to_owned(),
             },
+            &RowOrder::default(),
         )
         .expect("貼り付けは適用できる");
     let pair = pair.expect("状態を変える適用は対を持つ");
@@ -1138,7 +1203,7 @@ fn an_undo_of_a_paste_that_widened_a_short_row_restores_its_original_width() {
     );
 
     apply
-        .apply_history(fixture.document_mut(), &pair.inverse)
+        .apply_history(fixture.document_mut(), &pair.inverse, &RowOrder::default())
         .expect("逆命令は適用できる");
     assert_eq!(before, fixture.snapshot(), "適用前の状態へ戻る");
     assert_eq!(
@@ -1169,17 +1234,21 @@ fn each_command_maps_to_its_label() {
         ),
         (
             EditCommand::InsertRows {
-                at: RowOrdinal::new(2),
+                at: RowAnchor::Document(RowOrdinal::new(2)),
                 count: 1,
             },
             UndoLabel::RowInsert,
         ),
         (
-            EditCommand::RemoveRows { rows: vec![row] },
+            EditCommand::RemoveRows {
+                target: RowTarget::Ids(vec![row]),
+            },
             UndoLabel::RowRemove,
         ),
         (
-            EditCommand::DuplicateRows { rows: vec![row] },
+            EditCommand::DuplicateRows {
+                target: RowTarget::Ids(vec![row]),
+            },
             UndoLabel::RowDuplicate,
         ),
         (
@@ -1222,7 +1291,11 @@ fn every_entry_goes_through_one_push() {
     // 生成元 1: 編集の適用が返した対。
     let mut apply = fixture.apply();
     let (_, edit_pair) = apply
-        .apply_with_inverse(fixture.document_mut(), set_cell(row, INT_COLUMN, "7"))
+        .apply_with_inverse(
+            fixture.document_mut(),
+            set_cell(row, INT_COLUMN, "7"),
+            &RowOrder::default(),
+        )
         .expect("編集は適用できる");
     let edit_entry = entry(UndoLabel::CellEdit, edit_pair);
     stack.push(edit_entry.clone());
@@ -1305,6 +1378,7 @@ fn the_history_holds_operations_of_several_sheets_as_one_document() {
         .apply_with_inverse(
             fixture.document_mut(),
             set_cell(first_row, INT_COLUMN, "11"),
+            &RowOrder::default(),
         )
         .expect("1 つ目のシートの編集は適用できる");
     stack.push(entry(UndoLabel::CellEdit, first_pair));
@@ -1320,6 +1394,7 @@ fn the_history_holds_operations_of_several_sheets_as_one_document() {
         .apply_with_inverse(
             fixture.document_mut(),
             set_cell(second_row, INT_COLUMN, "22"),
+            &RowOrder::default(),
         )
         .expect("2 つ目のシートの編集は適用できる");
     stack.push(entry(UndoLabel::CellEdit, second_pair));
@@ -1339,7 +1414,11 @@ fn the_history_holds_operations_of_several_sheets_as_one_document() {
     // 取り消しは**全体で 1 つの後入れ先出し**である（シートごとの履歴に分かれていない）。
     let second_inverse = stack.undo().expect("2 件目がある").clone();
     second_apply
-        .apply_history(fixture.document_mut(), &second_inverse)
+        .apply_history(
+            fixture.document_mut(),
+            &second_inverse,
+            &RowOrder::default(),
+        )
         .expect("2 つ目のシートの逆命令は適用できる");
     assert_eq!(
         second_before,
@@ -1354,7 +1433,7 @@ fn the_history_holds_operations_of_several_sheets_as_one_document() {
 
     let first_inverse = stack.undo().expect("1 件目がある").clone();
     first_apply
-        .apply_history(fixture.document_mut(), &first_inverse)
+        .apply_history(fixture.document_mut(), &first_inverse, &RowOrder::default())
         .expect("1 つ目のシートの逆命令は適用できる");
     assert_eq!(first_before, fixture.snapshot(), "1 つ目のシートも元へ戻る");
     assert_eq!(2, stack.depth(), "積んだ件数は変わらない（位置だけが動く）");
@@ -1415,21 +1494,21 @@ fn the_shape_of_the_history_is_deterministic() {
         let first = vec![
             set_cell(fixture.row(1), INT_COLUMN, "5"),
             EditCommand::InsertRows {
-                at: RowOrdinal::new(2),
+                at: RowAnchor::Document(RowOrdinal::new(2)),
                 count: 2,
             },
             EditCommand::DuplicateRows {
-                rows: vec![fixture.row(0)],
+                target: RowTarget::Ids(vec![fixture.row(0)]),
             },
             EditCommand::RemoveRows {
-                rows: vec![fixture.row(3), fixture.row(6)],
+                target: RowTarget::Ids(vec![fixture.row(3), fixture.row(6)]),
             },
         ];
         let mut stack = UndoStack::new(16);
         for command in first {
             let label = UndoLabel::of_edit(&command);
             let (_, pair) = apply
-                .apply_with_inverse(fixture.document_mut(), command)
+                .apply_with_inverse(fixture.document_mut(), command, &RowOrder::default())
                 .expect("適用は成功する");
             stack.push(entry(label, pair));
         }
@@ -1441,7 +1520,7 @@ fn the_shape_of_the_history_is_deterministic() {
         };
         let label = UndoLabel::of_edit(&command);
         let (_, pair) = apply
-            .apply_with_inverse(fixture.document_mut(), command)
+            .apply_with_inverse(fixture.document_mut(), command, &RowOrder::default())
             .expect("適用は成功する");
         stack.push(entry(label, pair));
         // 対の**形**: 種別の並びと、材料の規模（行の件数・位置）だけを写す（値も識別子も写さない）。
@@ -1452,12 +1531,33 @@ fn the_shape_of_the_history_is_deterministic() {
             .collect()
     }
 
+    /// 対象の行数の**形**（識別子の一覧は件数、可視の序数の区間は件数である。履歴が
+    /// **どちらの腕を運んでいるかは形に現れない** — 現れてはならないのは序数であり、
+    /// それは `describe` ではなく往復の検査が捕まえる。タスク 10.4）。
+    fn target_size(target: &RowTarget) -> usize {
+        match target {
+            RowTarget::Ids(rows) => rows.len(),
+            RowTarget::Ordinals { count, .. } => *count,
+        }
+    }
+
+    /// 挿入の位置の**形**（**2 つの空間を混ぜて写さない** — 文書の位置と可視の序数は別の
+    /// 空間であり、同じ数でも別の行を指す。タスク 10.4）。
+    fn describe_anchor(anchor: &RowAnchor) -> String {
+        match anchor {
+            RowAnchor::Document(position) => format!("document:{position}"),
+            RowAnchor::Before { ordinal } => format!("before:{ordinal}"),
+            RowAnchor::After { ordinal } => format!("after:{ordinal}"),
+            RowAnchor::End => "end".to_owned(),
+        }
+    }
+
     /// 復元命令の**形**（種別と、位置と件数）。
     fn describe(command: &HistoryCommand) -> String {
         match command {
             HistoryCommand::Edit(EditCommand::SetCells { cells }) => format!("set:{}", cells.len()),
-            HistoryCommand::Edit(EditCommand::RemoveRows { rows }) => {
-                format!("remove:{}", rows.len())
+            HistoryCommand::Edit(EditCommand::RemoveRows { target }) => {
+                format!("remove:{}", target_size(target))
             }
             // 貼り付けのやり直しは、覆う行の件数と矩形の大きさだけを写す（**識別子は写さない**。
             // 実行を跨ぐと変わるため、形の比較に含められない）。
@@ -1465,11 +1565,11 @@ fn the_shape_of_the_history_is_deterministic() {
                 format!("paste:{}x{}", rows.len(), text.lines().count())
             }
             HistoryCommand::Edit(EditCommand::InsertRows { at, count }) => {
-                format!("insert:{}:{}", at.get(), count)
+                format!("insert:{}:{}", describe_anchor(at), count)
             }
             HistoryCommand::Edit(EditCommand::SetNested { .. }) => "nested".to_owned(),
-            HistoryCommand::Edit(EditCommand::DuplicateRows { rows }) => {
-                format!("duplicate:{}", rows.len())
+            HistoryCommand::Edit(EditCommand::DuplicateRows { target }) => {
+                format!("duplicate:{}", target_size(target))
             }
             HistoryCommand::RestoreValues { rows, .. } => format!(
                 "values:{}",
@@ -1574,7 +1674,7 @@ impl Session {
         let label = UndoLabel::of_edit(&command);
         let (outcome, pair) = self
             .apply
-            .apply_with_inverse(self.fixture.document_mut(), command)
+            .apply_with_inverse(self.fixture.document_mut(), command, &RowOrder::default())
             .expect("編集は適用できる");
         let pair = pair.expect("状態を変える編集は対を持つ");
         self.stack.push(UndoEntry {
@@ -1602,7 +1702,7 @@ impl Session {
             stack,
             ..
         } = self;
-        UndoRedo::new(stack, apply).undo(fixture.document_mut())
+        UndoRedo::new(stack, apply).undo(fixture.document_mut(), &RowOrder::default())
     }
 
     /// やり直しの生の結果（失敗も観測する検査のため）。
@@ -1613,7 +1713,7 @@ impl Session {
             stack,
             ..
         } = self;
-        UndoRedo::new(stack, apply).redo(fixture.document_mut())
+        UndoRedo::new(stack, apply).redo(fixture.document_mut(), &RowOrder::default())
     }
 
     /// 取り消しを 1 回適用する（**取り消せる操作がある**ことを前提にする）。
@@ -1648,10 +1748,12 @@ fn an_undo_returns_to_the_state_before_the_operation_and_a_redo_applies_it_again
 
     session.edit_int(row, 0);
     session.edit(EditCommand::InsertRows {
-        at: RowOrdinal::new(3),
+        at: RowAnchor::Document(RowOrdinal::new(3)),
         count: 2,
     });
-    session.edit(EditCommand::RemoveRows { rows: remove });
+    session.edit(EditCommand::RemoveRows {
+        target: RowTarget::Ids(remove),
+    });
     // 貼り付けの `rows` は**適用の直前**の文書から取る（行の増減で識別子の集合が変わるため）。
     let displayed = session.displayed();
     session.edit(EditCommand::PasteRange {
@@ -1751,7 +1853,7 @@ fn the_result_of_an_undo_and_a_redo_carries_the_rows_it_touched() {
     let mut session = Session::new(8, 13, 64);
     let inserted = session
         .edit(EditCommand::InsertRows {
-            at: RowOrdinal::new(3),
+            at: RowAnchor::Document(RowOrdinal::new(3)),
             count: 2,
         })
         .affected;
@@ -1767,7 +1869,7 @@ fn the_result_of_an_undo_and_a_redo_carries_the_rows_it_touched() {
     let mut session = Session::new(8, 13, 64);
     let removed = vec![session.row(2), session.row(5)];
     let applied = session.edit(EditCommand::RemoveRows {
-        rows: removed.clone(),
+        target: RowTarget::Ids(removed.clone()),
     });
     assert_eq!(removed, applied.affected, "削除は取り除かれた行を報告する");
     assert_eq!(removed, session.undo().affected, "取り消しは戻した行を運ぶ");
@@ -1823,7 +1925,7 @@ fn the_row_count_of_an_undo_and_a_redo_is_the_count_after_the_inverse_applied() 
     let base = session.snapshot().len();
     assert_eq!(8, base, "前提: 標本は 8 行");
     let applied = session.edit(EditCommand::InsertRows {
-        at: RowOrdinal::new(3),
+        at: RowAnchor::Document(RowOrdinal::new(3)),
         count: 2,
     });
     assert_count(&session, &applied, base + 2, "挿入の適用");
@@ -1836,7 +1938,9 @@ fn the_row_count_of_an_undo_and_a_redo_is_the_count_after_the_inverse_applied() 
     let mut session = Session::new(8, 13, 64);
     let base = session.snapshot().len();
     let removed = vec![session.row(2), session.row(5)];
-    let applied = session.edit(EditCommand::RemoveRows { rows: removed });
+    let applied = session.edit(EditCommand::RemoveRows {
+        target: RowTarget::Ids(removed),
+    });
     assert_count(&session, &applied, base - 2, "削除の適用");
     let undone = session.undo();
     assert_count(&session, &undone, base, "削除の取り消し（差し戻した後の行数）");
@@ -1852,7 +1956,9 @@ fn the_row_count_of_an_undo_and_a_redo_is_the_count_after_the_inverse_applied() 
     let mut session = Session::new(8, 13, 64);
     let base = session.snapshot().len();
     let duplicated = vec![session.row(1), session.row(4)];
-    let applied = session.edit(EditCommand::DuplicateRows { rows: duplicated });
+    let applied = session.edit(EditCommand::DuplicateRows {
+        target: RowTarget::Ids(duplicated),
+    });
     assert_count(&session, &applied, base + 2, "複製の適用");
     let undone = session.undo();
     assert_count(&session, &undone, base, "複製の取り消し（複製の前の行数）");
@@ -2320,7 +2426,10 @@ fn a_failed_undo_leaves_the_position_unchanged() {
         .apply
         .apply(
             session.fixture.document_mut(),
-            EditCommand::RemoveRows { rows: vec![row] },
+            EditCommand::RemoveRows {
+                target: RowTarget::Ids(vec![row]),
+            },
+            &RowOrder::default(),
         )
         .expect("行の削除は適用できる");
 
@@ -2368,7 +2477,7 @@ fn a_failed_redo_leaves_the_position_unchanged() {
     // (2) 行の追加（失敗したやり直しが**飛び越してはならない**次の操作）。
     session.edit_int(row, 0);
     let added = session.edit(EditCommand::InsertRows {
-        at: RowOrdinal::new(session.fixture.row_count()),
+        at: RowAnchor::Document(RowOrdinal::new(session.fixture.row_count())),
         count: 1,
     });
     let added_row = added.affected[0];
@@ -2382,7 +2491,10 @@ fn a_failed_redo_leaves_the_position_unchanged() {
         let mut raw = session.fixture.apply();
         raw.apply(
             session.fixture.document_mut(),
-            EditCommand::RemoveRows { rows: vec![row] },
+            EditCommand::RemoveRows {
+                target: RowTarget::Ids(vec![row]),
+            },
+            &RowOrder::default(),
         )
         .expect("行の削除は適用できる");
     }
@@ -2442,7 +2554,7 @@ fn the_undo_redo_round_trip_is_deterministic() {
         let row = session.row(2);
         session.edit_int(row, 0);
         session.edit(EditCommand::InsertRows {
-            at: RowOrdinal::new(1),
+            at: RowAnchor::Document(RowOrdinal::new(1)),
             count: 2,
         });
         session.edit_int(row, 1);
@@ -2474,10 +2586,14 @@ fn the_undo_redo_round_trip_is_deterministic() {
     /// 材料が運ぶ行の件数（形の比較のためだけに写す。**識別子も値も写さない**）。
     fn material_rows(command: &HistoryCommand) -> usize {
         match command {
-            HistoryCommand::Edit(EditCommand::RemoveRows { rows }) => rows.len(),
+            HistoryCommand::Edit(EditCommand::RemoveRows {
+                target: RowTarget::Ids(rows),
+            }) => rows.len(),
             HistoryCommand::Edit(EditCommand::PasteRange { rows, .. }) => rows.len(),
             HistoryCommand::Edit(EditCommand::InsertRows { count, .. }) => *count,
-            HistoryCommand::Edit(EditCommand::DuplicateRows { rows }) => rows.len(),
+            HistoryCommand::Edit(EditCommand::DuplicateRows {
+                target: RowTarget::Ids(rows),
+            }) => rows.len(),
             HistoryCommand::RestoreRows { rows, .. } => rows.len(),
             HistoryCommand::RestoreValues { rows, .. } => rows.len(),
             HistoryCommand::Composite(parts) => parts.iter().map(material_rows).sum(),
@@ -2498,7 +2614,7 @@ fn the_undo_redo_entry_point_does_not_add_entries() {
     let row = session.row(1);
     session.edit_int(row, 0);
     session.edit(EditCommand::InsertRows {
-        at: RowOrdinal::new(2),
+        at: RowAnchor::Document(RowOrdinal::new(2)),
         count: 1,
     });
     let entries = session.entries();

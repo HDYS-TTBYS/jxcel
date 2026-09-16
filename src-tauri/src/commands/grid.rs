@@ -272,17 +272,17 @@ use app_shell::ipc::{
     GridEditOutcome, GridEditRequest, GridEditResponse, GridExpansionState, GridFilterSpec,
     GridHistoryDirection, GridHistoryRequest, GridHistoryRequestedEvent, GridOpenRequest,
     GridOpenResponse, GridPathSegment, GridReferenceRequest, GridReferenceResponse,
-    GridReferenceRow, GridSearchDirection, GridSheetSummary, GridViewRequest, GridViewResponse,
-    GridViewSpec, GridViolation, GridViolationLocation, GridViolationRequest,
-    GridViolationResponse, IpcError, IpcResult, TypeKindTag, WindowContext, WindowLabel,
-    command_names,
+    GridReferenceRow, GridRowAnchor, GridRowTarget, GridSearchDirection, GridSheetSummary,
+    GridViewRequest, GridViewResponse, GridViewSpec, GridViolation, GridViolationLocation,
+    GridViolationRequest, GridViolationResponse, IpcError, IpcResult, TypeKindTag, WindowContext,
+    WindowLabel, command_names,
 };
 use data_grid::{
     CellAddress, CoercionNotice, ColumnIndex, DEFAULT_UNDO_LIMIT, EMPTY_WINDOW, EditCommand,
     EditOutcome, ElementCount, Expandability, ExpansionState, FilterSpec, Generation, GridError,
-    GridSession, LayoutColumn, NestedPathSegment, ReferencePage, RowOrdinal, RowSpan,
-    SearchDirection, SortKey, UndoStack, ViewSpec, WindowCodec, WindowRequest, display_text,
-    reference_page,
+    GridSession, LayoutColumn, NestedPathSegment, ReferencePage, RowAnchor, RowOrdinal, RowSpan,
+    RowTarget, SearchDirection, SortKey, UndoStack, ViewSpec, WindowCodec, WindowRequest,
+    display_text, reference_page,
 };
 use document_session::{DocumentSessions, DocumentSessionsApi, SessionError};
 use schema_engine::compile::plan::ColumnValidator;
@@ -704,6 +704,39 @@ where
     rows.iter().map(|row| parse_row(row)).collect()
 }
 
+/// 境界の行の対象を、ドメインの [`RowTarget`] へ写す（タスク 10.4。要件 6.2、8.6）。
+///
+/// **座標空間を解かない**（写すだけである）。可視の序数はそのまま運び、識別子へ解くのは
+/// ドメイン（適用の直前。`RowOrder` を持つのは `data-grid` の `GridSession` だけである）。
+/// ここで写像を作れば、写しが 2 つになり、並べ替えや絞り込みの下で食い違う。
+///
+/// 識別子の解釈の失敗は**理由の文字列**である（[`parse_row`] と同じ規律）。
+fn row_target(target: &GridRowTarget) -> Result<RowTarget, String> {
+    Ok(match target {
+        GridRowTarget::Ids { rows } => RowTarget::Ids(row_ids(rows)?),
+        GridRowTarget::Ordinals { from, count } => RowTarget::Ordinals {
+            from: *from as usize,
+            count: *count as usize,
+        },
+    })
+}
+
+/// 境界の挿入の位置を、ドメインの [`RowAnchor`] へ写す（タスク 10.4。要件 6.1、8.6）。
+///
+/// [`row_target`] と同じく**解かない**（可視の序数は可視の序数のまま運ぶ）。
+fn row_anchor(anchor: GridRowAnchor) -> RowAnchor {
+    match anchor {
+        GridRowAnchor::Document { at } => RowAnchor::Document(RowOrdinal::new(at as usize)),
+        GridRowAnchor::Before { ordinal } => RowAnchor::Before {
+            ordinal: ordinal as usize,
+        },
+        GridRowAnchor::After { ordinal } => RowAnchor::After {
+            ordinal: ordinal as usize,
+        },
+        GridRowAnchor::End => RowAnchor::End,
+    }
+}
+
 /// 編集命令をドメインの [`EditCommand`] へ写す（要件 3.3、5.7、6.1、6.3、7.3、8.9）。
 ///
 /// 6 つの命令を過不足なく写す（ワイルドカードを使わない — `data-grid` に命令が増えれば
@@ -730,14 +763,14 @@ fn edit_command(command: &GridEditCommand, columns: usize) -> Result<EditCommand
             json: json.clone(),
         },
         GridEditCommand::InsertRows { at, count } => EditCommand::InsertRows {
-            at: RowOrdinal::new(*at as usize),
+            at: row_anchor(*at),
             count: *count as usize,
         },
-        GridEditCommand::RemoveRows { rows } => EditCommand::RemoveRows {
-            rows: row_ids(rows)?,
+        GridEditCommand::RemoveRows { target } => EditCommand::RemoveRows {
+            target: row_target(target)?,
         },
-        GridEditCommand::DuplicateRows { rows } => EditCommand::DuplicateRows {
-            rows: row_ids(rows)?,
+        GridEditCommand::DuplicateRows { target } => EditCommand::DuplicateRows {
+            target: row_target(target)?,
         },
         GridEditCommand::PasteRange { anchor, rows, text } => EditCommand::PasteRange {
             anchor: cell_address(anchor, columns)?,
@@ -3144,6 +3177,26 @@ mod tests {
             .clone()
     }
 
+    /// 保持している文書の**先頭のシート**の行の識別子を、文書の順に返す。
+    ///
+    /// **小さな標本の検査で、文書のいまの姿をそのまま見る**ための口である（保存された
+    /// ファイルを読む [`stored_rows`] は適用の前後で変わらないため、適用の結果を見るには
+    /// 使えない）。10 万行の検査では [`stored_rows_at`] を使う（行を丸ごと写さない）。
+    fn held_rows(sessions: &Arc<DocumentSessions>, label: &WindowLabel) -> Vec<String> {
+        sessions
+            .read(label, &mut |document| {
+                document
+                    .sheets()
+                    .first()
+                    .expect("標本にはシートが 1 つある")
+                    .rows()
+                    .iter()
+                    .map(|row| row.id().to_string())
+                    .collect()
+            })
+            .expect("保持している文書を読める")
+    }
+
     /// 保持している文書の、指定した位置の行の識別子を返す（10 万行を写さないための入口）。
     fn stored_rows_at(
         sessions: &Arc<DocumentSessions>,
@@ -3972,6 +4025,263 @@ mod tests {
                 SessionState::Open { unsaved: false, .. }
             ),
             "変換できない要求で未保存の印を立てない"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 行の対象を可視の序数で指す（タスク 10.4。要件 6.1、6.2、8.6）
+    // -----------------------------------------------------------------------
+
+    /// **選択のすべての行が消え、確認の数と消える数が一致する**（タスク 10.4。要件 6.2、8.6）。
+    ///
+    /// 画面が識別子を集める経路では、窓の記憶が保っている範囲の外の行は引けず、1 画面に
+    /// 収まらない範囲の削除はできなかった（tasks.md 10.4 の指摘）。序数で指せば、解くのは
+    /// **可視の並びを持つドメイン**であり、窓を 1 つ要求しただけで選択されたすべての行が
+    /// 消える。ここでは **10 万行を数量の降順に並べ**（可視の序数と文書の位置が食い違う
+    /// 並びである）、その可視の序数 `10 ..< 50_010` を消す — 消えた行が**窓が報せたその
+    /// 序数の行**であること（文書の位置の行ではない）と、**実際に消えた数が確認の数と
+    /// 一致する**ことを、識別子そのもので確かめる。
+    #[test]
+    fn a_visible_ordinal_range_removes_every_selected_row_of_a_hundred_thousand_rows() {
+        const ROWS: usize = 100_000;
+        const FROM: usize = 10;
+        const COUNT: usize = 50_000;
+
+        let scratch = Scratch::new("row-range-100k");
+        let path = scratch.file("台帳.jxcel");
+        write_large_document(&path, ROWS);
+        let (sessions, label) = documents(&path);
+        let grids = grids();
+        let sheet = sheet_id(&path);
+        assert!(
+            matches!(
+                answer_open(
+                    &sessions,
+                    &grids,
+                    &label,
+                    &GridOpenRequest {
+                        sheet: sheet.clone()
+                    }
+                ),
+                IpcResult::Ok { .. }
+            ),
+            "10 万行のシートも開ける"
+        );
+        // **数量の降順**（列 1）。可視の序数と文書の位置が食い違う並びである（要件 8.3）。
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest {
+                view: GridViewSpec {
+                    sort: vec![GridSortKey {
+                        column: 1,
+                        descending: true,
+                    }],
+                    ..empty_view()
+                },
+            },
+        ));
+
+        // **窓が報せる可視の序数の行**を読む（窓は表示の窓であり、序数で引く）。
+        let visible = |ordinal: usize| -> [u8; ROW_KEY_LEN] {
+            let bytes = window_bytes(answer_rows_window(
+                &sessions,
+                &grids,
+                &label,
+                &InvokeBody::Raw(window_argument(
+                    &sheet,
+                    generation_of(&grids, &label),
+                    ordinal as u64,
+                    1,
+                )),
+            ));
+            let window = decode_window(&bytes).expect("窓は復号できる");
+            assert_eq!(1, window.row_count(), "1 行の窓が返る");
+            window.rows()[0].key()
+        };
+        // 区間の**全体**を可視の序数で読む（消えるはずの行の集合。1 度の窓の要求である）。
+        let selected = {
+            let bytes = window_bytes(answer_rows_window(
+                &sessions,
+                &grids,
+                &label,
+                &InvokeBody::Raw(window_argument(
+                    &sheet,
+                    generation_of(&grids, &label),
+                    FROM as u64,
+                    COUNT as u64,
+                )),
+            ));
+            let window = decode_window(&bytes).expect("窓は復号できる");
+            assert_eq!(COUNT, window.row_count(), "選択の全体が 1 つの窓で読める");
+            window.rows().iter().map(|row| row.key()).collect::<Vec<_>>()
+        };
+        let first = selected[0];
+        let last = selected[COUNT - 1];
+        let kept_before = visible(0);
+        let kept_after = visible(FROM + COUNT);
+        // 対照: 可視の序数 10 の行は**文書の位置 10 の行ではない**（食い違わなければ、
+        // 2 つの空間の取り違えをこの検査は捕まえられない）。
+        let document_position_ten = stored_rows_at(&sessions, &label, &[FROM]);
+        assert_ne!(
+            first,
+            row_key(&document_position_ten[0]),
+            "対照: 可視の序数は文書の位置ではない（降順に並んでいる）"
+        );
+
+        let applied = data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest {
+                command: GridEditCommand::RemoveRows {
+                    target: GridRowTarget::Ordinals {
+                        from: FROM as u32,
+                        count: COUNT as u32,
+                    },
+                },
+            },
+        ));
+        let outcome = applied.outcome.expect("適用は必ず要約を返す");
+        assert_eq!(
+            COUNT,
+            outcome.affected.len(),
+            "確認が示す数（区間の数）と実際に消える行の数が一致する"
+        );
+        // **消えたのは可視の序数の行そのものである**（文書の位置の行ではない）。`affected` は
+        // シート順であるため、集合として突き合わせる。
+        let mut removed: Vec<[u8; ROW_KEY_LEN]> =
+            outcome.affected.iter().map(|row| row_key(row)).collect();
+        let mut expected: Vec<[u8; ROW_KEY_LEN]> = selected.clone();
+        removed.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            expected, removed,
+            "消えた行の集合は、可視の序数 {FROM}..{} の行の集合そのものである",
+            FROM + COUNT
+        );
+        assert_eq!((ROWS - COUNT) as u32, outcome.row_count, "行数は選択の数だけ減る");
+
+        // 文書を直接読む（窓の記憶が保っている範囲に依らない）。消えた行が本当に消え、
+        // 選択の外の行が 1 つも失われていないことを、識別子そのもので確かめる。
+        let held: Vec<[u8; ROW_KEY_LEN]> = sessions
+            .read(&label, &mut |document| {
+                document
+                    .sheets()
+                    .first()
+                    .expect("標本にはシートが 1 つある")
+                    .rows()
+                    .iter()
+                    .map(|row| row.id().ulid().to_bytes())
+                    .collect()
+            })
+            .expect("保持している文書を読める");
+        assert_eq!(ROWS - COUNT, held.len(), "保持している文書の行数");
+        assert!(!held.contains(&first), "区間の先頭の行は消えている");
+        assert!(!held.contains(&last), "区間の末尾の行は消えている");
+        assert!(
+            held.contains(&kept_before),
+            "区間より前の行（可視の序数 0）は残っている"
+        );
+        assert!(
+            held.contains(&kept_after),
+            "区間より後の行（可視の序数 {}）は残っている",
+            FROM + COUNT
+        );
+    }
+
+    /// **取り消しは元の位置と識別子を戻し、やり直しは同じ行をもう一度消す**（タスク 10.4。
+    /// 要件 9.2、9.3）。
+    ///
+    /// 逆命令が**識別子**を運ぶこと（可視の序数を残さないこと）は、**取り消しとやり直しの間に
+    /// 表示の指定を変える**ことで観測できる — 序数が残っていれば、やり直しは同じ序数が指す
+    /// **別の行**を消す。ここでは数量の降順（可視の序数 0 が `C`）で 1 行消し、取り消してから
+    /// 昇順（可視の序数 0 が `A`）へ変えてやり直す — 消えるのは `C` のままでなければならない。
+    #[test]
+    fn undoing_and_redoing_a_visible_ordinal_removal_keeps_the_same_rows_across_view_changes() {
+        let (_scratch, sessions, grids, label) = opened("row-ordinal-history");
+        let path = _scratch.file("台帳.jxcel");
+        let rows = stored_rows(&path);
+        assert_eq!(3, rows.len(), "前提: 標本は 3 行である");
+
+        let descending = GridViewSpec {
+            sort: vec![GridSortKey {
+                column: 1,
+                descending: true,
+            }],
+            ..empty_view()
+        };
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: descending },
+        ));
+
+        // 可視の序数 0 の行（数量が最大の行 = 文書の位置 2 の `C`）を消す。
+        let applied = data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest {
+                command: GridEditCommand::RemoveRows {
+                    target: GridRowTarget::Ordinals { from: 0, count: 1 },
+                },
+            },
+        ));
+        let outcome = applied.outcome.expect("適用は必ず要約を返す");
+        assert_eq!(
+            vec![rows[2].clone()],
+            outcome.affected,
+            "可視の序数 0 の行が消える（文書の位置 0 の行ではない）"
+        );
+        assert_eq!(
+            vec![rows[0].clone(), rows[1].clone()],
+            held_rows(&sessions, &label),
+            "残るのは他の 2 行である"
+        );
+
+        // 取り消し: **元の位置（文書の位置 2）と識別子が戻る**（逆命令は識別子を運ぶ）。
+        data(answer_history(
+            &sessions,
+            &grids,
+            &label,
+            &GridHistoryRequest {
+                direction: GridHistoryDirection::Undo,
+            },
+        ));
+        assert_eq!(rows, held_rows(&sessions, &label), "識別子も位置も元へ戻る");
+
+        // 表示の指定を変える（可視の序数 0 が `A` になる）。
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest {
+                view: GridViewSpec {
+                    sort: vec![GridSortKey {
+                        column: 1,
+                        descending: false,
+                    }],
+                    ..empty_view()
+                },
+            },
+        ));
+
+        // やり直し: **同じ行**（`C`）がもう一度消える。序数を運んでいれば `A` が消える。
+        data(answer_history(
+            &sessions,
+            &grids,
+            &label,
+            &GridHistoryRequest {
+                direction: GridHistoryDirection::Redo,
+            },
+        ));
+        assert_eq!(
+            vec![rows[0].clone(), rows[1].clone()],
+            held_rows(&sessions, &label),
+            "やり直しは同じ行を消す（序数ではなく識別子が積まれている）"
         );
     }
 

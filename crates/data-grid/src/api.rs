@@ -558,12 +558,17 @@ impl GridSession {
 
     /// 編集命令を適用する（要件 3.3, 6.1, 7.3。design.md の `apply`）。
     ///
-    /// 適用そのものは `edit` 層（[`EditApply::apply_with_inverse`]）が行い、本層は 3 つを足す:
+    /// 適用そのものは `edit` 層（[`EditApply::apply_with_inverse`]）が行い、本層は 4 つを足す:
     ///
     /// 1. **表示の並びの補完** — 貼り付けの宛先（要件 8.9。モジュール docs「貼り付けの宛先」）
-    /// 2. **履歴への積み込み** — 適用が組んだ対（逆命令とやり直しの命令）を、**渡された履歴**
-    ///    （`history`）へ積む（要件 9.1。状態を変えない適用は対を持たないため積まない）
-    /// 3. **索引と順序の整合** — 判定が返した違反との差分で索引を更新し（要件 4.6, 11.4）、
+    /// 2. **可視の序数の解決** — 行の対象と挿入の位置が可視の序数で指されていれば、**適用の
+    ///    直前に**いまの [`RowOrder`]（`&self.order`）で識別子・文書の位置へ解く（タスク 10.4。
+    ///    `RowOrder` を持つのは本層だけであり、画面も境界も写像を持たない。要件 8.6）
+    /// 3. **履歴への積み込み** — 適用が組んだ対（逆命令とやり直しの命令）を、**渡された履歴**
+    ///    （`history`）へ積む（要件 9.1。状態を変えない適用は対を持たないため積まない）。
+    ///    **積まれるのは識別子であり、可視の序数は 1 つも残らない**（`edit` のモジュール docs
+    ///    「序数は逆命令に残さない」）
+    /// 4. **索引と順序の整合** — 判定が返した違反との差分で索引を更新し（要件 4.6, 11.4）、
     ///    行の集合が変わったときだけ順序を導出し直す（要件 8.8, 1.7）
     ///
     /// # 履歴は受け取る（所有しない）
@@ -589,7 +594,10 @@ impl GridSession {
         let label = UndoLabel::of_edit(&command);
         let structural = is_structural(&command);
 
-        let (outcome, pair) = self.apply.apply_with_inverse(doc, command)?;
+        // **可視の序数の解決は適用の直前で 1 回だけ**（タスク 10.4）。`RowOrder` を持つのは
+        // 本層だけであるため、いまの並びを `edit` 層へ渡す — 行の対象（削除・複製）と挿入の
+        // 位置が可視の序数で指されていても、適用の道は 1 つしか無い。
+        let (outcome, pair) = self.apply.apply_with_inverse(doc, command, &self.order)?;
         if let Some(pair) = pair {
             history.push(UndoEntry {
                 label,
@@ -627,7 +635,7 @@ impl GridSession {
     ) -> Result<Option<EditOutcome>, GridError> {
         let rows_before = self.sheet_of(doc)?.rows().len();
         // 借用はこの 1 文で切れる（履歴と適用の経路を同時に借りるため、束ねた型を通す）。
-        let outcome = UndoRedo::new(history, &mut self.apply).undo(doc)?;
+        let outcome = UndoRedo::new(history, &mut self.apply).undo(doc, &self.order)?;
         match outcome {
             Some(outcome) => {
                 // 戻る操作の種類は本層に届かないため、行の集合の変化は行数だけで見る。
@@ -653,7 +661,7 @@ impl GridSession {
         history: &mut UndoStack,
     ) -> Result<Option<EditOutcome>, GridError> {
         let rows_before = self.sheet_of(doc)?.rows().len();
-        let outcome = UndoRedo::new(history, &mut self.apply).redo(doc)?;
+        let outcome = UndoRedo::new(history, &mut self.apply).redo(doc, &self.order)?;
         match outcome {
             Some(outcome) => {
                 self.settle(doc, &outcome, rows_before, false)?;

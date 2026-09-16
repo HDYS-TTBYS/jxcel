@@ -67,7 +67,7 @@ use common::sample::sample;
 use common::sample::{SampleEditParts, SampleOptions};
 use data_grid::{
     display_text, CellAddress, CoercionNotice, ColumnIndex, EditApply, EditCommand,
-    EditSchemaQuery, GridError, NestedPath, NestedPathSegment, SchemaEngineQuery,
+    EditSchemaQuery, GridError, NestedPath, NestedPathSegment, RowOrder, SchemaEngineQuery,
 };
 use document_format::{
     from_json_bytes, to_json_bytes, CellValue, Document, NestedValue, RowId, SchemaPart, SheetId,
@@ -554,6 +554,7 @@ fn editing_one_inner_field_leaves_every_other_field_and_the_rest_of_the_document
         .apply(
             fixture.document_mut(),
             set_nested(row, column, &edited_json),
+            &RowOrder::default(),
         )
         .expect("構造表現として解釈できる入力の書き込みは成功する");
 
@@ -601,6 +602,7 @@ fn editing_one_inner_field_leaves_every_other_field_and_the_rest_of_the_document
         .apply(
             fixture.document_mut(),
             set_nested(row, column, &before_json),
+            &RowOrder::default(),
         )
         .expect("変更前の表現の書き戻しも成功する");
     assert_eq!(vec![row], restored.affected, "書き戻しも同じ行を報告する");
@@ -656,6 +658,7 @@ fn editing_an_element_of_an_array_keeps_the_other_elements() {
         .apply(
             fixture.document_mut(),
             set_nested(row, column, &json_of(&edited)),
+            &RowOrder::default(),
         )
         .expect("配列の要素の編集も成功する");
 
@@ -712,6 +715,7 @@ fn a_violation_inside_an_array_reports_the_element_position() {
         .apply(
             fixture.document_mut(),
             set_nested(row, column, &edited_json),
+            &RowOrder::default(),
         )
         .expect("適合しない入れ子の値でも編集は成功する（編集経路は拒否しない）");
 
@@ -781,6 +785,7 @@ fn a_violation_inside_an_object_reports_the_field_position() {
         .apply(
             fixture.document_mut(),
             set_nested(row, column, &json_of(&edited)),
+            &RowOrder::default(),
         )
         .expect("適合しない入れ子の値でも編集は成功する");
 
@@ -836,7 +841,11 @@ fn input_that_is_not_a_structural_representation_stops_the_edit() {
         );
 
         let error = apply
-            .apply(fixture.document_mut(), set_nested(row, column, payload))
+            .apply(
+                fixture.document_mut(),
+                set_nested(row, column, payload),
+                &RowOrder::default(),
+            )
             .expect_err("解釈できない入力は失敗する");
 
         assert_eq!(
@@ -885,6 +894,7 @@ fn a_broken_representation_is_reported_before_the_destination_is_checked() {
         .apply(
             fixture.document_mut(),
             set_nested(foreign, DESTINATION, "{"),
+            &RowOrder::default(),
         )
         .expect_err("壊れた表現は失敗する");
     assert_eq!(
@@ -897,7 +907,11 @@ fn a_broken_representation_is_reported_before_the_destination_is_checked() {
 
     // 2. 範囲外の列 + 壊れた表現 → 同じく解釈の誤り。
     let error = apply
-        .apply(fixture.document_mut(), set_nested(row, outside, "{"))
+        .apply(
+            fixture.document_mut(),
+            set_nested(row, outside, "{"),
+            &RowOrder::default(),
+        )
         .expect_err("壊れた表現は失敗する");
     assert_eq!(
         GridError::NestedDecode {
@@ -913,6 +927,7 @@ fn a_broken_representation_is_reported_before_the_destination_is_checked() {
         .apply(
             fixture.document_mut(),
             set_nested(foreign, DESTINATION, &payload),
+            &RowOrder::default(),
         )
         .expect_err("未知の行への書き込みは失敗する");
     assert_eq!(GridError::UnknownRow { row: foreign }, error);
@@ -944,7 +959,11 @@ fn json_that_is_not_nested_is_decided_by_the_type_system() {
 
     // 1. 入れ子の列: 適合しないので違反になるが、**中止しない**。
     let outcome = apply
-        .apply(fixture.document_mut(), set_nested(row, DESTINATION, &json))
+        .apply(
+            fixture.document_mut(),
+            set_nested(row, DESTINATION, &json),
+            &RowOrder::default(),
+        )
         .expect("入れ子でない値の書き込みも成功する（編集経路は拒否しない）");
     assert_eq!(1, outcome.violation_total, "入れ子の列では違反になる");
     assert!(outcome.coercions.is_empty(), "入れ子の列への変換は無い");
@@ -962,7 +981,11 @@ fn json_that_is_not_nested_is_decided_by_the_type_system() {
 
     // 2. `int` の列: 同じ入力が適合する（`Int` は `int` の型であり、変換も起きない）。
     let outcome = apply
-        .apply(fixture.document_mut(), set_nested(row, QUANTITY, &json))
+        .apply(
+            fixture.document_mut(),
+            set_nested(row, QUANTITY, &json),
+            &RowOrder::default(),
+        )
         .expect("適合する値の書き込みは成功する");
     assert_eq!(0, outcome.violation_total, "`int` の列では適合する");
     assert!(
@@ -1004,7 +1027,11 @@ fn a_coerced_value_is_reported_with_its_before_and_after() {
     let (mut apply, calls) = counting(sheet, fixture.plan.clone());
 
     let outcome = apply
-        .apply(fixture.document_mut(), set_nested(row, column, &json))
+        .apply(
+            fixture.document_mut(),
+            set_nested(row, column, &json),
+            &RowOrder::default(),
+        )
         .expect("変換を伴う書き込みも成功する");
 
     assert_eq!(vec![row], outcome.affected, "影響を受けた行");
@@ -1068,6 +1095,7 @@ fn a_nested_edit_is_a_single_cell_edit_for_the_call_shape() {
         .apply(
             fixture.document_mut(),
             set_nested(row, column, &json_of(&edited)),
+            &RowOrder::default(),
         )
         .expect("適合する値の書き込みは成功する");
 
@@ -1111,6 +1139,7 @@ fn an_unknown_row_or_an_out_of_range_column_stops_before_any_write() {
         .apply(
             fixture.document_mut(),
             set_nested(foreign, DESTINATION, &payload),
+            &RowOrder::default(),
         )
         .expect_err("他シートの行への書き込みは失敗する");
     assert_eq!(GridError::UnknownRow { row: foreign }, error);
@@ -1122,7 +1151,11 @@ fn an_unknown_row_or_an_out_of_range_column_stops_before_any_write() {
     );
 
     let error = apply
-        .apply(fixture.document_mut(), set_nested(row, outside, &payload))
+        .apply(
+            fixture.document_mut(),
+            set_nested(row, outside, &payload),
+            &RowOrder::default(),
+        )
         .expect_err("範囲外の列への書き込みは失敗する");
     assert_eq!(
         GridError::ColumnOutOfRange {
@@ -1172,6 +1205,7 @@ fn a_nested_command_on_a_sheet_without_columns_is_unusable() {
                 0,
                 &json_of(&CellValue::Nested(NestedValue::Array(Vec::new()))),
             ),
+            &RowOrder::default(),
         )
         .expect_err("列 0 本のシートは編集できない");
 
@@ -1202,11 +1236,15 @@ fn applying_the_same_nested_command_twice_gives_the_same_outcome() {
     let mut apply = EditApply::new(sheet, fixture.plan.clone());
 
     let first = apply
-        .apply(fixture.document_mut(), command.clone())
+        .apply(
+            fixture.document_mut(),
+            command.clone(),
+            &RowOrder::default(),
+        )
         .expect("1 回目の適用は成功する");
     let after_first = fixture.snapshot();
     let second = apply
-        .apply(fixture.document_mut(), command)
+        .apply(fixture.document_mut(), command, &RowOrder::default())
         .expect("2 回目の適用も成功する");
 
     assert_eq!(first, second, "同じ命令の 2 回の適用は同じ結果");

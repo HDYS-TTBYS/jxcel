@@ -241,7 +241,7 @@
  * |---|---|---|
  * | 3 つの操作の置き場所 | **表の面の上に行として出す**（打鍵・メニューの結線は要件 7.8 / 9.9 の担当であり、**8.7 が足す**）。3 つの操作が要するのは窓の記憶と選択であり、その両方を持つのは表だからである | `GridSurface` の中の `RowOperations` |
  * | 足す位置の意味（要件 6.1） | **現在位置の行の位置へ 1 行**（その行の**上**に入る。表計算の「上に行を挿入」と同じである）。数はつねに 1 である（まとめて足すのは貼り付けの補充であり、`PasteRange` が担う） | `./rowOps` の `InsertRows` の組み立て |
- * | **挿入の位置の座標空間**（要件 8.6） | 境界の `at` は**文書の位置**である。写せるのは**並べ替えも絞り込みも無いとき**だけであり、効いていれば**送らずに理由を出す** | `./rowOps` の `insertPositionIsDocumentOrder` と `planRowOperation` |
+ * | **挿入の位置の座標空間**（要件 8.6） | 送るのは**可視の序数**である（`{ anchor: "Before", ordinal }`。文書の位置へ写すのはドメイン）。並べ替え・絞り込みが効いていてもそのまま送れる（tasks.md 10.4） | `./rowOps` の `planRowOperation` |
  * | 追加した行の既定値（要件 6.1） | **画面は値を 1 つも作らない**（`InsertRows` は位置と数しか運ばない）。既定値を書くのは宣言（`CompiledSchema::default_row`）であり、画面は**取り直した窓がそれを運ぶ**ように行数を作り直す | `./rowOps` の `applyRowOperation` |
  * | 削除の確認（要件 6.5） | 閾値は**いま 1 画面に見えている行数**（移植口の `onVisibleSpanChange` が報せた区間。**先読みの幅ではない**）。超えるときは**送らずに**数を示して尋ねる。**選択が動けば取り下げる**（尋ねた数と消える数が食い違わない） | `./rowOps` の `deleteNeedsConfirmation`、`ready.pendingDelete`、`RowOperations` |
  * | 確認への取り消し | **境界へ 1 つも送らない**（`./rowOps` の計画の腕であり、往復へ載らない）。報告・告知も動かさない | `gridScreenDeleteCancelled` |
@@ -1993,10 +1993,6 @@ interface GridSurfaceProps {
   readonly editing: CellEdit | null;
   /** 開いている詳細表示（8.5。要件 5.5）。`null` なら開いていない。 */
   readonly detail: CellDetail | null;
-  /**
-   * いまの表示の指定（8.6）。**挿入の位置を写せるかを決める**（`./rowOps` の判断に渡す）。
-   */
-  readonly view: GridViewSpec;
   /** 削除の確認を待っている対象（8.6。要件 6.5）。`null` なら尋ねていない。 */
   readonly pendingDelete: DeleteConfirmation | null;
   /**
@@ -2054,7 +2050,7 @@ interface GridSurfaceProps {
   readonly onDeleteRequested: (confirmation: DeleteConfirmation) => void;
   /** 確認への取り消し（**送らない**）。 */
   readonly onDeleteCancelled: () => void;
-  /** 送らずに理由を告げる（挿入の位置を写せない・対象の行の識別子が届いていない）。 */
+  /** 返さずに理由を告げる（複製と貼り付けの拒否。8.6 の行の操作はここへ来ない）。 */
   readonly onRefused: (message: string) => void;
 }
 
@@ -2136,7 +2132,6 @@ function GridSurface({
   selection,
   editing,
   detail,
-  view,
   pendingDelete,
   client,
   onSelectionChange,
@@ -2508,12 +2503,12 @@ function GridSurface({
   };
 
   /**
-   * 行の操作の 1 往復（8.6。要件 6.1、6.2、6.3）。**宛先を引くのは境界ではなく窓の記憶である**
-   * （行の識別子は窓にしか無い。`./rowOps` の判断が `rowId` を通して引く）ので、往復はここから
-   * 起動する（セルの編集と同じ配置である）。
+   * 行の操作の 1 往復（8.6。要件 6.1、6.2、6.3）。**宛先は境界が解く** — 画面は可視の序数
+   * （または末尾）をそのまま送り、**識別子を引かない**（10.4 が `RowTarget` / `RowAnchor` を
+   * 足して、写像の所有者をドメインの `RowOrder` 1 つにした）ので、往復はここから起動する
+   * （セルの編集と同じ配置である）。
    *
-   * 器がまだ無いときは往復を起こさない — そのとき識別子は 1 つも引けず、判断は「届いていない」
-   * として拒む（`rowId` に `null` を返させる）。**投げない**（`applyRowOperation` が投げない）。
+   * 器がまだ無いときは往復を起こさない。**投げない**（`applyRowOperation` が投げない）。
    */
   const runRowOperation = (intent: RowSendIntent): void => {
     const cache = cacheRef.current;
@@ -2535,28 +2530,26 @@ function GridSurface({
 
   /**
    * 行の操作の入口（8.6。要件 6.1、6.2、6.3、6.5）。**判断は `./rowOps` が行う** — 表が担うのは
-   * 材料（表示の指定・行数・**1 画面に見えている行数**・識別子を引く口）を揃えることと、答えを
-   * 4 つの行き先へ渡すことだけである（閾値も座標空間の判断もここには書かない）。
+   * 材料（**いまの表示の指定・行数・1 画面に見えている行数**）を揃えることと、答えを 3 つの行き先へ
+   * 渡すことだけである（閾値も座標空間の判断もここには書かない。**送れないという答えは無い** —
+   * 10.4 が可視の序数をそのまま送れる形にした）。
    *
    * **取り消しもこの入口を通る**（確認の面の 2 つの口が 1 つの経路で終わる）。取り消しの腕は
    * 送る腕へ載らないので、境界へは 1 つも行かない（`./rowOps` の
    * [`runRowOperationPlan`]）。
    */
   const requestRowOperation = (target: RowOperationTarget): void => {
-    const cache = cacheRef.current;
     runRowOperationPlan(
       planRowOperation(target, {
-        view,
         visibleRows,
         // **移植口が報せた区間だけが源である**（開いた直後の見当は先読みの幅である）。
         viewportRows: viewportRowsRef.current,
-        // 器がまだ無ければ識別子は引けない（**推測で答えない**）。
-        rowId: (position) => cache?.rowId(position) ?? null,
       }),
       {
+        // **送る対象は可視の序数である**（識別子を引き集める口も、文書の位置へ写す口も
+        // 画面には無い — 解くのはドメインである。要件 8.6、tasks.md 10.4）。
         send: runRowOperation,
         confirm: onDeleteRequested,
-        refuse: onRefused,
         cancel: onDeleteCancelled,
       },
     );
@@ -3368,7 +3361,6 @@ function GridScreenBody({
             selection={state.selection}
             editing={state.editing}
             detail={state.detail}
-            view={state.view}
             pendingDelete={state.pendingDelete}
             client={client}
             onSelectionChange={onSelectionChange}

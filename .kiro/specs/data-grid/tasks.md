@@ -375,7 +375,7 @@
   - _Boundary: crates/app-shell/src/ipc/grid.rs, crates/app-shell/src/ipc/command_names.rs, src/ipc/bindings.ts, src-tauri/src/commands/grid.rs, src-tauri/permissions/app.toml, crates/data-grid/src/view/, crates/data-grid/src/api.rs, src/features/grid/, .kiro/specs/data-grid/design.md_
   - _Depends: 6.1, 6.2, 6.3_
 
-- [ ] 10.4 行の対象を識別子と可視の序数の双方で指せるようにする
+- [x] 10.4 行の対象を識別子と可視の序数の双方で指せるようにする
   - 行の対象（削除・複製）を、**識別子の一覧**と**可視の序数の区間**のいずれでも指定できるようにする。序数はドメインが `RowOrder` で解決する（画面が写像を持たない）
   - 位置を指定した追加の位置を、**文書の位置**ではなく**対象の行の識別子に対する前後**または**可視の序数**で指定できるようにする（並べ替え・絞り込みが効いていても送れる形）
   - 画面は並べ替え・絞り込み中でも位置指定の追加と範囲削除を送る（「送らずに理由を提示する」経路を消す）。**推測した位置へ挿す経路は作らない**

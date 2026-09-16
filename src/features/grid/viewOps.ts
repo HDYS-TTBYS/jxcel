@@ -247,9 +247,9 @@ export function filterOf(view: GridViewSpec, documentColumn: number): GridFilter
 /**
  * 行の集合を変えうる指定が効いているか（**並べ替えまたは絞り込み**）。
  *
- * 入れ子の展開は列の話であり、行の集合を変えない（要件 5.3）。挿入の位置を文書の位置へ写せる
- * かの判断（`./rowOps` の `insertPositionIsDocumentOrder` と同じ条件）と、行の増減のあとに
- * 表示の指定を当て直すか（要件 8.7 の数の取り直し）の両方がこれを読む。
+ * 入れ子の展開は列の話であり、行の集合を変えない（要件 5.3）。**行の増減のあとに表示の指定を
+ * 当て直すか**（要件 8.7 の数の取り直し）の判断がこれを読む（8.6 の挿入の位置は可視の序数で
+ * 送るため、この条件を見ない。tasks.md 10.4）。
  */
 export function hasRowRestriction(view: GridViewSpec): boolean {
   return view.sort.length > 0 || view.filters.length > 0;

@@ -65,8 +65,8 @@ use common::sample::sample;
 use common::sample::{SampleEditParts, SampleOptions};
 use data_grid::{
     display_text, CellAddress, CoercionNotice, ColumnIndex, EditApply, EditCommand,
-    EditSchemaQuery, GridError, RowOrder, RowOrdinal, RowSpan, SchemaEngineQuery, SortKey,
-    ViewSpec,
+    EditSchemaQuery, FilterSpec, GridError, RowAnchor, RowOrder, RowOrdinal, RowSpan, RowTarget,
+    SchemaEngineQuery, SortKey, ViewSpec,
 };
 use document_format::{CellValue, Document, RowId, SheetId};
 use schema_engine::{
@@ -404,9 +404,10 @@ fn inserting_rows_applies_the_schema_defaults_at_the_documented_position() {
         .apply(
             fixture.document_mut(),
             EditCommand::InsertRows {
-                at: RowOrdinal::new(at),
+                at: RowAnchor::Document(RowOrdinal::new(at)),
                 count,
             },
+            &RowOrder::default(),
         )
         .expect("行の追加は成功する");
 
@@ -478,12 +479,15 @@ fn inserting_rows_applies_the_schema_defaults_at_the_documented_position() {
     assert_row_operation_call_shape(&calls, &fixture.plan);
 }
 
-/// 挿入位置は**文書の位置**であり、可視の序数ではない。画面の位置に挿入したい呼び出し側は
-/// `RowOrder` で行そのものへ写してから文書の位置を渡す（要件 8.6 の帰結）。
+/// **文書の位置を指す錨**（[`RowAnchor::Document`]）は、その位置に挿入する — 可視の序数では
+/// ない（要件 8.6）。並べ替えを効かせた順序では、可視の序数 `k` が指す行は文書の位置 `k` には
+/// 無い。
 ///
-/// 並べ替えを効かせた順序では、可視の序数 `k` が指す行は文書の位置 `k` には無い。したがって
-/// 可視の序数をそのまま渡せば**別の場所**に入り、写してから渡せば意図した行の直前に入る。
-/// 2 つの空間を取り違えた実装は、この検査のどちらかで落ちる。
+/// 可視の序数で挿入したい呼び出し側の道は 2 つあり、どちらも意図した行の直前に入る:
+/// ① 自前で行そのものへ写してからその行の**文書の位置**を [`RowAnchor::Document`] で渡す
+/// （この検査の (2)）、② **可視の序数**をそのまま [`RowAnchor::Before`] で渡す（ドメインが
+/// 適用の直前に解く。10.4。`an_insert_anchor_naming_a_visible_ordinal_lands_next_to_the_displayed_row`
+/// が固定する）。2 つの空間を取り違えた実装は、この検査の (1) で落ちる。
 #[test]
 fn an_insert_position_is_a_document_position_and_the_caller_translates_the_visible_ordinal() {
     // 並べ替えを効かせた順序（列 1 の降順）と、可視の序数と文書の位置が食い違う行を用意する。
@@ -533,9 +537,10 @@ fn an_insert_position_is_a_document_position_and_the_caller_translates_the_visib
         .apply(
             raw.document_mut(),
             EditCommand::InsertRows {
-                at: RowOrdinal::new(ordinal),
+                at: RowAnchor::Document(RowOrdinal::new(ordinal)),
                 count: 1,
             },
+            &RowOrder::default(),
         )
         .expect("行の追加は成功する");
 
@@ -569,9 +574,10 @@ fn an_insert_position_is_a_document_position_and_the_caller_translates_the_visib
         .apply(
             translated.document_mut(),
             EditCommand::InsertRows {
-                at: RowOrdinal::new(at),
+                at: RowAnchor::Document(RowOrdinal::new(at)),
                 count: 1,
             },
+            &RowOrder::default(),
         )
         .expect("行の追加は成功する");
 
@@ -607,7 +613,10 @@ fn removing_several_rows_is_one_operation_and_the_rest_keep_their_order_and_valu
     let outcome = apply
         .apply(
             fixture.document_mut(),
-            EditCommand::RemoveRows { rows: requested },
+            EditCommand::RemoveRows {
+                target: RowTarget::Ids(requested),
+            },
+            &RowOrder::default(),
         )
         .expect("行の削除は成功する");
 
@@ -644,13 +653,13 @@ fn a_removal_that_contains_an_unknown_row_removes_nothing() {
     let foreign = foreign_row(&fixture);
     // 妥当な行を先に置く（部分適用があれば、この行が消えてから失敗する）。
     let command = EditCommand::RemoveRows {
-        rows: vec![fixture.row(3), foreign],
+        target: RowTarget::Ids(vec![fixture.row(3), foreign]),
     };
     let (mut apply, calls) = counting(sheet, fixture.plan.clone());
     let before = fixture.snapshot();
 
     let error = apply
-        .apply(fixture.document_mut(), command)
+        .apply(fixture.document_mut(), command, &RowOrder::default())
         .expect_err("他シートの行を指す命令は失敗する");
 
     assert_eq!(GridError::UnknownRow { row: foreign }, error);
@@ -674,15 +683,19 @@ fn removing_the_same_selection_again_changes_nothing() {
         .apply(
             fixture.document_mut(),
             EditCommand::RemoveRows {
-                rows: requested.clone(),
+                target: RowTarget::Ids(requested.clone()),
             },
+            &RowOrder::default(),
         )
         .expect("行の削除は成功する");
     let after_first = fixture.snapshot();
     let error = apply
         .apply(
             fixture.document_mut(),
-            EditCommand::RemoveRows { rows: requested },
+            EditCommand::RemoveRows {
+                target: RowTarget::Ids(requested),
+            },
+            &RowOrder::default(),
         )
         .expect_err("取り除かれた行を再び削除するのは失敗する");
 
@@ -712,7 +725,10 @@ fn duplicating_rows_copies_the_values_and_appends_them_at_the_end() {
     let outcome = apply
         .apply(
             fixture.document_mut(),
-            EditCommand::DuplicateRows { rows: requested },
+            EditCommand::DuplicateRows {
+                target: RowTarget::Ids(requested),
+            },
+            &RowOrder::default(),
         )
         .expect("行の複製は成功する");
 
@@ -773,6 +789,7 @@ fn duplicating_a_short_row_copies_exactly_the_values_it_has() {
             EditCommand::SetCells {
                 cells: vec![(CellAddress::new(short, ColumnIndex::new(1)), "7".to_owned())],
             },
+            &RowOrder::default(),
         )
         .expect("適合する値の書き込みは成功する");
     // 前提: 値の並びが列数に満たない（この検査の対象そのもの）。
@@ -787,7 +804,10 @@ fn duplicating_a_short_row_copies_exactly_the_values_it_has() {
     let outcome = apply
         .apply(
             fixture.document_mut(),
-            EditCommand::DuplicateRows { rows: vec![short] },
+            EditCommand::DuplicateRows {
+                target: RowTarget::Ids(vec![short]),
+            },
+            &RowOrder::default(),
         )
         .expect("行の複製は成功する");
 
@@ -829,7 +849,10 @@ fn duplicating_a_row_that_holds_a_unique_value_reports_the_duplicate_without_abo
     let outcome = apply
         .apply(
             fixture.document_mut(),
-            EditCommand::DuplicateRows { rows: vec![source] },
+            EditCommand::DuplicateRows {
+                target: RowTarget::Ids(vec![source]),
+            },
+            &RowOrder::default(),
         )
         .expect("一意制約に重複が生じても中止しない（要件 6.4）");
 
@@ -881,6 +904,7 @@ fn duplicating_a_row_that_holds_a_violating_value_copies_the_violation_itself() 
             EditCommand::SetCells {
                 cells: vec![(CellAddress::new(row, ColumnIndex::new(4)), "yes".to_owned())],
             },
+            &RowOrder::default(),
         )
         .expect("適合しない値の書き込みも成功する");
     let violating = fixture.values_of(row);
@@ -894,7 +918,10 @@ fn duplicating_a_row_that_holds_a_violating_value_copies_the_violation_itself() 
     let outcome = apply
         .apply(
             fixture.document_mut(),
-            EditCommand::DuplicateRows { rows: vec![row] },
+            EditCommand::DuplicateRows {
+                target: RowTarget::Ids(vec![row]),
+            },
+            &RowOrder::default(),
         )
         .expect("行の複製は成功する");
 
@@ -948,13 +975,13 @@ fn an_unknown_row_stops_the_duplication_before_any_change() {
     let foreign = foreign_row(&fixture);
     // 妥当な行を先に置く（部分適用があれば、この行が複製されてから失敗する）。
     let command = EditCommand::DuplicateRows {
-        rows: vec![fixture.row(3), foreign],
+        target: RowTarget::Ids(vec![fixture.row(3), foreign]),
     };
     let (mut apply, calls) = counting(sheet, fixture.plan.clone());
     let before = fixture.snapshot();
 
     let error = apply
-        .apply(fixture.document_mut(), command)
+        .apply(fixture.document_mut(), command, &RowOrder::default())
         .expect_err("他シートの行を指す命令は失敗する");
 
     assert_eq!(GridError::UnknownRow { row: foreign }, error);
@@ -981,9 +1008,10 @@ fn an_insert_position_may_be_the_end_and_beyond_it_is_rejected() {
         .apply(
             fixture.document_mut(),
             EditCommand::InsertRows {
-                at: RowOrdinal::new(ids.len()),
+                at: RowAnchor::Document(RowOrdinal::new(ids.len())),
                 count: 1,
             },
+            &RowOrder::default(),
         )
         .expect("行数の位置への挿入は末尾への追加として成功する");
 
@@ -1010,9 +1038,10 @@ fn an_insert_position_may_be_the_end_and_beyond_it_is_rejected() {
         .apply(
             fixture.document_mut(),
             EditCommand::InsertRows {
-                at: RowOrdinal::new(at),
+                at: RowAnchor::Document(RowOrdinal::new(at)),
                 count: 1,
             },
+            &RowOrder::default(),
         )
         .expect_err("行数を超える位置への挿入は失敗する");
 
@@ -1029,6 +1058,43 @@ fn an_insert_position_may_be_the_end_and_beyond_it_is_rejected() {
         recorded(&calls),
         "縫い目も呼ばれない"
     );
+
+    // (3) **可視の序数で指した錨も、可視行数の外は拒まれる**（境界は任意の `u32` を受けるため、
+    // 解けない序数が届く経路は塞いでおく。10.4 のレビューが指摘した覆いの穴）。
+    let mut fixture = Fixture::clean(64, 13);
+    let sheet = fixture.sheet();
+    let visible = fixture.row_count();
+    let (mut apply, calls) = counting(sheet, fixture.plan.clone());
+    let before = fixture.snapshot();
+
+    let error = apply
+        .apply(
+            fixture.document_mut(),
+            EditCommand::InsertRows {
+                at: RowAnchor::Before { ordinal: visible },
+                count: 1,
+            },
+            &RowOrder::default(),
+        )
+        .expect_err("可視行数の外を指す錨は失敗する");
+
+    assert_eq!(
+        GridError::SpanOutOfRange {
+            span: RowSpan::new(RowOrdinal::new(visible), 1),
+            // **可視の序数の空間は既定の順序では空である**（`RowOrder::default()` は行を 1 つも
+            // 持たない）ため、`visible` は 0 になる。順序を持つ経路の範囲外は
+            // `a_visible_ordinal_range_removes_and_duplicates_only_the_displayed_rows` が
+            // 実物の順序で固定している（こちらは順序が空のときの網羅である）。
+            visible: 0,
+        },
+        error
+    );
+    assert_eq!(before, fixture.snapshot(), "1 行も挿入されない");
+    assert_eq!(
+        Vec::<QueryCall>::new(),
+        recorded(&calls),
+        "縫い目も呼ばれない"
+    );
 }
 
 /// 列が 1 件も宣言されていないシートでは、行の操作もできない（[`GridError::SchemaUnusable`]）。
@@ -1036,12 +1102,16 @@ fn an_insert_position_may_be_the_end_and_beyond_it_is_rejected() {
 fn row_operations_need_a_sheet_with_columns() {
     for command in [
         EditCommand::InsertRows {
-            at: RowOrdinal::new(0),
+            at: RowAnchor::Document(RowOrdinal::new(0)),
             count: 1,
         },
         // 空の命令でもセッションの前提は検査する（3.1 と同じ規則）。
-        EditCommand::RemoveRows { rows: Vec::new() },
-        EditCommand::DuplicateRows { rows: Vec::new() },
+        EditCommand::RemoveRows {
+            target: RowTarget::Ids(Vec::new()),
+        },
+        EditCommand::DuplicateRows {
+            target: RowTarget::Ids(Vec::new()),
+        },
     ] {
         let mut document = Document::new();
         let sheet = document.add_sheet("空のシート");
@@ -1054,7 +1124,7 @@ fn row_operations_need_a_sheet_with_columns() {
         let (mut apply, calls) = counting(sheet, plan);
         let before = snapshot(&document, sheet);
         let error = apply
-            .apply(&mut document, command.clone())
+            .apply(&mut document, command.clone(), &RowOrder::default())
             .expect_err("列 0 本のシートでは行の操作もできない");
 
         assert_eq!(GridError::SchemaUnusable { sheet }, error);
@@ -1092,16 +1162,20 @@ fn column_less_plan(document: &mut Document, sheet: SheetId) -> CompiledSchema {
 fn empty_row_commands_change_nothing_and_call_no_judgement() {
     let commands = [
         EditCommand::InsertRows {
-            at: RowOrdinal::new(0),
+            at: RowAnchor::Document(RowOrdinal::new(0)),
             count: 0,
         },
         // 件数 0 の追加は位置を見ない（何も挿入しないため、位置の妥当性も問わない）。
         EditCommand::InsertRows {
-            at: RowOrdinal::new(usize::MAX),
+            at: RowAnchor::Document(RowOrdinal::new(usize::MAX)),
             count: 0,
         },
-        EditCommand::RemoveRows { rows: Vec::new() },
-        EditCommand::DuplicateRows { rows: Vec::new() },
+        EditCommand::RemoveRows {
+            target: RowTarget::Ids(Vec::new()),
+        },
+        EditCommand::DuplicateRows {
+            target: RowTarget::Ids(Vec::new()),
+        },
     ];
 
     for command in commands {
@@ -1112,7 +1186,11 @@ fn empty_row_commands_change_nothing_and_call_no_judgement() {
         let row_count = fixture.row_count();
 
         let outcome = apply
-            .apply(fixture.document_mut(), command.clone())
+            .apply(
+                fixture.document_mut(),
+                command.clone(),
+                &RowOrder::default(),
+            )
             .expect("空の命令は成功する");
 
         assert_eq!(
@@ -1163,20 +1241,20 @@ fn the_same_row_command_on_the_same_shape_gives_the_same_outcome() {
             // 命令は毎回同じ形の標本から同じ位置で組み立てる（生の識別子は跨いで比較しない）。
             let command = match kind {
                 Kind::Insert => EditCommand::InsertRows {
-                    at: RowOrdinal::new(4),
+                    at: RowAnchor::Document(RowOrdinal::new(4)),
                     count: 2,
                 },
                 Kind::Remove => EditCommand::RemoveRows {
-                    rows: vec![fixture.row(9), fixture.row(1), fixture.row(1)],
+                    target: RowTarget::Ids(vec![fixture.row(9), fixture.row(1), fixture.row(1)]),
                 },
                 Kind::Duplicate => EditCommand::DuplicateRows {
-                    rows: vec![fixture.row(6), fixture.row(0)],
+                    target: RowTarget::Ids(vec![fixture.row(6), fixture.row(0)]),
                 },
             };
             let mut apply = EditApply::new(sheet, fixture.plan.clone());
 
             let outcome = apply
-                .apply(fixture.document_mut(), command)
+                .apply(fixture.document_mut(), command, &RowOrder::default())
                 .expect("行の操作は成功する");
 
             // 影響を受けた行の**適用後の文書の位置**（生の識別子の代わりに構造で比べる。削除では
@@ -1234,20 +1312,20 @@ fn row_operations_revalidate_every_column_once_and_never_judge_a_write() {
         let before = fixture.ids();
         let command = match kind {
             Kind::Insert => EditCommand::InsertRows {
-                at: RowOrdinal::new(3),
+                at: RowAnchor::Document(RowOrdinal::new(3)),
                 count: 2,
             },
             Kind::Remove => EditCommand::RemoveRows {
-                rows: vec![fixture.row(5), fixture.row(6)],
+                target: RowTarget::Ids(vec![fixture.row(5), fixture.row(6)]),
             },
             Kind::Duplicate => EditCommand::DuplicateRows {
-                rows: vec![fixture.row(1)],
+                target: RowTarget::Ids(vec![fixture.row(1)]),
             },
         };
         let (mut apply, calls) = counting(sheet, fixture.plan.clone());
 
         let outcome = apply
-            .apply(fixture.document_mut(), command)
+            .apply(fixture.document_mut(), command, &RowOrder::default())
             .expect("行の操作は成功する");
 
         // 呼び出しの形: 全列の再検証 1 回だけ（判定も全件検証も現れない）。
@@ -1308,7 +1386,10 @@ fn the_display_text_of_a_duplicated_row_is_the_same_as_the_source() {
     let outcome = apply
         .apply(
             fixture.document_mut(),
-            EditCommand::DuplicateRows { rows: vec![source] },
+            EditCommand::DuplicateRows {
+                target: RowTarget::Ids(vec![source]),
+            },
+            &RowOrder::default(),
         )
         .expect("行の複製は成功する");
 
@@ -1323,4 +1404,295 @@ fn the_display_text_of_a_duplicated_row_is_the_same_as_the_source() {
         before.iter().any(|text| !text.is_empty()),
         "前提: 中身のある列がある"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 8. 行の対象を識別子と可視の序数の双方で指す（タスク 10.4。要件 6.1, 6.2, 8.6）
+// ---------------------------------------------------------------------------
+
+/// 表示の指定から可視の並びを導出する（タスク 10.4 の検査の材料。`RowOrder` の唯一の源は
+/// `view` 層である）。
+fn visible_order(fixture: &Fixture, spec: &ViewSpec) -> RowOrder {
+    let mut order = RowOrder::default();
+    order.recompute(fixture.document(), fixture.sheet(), spec);
+    order
+}
+
+/// 可視の並びを先頭から並べた識別子（`RowOrder::row_at` の唯一の写像を通す）。
+fn visible_rows(order: &RowOrder) -> Vec<RowId> {
+    (0..order.len())
+        .filter_map(|ordinal| order.row_at(RowOrdinal::new(ordinal)))
+        .collect()
+}
+
+/// 可視の序数と文書の位置が食い違う、最初の可視の序数（前提が無ければ検査が空振りするため、
+/// 見つからなければ落とす）。
+fn a_displayed_ordinal_that_moved(fixture: &Fixture, order: &RowOrder) -> usize {
+    let ids = fixture.ids();
+    (0..order.len())
+        .find(|ordinal| order.row_at(RowOrdinal::new(*ordinal)) != Some(ids[*ordinal]))
+        .expect("前提: 見えている位置と文書の位置が食い違う行がある（並べ替えが効いている）")
+}
+
+/// **可視の序数で指した挿入は、その表示位置の行の隣に入る**（タスク 10.4。要件 6.1, 8.6）。
+///
+/// 並べ替えが効いていると、可視の序数 `k` が指す行は文書の位置 `k` には無い。`Before` / `After`
+/// は**適用の直前に `RowOrder` で解かれる**ため、文書の位置 `k` ではなく**表示されている行**の
+/// 隣に入る。序数を文書の位置として読む実装（解決を外した実装）は、この検査の最初の表明で
+/// 落ちる。
+#[test]
+fn an_insert_anchor_naming_a_visible_ordinal_lands_next_to_the_displayed_row() {
+    let spec = ViewSpec {
+        sort: vec![SortKey {
+            column: ColumnIndex::new(1),
+            descending: true,
+        }],
+        filters: Vec::new(),
+    };
+
+    // (1) 「その行の直前」。
+    let mut fixture = Fixture::clean(64, 13);
+    let sheet = fixture.sheet();
+    let order = visible_order(&fixture, &spec);
+    let ordinal = a_displayed_ordinal_that_moved(&fixture, &order);
+    let displayed = order
+        .row_at(RowOrdinal::new(ordinal))
+        .expect("可視の序数に行がある");
+    let displayed_position = fixture.position_of(displayed);
+    assert_ne!(
+        ordinal, displayed_position,
+        "対照: 可視の序数は文書の位置ではない（食い違わなければ取り違えを検出できない）"
+    );
+    let mut apply = EditApply::new(sheet, fixture.plan.clone());
+
+    let outcome = apply
+        .apply(
+            fixture.document_mut(),
+            EditCommand::InsertRows {
+                at: RowAnchor::Before { ordinal },
+                count: 1,
+            },
+            &order,
+        )
+        .expect("行の追加は成功する");
+
+    let inserted = outcome.affected[0];
+    assert_eq!(
+        displayed_position,
+        fixture.position_of(inserted),
+        "表示されている行の**直前**に入る（文書の位置 `ordinal` ではない）"
+    );
+    assert_eq!(
+        displayed_position + 1,
+        fixture.position_of(displayed),
+        "表示されている行は 1 つ後ろへずれる"
+    );
+
+    // (2) 「その行の直後」。同じ行の反対側であり、直前とは 1 つ違う。
+    let mut fixture = Fixture::clean(64, 13);
+    let sheet = fixture.sheet();
+    let order = visible_order(&fixture, &spec);
+    let ordinal = a_displayed_ordinal_that_moved(&fixture, &order);
+    let displayed = order
+        .row_at(RowOrdinal::new(ordinal))
+        .expect("可視の序数に行がある");
+    let displayed_position = fixture.position_of(displayed);
+    let mut apply = EditApply::new(sheet, fixture.plan.clone());
+
+    let outcome = apply
+        .apply(
+            fixture.document_mut(),
+            EditCommand::InsertRows {
+                at: RowAnchor::After { ordinal },
+                count: 1,
+            },
+            &order,
+        )
+        .expect("行の追加は成功する");
+
+    let inserted = outcome.affected[0];
+    assert_eq!(
+        displayed_position + 1,
+        fixture.position_of(inserted),
+        "表示されている行の**直後**に入る"
+    );
+    assert_eq!(
+        displayed_position,
+        fixture.position_of(displayed),
+        "表示されている行は動かない"
+    );
+
+    // (3) 末尾は**文書の末尾**である（可視の最後の行の隣ではない）。
+    let mut fixture = Fixture::clean(64, 13);
+    let sheet = fixture.sheet();
+    let order = visible_order(&fixture, &spec);
+    let rows_before = fixture.row_count();
+    let mut apply = EditApply::new(sheet, fixture.plan.clone());
+
+    let outcome = apply
+        .apply(
+            fixture.document_mut(),
+            EditCommand::InsertRows {
+                at: RowAnchor::End,
+                count: 1,
+            },
+            &order,
+        )
+        .expect("行の追加は成功する");
+
+    assert_eq!(
+        rows_before,
+        fixture.position_of(outcome.affected[0]),
+        "末尾への追加は文書の末尾に置かれる"
+    );
+}
+
+/// **可視の序数の区間で指した削除・複製は、表示されている行だけを対象にする**（タスク 10.4。
+/// 要件 6.2, 8.6）。
+///
+/// 絞り込みが効いていると、可視の並びは文書の並びの部分列である。区間は適用の直前に
+/// `RowOrder` で識別子へ解かれるため、**隠れている行は 1 つも対象にならない**。
+/// **範囲外の序数は判別可能な誤り**（[`GridError::SpanOutOfRange`]）であり、1 行も変わらない。
+#[test]
+fn a_visible_ordinal_range_removes_and_duplicates_only_the_displayed_rows() {
+    // 列 4（検査済み）は真偽であり、`true` の行だけを見せる絞り込みを掛ける（隠れた行が
+    // 区間の内側に挟まる形を作る）。
+    let spec = ViewSpec {
+        sort: Vec::new(),
+        filters: vec![FilterSpec::Equals {
+            column: ColumnIndex::new(4),
+            text: "true".to_owned(),
+        }],
+    };
+
+    // (1) 可視の序数 `1 ..< 4` を削除する。
+    let mut fixture = Fixture::clean(64, 13);
+    let sheet = fixture.sheet();
+    let order = visible_order(&fixture, &spec);
+    assert!(order.len() >= 4, "前提: 可視行が 4 行以上ある");
+    assert!(
+        fixture.row_count() > order.len(),
+        "前提: 絞り込みが行を隠している"
+    );
+    let displayed = visible_rows(&order);
+    let removed: Vec<RowId> = order.span(RowSpan::new(RowOrdinal::new(1), 3)).to_vec();
+    let hidden: Vec<RowId> = fixture
+        .ids()
+        .into_iter()
+        .filter(|id| !displayed.contains(id))
+        .collect();
+    assert!(!hidden.is_empty(), "前提: 隠れている行がある");
+    let before = fixture.snapshot();
+    let mut apply = EditApply::new(sheet, fixture.plan.clone());
+
+    let outcome = apply
+        .apply(
+            fixture.document_mut(),
+            EditCommand::RemoveRows {
+                target: RowTarget::Ordinals { from: 1, count: 3 },
+            },
+            &order,
+        )
+        .expect("可視の序数で指した削除も成功する");
+
+    assert_eq!(
+        removed, outcome.affected,
+        "affected は可視の区間の行そのもの"
+    );
+    let after = fixture.ids();
+    for row in &removed {
+        assert!(!after.contains(row), "表示されていた行は消える");
+    }
+    for row in &hidden {
+        assert!(after.contains(row), "隠れている行は消えない");
+    }
+    assert_eq!(
+        before.len() - removed.len(),
+        after.len(),
+        "消えた数は区間の数"
+    );
+    // 残った行は相対順と値を保つ。
+    let expected: Vec<(RowId, Vec<CellValue>)> = before
+        .iter()
+        .filter(|(id, _)| !removed.contains(id))
+        .cloned()
+        .collect();
+    assert_eq!(expected, fixture.snapshot(), "残った行の順序と値");
+
+    // (2) 同じ見えている区間を複製すると、**表示されている行の値**が複製される。
+    let mut fixture = Fixture::clean(64, 13);
+    let sheet = fixture.sheet();
+    let order = visible_order(&fixture, &spec);
+    let sources: Vec<RowId> = order.span(RowSpan::new(RowOrdinal::new(1), 2)).to_vec();
+    let hidden: Vec<RowId> = fixture
+        .ids()
+        .into_iter()
+        .filter(|id| !visible_rows(&order).contains(&id))
+        .collect();
+    let expected_values: Vec<Vec<CellValue>> =
+        sources.iter().map(|row| fixture.values_of(*row)).collect();
+    let mut apply = EditApply::new(sheet, fixture.plan.clone());
+
+    let outcome = apply
+        .apply(
+            fixture.document_mut(),
+            EditCommand::DuplicateRows {
+                target: RowTarget::Ordinals { from: 1, count: 2 },
+            },
+            &order,
+        )
+        .expect("可視の序数で指した複製も成功する");
+
+    assert_eq!(2, outcome.affected.len(), "可視の区間の数だけ複製される");
+    for (copy, values) in outcome.affected.iter().zip(expected_values) {
+        assert_eq!(
+            values,
+            fixture.values_of(*copy),
+            "複製の値は**表示されていた行**の値である"
+        );
+    }
+    let after = fixture.ids();
+    for row in &hidden {
+        assert!(after.contains(row), "隠れている行は消えない");
+    }
+    for row in &sources {
+        assert!(after.contains(row), "元の行は残る");
+    }
+
+    // (3) 可視行数の外を指す区間は判別可能な誤りであり、**1 行も変えない**。
+    let mut fixture = Fixture::clean(64, 13);
+    let sheet = fixture.sheet();
+    let order = visible_order(&fixture, &spec);
+    let from = order.len();
+    let before = fixture.snapshot();
+    let mut apply = EditApply::new(sheet, fixture.plan.clone());
+    let command = EditCommand::RemoveRows {
+        target: RowTarget::Ordinals { from, count: 2 },
+    };
+
+    let error = apply
+        .apply(fixture.document_mut(), command, &order)
+        .expect_err("可視行数の外を指す区間は失敗する");
+
+    assert_eq!(
+        GridError::SpanOutOfRange {
+            span: RowSpan::new(RowOrdinal::new(from), 2),
+            visible: order.len(),
+        },
+        error,
+        "判別可能な誤りである（可視行数を載せる）"
+    );
+    assert_eq!(before, fixture.snapshot(), "文書は 1 行も変わらない");
+    // 同じ誤りを複製でも返す（対象の解決は 2 つの命令で 1 つである）。
+    let error = apply
+        .apply(
+            fixture.document_mut(),
+            EditCommand::DuplicateRows {
+                target: RowTarget::Ordinals { from, count: 1 },
+            },
+            &order,
+        )
+        .expect_err("可視行数の外を指す複製も失敗する");
+    assert!(matches!(error, GridError::SpanOutOfRange { .. }));
+    assert_eq!(before, fixture.snapshot(), "文書は 1 行も変わらない");
 }

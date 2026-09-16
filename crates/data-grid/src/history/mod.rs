@@ -114,6 +114,7 @@
 // 材料の型は `edit` 層にある（本層はそれを使う。層の鎖は左向きの一方向である）。
 use crate::edit::{EditApply, EditCommand, EditOutcome, HistoryCommand};
 use crate::error::GridError;
+use crate::view::RowOrder;
 
 use document_format::Document;
 
@@ -370,13 +371,17 @@ impl<'a> UndoRedo<'a> {
     /// 結果（[`EditOutcome`]）の `affected` は**その操作が触れた行**である（セルの編集では
     /// 編集したセルの行、行の削除では取り除かれた行、貼り付けでは書いた行）。適用は
     /// `edit` 層の [`EditApply::apply_history`] が行い、本型は解釈を足さない。
-    pub fn undo(&mut self, doc: &mut Document) -> Result<Option<EditOutcome>, GridError> {
+    pub fn undo(
+        &mut self,
+        doc: &mut Document,
+        order: &RowOrder,
+    ) -> Result<Option<EditOutcome>, GridError> {
         // 位置を動かす**前に**読む（借りはこの呼び出しの間だけであり、適用の結果は命令を
         // 借りない — 適用が終われば借りは切れ、そのあとで位置を動かせる）。
         let Some(command) = self.stack.peek_undo() else {
             return Ok(None);
         };
-        let outcome = self.apply.apply_history(doc, command)?;
+        let outcome = self.apply.apply_history(doc, command, order)?;
         // 適用が成功したので位置を進める（`peek_undo` が読んだ対と同じものである）。
         self.stack.undo();
         Ok(Some(outcome))
@@ -389,11 +394,15 @@ impl<'a> UndoRedo<'a> {
     /// [`UndoStack::push`]）。
     ///
     /// 適用が失敗したときは**位置を動かさない**（[`UndoRedo::undo`] と同じ規律）。
-    pub fn redo(&mut self, doc: &mut Document) -> Result<Option<EditOutcome>, GridError> {
+    pub fn redo(
+        &mut self,
+        doc: &mut Document,
+        order: &RowOrder,
+    ) -> Result<Option<EditOutcome>, GridError> {
         let Some(command) = self.stack.peek_redo() else {
             return Ok(None);
         };
-        let outcome = self.apply.apply_history(doc, command)?;
+        let outcome = self.apply.apply_history(doc, command, order)?;
         self.stack.redo();
         Ok(Some(outcome))
     }

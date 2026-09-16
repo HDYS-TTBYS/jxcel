@@ -67,7 +67,7 @@ use common::sample::sample;
 use common::sample::{SampleEditParts, SampleOptions};
 use data_grid::{
     display_text, CellAddress, CoercionNotice, ColumnIndex, EditApply, EditCommand,
-    EditSchemaQuery, GridError, SchemaEngineQuery,
+    EditSchemaQuery, GridError, RowOrder, SchemaEngineQuery,
 };
 use document_format::{CellValue, Document, RowId, SchemaPart, SheetId};
 use schema_engine::{
@@ -387,7 +387,11 @@ fn a_single_cell_edit_judges_once_and_revalidates_only_the_edited_column() {
     let (mut apply, calls) = counting(sheet, fixture.plan.clone());
 
     let outcome = apply
-        .apply(fixture.document_mut(), set_one(row, column, "7"))
+        .apply(
+            fixture.document_mut(),
+            set_one(row, column, "7"),
+            &RowOrder::default(),
+        )
         .expect("適合する値の書き込みは成功する");
 
     // **記録の全体**が「判定 1 回 + 当該列だけの再検証 1 回」である（全件検証は現れない）。
@@ -420,7 +424,11 @@ fn the_call_shape_of_a_single_cell_edit_does_not_depend_on_the_row_count() {
         let (mut apply, calls) = counting(sheet, fixture.plan.clone());
 
         apply
-            .apply(fixture.document_mut(), set_one(row, 1, "7"))
+            .apply(
+                fixture.document_mut(),
+                set_one(row, 1, "7"),
+                &RowOrder::default(),
+            )
             .expect("適合する値の書き込みは成功する");
 
         let log = recorded(&calls);
@@ -467,7 +475,11 @@ fn a_value_that_does_not_fit_is_kept_in_the_document_and_reported() {
     let (mut apply, calls) = counting(sheet, fixture.plan.clone());
 
     let outcome = apply
-        .apply(fixture.document_mut(), set_one(row, column, "yes"))
+        .apply(
+            fixture.document_mut(),
+            set_one(row, column, "yes"),
+            &RowOrder::default(),
+        )
         .expect("編集経路は拒否しない（違反があっても成功する）");
 
     assert_eq!(vec![row], outcome.affected, "影響を受けた行");
@@ -527,7 +539,11 @@ fn clearing_a_required_cell_keeps_the_absence_and_reports_it() {
 
     let mut apply = EditApply::new(sheet, fixture.plan.clone());
     let outcome = apply
-        .apply(fixture.document_mut(), set_one(row, column, ""))
+        .apply(
+            fixture.document_mut(),
+            set_one(row, column, ""),
+            &RowOrder::default(),
+        )
         .expect("空の文字列の書き込みも成功する");
 
     assert_eq!(1, outcome.violation_total, "必須の列の値なしは違反");
@@ -556,7 +572,11 @@ fn a_coerced_value_is_reported_with_its_before_and_after() {
     let (mut apply, _calls) = counting(sheet, fixture.plan.clone());
 
     let outcome = apply
-        .apply(fixture.document_mut(), set_one(row, column, "42"))
+        .apply(
+            fixture.document_mut(),
+            set_one(row, column, "42"),
+            &RowOrder::default(),
+        )
         .expect("変換を伴う書き込みも成功する");
 
     assert_eq!(vec![row], outcome.affected, "影響を受けた行");
@@ -600,7 +620,11 @@ fn clearing_an_optional_cell_writes_the_absence_of_a_value() {
 
     // まず値を入れ、次に消す（消す前の状態が値なしでないことを先に確かめる）。
     apply
-        .apply(fixture.document_mut(), set_one(row, column, "7.5"))
+        .apply(
+            fixture.document_mut(),
+            set_one(row, column, "7.5"),
+            &RowOrder::default(),
+        )
         .expect("適合する値の書き込みは成功する");
     assert_ne!(
         CellValue::Null,
@@ -609,7 +633,11 @@ fn clearing_an_optional_cell_writes_the_absence_of_a_value() {
     );
 
     let outcome = apply
-        .apply(fixture.document_mut(), set_one(row, column, ""))
+        .apply(
+            fixture.document_mut(),
+            set_one(row, column, ""),
+            &RowOrder::default(),
+        )
         .expect("値を消す書き込みも成功する");
 
     assert_eq!(
@@ -653,6 +681,7 @@ fn the_same_text_takes_two_different_paths_because_the_columns_differ() {
                     ),
                 ],
             },
+            &RowOrder::default(),
         )
         .expect("どちらの列への書き込みも成功する");
 
@@ -703,7 +732,11 @@ fn an_unknown_row_stops_before_any_write() {
     let before = fixture.snapshot();
 
     let error = apply
-        .apply(fixture.document_mut(), set_one(foreign, 1, "7"))
+        .apply(
+            fixture.document_mut(),
+            set_one(foreign, 1, "7"),
+            &RowOrder::default(),
+        )
         .expect_err("他シートの行への書き込みは失敗する");
 
     assert_eq!(GridError::UnknownRow { row: foreign }, error);
@@ -726,7 +759,11 @@ fn an_out_of_range_column_stops_before_any_write() {
     let before = fixture.snapshot();
 
     let error = apply
-        .apply(fixture.document_mut(), set_one(row, column, "7"))
+        .apply(
+            fixture.document_mut(),
+            set_one(row, column, "7"),
+            &RowOrder::default(),
+        )
         .expect_err("範囲外の列への書き込みは失敗する");
 
     assert_eq!(
@@ -771,6 +808,7 @@ fn a_command_with_one_invalid_cell_writes_nothing() {
                     ),
                 ],
             },
+            &RowOrder::default(),
         )
         .expect_err("1 つでも不正なら失敗する");
 
@@ -813,7 +851,7 @@ fn a_sheet_without_columns_cannot_be_edited() {
         .parse::<RowId>()
         .expect("正準の行識別子が解析できない");
     let error = apply
-        .apply(&mut document, set_one(row, 0, "7"))
+        .apply(&mut document, set_one(row, 0, "7"), &RowOrder::default())
         .expect_err("列 0 本のシートは編集できない");
 
     assert_eq!(GridError::SchemaUnusable { sheet }, error);
@@ -858,7 +896,7 @@ fn a_plan_that_does_not_match_the_sheet_is_unusable() {
     let mut apply = EditApply::new(sheet, mismatched);
     let before = snapshot(&document, sheet);
     let error = apply
-        .apply(&mut document, set_one(row, 0, "1"))
+        .apply(&mut document, set_one(row, 0, "1"), &RowOrder::default())
         .expect_err("列数の食い違う計画は使えない");
 
     assert_eq!(GridError::SchemaUnusable { sheet }, error);
@@ -898,11 +936,15 @@ fn applying_the_same_command_twice_gives_the_same_outcome() {
     let mut apply = EditApply::new(sheet, fixture.plan.clone());
 
     let first = apply
-        .apply(fixture.document_mut(), command.clone())
+        .apply(
+            fixture.document_mut(),
+            command.clone(),
+            &RowOrder::default(),
+        )
         .expect("1 回目の適用は成功する");
     let after_first = fixture.snapshot();
     let second = apply
-        .apply(fixture.document_mut(), command)
+        .apply(fixture.document_mut(), command, &RowOrder::default())
         .expect("2 回目の適用も成功する");
 
     assert_eq!(first, second, "同じ命令の 2 回の適用は同じ結果");
@@ -942,6 +984,7 @@ fn a_repeated_cell_keeps_the_last_text_and_judges_only_that_value() {
                     ),
                 ],
             },
+            &RowOrder::default(),
         )
         .expect("同じセルを 2 度書く命令も成功する");
 
@@ -997,6 +1040,7 @@ fn affected_lists_each_row_once_and_row_count_is_the_count_after_the_edit() {
                     ),
                 ],
             },
+            &RowOrder::default(),
         )
         .expect("3 セルの書き込みは成功する");
 
@@ -1042,6 +1086,7 @@ fn an_empty_command_changes_nothing_and_calls_nothing() {
         .apply(
             fixture.document_mut(),
             EditCommand::SetCells { cells: Vec::new() },
+            &RowOrder::default(),
         )
         .expect("空の命令は成功する");
 
@@ -1113,6 +1158,7 @@ fn the_default_path_produces_the_engines_own_conversions_and_violations() {
                     ),
                 ],
             },
+            &RowOrder::default(),
         )
         .expect("適合しない値があっても成功する");
 
@@ -1167,7 +1213,11 @@ fn the_default_path_agrees_with_an_explicit_schema_engine_query() {
         };
 
         let outcome = apply
-            .apply(fixture.document_mut(), set_one(row, 4, "yes"))
+            .apply(
+                fixture.document_mut(),
+                set_one(row, 4, "yes"),
+                &RowOrder::default(),
+            )
             .expect("適合しない値でも成功する");
 
         structures.push((
@@ -1230,6 +1280,7 @@ fn a_repeated_cell_whose_last_text_is_empty_writes_the_absence_of_a_value() {
                     ),
                 ],
             },
+            &RowOrder::default(),
         )
         .expect("空の文字列で終わる命令も成功する");
 

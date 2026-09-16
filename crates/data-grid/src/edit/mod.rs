@@ -108,28 +108,61 @@
 //! [`EditCommand::DuplicateRows`] は行の集合を変える。**値の判定を要さない**という点で
 //! `SetCells` と性格が異なる（下の「行の構造を変える命令の再検証」）。
 //!
-//! ## 挿入位置は**文書の位置**であり、可視の序数ではない（要件 8.6 の帰結）
+//! ## 行の対象と挿入の位置は**2 つの座標空間**で指せる（タスク 10.4。要件 8.6）
 //!
-//! `at` は [`RowOrdinal`] として運ぶが、**本層はそれを文書の行順に対する位置として読む**
-//! （上流の [`Document::insert_row_at`] が同じ空間の添字を取る）。可視の序数ではない。
+//! [`EditCommand::RemoveRows`] / [`EditCommand::DuplicateRows`] の対象は [`RowTarget`]、
+//! [`EditCommand::InsertRows`] の位置は [`RowAnchor`] が表す。どちらも 2 つの腕を持つ:
 //!
-//! 理由は 3 つある。第 1 に、挿入される行はまだ存在しないため**行の識別子で指せない** —
-//! 編集の宛先（要件 8.6）を識別子で表す規律が、この命令だけは適用できない。第 2 に、
-//! 可視の序数が指すのは**導出された表示の並び**であり、それを与える `RowOrder` は
-//! `view` 層が `&Document` から導く（要件 8.5。順序の導出はドキュメントを変更しない）。
-//! 本層は適用の間 `&mut Document` を握るため、序数を解く手段を持たない — 持てば表示の
-//! 都合（並べ替え・絞り込み）がドキュメントへ書き込む位置を決めることになり、
-//! design.md「表示状態（ドキュメントに保存されない）」に反する。第 3 に、文書の位置は
-//! **まさにこれから変えようとしている構造そのもの**の座標であり、同じ命令を 2 度適用しても
-//! 同じ場所を指す（可視の序数は並べ替えの再計算で動く）。
+//! | 指し方 | 座標空間 | 誰が解くか |
+//! |---|---|---|
+//! | [`RowTarget::Ids`] / [`RowAnchor::Document`] | **文書**（行そのもの・行順の位置） | 解くものが無い |
+//! | [`RowTarget::Ordinals`] / [`RowAnchor::Before`] / [`After`] | **表示**（可視の序数） | 本層が適用の直前に `&RowOrder` で解く |
 //!
-//! したがって**画面の位置に挿入したい呼び出し側が写す** — `RowOrder::row_at` で可視の
-//! 序数から行そのものを得て、その行の文書の位置を渡す。この分担は 3.4 の貼り付けの
-//! 錨（[`CellAddress`] が行の識別子を運ぶ）と同じ規律である: 表示の座標を物理の座標へ
-//! 写すのは表示を持っている側の仕事であり、本層は物理の座標しか受け取らない
+//! **解決は適用の直前で 1 回だけである。**`apply_with_inverse` が呼び出し側（5.2 の
+//! [`GridSession`](crate::GridSession)）から [`RowOrder`] を受け取り、序数を識別子へ、
+//! 「その行の前後」を文書の位置へ写す。解いた後の道は 1 つしか無い — 2 つの腕は同じ集合・
+//! 同じ位置へ着く。
+//!
+//! # なぜ序数の腕が要るのか
+//!
+//! 画面が持っているのは**表示の位置**であり、行の識別子ではない。識別子で指すには画面が
+//! 窓の記憶から識別子を引き集めることになり、**記憶が保っている範囲の外の行は引けない**
+//! （10 万行のシートで 1 画面に収まらない範囲を選ぶと、選択された行の識別子が揃わず操作
+//! そのものができなかった。tasks.md 10.4）。文書の位置へ写す口も境界には無い（窓が運ぶのは
+//! 識別子であって位置ではない）。したがって**可視の並びを持っている本層が解く**。
+//!
+//! **本層が `RowOrder` を導出することはない。**受け取るのは適用の直前の 1 回だけで、順序の
+//! 導出（並べ替え・絞り込み）は `view` 層の [`RowOrder::recompute`] が `&Document` から行う
+//! （要件 8.5）。本層が自分で導出すれば、表示の都合がドキュメントへ書き込む位置を決める
+//! 第 2 の経路になる。
+//!
+//! # 序数は**逆命令に残さない**（要件 9.2）
+//!
+//! 履歴へ積む材料は適用の時に読む（要件 9.1）ため、序数をそのまま積むこともできてしまうが、
+//! **積んではならない** — 取り消しの時点では索引が変わっており（並べ替え・絞り込み・行数の
+//! 変化）、同じ序数が**別の行**を指す。したがって [`HistoryCommand::Edit`] へ包む命令も
+//! 復元の材料も、**識別子へ解いた後の形**（[`RowTarget::Ids`]・[`RowAnchor::Document`]）だけを
+//! 運ぶ（`tests/undo_stack.rs` と `src-tauri/src/commands/grid.rs` の検査が、取り消しと
+//! やり直しの間で表示の指定を変えても**同じ行**が戻ることを固定する）。
+//!
+//! ## 挿入される行は識別子で指せない（[`RowAnchor`] を持つ理由）
+//!
+//! 追加する行はまだ存在しないため、**行の識別子で指せない**（編集の宛先を識別子で表す
+//! 要件 8.6 の規律は、この命令だけは適用できない）。可視の序数の腕はその代わりであり、
+//! 「対象の行の前後」として指す（[`RowAnchor::Before`] / [`After`]）。文書の位置を直接
+//! 指す [`RowAnchor::Document`] は、呼び出し側が既に文書の座標を持っているときの腕である
 //! （`tests/edit_rows.rs` の
 //! `an_insert_position_is_a_document_position_and_the_caller_translates_the_visible_ordinal`
-//! が、2 つの空間が食い違う並べ替えの下で両方の渡し方を固定する）。
+//! が `Document` の腕の空間を、`an_insert_anchor_naming_a_visible_ordinal_lands_next_to_the_displayed_row`
+//! が序数の腕の空間を固定する）。
+//!
+//! ## 範囲外の序数は判別可能な誤りである（部分適用の不在）
+//!
+//! 可視行の範囲を超える序数（区間の終端が可視行数を超える・序数に可視の行が無い）は
+//! [`GridError::SpanOutOfRange`] であり、**1 行も変えない**。窓の要求と違い**切り落とさない** —
+//! 窓は表示範囲の端で必ず短くなるが、編集は利用者が名指した集合であり、静かに別の集合を
+//! 消してはならない（`tests/edit_rows.rs` の
+//! `a_visible_ordinal_range_removes_and_duplicates_only_the_displayed_rows`）。
 //!
 //! ## 既定値の適用（要件 6.1）
 //!
@@ -197,6 +230,7 @@
 //! |---|---|
 //! | 要求された行が対象シートに属さない | [`GridError::UnknownRow`] |
 //! | 挿入位置が行数を超える | [`GridError::SpanOutOfRange`]（`span` は要求された位置と件数、`visible` は適用前の行数） |
+//! | 可視の序数が可視行の外を指す（対象の区間・挿入の前後） | [`GridError::SpanOutOfRange`]（`span` は要求された序数と件数、`visible` は可視行数。`span` は行数ではなく**可視行数**と比べる） |
 //! | 計画が列を持たない・対象シートと食い違う | [`GridError::SchemaUnusable`] |
 //!
 //! どちらの経路でも**1 行も増減せず、縫い目も 1 回も呼ばれない**（再検証は構造を変えた後に
@@ -495,7 +529,7 @@ use schema_engine::coerce::coerce;
 
 use crate::error::GridError;
 use crate::types::{CellAddress, RowOrdinal, RowSpan};
-use crate::view::display_text;
+use crate::view::{RowOrder, display_text};
 
 /// 行データの wire 形式（NDJSON）の予約キー（行識別子を 26 文字 ULID テキストで持つ）。
 ///
@@ -507,6 +541,152 @@ const ROW_ID_KEY: &str = "$id";
 pub mod paste;
 
 use self::paste::PasteCodec;
+
+/// 行の集合（削除・複製の対象）の指し方（タスク 10.4。要件 6.2, 8.6）。
+///
+/// 2 つの指し方は**同じ集合を別の座標空間で名指す**。
+///
+/// | 腕 | 座標空間 | 適用のときに何が要るか |
+/// |---|---|---|
+/// | [`RowTarget::Ids`] | **文書の同一性**（行そのもの） | 何も要らない（そのまま使える） |
+/// | [`RowTarget::Ordinals`] | **表示の序数**（可視の何番目か。半開区間） | [`RowOrder`]（可視の並び） |
+///
+/// # なぜ序数の腕が要るのか
+///
+/// 画面が持っているのは**表示の位置**である（利用者が指したのは表の中の範囲であり、行の
+/// 識別子ではない）。識別子で指すには画面が `WindowCache` から識別子を引き集める必要があり、
+/// **窓の記憶が保っている範囲の外の行は引けない**（10 万行のシートで 1 画面に収まらない範囲を
+/// 選ぶと、選択された行の識別子が揃わず操作そのものができなかった。tasks.md 10.4）。
+/// 可視の序数で指せば、**解決は可視の並びを持っている側（本層の適用の直前）が 1 回だけ**行う。
+///
+/// # 解くのは適用の直前である
+///
+/// 適用の前に解く（[`EditApply::apply_with_inverse`] が `&RowOrder` を受けて解く）。索引が
+/// 変わると可視の序数は別の行を指すため、**適用の後や履歴に積むときに解いてはならない**
+/// （だから逆命令は識別子を運ぶ。モジュール docs「逆命令は識別子を運ぶ」）。
+///
+/// 序数の区間が可視行の範囲を超えるときは [`GridError::SpanOutOfRange`] であり、
+/// **1 行も変えない**（`RowSpan` の契約と同じ規律。`tests/edit_rows.rs`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowTarget {
+    /// 行の識別子の一覧（**表示の指定に依らない**。従来の意味）。
+    ///
+    /// 対象シートに属さない行が 1 つでもあれば [`GridError::UnknownRow`]（1 行も変えない）。
+    Ids(Vec<RowId>),
+    /// **可視の序数の半開区間** `from ..< from + count`（適用の直前に識別子へ解く）。
+    ///
+    /// `count == 0` は空の集合であり、位置を見ない（空の命令は何も変えない。
+    /// モジュール docs「空の命令」）。
+    Ordinals {
+        /// 先頭の可視行の序数（含む）。
+        from: usize,
+        /// 区間の行数。
+        count: usize,
+    },
+}
+
+impl RowTarget {
+    /// 対象の行を**識別子の一覧**へ解く（[`EditApply::apply_with_inverse`] の適用の直前に
+    /// 1 回だけ呼ぶ）。
+    ///
+    /// [`RowTarget::Ids`] はそのまま返す（解くものが無い）。[`RowTarget::Ordinals`] は
+    /// `order` の可視の並びから切り出す。**区間が可視行の範囲を超えていれば
+    /// [`GridError::SpanOutOfRange`]**（切り落とさない — 窓の要求と違い、編集は利用者が
+    /// 名指した集合であり、静かに別の集合を消してはならない）。
+    fn resolve(&self, order: &RowOrder) -> Result<Vec<RowId>, GridError> {
+        match self {
+            RowTarget::Ids(rows) => Ok(rows.clone()),
+            RowTarget::Ordinals { from, count } => {
+                // 空の集合は位置を見ない（空の命令は何も変えず、縫い目も呼ばない）。
+                if *count == 0 {
+                    return Ok(Vec::new());
+                }
+                let end = from.saturating_add(*count);
+                if end > order.len() {
+                    return Err(GridError::SpanOutOfRange {
+                        span: RowSpan::new(RowOrdinal::new(*from), *count),
+                        visible: order.len(),
+                    });
+                }
+                Ok(order
+                    .span(RowSpan::new(RowOrdinal::new(*from), *count))
+                    .to_vec())
+            }
+        }
+    }
+}
+
+/// 挿入の位置の指し方（タスク 10.4。要件 6.1, 8.6）。
+///
+/// | 腕 | 座標空間 | 解いた結果 |
+/// |---|---|---|
+/// | [`RowAnchor::Document`] | **文書の行順に対する位置** | その位置（従来の意味） |
+/// | [`RowAnchor::Before`] | **可視の序数** | その序数の行の**直前**の文書の位置 |
+/// | [`RowAnchor::After`] | **可視の序数** | その序数の行の**直後**の文書の位置 |
+/// | [`RowAnchor::End`] | 無し（文書の末尾） | 適用前の行数 |
+///
+/// # なぜ可視の序数の腕が要るのか
+///
+/// 並べ替えや絞り込みが効いている間、可視の序数と文書の位置は食い違う。画面が文書の位置へ
+/// 写すには、可視の行の文書の位置を知る必要があり、**それは境界の 6 本のコマンドに無い**
+/// （窓が運ぶのは識別子であって文書の位置ではない）。写せないことを理由に操作を拒む代わりに、
+/// **画面が指した位置（可視の序数）をそのまま送り、写すのは可視の並びを持っている本層**に
+/// する（tasks.md 10.4。`src/features/grid/rowOps.ts`）。
+///
+/// 可視の序数の行が存在しないとき（`ordinal >= 可視行数`）は [`GridError::SpanOutOfRange`]
+/// であり、**1 行も変えない**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowAnchor {
+    /// 文書の行順に対する位置（`at == 行数` は末尾への追加）。
+    Document(RowOrdinal),
+    /// 可視の序数 `ordinal` の行の**直前**。
+    Before {
+        /// 対象の行の可視の序数。
+        ordinal: usize,
+    },
+    /// 可視の序数 `ordinal` の行の**直後**。
+    After {
+        /// 対象の行の可視の序数。
+        ordinal: usize,
+    },
+    /// 文書の**末尾**（可視の最後の行ではない）。
+    End,
+}
+
+impl RowAnchor {
+    /// 挿入の位置を**文書の位置**へ解く（[`EditApply::insert_rows_with_inverse`] の適用の直前に
+    /// 1 回だけ呼ぶ）。
+    ///
+    /// `rows` は対象シートの行の並び（**文書の位置**を引くための読み口）である。行そのものから
+    /// 位置へ写すのは文書の側の仕事であり、本層はその並びを 1 度だけ走査する（索引を作らない —
+    /// 錨は 1 つしか無い）。
+    ///
+    /// [`RowAnchor::Document`] はそのまま返す（解くものが無い）。可視の序数が可視行の範囲外なら
+    /// [`GridError::SpanOutOfRange`]、序数が指す行が文書に無ければ [`GridError::UnknownRow`]
+    /// である（どちらも 1 行も挿入しない）。
+    fn resolve(self, order: &RowOrder, rows: &[Row]) -> Result<RowOrdinal, GridError> {
+        match self {
+            RowAnchor::Document(position) => Ok(position),
+            RowAnchor::End => Ok(RowOrdinal::new(rows.len())),
+            RowAnchor::Before { ordinal } | RowAnchor::After { ordinal } => {
+                let row =
+                    order
+                        .row_at(RowOrdinal::new(ordinal))
+                        .ok_or(GridError::SpanOutOfRange {
+                            span: RowSpan::new(RowOrdinal::new(ordinal), 1),
+                            visible: order.len(),
+                        })?;
+                let position = rows
+                    .iter()
+                    .position(|candidate| candidate.id() == row)
+                    .ok_or(GridError::UnknownRow { row })?;
+                // 「直後」はその行の次の位置である（`After` と `Before` の違いはここだけである）。
+                let shift = usize::from(matches!(self, RowAnchor::After { .. }));
+                Ok(RowOrdinal::new(position + shift))
+            }
+        }
+    }
+}
 
 /// 編集命令（design.md「EditApply」の Service Interface。要件 3.3, 5.5, 6.1, 6.2, 6.3, 7.3,
 /// 7.4, 8.9）。
@@ -556,30 +736,38 @@ pub enum EditCommand {
         json: String,
     },
 
-    /// 指定した**文書の位置**へ、値を持たない行を `count` 行足し、**宣言の既定値**を書く
+    /// 指定した**位置**へ、値を持たない行を `count` 行足し、**宣言の既定値**を書く
     /// （要件 6.1）。
     ///
-    /// `at` は**可視の序数ではなく、文書の行順に対する位置**である（`at == 行数` は末尾への
-    /// 追加。モジュール docs「挿入位置は文書の位置であり、可視の序数ではない」）。画面の位置に
-    /// 挿入したい呼び出し側は `RowOrder` で行そのものへ写してからその行の文書の位置を渡す。
+    /// `at` は**文書の位置**（[`RowAnchor::Document`]）でも、**可視の序数**を指す
+    /// [`RowAnchor::Before`] / [`RowAnchor::After`] でも、文書の末尾（[`RowAnchor::End`]）でも
+    /// よい。可視の序数は適用の直前に [`RowAnchor::resolve`] が文書の位置へ解く — **画面は
+    /// 文書の位置を知らなくてよい**（並べ替え・絞り込みが効いていても送れる。タスク 10.4）。
     /// 追加された行の値は [`CompiledSchema::default_row`] そのものであり、**値を運ばない**
     /// （打たれた文字ではないため判定を通さない）。
     InsertRows {
-        /// 挿入する**文書の位置**（適用前の行順に対する添字。行数までの値が妥当）。
-        at: RowOrdinal,
+        /// 挿入する位置。行数までの文書の位置と、可視の序数（前後）と、末尾が妥当である。
+        at: RowAnchor,
         /// 挿入する行数。`0` は何も変えない。
         count: usize,
     },
-    /// 選択された複数の行を**1 回の操作**として取り除く（要件 6.2）。
+    /// 指定した行を**1 回の操作**として取り除く（要件 6.2）。
+    ///
+    /// 対象は**識別子の一覧**（[`RowTarget::Ids`]）でも、**可視の序数の区間**
+    /// （[`RowTarget::Ordinals`]）でもよい。後者は適用の直前に [`RowTarget::resolve`] が
+    /// 識別子へ解く（動作は同じである — 解いた後の道は 1 つしか無い）。
     ///
     /// 同じ行が 2 度現れる要求は 1 回へ畳む。`affected` は取り除かれた行を**シート順**に持つ
     /// （要求の並びに依らない）。対象シートに属さない行が 1 つでもあれば
     /// [`GridError::UnknownRow`] を返し、**1 行も取り除かない**。
     RemoveRows {
         /// 取り除く行。空なら何も変えない。
-        rows: Vec<RowId>,
+        target: RowTarget,
     },
-    /// 選択された行と**同じ値を持つ行**を末尾へ足す（要件 6.3, 6.4）。
+    /// 指定した行と**同じ値を持つ行**を末尾へ足す（要件 6.3, 6.4）。
+    ///
+    /// 対象の指し方は [`EditCommand::RemoveRows`] と同じ 2 つである
+    /// （[`RowTarget::Ordinals`] は適用の直前に識別子へ解く）。
     ///
     /// 値は元の行の値の並びをそのまま写す（列数に満たない行も埋めない。モジュール docs
     /// 「複製は末尾へ足し、値をそのまま写す」）。同じ行が 2 度現れる要求は 1 回へ畳む。
@@ -587,7 +775,7 @@ pub enum EditCommand {
     /// （要件 6.4）。
     DuplicateRows {
         /// 複製する元の行。空なら何も変えない。
-        rows: Vec<RowId>,
+        target: RowTarget,
     },
 
     /// 表形式テキストを、錨のセルから始まる矩形として貼り付ける（要件 7.3, 7.4, 7.5, 7.7,
@@ -990,11 +1178,12 @@ impl EditApply {
         &mut self,
         doc: &mut Document,
         command: EditCommand,
+        order: &RowOrder,
     ) -> Result<EditOutcome, GridError> {
         // 本体は 1 つである（[`EditApply::apply_with_inverse`]）。本経路は履歴へ積まないため、
         // 適用時に組んだ対を捨てるだけである — 対を組む作業は「材料を読む」ことであり、
         // 読む場所は適用の本体の中（書き込みの前）にしか無い。
-        self.apply_with_inverse(doc, command)
+        self.apply_with_inverse(doc, command, order)
             .map(|(outcome, _)| outcome)
     }
 
@@ -1014,13 +1203,18 @@ impl EditApply {
         &mut self,
         doc: &mut Document,
         command: EditCommand,
+        order: &RowOrder,
     ) -> Result<(EditOutcome, Option<HistoryPair>), GridError> {
         match command {
             EditCommand::SetCells { cells } => self.set_cells_with_inverse(doc, cells),
             EditCommand::SetNested { cell, json } => self.set_nested_with_inverse(doc, cell, json),
-            EditCommand::InsertRows { at, count } => self.insert_rows_with_inverse(doc, at, count),
-            EditCommand::RemoveRows { rows } => self.remove_rows_with_inverse(doc, rows),
-            EditCommand::DuplicateRows { rows } => self.duplicate_rows_with_inverse(doc, rows),
+            EditCommand::InsertRows { at, count } => {
+                self.insert_rows_with_inverse(doc, at, count, order)
+            }
+            EditCommand::RemoveRows { target } => self.remove_rows_with_inverse(doc, target, order),
+            EditCommand::DuplicateRows { target } => {
+                self.duplicate_rows_with_inverse(doc, target, order)
+            }
             EditCommand::PasteRange { anchor, rows, text } => {
                 self.paste_range_with_inverse(doc, anchor, rows, text)
             }
@@ -1067,12 +1261,13 @@ impl EditApply {
         &mut self,
         doc: &mut Document,
         command: &HistoryCommand,
+        order: &RowOrder,
     ) -> Result<EditOutcome, GridError> {
         match command {
-            HistoryCommand::Edit(edit) => self.apply(doc, edit.clone()),
+            HistoryCommand::Edit(edit) => self.apply(doc, edit.clone(), order),
             HistoryCommand::RestoreValues { sheet, rows } => self.restore_values(doc, *sheet, rows),
             HistoryCommand::RestoreRows { sheet, rows } => self.restore_rows(doc, *sheet, rows),
-            HistoryCommand::Composite(parts) => self.apply_parts(doc, parts),
+            HistoryCommand::Composite(parts) => self.apply_parts(doc, parts, order),
         }
     }
 
@@ -1168,13 +1363,21 @@ impl EditApply {
     fn insert_rows_with_inverse(
         &mut self,
         doc: &mut Document,
-        at: RowOrdinal,
+        at: RowAnchor,
         count: usize,
+        order: &RowOrder,
     ) -> Result<(EditOutcome, Option<HistoryPair>), GridError> {
         self.usable_columns(doc)?;
         if count == 0 {
             return Ok((self.unchanged(doc)?, None));
         }
+        // **解決はここ 1 回だけである**（タスク 10.4）。可視の序数（`Before` / `After`）は
+        // いまの可視の並びで文書の位置へ解く — 適用の後には解けない（索引が変われば別の行を
+        // 指す）。`Document` の腕はそのまま通る（解くものが無い）。
+        let at = {
+            let sheet = self.target_sheet(doc)?;
+            at.resolve(order, sheet.rows())?
+        };
         // 挿入位置の事前検査（`at == 行数` は末尾への追加として妥当）。
         let rows_before = self.target_sheet(doc)?.rows().len();
         if at.get() > rows_before {
@@ -1213,7 +1416,9 @@ impl EditApply {
         Ok((
             outcome,
             Some(HistoryPair {
-                inverse: HistoryCommand::Edit(EditCommand::RemoveRows { rows: inserted }),
+                inverse: HistoryCommand::Edit(EditCommand::RemoveRows {
+                    target: RowTarget::Ids(inserted),
+                }),
                 redo: HistoryCommand::RestoreRows {
                     sheet: self.sheet,
                     rows: restored,
@@ -1232,13 +1437,18 @@ impl EditApply {
     /// 「削除は 1 回の操作である」）。
     ///
     /// やり直しは**同じ識別子をもう一度取り除く** — 差し戻しで識別子が元へ戻っているため、
-    /// そのまま使える。
+    /// そのまま使える。**逆命令もやり直しも識別子を運ぶ**（可視の序数は残さない。索引が
+    /// 変われば別の行を指すためである。タスク 10.4）。
     fn remove_rows_with_inverse(
         &mut self,
         doc: &mut Document,
-        rows: Vec<RowId>,
+        target: RowTarget,
+        order: &RowOrder,
     ) -> Result<(EditOutcome, Option<HistoryPair>), GridError> {
         self.usable_columns(doc)?;
+        // **解決はここ 1 回だけである**（タスク 10.4）。可視の序数の区間は、いまの可視の並びで
+        // 識別子へ解く（範囲外なら [`GridError::SpanOutOfRange`] であり、1 行も変えない）。
+        let rows = target.resolve(order)?;
         if rows.is_empty() {
             return Ok((self.unchanged(doc)?, None));
         }
@@ -1291,7 +1501,9 @@ impl EditApply {
                     sheet: self.sheet,
                     rows: materials,
                 },
-                redo: HistoryCommand::Edit(EditCommand::RemoveRows { rows: affected }),
+                redo: HistoryCommand::Edit(EditCommand::RemoveRows {
+                    target: RowTarget::Ids(affected),
+                }),
             }),
         ))
     }
@@ -1306,9 +1518,12 @@ impl EditApply {
     fn duplicate_rows_with_inverse(
         &mut self,
         doc: &mut Document,
-        rows: Vec<RowId>,
+        target: RowTarget,
+        order: &RowOrder,
     ) -> Result<(EditOutcome, Option<HistoryPair>), GridError> {
         self.usable_columns(doc)?;
+        // **解決はここ 1 回だけである**（タスク 10.4。`RemoveRows` と同じ規律）。
+        let rows = target.resolve(order)?;
         if rows.is_empty() {
             return Ok((self.unchanged(doc)?, None));
         }
@@ -1366,7 +1581,9 @@ impl EditApply {
         Ok((
             outcome,
             Some(HistoryPair {
-                inverse: HistoryCommand::Edit(EditCommand::RemoveRows { rows: copies }),
+                inverse: HistoryCommand::Edit(EditCommand::RemoveRows {
+                    target: RowTarget::Ids(copies),
+                }),
                 redo: HistoryCommand::RestoreRows {
                     sheet: self.sheet,
                     rows: restored,
@@ -1630,7 +1847,7 @@ impl EditApply {
         }
         if !appended_rows.is_empty() {
             parts.push(HistoryCommand::Edit(EditCommand::RemoveRows {
-                rows: appended_rows.to_vec(),
+                target: RowTarget::Ids(appended_rows.to_vec()),
             }));
         }
         let inverse = match parts.len() {
@@ -2221,6 +2438,7 @@ impl EditApply {
         &mut self,
         doc: &mut Document,
         parts: &[HistoryCommand],
+        order: &RowOrder,
     ) -> Result<EditOutcome, GridError> {
         // 事前検査は**部分の適用より先**である（1 つでも適用してから拒むと、その分が
         // 文書に残る — 成功した部分は巻き戻せない）。
@@ -2228,7 +2446,7 @@ impl EditApply {
         let sheet = self.sheet;
         let mut affected: Vec<RowId> = Vec::new();
         for part in parts {
-            let outcome = self.apply_history(doc, part)?;
+            let outcome = self.apply_history(doc, part, order)?;
             affected.extend(outcome.affected);
         }
         // 同じ行が 2 度現れる合成（値の復元と行の削除が同じ行を指す等）は 1 回へ畳む

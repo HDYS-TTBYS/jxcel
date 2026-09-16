@@ -329,7 +329,7 @@ stateDiagram-v2
 | 4.5 | 入れ子の内側の違反位置 | WindowCodec, NestedInspector | `Violation.path` の写し | — |
 | 5.1, 5.2, 5.3, 5.4, 5.6 | 入れ子の展開・折りたたみ・深さの上限・要素数 | ViewState, GridSession, GridCommands, GridScreen | `ViewState.expansion`, `MAX_EXPANSION_DEPTH`, `GridViewResponse.columns`（導出後の構成）, `ColumnSpace`（表示の位置 → 文書の列） | — |
 | 5.5, 5.7 | 入れ子の詳細表示とその中の編集 | NestedInspector, EditApply | `EditCommand::SetNested` | 編集の適用と判定 |
-| 6.1, 6.2, 6.3, 6.4 | 行の追加・削除・複製と一意違反 | EditApply, document-format の 3 メソッド, GridScreen（`rowOps.ts`） | `EditCommand::InsertRows/RemoveRows/DuplicateRows`, `GridClient.applyEdit` | 編集の適用と判定 |
+| 6.1, 6.2, 6.3, 6.4 | 行の追加・削除・複製と一意違反 | EditApply, document-format の 3 メソッド, GridScreen（`rowOps.ts`） | `EditCommand::InsertRows/RemoveRows/DuplicateRows`, `GridClient.applyEdit`。**対象と位置は `RowTarget` / `RowAnchor` の 2 つの空間で指せる**（10.4 が足した） | 編集の適用と判定 |
 | 6.5 | 大量削除の確認 | GridScreen（`rowOps.ts` の `deleteNeedsConfirmation`） | `RendererSpec.onVisibleSpanChange`（**1 画面に見えている行数**の源） | — |
 | 6.6 | 行操作が取り消しの対象 | UndoStack | `UndoStack.push` | — |
 | 7.1, 7.2 | 範囲の複製と外部への受け渡し | PasteCodec, RendererPort, GridScreen（`clipboard.ts`） | `RendererSpec.onCopy`, `RendererHandle.copySelection`（**8.7 が足した** — 打鍵とメニューの唯一の入口） | — |
@@ -341,7 +341,7 @@ stateDiagram-v2
 | 8.1, 8.2 | 列幅と表示上の列順 | DisplayState | `DisplayState.columnWidths/columnOrder` | — |
 | 8.3, 8.4, 8.7 | 並べ替え・絞り込み・隠れた行数 | RowOrder, GridSession | `set_view`, `GridViewResponse` | — |
 | 8.5 | 保存される順序を変更しない | RowOrder | 表示順は `Document` を書き換えない | — |
-| 8.6, 8.9 | 並べ替え・絞り込み中の編集と貼り付け | RowOrder, EditApply | 表示位置ではなく `RowId` で対象を決める | 編集の適用と判定 |
+| 8.6, 8.9 | 並べ替え・絞り込み中の編集と貼り付け | RowOrder, EditApply | 表示位置ではなく `RowId` で対象を決める。**行の対象と挿入の位置は可視の序数でも指せ、`RowOrder` が適用の直前に解く**（10.4。画面は写像を持たない） | 編集の適用と判定 |
 | 8.8 | 並べ替えの基準列の編集で行が動かない | RowOrder | 順序は明示の指示でのみ再計算する | — |
 | 9.1, 9.2, 9.3, 9.4, 9.5, 9.6 | 取り消しとやり直しの対象・復元・破棄・単位・上限 | UndoStack, UndoRedo, **GridCommands の保持（`SheetEntry`）** | `apply` / `undo` / `redo` が `&mut UndoStack` を受け取る（**10.2 が所有者を `GridSession` から降ろした**）、`push`（上限） | UndoRedo が履歴と `EditApply` を借用で束ねてドキュメントへ適用する。**履歴の所有者はウィンドウの保持であり、シートの切り替えを越えて引き継ぎ、文書が差し替わったら捨てる**（要件 9.5） |
 | 9.7 | 数式とマクロが同じ履歴に加わる | UndoStack | `UndoStack.push` の公開 | — |
@@ -528,6 +528,14 @@ impl RowOrder {
 - `WriteOrigin::Edit` は決して拒否しない（`schema-engine` 要件 6.1）。したがって「編集が失敗して値が戻る」経路は存在しない
 - 1 セルの編集では `validate_columns` を**当該列に限定して**呼ぶ。全件検証は行わない（要件 11.4）
 - 行の追加は `CompiledSchema::default_row()` を使う（要件 6.1）
+- **行の対象と挿入の位置の解決は、適用の直前で 1 回だけ行う**（10.4 が決めた所有者）。
+  `EditApply::apply` / `apply_with_inverse` / `apply_history` は `&RowOrder` を受け取り、
+  `RowTarget::Ordinals` を識別子へ、`RowAnchor::Before` / `After` を文書の位置へ解く。
+  `RowOrder` を持つのは `GridSession`（`api.rs`）だけであるため、**画面も適応層も写像を
+  持たない**（写しが 2 つあれば、並べ替え・絞り込みの下で食い違う。要件 8.6）。
+  解いた後の道は 1 つであり、`Ids` / `Document` の腕はそのまま通る。
+  **逆命令とやり直しの命令は識別子（`Ids`）だけを運ぶ** — 取り消しの時点では可視の序数が
+  別の行を指すためである（索引が変わるたびに `RowOrder` は別の行へ写す）
 - **履歴の合成（`HistoryCommand::Composite`。複数の書き込みを連ねる唯一の経路）は、適用の
   前にすべての部分が名乗るシートを照合する**（`EditApply::ensure_parts_share_target`。
   10.2 の 2 度目のレビューが実測した欠陥）。1 つでも適用先（`self.sheet`）と食い違えば
@@ -542,10 +550,32 @@ impl RowOrder {
 pub enum EditCommand {
     SetCells { cells: Vec<(CellAddress, String)> },
     SetNested { cell: CellAddress, json: String },
-    InsertRows { at: RowOrdinal, count: usize },
-    RemoveRows { rows: Vec<RowId> },
-    DuplicateRows { rows: Vec<RowId> },
+    InsertRows { at: RowAnchor, count: usize },
+    RemoveRows { target: RowTarget },
+    DuplicateRows { target: RowTarget },
     PasteRange { anchor: CellAddress, text: String },
+}
+
+/// 10.4 が足した: 行の集合（削除・複製の対象）の指し方。
+///
+/// `Ids` は**文書の同一性**（表示の指定に依らない）、`Ordinals` は**可視の序数の半開区間**で
+/// ある。後者は適用の直前に `RowOrder` で識別子へ解く。範囲外は
+/// `GridError::SpanOutOfRange` であり、**1 行も変えない**。
+pub enum RowTarget {
+    Ids(Vec<RowId>),
+    Ordinals { from: usize, count: usize },
+}
+
+/// 10.4 が足した: 挿入の位置の指し方。
+///
+/// `Document` は**文書の行順に対する位置**（従来の意味。`at == 行数` は末尾への追加）、
+/// `Before` / `After` は**可視の序数**（その行の直前・直後）、`End` は**文書の末尾**である。
+/// 可視の序数は適用の直前に解く（存在しない序数は `GridError::SpanOutOfRange`）。
+pub enum RowAnchor {
+    Document(RowOrdinal),
+    Before { ordinal: usize },
+    After { ordinal: usize },
+    End,
 }
 
 pub struct EditOutcome {
@@ -757,6 +787,7 @@ impl<'a> UndoRedo<'a> {
 | `GridSheetSummary`（列の構成とシートの行数） | `ColumnLayout` とシートの行数 |
 | `GridViewSpec` / `GridSortKey` / `GridFilterSpec` / `GridExpansionState` | `ViewSpec` / `SortKey` / `FilterSpec` / `ExpansionState` |
 | `GridEditCommand` / `GridCellEdit` / `GridCellAddress` | `EditCommand` / （`SetCells` の 2 つ組） / `CellAddress` |
+| `GridRowTarget` / `GridRowAnchor`（**10.4 が足した**） | `RowTarget` / `RowAnchor`（行の対象と挿入の位置の 2 つの空間。要件 6.1、6.2、8.6） |
 | `GridEditOutcome` / `GridCoercionNotice` | `EditOutcome` / `CoercionNotice` |
 | `GridViolationLocation` | `Violation` の位置（行・列・内側の経路） |
 | `ColumnChoice` / `ColumnMemberDescriptor`（**10.3 が足した**） | `ColumnDeclaration.choices` / `LayoutMember`（宣言の材料。要件 3.2、3.7、3.8、5.5、10.1、10.4） |
@@ -1634,7 +1665,7 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 
 | 論点 | 決定 | 根拠 |
 |---|---|---|
-| **挿入の位置の座標空間**（要件 8.6 の取り違え） | `InsertRows.at` は**文書の位置**である。可視の序数をそのまま渡せるのは**並べ替えも絞り込みも無いとき**だけであり（`insertPositionIsDocumentOrder`。入れ子の展開は**列**の話なので影響しない）、効いていれば**送らずに理由を提示する** | 可視の序数から文書の位置へ写す口が**境界の 6 本のコマンドに無い**（窓が運ぶのは行の識別子であって文書の位置ではない）。一致を仮定して送ると、並べ替えでは別の行の位置へ、絞り込みでは隠れた行を数えた位置へ足すことになる。**推測した位置へ足さない**（`./cellEdit` の「引けなければ送らない」と同じ規律）。8.8 が並べ替え・絞り込みを結線するときに、写す口（`RowOrder` 側の 1 本）をここへ足す — **8.8 は足さなかった**（`hasRowRestriction` が真なら送らない側のままにする。下の「8.8 が確定させたもの」） |
+| **行の対象と挿入の位置の座標空間**（要件 8.6 の取り違え。**10.4 が閉じた**） | 画面は**可視の序数だけ**を送る（削除・複製は `GridRowTarget::Ordinals`、挿入は `GridRowAnchor::Before` / `End`）。文書の位置へ解くのは**ドメイン（適用の直前）**であり、`RowOrder` を持つ `GridSession` だけが写す。**写せないことを理由に断る経路は無い** | 画面が指せるのは表示の位置だけであり、境界に写す口は無い（窓が運ぶのは行の識別子であって文書の位置ではない）。**画面に写しを作らない** — 写しが 2 つあれば並べ替え・絞り込みの下で食い違い、利用者が指したのとは別の行を消す。断れば利用者は操作そのものをできない（10 万行で 1 画面に収まらない選択がそれである。tasks.md 10.4）。**一致を仮定して文書の位置を送るのも同じ取り違えである**（`./cellEdit` が識別子を引けないときに送らないのと同じ規律） |
 | 削除・複製の対象（要件 6.2、6.3） | **行の識別子**（`WindowCache.rowId`）で決める。識別子が 1 つでも引けなければ**送らない** | 識別子は表示の並びに依らないので、**並べ替え・絞り込みの下でも成り立つ**（要件 8.6 の「表示位置ではなく `RowId` で対象を決める」）。部分的な対象を送ると、利用者が指した選択とは別のものを消す |
 | **追加した行の既定値**（要件 6.1） | **画面は値を 1 つも作らない。**`InsertRows` は位置と数だけを運び、既定値を書くのは `CompiledSchema::default_row()`（`crates/data-grid/src/edit`）である。画面の責務は、適用のあとに `clear(row_count)` を呼んで**取り直した窓が既定値を運ぶ**ようにすること | 既定値の源が 2 つになると、宣言が既定値を 1 つ持つという事実が 2 箇所へ現れる（`edit` 層のモジュール docs「既定値の適用」） |
 | **削除の確認の閾値**（要件 6.5） | **いま 1 画面に見えている行数**（`RendererSpec.onVisibleSpanChange` が報せる可視の区間の行数）。この数を超えるときだけ、**送らずに**削除する行数を示して尋ねる。**知らないうちは尋ねる** | 仮想化された表に「1 画面」は**描かれている面の高さ**である。先読みの幅（`WINDOW_ROWS` ＝ 256 行）で代用すると、1 画面に収まらない削除が確認を求めなくなる。尋ねないで消した行は戻せないので、判断がつかないときは尋ねる側へ倒す |
@@ -1670,7 +1701,7 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 | **複製のテキストを作る場所** | **画面が作る**（移植口の `onCopy` は文字列を返す口であり、7.2 の実装は素通しである）。値は**窓の記憶の `getCell`**（表示文字列）から読み、規則は `paste.rs` の写しで書く | ドメインは書く側（`PasteCodec::write`）を持つが、**境界の 6 つのコマンドに「範囲を読む」口が無い**ため画面から到達できない（`grep -rn "PasteCodec" crates/data-grid/src/` は `edit` 層の内側と `lib.rs` の再輸出だけを返す）。**写しを消せるのは境界に口を足す仕事であり、所有は 7.1 / 7.2 の実装（境界の側）である** — 8.7（画面）はそれを足せない |
 | テキストの形式（要件 7.2） | 行は LF、列は TAB。区切りと `"` を含む値は囲み、囲みの中の `"` を `""` へ倍にする | 正典は `paste.rs` の module docs「規則（正典）」である。**写しが正典と 1 バイトも違わないことを実測で突き合わせた**（使い捨ての駆動器で `PasteCodec::write` を呼び、標本 7 件の出力を `clipboard.test.ts` の golden として固定。research.md「複製のテキストの往復」） |
 | 複製できないとき | **空文字を返さない。**窓が届いていないセルが 1 つでもあれば拒否し、理由を告知へ出す | 空文字を返せば利用者には「複製できた」と見え、クリップボードは空になる（8.1 が「黙って何もしない実装にしない」と決めたのと同じ理由である）。`RenderCell.loading` を値なしとして書かない（8.6 が識別子の `null` を推測で埋めないのと同じ規律） |
-| **貼り付けの宛先の座標空間**（要件 8.6、8.9） | 錨は**物理の行（`RowId`）と文書の列**（`WindowCache.rowId` / `documentColumn`）。`rows` は**表示されている行の並び**である | **8.6 の「挿入の位置を写せない」制約は掛からない** — 挿入が写せないのは `InsertRows.at` が**文書の位置**（行順の添字）だからであり、貼り付けが渡すのは**行の識別子**と表示の並びそのものである（削除・複製が識別子で対象を決めたのと同じ理由で、並べ替え・絞り込みの下でも成り立つ） |
+| **貼り付けの宛先の座標空間**（要件 8.6、8.9） | 錨は**物理の行（`RowId`）と文書の列**（`WindowCache.rowId` / `documentColumn`）。`rows` は**表示されている行の並び**である | **8.6 の座標空間の取り違えは掛からない** — 貼り付けが渡すのは**行の識別子**と表示の並びそのものであり、可視の序数を文書の位置として読む余地が無い（削除・複製が 10.4 で可視の序数を受け取るようになったのとは別の経路である。あちらはドメインが適用の直前に解く） |
 | 行の補充の境目（要件 7.4） | 渡す並びは「矩形の行数」と「錨から先に残る可視行数」の小さい方である | ドメインは**並びが尽きた**と見て行を末尾へ足す（`paste_range_with_inverse`）。したがって短く渡すと、既存の行へ書かずに**行が増える**（利用者から見れば貼り付けたはずの行が増える）。矩形の行数は `split("
 ")` では出せない（囲みの中の改行は値の文字である）ので、`./clipboard` が行数を数える |
 | 貼り付けのテキスト | **1 バイトも変えない**（改行の正規化も、列の解釈もしない） | 解釈の源は 1 つ（`PasteCodec::parse`）であり、画面が解釈すると 8.9 の「表示の位置ではなく `RowId` で対象を決める」規則が 2 箇所へ現れる |
@@ -1799,7 +1830,7 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 | 並べ替え・絞り込みの後の記憶 | `rowOrderKey`（並べ替えと絞り込みだけから決まる）を組み立ての効果の依存に入れ、**器と窓の記憶を組み直す** | 行の集合・並びが変われば、**序数を鍵とする窓は別の行を指す**。`WindowCache.clear` を別に呼ぶのではなく組み直しが同じことをする（合図が 2 つあると、片方だけが古い記憶を残す） |
 | 隠れた行の数（要件 8.7） | **応答が運んだ数をそのまま状態へ置き、そのまま出す**（`GridViewResponse.hidden_rows`。画面は数え直さない）。絞り込みが 1 つも無ければ名乗らない | 数え直す画面は**応答と食い違う数**を名乗る（`GridScreen.test.ts` が「数え直すと食い違う応答」で固定する）。「0 行」と名乗ると条件が効いているように読めるので、出すものが無ければ出さない |
 | 値だけの編集のあと（要件 8.8） | `needsViewRefresh` は**行数が変わったとき**（かつ行を絞る指定が効いているとき）だけ真になる。したがって**表示の指定を送り直さない** | 送り直せばドメインが順序を導出し直し、**確定と同時に行の表示位置が動く**（要件 8.8 の本体）。絞り込み中に条件へ合う値へ書き換えた行も、数を取り直すと画面から消えてしまう |
-| 挿入の位置を写せない件（8.6 の申し送り） | **写す口を足さない。**`hasRowRestriction` が真なら送らずに理由を提示する（8.6 の判断のまま） | 可視の序数から文書の位置へ写す口は境界に無く、写しを足せば規則が 2 箇所に並ぶ。要件 8.6 は「推測した位置へ足さない」であり、8.8 はこれを変えない |
+| 挿入の位置を写せない件（8.6 の申し送り） | **閉じた**（10.4 が `RowAnchor` / `RowTarget` を足し、画面は可視の序数を送り、**ドメインが適用の直前に解く**）。`hasRowRestriction` は行の増減のあとに表示の指定を当て直すか（要件 8.7 の数の取り直し）だけを見る | 画面に写しを足すのではなく、**解決の所有者をドメインへ置いた** — 可視の並びを持つのは `GridSession` だけであり、写しを境界や画面に置けば規則が 2 箇所に並ぶ（8.8 の当時の判断は「写しを足さない」であり、10.4 はそれを満たしたまま経路を開いた） |
 
 **8.8 が受けた申し送り（7.2 / 7.5 / 8.5 からの分）**: ① 7.2 / 7.5 の「列幅・列順は次の `mount`
 に載る」 — **実施**（`layoutKey` を依存に持つ効果が器・窓の記憶・移植口を組み直す）、② 7.5 の

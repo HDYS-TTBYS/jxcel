@@ -38,7 +38,8 @@
 //!   [`ColumnExpandability`] / [`GridPathSegment`]、シートの要約 [`GridSheetSummary`]、
 //!   表示の指定 [`GridViewSpec`] / [`GridSortKey`] / [`GridFilterSpec`] /
 //!   [`GridExpansionState`]、編集命令 [`GridEditCommand`] / [`GridCellEdit`] /
-//!   [`GridCellAddress`]、判定の要約 [`GridEditOutcome`] / [`GridCoercionNotice`]、
+//!   [`GridCellAddress`] と**行の指し方** [`GridRowTarget`] / [`GridRowAnchor`]（10.4）、
+//!   判定の要約 [`GridEditOutcome`] / [`GridCoercionNotice`]、
 //!   違反の位置 [`GridViolationLocation`]、および型の種別の札 [`TypeKindTag`]）。
 //!   **実体は `data-grid` にあり、ここは境界の形だけを持つ**（`crate::ipc::grid`）
 //! - 6.2: グリッドの 5 つのコマンドの封筒（要求 [`GridOpenRequest`] / [`GridViewRequest`] /
@@ -80,9 +81,9 @@ pub use grid::{
     GridCoercionNotice, GridEditCommand, GridEditOutcome, GridEditRequest, GridEditResponse,
     GridExpansionState, GridFilterSpec, GridHistoryDirection, GridHistoryRequest, GridOpenRequest,
     GridOpenResponse, GridPathSegment, GridReferenceRequest, GridReferenceResponse,
-    GridReferenceRow, GridSearchDirection, GridSheetSummary, GridSortKey, GridViewRequest,
-    GridViewResponse, GridViewSpec, GridViolation, GridViolationLocation, GridViolationRequest,
-    GridViolationResponse, TypeKindTag,
+    GridReferenceRow, GridRowAnchor, GridRowTarget, GridSearchDirection, GridSheetSummary,
+    GridSortKey, GridViewRequest, GridViewResponse, GridViewSpec, GridViolation,
+    GridViolationLocation, GridViolationRequest, GridViolationResponse, TypeKindTag,
 };
 
 /// 境界を越えるすべてのコマンドが返す封筒（要件 4.2、4.4）。
@@ -1088,6 +1089,8 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<GridViewSpec>(&cfg),
         declared::<GridCellAddress>(&cfg),
         declared::<GridCellEdit>(&cfg),
+        declared::<GridRowTarget>(&cfg),
+        declared::<GridRowAnchor>(&cfg),
         declared::<GridEditCommand>(&cfg),
         declared::<GridCoercionNotice>(&cfg),
         declared::<GridViolationLocation>(&cfg),

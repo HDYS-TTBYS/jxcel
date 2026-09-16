@@ -538,6 +538,7 @@ fn a_paste_writes_a_rectangle_of_cells_from_the_anchor() {
                 vec![first, second],
                 "7\t9\n11\t13",
             ),
+            &RowOrder::default(),
         )
         .expect("適合する値の貼り付けは成功する");
 
@@ -619,6 +620,7 @@ fn the_paste_starts_at_the_anchor_within_the_displayed_rows() {
                 vec![before, middle, after],
                 "7\n9",
             ),
+            &RowOrder::default(),
         )
         .expect("貼り付けは成功する");
 
@@ -684,6 +686,7 @@ fn a_filtered_paste_touches_only_the_displayed_rows() {
                 visible.clone(),
                 &text,
             ),
+            &RowOrder::default(),
         )
         .expect("絞り込み中の貼り付けも成功する");
 
@@ -759,6 +762,7 @@ fn a_paste_anchored_on_a_row_that_is_not_displayed_writes_nothing() {
                 visible,
                 "7\n9\n11",
             ),
+            &RowOrder::default(),
         )
         .expect("錨が表示されていない貼り付けも成功する");
 
@@ -804,6 +808,7 @@ fn a_paste_beyond_the_last_row_appends_the_missing_rows() {
                 rows.clone(),
                 "7\n9\n11",
             ),
+            &RowOrder::default(),
         )
         .expect("不足する行を足して貼り付けは完了する");
 
@@ -889,6 +894,7 @@ fn a_paste_with_values_that_do_not_fit_completes_and_reports_them() {
                 rows.clone(),
                 text,
             ),
+            &RowOrder::default(),
         )
         .expect("適合しない値があっても貼り付けは完了する");
 
@@ -943,6 +949,7 @@ fn a_quoted_value_with_a_newline_lands_in_one_cell() {
                 vec![row],
                 "\"1 行目\n2 行目\"",
             ),
+            &RowOrder::default(),
         )
         .expect("囲みを含む貼り付けも成功する");
 
@@ -968,6 +975,7 @@ fn a_short_rectangle_row_leaves_the_other_columns_alone() {
         .apply(
             fixture.document_mut(),
             paste(CellAddress::new(row, ColumnIndex::new(1)), vec![row], "7"),
+            &RowOrder::default(),
         )
         .expect("1 列だけの貼り付けも成功する");
 
@@ -1009,6 +1017,7 @@ fn a_ten_thousand_row_paste_judges_once_and_never_per_row() {
                     rows.clone(),
                     &text,
                 ),
+                &RowOrder::default(),
             )
             .expect("全行への貼り付けは成功する");
 
@@ -1110,7 +1119,7 @@ fn a_broken_paste_writes_nothing_and_calls_no_judgement() {
     for (command, expected) in cases {
         let (mut apply, calls) = counting(sheet, fixture.plan.clone());
         let error = apply
-            .apply(fixture.document_mut(), command)
+            .apply(fixture.document_mut(), command, &RowOrder::default())
             .expect_err("壊れた貼り付けは止まる");
 
         assert_eq!(expected, error, "判別可能な変種として返る");
@@ -1152,6 +1161,7 @@ fn a_paste_needs_a_sheet_with_columns() {
         .apply(
             &mut document,
             paste(CellAddress::new(row, ColumnIndex::new(0)), vec![row], "7"),
+            &RowOrder::default(),
         )
         .expect_err("列 0 本のシートでは貼り付けもできない");
 
@@ -1191,7 +1201,7 @@ fn an_empty_paste_changes_nothing_and_calls_nothing() {
     ] {
         let (mut apply, calls) = counting(sheet, fixture.plan.clone());
         let outcome = apply
-            .apply(fixture.document_mut(), command)
+            .apply(fixture.document_mut(), command, &RowOrder::default())
             .expect("空の貼り付けも成功する");
 
         assert_eq!(
@@ -1221,11 +1231,15 @@ fn pasting_the_same_rectangle_twice_gives_the_same_outcome() {
     let mut apply = EditApply::new(sheet, fixture.plan.clone());
 
     let first = apply
-        .apply(fixture.document_mut(), command.clone())
+        .apply(
+            fixture.document_mut(),
+            command.clone(),
+            &RowOrder::default(),
+        )
         .expect("1 回目の適用は成功する");
     let after_first = fixture.snapshot();
     let second = apply
-        .apply(fixture.document_mut(), command)
+        .apply(fixture.document_mut(), command, &RowOrder::default())
         .expect("2 回目の適用も成功する");
 
     assert_eq!(first, second, "同じ命令の 2 回の適用は同じ結果");
@@ -1272,6 +1286,7 @@ fn a_ragged_rectangle_leaves_uncovered_columns_alone_and_counts_every_written_ce
                 vec![first, second],
                 "7\n7\t7\tzzz",
             ),
+            &RowOrder::default(),
         )
         .expect("幅の違う矩形の貼り付けも成功する");
 
