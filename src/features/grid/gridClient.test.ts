@@ -148,6 +148,33 @@ describe("境界の口の引数の形", () => {
     });
   });
 
+  it("履歴も `request` という名前の引数で包む（向きは生成物の閉じた列挙）", async () => {
+    invoke.mockResolvedValue({
+      status: "ok",
+      data: {
+        context: { window: "main" },
+        outcome: {
+          affected: [],
+          coercions: [],
+          violation_total: 0,
+          violations: [],
+          revalidated_columns: [],
+          row_count: 0,
+        },
+      },
+    });
+    const client = createGridClient();
+
+    await client.readHistory("undo");
+
+    // **取り消しとやり直しは同じ 1 つのコマンドである**（向きは要求が運ぶ）。
+    expect(invoke).toHaveBeenCalledWith("grid_history", { request: { direction: "undo" } });
+    await client.readHistory("redo");
+    expect(invoke).toHaveBeenLastCalledWith("grid_history", {
+      request: { direction: "redo" },
+    });
+  });
+
   it("`invoke` の拒否は封筒の失敗として返る（画面はそれを失敗として扱える）", async () => {
     invoke.mockRejectedValue(new Error("コマンドが許可されていない"));
     const client = createGridClient();

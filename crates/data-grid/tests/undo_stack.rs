@@ -1792,6 +1792,138 @@ fn the_result_of_an_undo_and_a_redo_carries_the_rows_it_touched() {
     assert_eq!(written, session.redo().affected, "やり直しも書いた行を運ぶ");
 }
 
+/// 取り消し・やり直しの結果が運ぶ**行数**は、**逆命令を適用した後**の実数である
+/// （要件 1.7, 6.5 の提示）。
+///
+/// 画面はこの数をそのまま使う（境界が写し、`GridScreen` が行数の表示と窓の覆う範囲に使う）。
+/// したがって**向き**が固定されていなければならない — 行を挿入した操作の取り消しは**挿入前**
+/// の数であり、やり直しは**挿入後**の数である。ここが 1 ずれると、取り消しのたびに画面の
+/// 行数と窓の覆う行が静かに食い違い、要件 6.5 の提示が偽になる。
+///
+/// 行の集合を変える 3 つの命令（追加・削除・複製）それぞれで、適用 → 取り消し → やり直しの
+/// 3 点を突き合わせる。比較の相手は**文書から読んだ実数**であり、結果の数を信じない
+/// （結果が実数であることを、結果自身ではなく文書が示す）。
+#[test]
+fn the_row_count_of_an_undo_and_a_redo_is_the_count_after_the_inverse_applied() {
+    /// 結果が運ぶ行数を、**文書から読んだ実数**と突き合わせる。
+    fn assert_count(session: &Session, outcome: &EditOutcome, expected: usize, what: &str) {
+        assert_eq!(
+            expected,
+            session.snapshot().len(),
+            "{what}: 前提（文書から読んだ行数）が食い違う"
+        );
+        assert_eq!(
+            expected, outcome.row_count,
+            "{what}: 結果が運ぶ行数が、逆命令を適用した後の実数と食い違う"
+        );
+    }
+
+    // --- 行の追加（逆命令は取り除き、やり直しは差し戻し） ---
+    let mut session = Session::new(8, 13, 64);
+    let base = session.snapshot().len();
+    assert_eq!(8, base, "前提: 標本は 8 行");
+    let applied = session.edit(EditCommand::InsertRows {
+        at: RowOrdinal::new(3),
+        count: 2,
+    });
+    assert_count(&session, &applied, base + 2, "挿入の適用");
+    let undone = session.undo();
+    assert_count(&session, &undone, base, "挿入の取り消し（挿入前の行数）");
+    let redone = session.redo();
+    assert_count(&session, &redone, base + 2, "挿入のやり直し（挿入後の行数）");
+
+    // --- 行の削除（逆命令は差し戻し、やり直しは取り除き） ---
+    let mut session = Session::new(8, 13, 64);
+    let base = session.snapshot().len();
+    let removed = vec![session.row(2), session.row(5)];
+    let applied = session.edit(EditCommand::RemoveRows { rows: removed });
+    assert_count(&session, &applied, base - 2, "削除の適用");
+    let undone = session.undo();
+    assert_count(&session, &undone, base, "削除の取り消し（差し戻した後の行数）");
+    let redone = session.redo();
+    assert_count(
+        &session,
+        &redone,
+        base - 2,
+        "削除のやり直し（取り除いた後の行数）",
+    );
+
+    // --- 行の複製（逆命令は取り除き、やり直しは差し戻し） ---
+    let mut session = Session::new(8, 13, 64);
+    let base = session.snapshot().len();
+    let duplicated = vec![session.row(1), session.row(4)];
+    let applied = session.edit(EditCommand::DuplicateRows { rows: duplicated });
+    assert_count(&session, &applied, base + 2, "複製の適用");
+    let undone = session.undo();
+    assert_count(&session, &undone, base, "複製の取り消し（複製の前の行数）");
+    let redone = session.redo();
+    assert_count(&session, &redone, base + 2, "複製のやり直し（複製の後の行数）");
+}
+
+/// 行を増減しない編集（セルへの書き込み）の取り消し・やり直しが、**変わらない**行数を
+/// 報告すること（要件 1.7）。
+///
+/// 値の復元は行の集合に触れないため、3 点（適用・取り消し・やり直し）とも同じ数である。
+/// ここが実数でなければ、値を書き直すだけの取り消しで画面の行数が動く。
+#[test]
+fn a_value_only_edit_reports_the_unchanged_row_count_through_undo_and_redo() {
+    let mut session = Session::new(6, 13, 64);
+    let row = session.row(2);
+    let base = session.snapshot().len();
+    assert_eq!(6, base, "前提: 標本は 6 行");
+
+    let applied = session.edit_int(row, 0);
+    assert_eq!(base, applied.row_count, "セルの編集は行数を変えない");
+    let undone = session.undo();
+    assert_eq!(base, undone.row_count, "値の復元は行数を変えない");
+    let redone = session.redo();
+    assert_eq!(base, redone.row_count, "やり直しも行数を変えない");
+    assert_eq!(
+        base,
+        session.snapshot().len(),
+        "前提: 往復の間に行数は 1 度も動いていない"
+    );
+}
+
+/// 行を**補充する**貼り付け（合成の逆命令）の往復でも、行数の向きが正しいこと
+/// （要件 7.6, 9.2）。
+///
+/// 合成の逆命令は部分（値の復元と行の取り除き）を順に適用した**後**の実数を返す — 部分の
+/// 数を写すと、取り除く前の数が画面へ出る。
+#[test]
+fn a_paste_that_appends_rows_reports_the_count_after_each_inverse() {
+    let mut session = Session::new(6, 13, 8);
+    let displayed = session.displayed();
+    let base = session.snapshot().len();
+    assert_eq!(6, base, "前提: 標本は 6 行");
+    let anchor = displayed[displayed.len() - 2];
+    let text = (0..4)
+        .map(|offset| distinct_value(offset))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let applied = session.edit(EditCommand::PasteRange {
+        anchor: CellAddress::new(anchor, ColumnIndex::new(INT_COLUMN)),
+        rows: displayed,
+        text,
+    });
+    assert_eq!(8, applied.row_count, "貼り付けは補充した後の行数を報告する");
+    assert_eq!(8, session.snapshot().len(), "前提: 2 行補充された");
+
+    let undone = session.undo();
+    assert_eq!(
+        base, undone.row_count,
+        "取り消しは補充した行を除いた後の行数を報告する"
+    );
+    assert_eq!(base, session.snapshot().len(), "前提: 補充した行が消えた");
+
+    let redone = session.redo();
+    assert_eq!(
+        8, redone.row_count,
+        "やり直しは再び補充した後の行数を報告する"
+    );
+}
+
 /// 取り消しとやり直しが**履歴へ積まれない**こと（要件 9.2, 9.3 と「登録口は `push` 1 つ」の
 /// 交わり）。
 ///

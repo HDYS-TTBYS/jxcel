@@ -44,6 +44,7 @@ import type {
   GridEditCommand,
   GridEditOutcome,
   GridEditResponse,
+  GridHistoryDirection,
   GridOpenResponse,
   GridSheetSummary,
   GridViolationResponse,
@@ -79,6 +80,7 @@ import {
   gridScreenEditSettled,
   gridScreenEditStarted,
   gridScreenFailed,
+  gridScreenHistorySettled,
   gridScreenLoaded,
   gridScreenNoticeDismissed,
   gridScreenPasteSettled,
@@ -99,9 +101,10 @@ import { applyViewOperation, drawnColumns, layoutKeyOf, rowOrderKeyOf } from "./
 import { withExpansion } from "./nestedInspector";
 import { followTarget, initialSelection, selectionAt } from "./selection";
 import type { GridClient } from "./gridClient";
-import type { DeleteConfirmation } from "./rowOps";
+import { applyRowOperation, type DeleteConfirmation } from "./rowOps";
 import type { PastePayload } from "./clipboard";
-import { createClipboardSurface } from "./clipboard";
+import { applyPaste, createClipboardSurface } from "./clipboard";
+import { applyHistory } from "./history";
 import { settleCellEdit } from "./cellEdit";
 import type { CellPosition, RendererSelection, VisibleSpan } from "./renderer/port";
 import { nextViolation, reasonInRow, type ViolationPresentation } from "./violations";
@@ -184,6 +187,8 @@ interface FakeClient extends GridClient {
   readonly calls: readonly string[];
   readonly edits: readonly GridEditCommand[];
   readonly searches: readonly number[];
+  /** 履歴へ渡した向き（8.9。`grid_history` の引数である）。 */
+  readonly directions: readonly GridHistoryDirection[];
 }
 
 function fakeClient(answers: {
@@ -193,14 +198,18 @@ function fakeClient(answers: {
   readonly edit?: IpcResult<GridEditResponse, IpcClientError>;
   /** 違反の探索の答え（既定は「見つからない」）。 */
   readonly search?: (from: number) => IpcResult<GridViolationResponse, IpcClientError>;
+  /** 履歴の答え（既定は封筒の失敗である。**8.9 の検査だけが与える**）。 */
+  readonly history?: (direction: GridHistoryDirection) => IpcResult<GridEditResponse, IpcClientError>;
 }): FakeClient {
   const calls: string[] = [];
   const edits: GridEditCommand[] = [];
   const searches: number[] = [];
+  const directions: GridHistoryDirection[] = [];
   return {
     calls,
     edits,
     searches,
+    directions,
     readDocumentState: async () => {
       calls.push("document_state");
       return answers.state;
@@ -228,6 +237,11 @@ function fakeClient(answers: {
       calls.push(`grid_find_violation:${request.direction}`);
       searches.push(request.from);
       return answers.search?.(request.from) ?? ok({ context: CONTEXT, violation: null });
+    },
+    readHistory: async (direction) => {
+      calls.push(`grid_history:${direction}`);
+      directions.push(direction);
+      return answers.history?.(direction) ?? err<GridEditResponse>();
     },
   };
 }
@@ -285,6 +299,7 @@ function markOf(model: GridScreenModel): string {
       onDeleteCancelled: () => undefined,
       onRowOperationSettled: () => undefined,
       onPasteSettled: () => undefined,
+      onHistorySettled: () => undefined,
       onRefused: () => undefined,
     }),
   );
@@ -2525,8 +2540,367 @@ describe("貼り付けの反映（8.7。要件 7.3、7.4、1.7）", () => {
 });
 
 // ===========================================================================
-// 2.8 表示の操作（tasks.md 8.8。要件 8.1〜8.7）
+// 2.9 取り消しとやり直し（tasks.md 8.9。要件 9.2、9.3、9.8、9.9）
 // ===========================================================================
+
+/**
+ * 取り消しとやり直しの**反映**（要件 9.2、9.3、9.8）を、画面の結線の側から固定する。
+ *
+ * 3 つを見る:
+ *
+ * 1. **反映の形は 8.6 / 8.7 と同じ 1 つである**（`appliedRowOperation` を通る）。取り消しは
+ *    行数を変えうるので、提示する行数・窓が覆う行数・現在位置と選択の寄せ・消えた行の面を
+ *    閉じることが要る — 形を 2 つに割れば、片方だけが寄せを持つ日が来る
+ * 2. **対象となった範囲へ現在位置が移る**（要件 9.8）。移動先は**表示の序数**であり（行の
+ *    識別子ではない）、引けなければ**動かさない**（推測しない）
+ * 3. **3 種の操作が同じ 1 つの履歴に乗っている**（8.9 の受け入れ）。セルの編集・行の操作・
+ *    貼り付けはどれも `grid_apply_edit` へ行き、取り消しとやり直しはどれも `grid_history` へ
+ *    行く — 画面は**操作の種別を 1 つも持たない**（種別を持つと、5 つ目の操作が来た日に
+ *    分岐が増える）
+ */
+
+describe("取り消しとやり直しの反映（8.9。要件 9.2、9.3、9.8）", () => {
+  it("取り消しとやり直しの操作が画面に出る（要件 9.9 の入口）", () => {
+    const markup = markOf(readyModel(initialSelection()));
+
+    // **画面の中の入口である**（メニューと打鍵だけにしない — どちらも使えない環境では
+    // 操作へ届く道が無くなる）。表示名はメニューの項目と同じ綴りである。
+    expect(markup).toContain("jxcel-grid-history");
+    expect(markup).toContain("jxcel-grid-undo");
+    expect(markup).toContain("jxcel-grid-redo");
+    expect(markup).toContain("元に戻す");
+    expect(markup).toContain("やり直し");
+  });
+
+  it("適用のあと、提示する行数と窓が覆う行数が応答の数になる（構造の取り消し）", () => {
+    const before = readyModel(initialSelection());
+
+    const after = gridScreenHistorySettled(before, {
+      status: "applied",
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 3, violation_total: 4 }),
+      affectedRow: null,
+    });
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // **行数を戻すのは取り消しの本体の一部である**（行の追加の逆命令は行を取り除く）。
+    // `invalidate` だけでは、削除された行より後ろの窓が別の行を指したまま残る。
+    expect(after.state.visibleRows).toBe(3);
+    expect(after.state.summary.row_count).toBe(3);
+    expect(after.state.violationTotal).toBe(4);
+    expect(after.state.generation).toBe(2);
+    expect(markOf(after)).toContain('data-row-count="3"');
+  });
+
+  it("対象となった範囲へ現在位置を移す（要件 9.8）", () => {
+    // 現在位置は先頭、影響を受けた行は表示の序数 7 である（行の識別子ではない）。
+    const before = readyModel(initialSelection());
+
+    const after = gridScreenHistorySettled(before, {
+      status: "applied",
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 20 }),
+      affectedRow: 7,
+    });
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // 選択は**その 1 セルへ畳む**（列は現在位置のものが残る — 変わったのは行だけである）。
+    expect(after.state.selection).toEqual(selectionAt({ row: 7, column: 0 }));
+    const markup = markOf(after);
+    expect(markup).toContain('data-current-row="7"');
+    expect(markup).toContain("現在位置 8 行 1 列");
+  });
+
+  it("移した先が表示範囲の外なら、追随がスクロールを起こす（変更された箇所が見える）", () => {
+    // **可視の区間は先頭 5 行である**（要件 9.8 の「見える状態」は追随が担う。8.4 の巡回と
+    // 同じ道であり、`scrollTo` へ何を渡すかは 1 箇所に閉じている）。
+    const before = readyModel(initialSelection());
+    const after = gridScreenHistorySettled(before, {
+      status: "applied",
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 20 }),
+      affectedRow: 12,
+    });
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+
+    const visible: VisibleSpan = {
+      rows: { start: 0, count: 5 },
+      columns: { start: 0, count: SAMPLE_COLUMNS.length },
+    };
+    expect(followTarget(visible, after.state.selection)).toEqual({ row: 12, column: 0 });
+
+    // 移植口へ下ろす 2 つ（選択と、追随のスクロール）を偽の取っ手で読む。
+    const calls: string[] = [];
+    followSelection(
+      {
+        setSelection: (selection) => {
+          // **下ろすのは選択そのものであり、`null` は「選択が無い」である**（表を描いていない
+          // ときだけであり、この検査では起きない）。
+          calls.push(`set:${selection === null ? "none" : String(selection.current.row)}`);
+        },
+        scrollTo: (position) => {
+          calls.push(`scroll:${String(position.row)}`);
+        },
+      },
+      visible,
+      after.state.selection,
+    );
+    expect(calls).toEqual(["set:12", "scroll:12"]);
+  });
+
+  it("移動先が引けなければ現在位置を動かさない（推測しない）", () => {
+    const before = readyModel({ current: { row: 4, column: 2 }, range: { start: { row: 4, column: 2 }, end: { row: 4, column: 2 } } });
+
+    const after = gridScreenHistorySettled(before, {
+      status: "applied",
+      // 削除の取り消しがこれに当たる（戻ってくる行の識別子は記憶に無い）。
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 20 }),
+      affectedRow: null,
+    });
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.selection.current).toEqual({ row: 4, column: 2 });
+  });
+
+  it("進める履歴が無いときは何も動かさない（失敗として扱わない）", () => {
+    const before = readyModel(initialSelection());
+
+    const after = gridScreenHistorySettled(before, { status: "empty" });
+
+    // **告知も出さない**: 何も起きていないので、失敗の枠を出す理由が無い（要件 9.2、9.3 の
+    // 「対象が無い」は正常な結果である）。
+    expect(after.state).toEqual(before.state);
+    expect(after.notice).toBe(before.notice);
+  });
+
+  it("経路が失敗したら、理由を告知へ出す（表も状態も動かない）", () => {
+    const before = readyModel(initialSelection());
+
+    const after = gridScreenHistorySettled(before, {
+      status: "failed",
+      message: "ドキュメントの失敗: 経路が不達である",
+    });
+
+    expect(after.state).toEqual(before.state);
+    expect(after.notice).toBe(
+      "取り消し・やり直しを実行できませんでした: ドキュメントの失敗: 経路が不達である",
+    );
+    expect(markOf(after)).toContain("jxcel-grid-table");
+  });
+});
+
+/**
+ * 3 種の操作が同じ 1 つの履歴に乗っている（8.9 の受け入れ）ことを、**本物の往復と本物の遷移**で
+ * 確かめる節である。
+ *
+ * # 何が偽物で、何が本物か（**正直に書く**）
+ *
+ * 偽物は**境界と窓の記憶だけ**である（`node` の環境には IPC も DOM も無い）。履歴そのものは
+ * **ドメインの `UndoStack` 1 つ**であり（4.1 / 4.2）、本物の往復をするには Rust を要する —
+ * `crates/data-grid` の検査がその本体を持つ。ここで観測できるのは**画面の側の主張**である:
+ *
+ * - 3 種の操作（セルの編集・行の操作・貼り付け）は**どれも同じ 1 つの口**（`grid_apply_edit`）へ
+ *   行き、画面は**種別を 1 つも持たない**（種別ごとの分岐も、種別ごとの履歴も無い）
+ * - 取り消しとやり直しは**どれも同じ 1 つの口**（`grid_history`）へ行き、**反映も同じ 1 つの
+ *   遷移**を通る — 3 種の往復が同じ形で画面の状態を戻す
+ *
+ * したがって「同じ履歴に乗っている」ことの**画面の側の証拠**はこの 2 つであり、履歴が実際に
+ * 逆命令を戻すこと（要件 9.2、9.3 の本体）は `crates/data-grid` の検査が持つ（`design.md`
+ * 「同じ履歴であること」）。
+ */
+
+describe("3 種の操作が同じ 1 つの履歴に乗っている（8.9 の受け入れ）", () => {
+  /**
+   * 標本の道具。**取り消しとやり直しの応答は台本である**（本物の履歴は Rust 側にしか無い）が、
+   * 画面が通る口は本物である — 台本を返す口を 2 つに分ければ、どちらかが「呼ばれない」ことで
+   * この検査が落ちる。
+   */
+  function instrumented(): {
+    readonly client: GridClient;
+    readonly cache: {
+      clear: (rowCount?: number) => void;
+      ordinalOf: (rowId: string) => number | null;
+      invalidate: (affected: readonly string[]) => void;
+      rowId: (position: CellPosition) => string | null;
+      documentColumn: (position: CellPosition) => number | null;
+    };
+    /** 境界へ届いた編集命令（`grid_apply_edit` の引数）。 */
+    readonly edits: readonly GridEditCommand[];
+    /** 境界へ届いた向き（`grid_history` の引数）。 */
+    readonly directions: readonly GridHistoryDirection[];
+    /** 適用の応答を 1 つずつ消費する台本（`applyEdit` がこの順に答える）。 */
+    readonly scriptEdits: (outcomes: readonly GridEditOutcome[]) => void;
+    /** 履歴の応答を 1 つずつ消費する台本（`readHistory` がこの順に答える。尽きたら `null`）。 */
+    readonly scriptHistory: (outcomes: readonly GridEditOutcome[]) => void;
+  } {
+    const edits: GridEditCommand[] = [];
+    const directions: GridHistoryDirection[] = [];
+    let editAt = 0;
+    let editScript: readonly GridEditOutcome[] = [];
+    let historyAt = 0;
+    let historyScript: readonly GridEditOutcome[] = [];
+    const rows = new Map<string, number>([
+      [EDITED_ROW, 1],
+      [OTHER_ROW, 2],
+    ]);
+    const unused = (name: string) => (): never => {
+      throw new Error(`履歴の往復は ${name} を呼んではならない`);
+    };
+    return {
+      edits,
+      directions,
+      scriptEdits: (outcomes) => {
+        editScript = outcomes;
+        editAt = 0;
+      },
+      scriptHistory: (outcomes) => {
+        historyScript = outcomes;
+        historyAt = 0;
+      },
+      client: {
+        readDocumentState: async () => unused("document_state")(),
+        openSheet: async () => unused("grid_open_sheet")(),
+        setView: async () => unused("grid_set_view")(),
+        readWindow: async () => unused("grid_rows_window")(),
+        findViolation: async () => unused("grid_find_violation")(),
+        applyEdit: async (command) => {
+          edits.push(command);
+          const outcome = editScript[editAt];
+          editAt += 1;
+          if (outcome === undefined) {
+            throw new Error("適用の応答の台本が尽きた");
+          }
+          return { status: "ok", data: { context: CONTEXT, outcome } };
+        },
+        readHistory: async (direction) => {
+          directions.push(direction);
+          const outcome = historyScript[historyAt];
+          historyAt += 1;
+          // **尽きたら「進める履歴が無い」である**（失敗ではない。要件 9.2、9.3）。
+          return { status: "ok", data: { context: CONTEXT, outcome: outcome ?? null } };
+        },
+      },
+      cache: {
+        // **捨てると行の対応が消える**（本物の記憶と同じ性質である。8.9 の移動先の解決が
+        // 作り直しの前に済んでいることは `history.test.ts` が固定する）。
+        clear: () => {
+          rows.clear();
+        },
+        ordinalOf: (rowId: string) => rows.get(rowId.toUpperCase()) ?? null,
+        invalidate: () => undefined,
+        rowId: (position) => (position.row === 1 ? EDITED_ROW : null),
+        documentColumn: (position) => position.column,
+      },
+    };
+  }
+
+  it("編集 → 行の操作 → 貼り付け → 取り消し 3 回 → やり直し 3 回で、同じ履歴を往復する", async () => {
+    const tool = instrumented();
+    // 3 種の操作が積む結果。① セルの編集（4 行のまま）② 行の追加（4 → 5 行）③ 貼り付け（5 行の
+    // まま、2 行へ書く）。
+    const editOutcome = outcomeOf({ affected: [EDITED_ROW], row_count: 4 });
+    const insertOutcome = outcomeOf({ affected: [OTHER_ROW], row_count: 5 });
+    const pasteOutcome = outcomeOf({ affected: [OTHER_ROW, EDITED_ROW], row_count: 5 });
+    // **取り消しの応答は、逆命令を適用したあとの数である**（行の追加の取り消しは行を取り除くの
+    // で、応答の行数は 4 である）。だから取り消しとやり直しで同じ欄が違う値になる。
+    const insertUndone = outcomeOf({ affected: [OTHER_ROW], row_count: 4 });
+    const editUndone = outcomeOf({ affected: [EDITED_ROW], row_count: 4 });
+    tool.scriptEdits([editOutcome, insertOutcome, pasteOutcome]);
+    // 取り消しは**新しい操作から戻る**（貼り付け → 行の追加 → セルの編集）ので、行数は
+    // 5 → 4 → 4 と動く。やり直しは**同じ履歴を前へ戻る**ので 4 → 5 → 5 である。
+    tool.scriptHistory([
+      pasteOutcome,
+      insertUndone,
+      editUndone,
+      editOutcome,
+      insertOutcome,
+      pasteOutcome,
+    ]);
+
+    // ① セルの編集（`SetCells`）
+    const edit = await settleCellEdit({
+      client: tool.client,
+      cache: tool.cache,
+      position: { row: 1, column: 0 },
+      intent: { kind: "commit", text: "12.50" },
+      carrier: "text",
+    });
+    expect(edit.status).toBe("applied");
+    let model = gridScreenEditSettled(readyModel(initialSelection()), edit);
+
+    // ② 行の操作（`InsertRows`）
+    const inserted = await applyRowOperation({
+      client: tool.client,
+      cache: tool.cache,
+      intent: { kind: "insert", at: 2 },
+    });
+    expect(inserted.status).toBe("applied");
+    model = gridScreenRowOperationSettled(model, inserted);
+    if (model.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(model.state.summary.row_count).toBe(5);
+
+    // ③ 貼り付け（`PasteRange`）
+    const pasted = await applyPaste({
+      client: tool.client,
+      cache: tool.cache,
+      payload: { anchor: { row: EDITED_ROW, column: 0 }, rows: [EDITED_ROW], text: "12.50" },
+    });
+    expect(pasted.status).toBe("applied");
+    model = gridScreenPasteSettled(model, pasted);
+
+    // **3 種とも同じ 1 つの口（`grid_apply_edit`）へ行った**（種別ごとの経路を作っていない）。
+    expect(tool.edits.map((command) => command.command)).toEqual([
+      "SetCells",
+      "InsertRows",
+      "PasteRange",
+    ]);
+
+    // ④ 取り消し 3 回（貼り付け → 行の操作 → セルの編集）。**反映は同じ 1 つの遷移である。**
+    const rowCounts: number[] = [];
+    for (let step = 0; step < 3; step += 1) {
+      const undone = await applyHistory({ client: tool.client, cache: tool.cache, direction: "undo" });
+      expect(undone.status).toBe("applied");
+      model = gridScreenHistorySettled(model, undone);
+      if (model.state.status !== "ready") {
+        throw new Error("表を描く状態でなくなった");
+      }
+      rowCounts.push(model.state.summary.row_count);
+    }
+    // 貼り付けの取り消し（5 行）→ 行の追加の取り消し（4 行へ戻る）→ セルの編集の取り消し（4 行）。
+    expect(rowCounts).toEqual([5, 4, 4]);
+
+    // ⑤ やり直し 3 回（同じ履歴を前へ戻る）。行数は 4 → 5 → 5 と進む。
+    const redoneCounts: number[] = [];
+    for (let step = 0; step < 3; step += 1) {
+      const redone = await applyHistory({ client: tool.client, cache: tool.cache, direction: "redo" });
+      expect(redone.status).toBe("applied");
+      model = gridScreenHistorySettled(model, redone);
+      if (model.state.status !== "ready") {
+        throw new Error("表を描く状態でなくなった");
+      }
+      redoneCounts.push(model.state.summary.row_count);
+    }
+    expect(redoneCounts).toEqual([4, 5, 5]);
+
+    // **取り消しとやり直しは同じ 1 つの口を通った**（6 回とも `grid_history` である）。
+    expect(tool.directions).toEqual(["undo", "undo", "undo", "redo", "redo", "redo"]);
+
+    // ⑥ 履歴が尽きたら何も動かない（要件 9.2、9.3 の正常な結果である）。
+    const exhausted = await applyHistory({ client: tool.client, cache: tool.cache, direction: "undo" });
+    expect(exhausted).toEqual({ status: "empty" });
+    const unchanged = gridScreenHistorySettled(model, exhausted);
+    expect(unchanged.state).toEqual(model.state);
+  });
+});
+
+
 
 /**
  * 列幅・表示上の列順（要件 8.1、8.2）、並べ替え・絞り込み（8.3、8.4）、隠れた行の提示（8.7）を、

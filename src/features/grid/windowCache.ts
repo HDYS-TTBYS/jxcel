@@ -584,6 +584,25 @@ export interface WindowCache {
    */
   rowId(position: CellPosition): string | null;
   /**
+   * その行の識別子が**いまの表示の順序で何番目か**（表示の序数）。**記憶に無ければ `null`**。
+   *
+   * **取り消しとやり直しの移動先（要件 9.8）のための口である**（tasks.md 8.9。`./history`）。
+   * `rowId` の逆向きであり、**序数と行の対応を持つ唯一の場所**が本記憶であるという事実から
+   * 来ている — 境界は行の識別子しか運ばず（`grid_history` の応答もまた然り）、序数を求める
+   * 手段はここにしか無い。
+   *
+   * **捨てる前に引くこと。**`invalidate` / `clear` は影響を受けた行の窓そのものを捨てるので、
+   * 順序を誤れば答えは必ず `null` になる（`./history` の module doc「移動先の解決は捨てる前に
+   * 済ませる」）。
+   *
+   * `null` は「まだ無い」である（未取得の行・捨てた行・範囲の外）。**推測で答えてはならない**
+   * — 呼び出し側はそれを現在位置として使う（要件 8.6 の取り違え。`rowId` と同じ規律である）。
+   * `rowId` と対称に、**要求を始めない**（引く口ではなく、既に描かれている行の位置を尋ねる
+   * 口である）— 序数を求めるには「どの行か」が既に分かっている必要があり、文書全体を走査する
+   * 経路は本機能に無い（行数に比例する費用を作らない。要件 11.6）。
+   */
+  ordinalOf(rowId: string): number | null;
+  /**
    * その**表示の位置**が指す文書の列の添字（`./columnSpace` の写像そのもの）。答えられなければ
    * `null`。
    *
@@ -935,6 +954,31 @@ export function createWindowCache(options: WindowCacheOptions): WindowCache {
   };
 
   /**
+   * その行の識別子が**いまの表示の順序で何番目か**（要件 9.8。`rowId` の逆向きである）。
+   *
+   * 記憶が保つ窓を順に見る（上限は 12 窓であるので、費用は行数に依らない。要件 11.6）。
+   * **要求を始めない** — 文書全体から 1 行を探す経路は本機能に無い（`ordinalOf` の doc）。
+   *
+   * 綴りの突き合わせは [`invalidate`] と同じ規律である（大小を問わない）— 行の識別子の写しは
+   * `rowKeyText` の 1 つであり、別の綴りで名指しされた行を「無い」と答えてはならない。
+   */
+  const ordinalOf = (wanted: string): number | null => {
+    if (wanted.length === 0) {
+      return null;
+    }
+    const upper = wanted.toUpperCase();
+    for (const entry of windows) {
+      for (let offset = 0; offset < entry.rows.length; offset += 1) {
+        const decoded = entry.rows[offset];
+        if (decoded !== undefined && rowKeyText(decoded.key).toUpperCase() === upper) {
+          return entry.span.start + offset;
+        }
+      }
+    }
+    return null;
+  };
+
+  /**
    * 表示の位置が指す**文書の列**（`./columnSpace` の写像そのもの。8.5）。
    *
    * 記憶の側で写像を書き直さない（**同じ 1 つの値を、読みと書きの両方が引く**）。行の範囲は
@@ -1048,6 +1092,7 @@ export function createWindowCache(options: WindowCacheOptions): WindowCache {
   return {
     getCell,
     rowId,
+    ordinalOf,
     documentColumn,
     nestedMarks,
     setVisibleSpan,

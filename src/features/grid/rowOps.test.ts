@@ -143,6 +143,7 @@ function fakeClient(answer: IpcResult<GridEditResponse, IpcClientError>): FakeCl
       return answer;
     },
     findViolation: async () => unused("grid_find_violation")(),
+    readHistory: async () => unused("grid_history")(),
   };
 }
 

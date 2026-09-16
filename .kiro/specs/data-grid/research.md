@@ -1836,3 +1836,154 @@ rows("a\nb\nc") = 3 / rows("\"a\nb\"") = 1 / rows("a\n") = 1 / rows("a\n\n") = 2
   固定するが、**実際の入力欄の挙動は実機の観測である**
 - **並べ替えの基準は列ごとに 1 つである**（同じ列を 2 度持たない）。複数の基準を**同じ列で**
   指定する要求は画面から作れない（`sortCycle` の巡回が 1 列 1 基準である）
+
+## 実測と固定: 取り消しとやり直しの二重の導線（タスク 8.9）
+
+実装は `src/features/grid/history.ts`（307 行。往復と移動先の解決と購読）と `GridScreen.tsx` の
+遷移（`gridScreenHistorySettled` ＋ `appliedRowOperation` の `target`）、窓の記憶の口
+（`WindowCache.ordinalOf`）、境界とメニュー（`crates/app-shell/src/ipc/mod.rs` の
+`GRID_HISTORY_REQUESTED_EVENT` / `GridHistoryRequestedEvent` と、`src-tauri/src/commands/grid.rs`
+の 2 項目）である。件数の実測: `npm run test` は **489 → 516 件**（`history.test.ts` が 15 件
+（新規）、`windowCache.test.ts` が +3、`gridClient.test.ts` が +1、`GridScreen.test.ts` が
+88 → 96 件）、`cargo test -p jxcel` は **171 → 172 件**（メニューの 1 件）、
+`cargo test -p app-shell` は **+1 件**（生成物の宣言の 1 件。計 194 件）。
+
+### 決めたこと（**根拠は読んだ源である**）
+
+| 論点 | 決定 | 根拠 |
+|---|---|---|
+| 2 つの操作の宛先 | `GridClient.readHistory(direction)` 1 つ（`grid_history`。7 つ目の口である） | 取り消しとやり直しは**別の指示**だが経路は 1 つ（`GridHistoryRequest` が向きを運ぶ）。口を 2 つに割れば、適用のあとの後始末（`clear` と移動）が片方だけに載る余地ができる |
+| 適用のあとの作り直し | 影響を受けた行があれば `WindowCache.clear(outcome.row_count)` | 取り消しは**行数を変えうる**（行の追加・削除・複製・貼り付けの補充の逆命令）。`invalidate` では削除された行より後ろの窓が別の行を指したまま残る（`WindowCache.clear` の doc。design.md「行数が変わる編集は画面が `clear` を呼ぶ」が**取り消しを名指ししている**） |
+| 反映の形 | 8.6 / 8.7 と同じ 1 つ（`appliedRowOperation`）を通る | 形を 2 つに割れば、片方だけが「行数を置き換え・現在位置を寄せ・消えた行の面を閉じる」を持つ日が来る |
+| **移動先の解決**（要件 9.8） | `WindowCache.ordinalOf`（**新設**）で `affected` の行の表示の序数を引き、**作り直しの前に**引く | 序数と行の対応を持つのは**窓の記憶だけ**である（境界は行の識別子しか運ばない）。`invalidate` / `clear` は影響を受けた行の窓そのものを捨てるので、**順序が本質である** — 後に引けば答えは必ず `null` になる（変異試験の 1 行目がそれを実測した） |
+| 変更された箇所が見えること | 移した選択を、**既存の追随**（要件 2.4。`followSelection`）が `handle.setSelection` / `scrollTo` へ渡す | 9.8 の後半は追随が唯一の実装である。別経路を作れば、`scrollTo` へ何を渡すかが 2 箇所に現れる（8.4 の「次の違反へ」と同じ道である） |
+| 序数が引けないとき | **動かさない**（`null`）。作り直しと違反の引き直しは行う | 行の識別子から序数への写像は**境界に無い**。推測した序数へ動かせば無関係な行を名乗る（要件 8.6 の取り違えの行版）。削除された行がこれに当たる（下の限界） |
+| 進める履歴が無いとき | 何も動かさず、**失敗としても告知としても扱わない** | 生成物の `GridEditResponse.outcome` の doc が「進める履歴が無かった」を**正常な結果**と定めている。名乗るものが 1 つも無い |
+| メニューの形 | `GRID_HISTORY_REQUESTED_EVENT` 1 つ ＋ **荷は向き**（生成物の閉じた列挙） | どちらの項目が選ばれたかを運ぶ必要がある（9.5 の `DiagnosticsRequestedEvent` と同じ形）。**画面の入口も 1 つになる**（イベントを 2 つに分ければ、片方だけを購読した画面が作れる） |
+| キーボードの経路 | **アクセラレータそのものである**（画面に打鍵の聴取を足さない） | 画面が `Ctrl+Z` を扱う経路は**存在しない**（`selectionForKey` は空白と矢印だけを引き受ける。`history.test.ts` が 4 通りの打鍵で `null` を確かめる）。したがってアクセラレータは**動いている半分を 1 つも奪わない** — 8.7 が貼り付けで逆向きに判断した事情の裏返しである |
+| 綴り（非 macOS） | `Ctrl+Z` / `Ctrl+Shift+Z` | GTK の慣習である。**`Ctrl+Y` を採らない** — それは Windows の一部のアプリの慣習であり、両方を登録しても利用者の期待は 1 つに定まらず、競合検査の対象が増えるだけである |
+| 綴り（macOS） | `Cmd+Z` / `Cmd+Shift+Z` | 3.6 / 7.4 と同じく `cfg` で解決済みの綴りを選ぶ（`CmdOrCtrl` は 4.6 の構文契約が受理せず、競合検査が組み合わせを見分けられなくなる）。**正準形の修飾キーの並びは `MODIFIER_ORDER`（`ctrl` < `alt` < `shift` < `super`）が決める**ので、やり直しは `shift+super+KeyZ` である（既存の `Cmd+Shift+J` → `shift+super+KeyJ` と同じ規則。`scripts/ci/macos/verify-menu-shortcuts.sh` の期待もこの綴りである） |
+| メニュー項目の期待 | `scripts/check-menu-shortcut.sh` と `scripts/ci/macos/verify-menu-shortcuts.sh` を **10 → 12 項目**へ | 項目を足せば配置の記録が動く（8.7 が 9 → 10 へ動かしたのと同じ段である） |
+
+### 赤 → 緑（実測。**落ちた理由をすべて記録する**）
+
+1. `history.test.ts`（15 件）を書き、`npx vitest run src/features/grid/history.test.ts` を走らせて
+   **赤**（`Cannot find module '/src/features/grid/history'` — 実装がまだ無い）。
+   `history.ts` を書いたあと **2 件が赤のまま**であり、いずれも**検査の側の誤り**であった:
+   ① 偽の封筒の `kind: "Grid"` は生成物の `IpcError` の腕に無い（正しい腕は `Document` である。
+   `describeIpcError` の網羅的な分岐が `assertNever` へ落ちた）、② `listen` の模擬を検査ごとに
+   数え直していなかった（前の検査の呼び出しが残る）。直して 15 件が緑
+2. `windowCache.test.ts` の `ordinalOf`（3 件）を走らせて **2 件が赤** — `FIXTURE_ROW_IDS[4]` が
+   `undefined` であった（固定ファイルは 3 件しか名指さない。4 件目以降は `keyFor` が組む）。
+   **固定ファイルの 3 件と一致すること**を先に表明する形へ直し、3 件が緑
+3. `GridScreen.test.ts` の往復（1 件）が**赤**（`expected [5, 5, 4] to deeply equal [5, 4, 4]`）。
+   原因は検査の側の誤りである — **取り消しの応答は「逆命令を適用した後」の行数**なので、行の追加の
+   取り消しは 4 行と答える（やり直しは 5 行）。同じ `outcome` を使い回していたのを、取り消しと
+   やり直しで別々の応答に割った。直して緑
+4. `cargo test -p jxcel the_history_items_...` が **2 回赤** — ① `items` を `for` で move した
+   あとに添字で読んだ（借用へ直した）、② **登録口の模型は項目を識別子で整列する**ので、
+   「登録の順に並ぶ」という前提が誤っていた（`data-grid.redo` が先に来る。識別子で引く形へ直した）
+
+### 変異試験（md5 は記録時のバイト。**変異前 = 復帰後**）
+
+| 変異 | 当てた先 | 落ちた検査 |
+|---|---|---|
+| **移動先の解決を `clear` の後へ移す**（順序の反転） | `src/features/grid/history.ts` | `影響を受けた行の表示の序数を、**捨てる前に**引く`（`affectedRow` が `null` になる。**記憶はもうその行を持たない**） |
+| `clear` へ渡す数を `outcome.row_count` から固定値 `1` へ | 同上 | `適用のあとは、応答の行数で記憶を作り直す（要件 1.7）`（記録が `[1]` になる。応答は 4） |
+| 移動先を無視する（`moved = state.selection`） | `src/features/grid/GridScreen.tsx`（`appliedRowOperation`） | `対象となった範囲へ現在位置を移す（要件 9.8）`（現在位置が 0 行のまま。期待は 7 行） |
+| 荷を読まずに `entry("undo")` を呼ぶ | `src/features/grid/history.ts`（購読） | `2 つの項目（取り消し・やり直し）が**同じ 1 つの入口**へ着く`（`["undo","undo"]` になる） |
+| イベント名を生成物の定数ではなく別のリテラルにする | 同上 | `イベント名は生成物の定数である（文字列リテラルを書かない）` |
+
+**md5（変異前 = 復帰後 = 最終。**記録した時点のファイルを以後編集しないこと**）**:
+
+| ファイル | md5 |
+|---|---|
+| `src/features/grid/history.ts` | `e80348bd18bd126ca9aad1eeb2f155f9` |
+| `src/features/grid/GridScreen.tsx` | 変異前 = 復帰後 `d6218b7b46f184438094acdd680d9eb0` / **最終** `777c9b4ad348dd7fd20ee2560eefeef0`（**変異の復帰後に JSX の 1 要素を行分けしただけ** — `HistoryOperations` の 2 つの `onClick` を 1 行から複数行へ。**意味は 1 つも変えていない**。この変更の後も `npm run typecheck` / `npm run lint` / `npm run test`（516 件）は緑である） |
+| `src/features/grid/history.test.ts` | `791fd93c68e341f6536b3bb5408d0b91` |
+| `src/features/grid/GridScreen.test.ts` | `7ee15df6109e3f80ca426e68852413c5` |
+| `src/features/grid/windowCache.ts` | `274e2f4b85625c7904299e8b5128d2ab` |
+| `src/features/grid/gridClient.ts` | `112c41d3ce0cda34778378a93e0e2c53` |
+| `crates/app-shell/src/ipc/mod.rs` | `b86089383c8a8e4e679b9391ddf8c1c0` |
+| `src-tauri/src/commands/grid.rs` | `a920d65f2389e64f0edb76fdd968b80f` |
+
+### 単体で示せること / **起動でしか示せないこと**（正直な分界）
+
+| 主張 | どこまで示したか |
+|---|---|
+| 2 つの操作が**同じ 1 つの入口**へ着くこと | **単体で実測した** — メニューの 2 つの荷（`undo` / `redo`）を注いで入口が 2 回呼ばれること、画面の中の 2 つのボタンが同じ関数を叩くこと（`runHistory` 1 つ）、往復が 6 回とも `grid_history` であることを固定した |
+| **3 種の操作が同じ履歴に乗っていること** | 画面の側で示せるのは「3 種とも `grid_apply_edit` へ行き、種別ごとの分岐も種別ごとの履歴も無いこと」と「往復が同じ遷移で状態を戻すこと」である（`instrumented()` の台本で実測）。**履歴が実際に逆命令を戻すこと**は Rust の契約（`crates/data-grid` の検査）であり、単体テストは**偽の履歴**を相手にする |
+| 移動先の解決と、その**順序** | **単体で実測した**（`ordinalOf` は本物の記憶で 3 件、順序は偽の記憶が「捨てたら引けない」性質を写して 1 件）。**`scrollTo` が実際にスクロールを起こすこと**は観測しない（`node` の環境に描画が無い） |
+| 構造の取り消しで行数が戻ること | 応答の行数を `clear` へ渡すことまでを固定した（**渡さなければ増えた行は永久に読み込み中**）。**文書の行数が実際に戻ること**は Rust の契約である |
+| **実機の打鍵がメニューの項目を起こすこと** | 固定したのは**登録と綴り**である（`Accelerator::parse` の一致、`cfg` による解決、正準形、期待表）。**プラットフォームが配信することそのもの**は観測しない |
+| **活性化が実画面へ届くこと** | 観測しない。`scripts/check-menu-shortcut.sh` の段は**配布物を要し、グリッド画面を開かない**（8.7 の起動観測の実測。本タスクはこの段を**拡張していない** — 静的な期待（項目・荷・綴り・項目数）だけを動かした）。**観測の場所は 9.2 の台本（3 OS の実起動）である** |
+
+### 限界（正直な記録）
+
+- **序数が引けない行へは動けない。** 境界（`grid_history` の応答）は**行の識別子しか運ばない**ので、
+  窓の記憶が保っていない行は現在位置の移し先にできない（`firstResolvableOrdinal` が引くのは
+  `WindowCache.ordinalOf` 1 つであり、これは保っている窓を順に見るだけで**要求を始めない**。
+  加えて解決の直後に `clear` が走るので、次の段では窓は 1 つも残っていない）。**推測しない**
+  （動かさない）を選んだ。閉じる道は 2 つあり、いずれも本タスクの境界の外である: ① 境界が
+  影響を受けた行の**表示の序数**を運ぶ（写すのは `src-tauri` の適応層であり、`RowOrder` の写像を
+  使える唯一の層である）、② 窓の要求へ「行の識別子で引く」口を足す
+  - **レビューの実測（本項の訂正）**: 引けなかったのは**行の追加のやり直し**である
+    （`affectedRow === null` — 現在位置が移らず、追随もスクロールしない）。同じ実測で**行の削除の
+    取り消しは引けた**。窓に**保たれている**行（画面外でも）は引け、その序数は**表示の序数の
+    空間として正しい**（`ordinalOf` は `entry.span.start + offset` を返す）。**分かれ目は操作の
+    種別ではなく、解決の時点で窓がその行を保っているかどうかである** — 以前の版が書いた
+    「典型は削除の取り消し」は実測に反するので**訂正する**
+- **要件 9.8 の前半は単体テストでは閉じない。** 固定できるのは経路と順序（`clear` の**前に**
+  引く）と「保たれている行なら移す」までである。**「現在位置が移り、変更された箇所が見える」の
+  観測は 9.2 の台本（3 OS の実起動）に属する** — 窓に保たれていない行を対象とする操作
+  （最小の再現は行の追加のやり直し）を実起動で確かめること。したがって 9.2 の受け入れを
+  「メニューが活性化される」「取り消し・やり直しが往復する」で閉じない（それは 9.8 の後半を
+  1 つも観測しない）
+- **`ordinalOf` は窓が保つ行にしか答えない**（要求を始めない）。文書全体を走査する経路を作れば
+  行数に比例する費用が生まれる（要件 11.6）ためであり、したがって移動先の解決は**可視の近傍**に
+  限られる
+- **3 種の往復の「履歴」は検査の側の台本である**（本物の `UndoStack` は Rust にしか無い）。
+  単体テストが主張するのは**経路の一意性**（種別ごとの分岐が無いこと）と**反映の同一性**である
+- **貼り付けのメニュー項目は依然として未達である**（本タスクは触っていない。理由は 8.7 の記録）
+
+## 補遺: 行数の**向き**の固定（レビューの指摘 F2 への是正）
+
+レビューは「取り消し・やり直しの応答が運ぶ `row_count` の**向き**を固定する検査が 1 件も無い」
+ことを実測した（`crates/data-grid/src/edit/mod.rs` の `restore_rows` の
+`row_count: …rows().len()` を `+ 1` へ変異させても、`cargo test -p data-grid` と
+`cargo test -p jxcel` がどちらも緑のまま通った。復帰後の md5 は
+`1b4f8acb907157e723c55bdfe1b92b24`）。**TS 側の往復の検査は応答を台本で書く**ため、固定して
+いるのは「画面がその数をそのまま使うこと」だけであり、**向きそのものはどちらの言語でも固定
+されていなかった** — `src-tauri/src/commands/grid.rs:856` が `outcome.row_count` を境界型へ写し、
+`GridScreen.tsx:1411` がそれをそのまま行数の提示と窓の覆う範囲に使うので、向きが 1 ずれれば
+要件 1.7 / 6.5 の提示が静かに偽になる。
+
+是正は `crates/data-grid/tests/undo_stack.rs` の 3 件である（**公開面だけ**を使い、源は 1 行も
+変えていない）:
+
+| 検査 | 固定する向き |
+|---|---|
+| `the_row_count_of_an_undo_and_a_redo_is_the_count_after_the_inverse_applied` | 行の集合を変える 3 命令（追加・削除・複製）の適用 → 取り消し → やり直しの 3 点。**挿入の取り消しは挿入前の数、やり直しは挿入後の数**。比較の相手は**文書から読んだ実数**であり、結果の数を信じない |
+| `a_value_only_edit_reports_the_unchanged_row_count_through_undo_and_redo` | 行を増減しない編集の 3 点が同じ数であること |
+| `a_paste_that_appends_rows_reports_the_count_after_each_inverse` | 行を**補充する**貼り付け（合成の逆命令）の 3 点 |
+
+**変異試験（実測）**: `crates/data-grid/src/edit/mod.rs` の `restore_rows` の `row_count` を
+`rows().len()` → `rows().len() + 1` へ変異させて `cargo test -p data-grid --no-fail-fast` を
+走らせると、**落ちるのは 3 件のうち 1 件だけ**であり（「挿入のやり直し（挿入後の行数）: 結果が
+運ぶ行数が、逆命令を適用した後の実数と食い違う」— 左 10・右 11）、**残る 224 件は緑**である
+（変異が生き残っていたことの追認）。変異を戻した後の md5 は
+`1b4f8acb907157e723c55bdfe1b92b24` で**変異前と一致する**。
+
+**適応層（`src-tauri/src/commands/grid.rs`）は本再作業の境界外である**（触っていない）。同
+856 行は `outcome.row_count` をそのまま写すだけであり、写しの向きは**上の Rust の検査**が
+固定する（境界の欄はドメインの値を写すだけなので、向きの源は 1 つである）。
+
+**記録した時点のバイト（以後このファイルを編集しないこと）**:
+
+| ファイル | md5 |
+|---|---|
+| `crates/data-grid/tests/undo_stack.rs`（3 件を足した後） | `3a49fd09821fd81db83b9bdc0b03fd40` |
+| `crates/data-grid/src/edit/mod.rs`（**源は 1 行も変えていない**。変異前 = 復帰後） | `1b4f8acb907157e723c55bdfe1b92b24` |
+| `.kiro/specs/data-grid/design.md`（**本再作業で「8.9 が残した申し送り」を書き直した後**） | `d4df88fb859eb41ca21c54dd9f8a9e9d` |
+| `.kiro/specs/data-grid/research.md`（本節を足す**前**のバイト） | `f368e8e25d87cbe1eda1125b90664037` |
+

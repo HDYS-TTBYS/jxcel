@@ -38,6 +38,7 @@ import type {
   DocumentStateResponse,
   GridEditCommand,
   GridEditResponse,
+  GridHistoryDirection,
   GridOpenResponse,
   GridViewResponse,
   GridViewSpec,
@@ -86,6 +87,15 @@ const GRID_FIND_VIOLATION_COMMAND: CommandName = "grid_find_violation";
 const GRID_APPLY_EDIT_COMMAND: CommandName = "grid_apply_edit";
 
 /**
+ * 履歴を 1 つ進めるコマンド（6.2。要件 9.2、9.3）。
+ *
+ * **取り消しとやり直しは同じコマンドである** — どちらへ進めるかは要求（`direction`）が運ぶ。
+ * 応答の形は編集の適用と同じである（`design.md`「GridCommands」の API Contract が
+ * `grid_apply_edit` と `grid_history` の応答を同じ型と定めている）。
+ */
+const GRID_HISTORY_COMMAND: CommandName = "grid_history";
+
+/**
  * 表示の指定を変えない指定（**空の指定＝絞り込み無し・並べ替え無し・展開無し**）。
  *
  * 8.1 は開いた直後にこれ 1 つだけを適用し、**並べ替え・絞り込み・展開の操作は 8.8 の担当**
@@ -93,7 +103,7 @@ const GRID_APPLY_EDIT_COMMAND: CommandName = "grid_apply_edit";
  */
 export const EMPTY_GRID_VIEW: GridViewSpec = { sort: [], filters: [], expansion: [] };
 
-/** 画面が境界へ出す口。**この 6 つだけである。** */
+/** 画面が境界へ出す口。**この 7 つだけである。** */
 export interface GridClient {
   /** 呼び出し元ウィンドウのセッションの状態（シートの一覧を含む）。 */
   readonly readDocumentState: () => Promise<IpcClientResult<DocumentStateResponse>>;
@@ -146,6 +156,21 @@ export interface GridClient {
   readonly findViolation: (
     request: GridViolationRequest,
   ) => Promise<IpcClientResult<GridViolationResponse>>;
+  /**
+   * 履歴を 1 つ進め、**判定の結果**（影響範囲・型強制・違反・行数）を受ける
+   * （8.9。要件 9.2、9.3、1.7）。
+   *
+   * **向きは生成物の閉じた列挙**（`"undo"` / `"redo"`）をそのまま渡す。取り消しとやり直しは
+   * **同じ 1 つの口**であり、本口を 2 つに割らない（割れば、適用のあとの後始末が片方だけに
+   * 載る余地ができる。`./history` の module doc）。
+   *
+   * 応答の `outcome` が `null` でありうるのは**適用と違って正常**である（「進める履歴が
+   * 無かった」＝要件 9.2、9.3 の正常な結果。生成物の `GridEditResponse` の doc）。**本口は
+   * それを失敗へ写さない** — 失敗かどうかを決めるのは呼び出し側（`./history`）である。
+   */
+  readonly readHistory: (
+    direction: GridHistoryDirection,
+  ) => Promise<IpcClientResult<GridEditResponse>>;
 }
 
 /**
@@ -174,5 +199,9 @@ export function createGridClient(): GridClient {
     // `fn grid_find_violation(app, window, request: GridViolationRequest)`）。
     findViolation: (request) =>
       invokeCommand<GridViolationResponse>(GRID_FIND_VIOLATION_COMMAND, { request }),
+    // 履歴も**`request` という名前の引数で包む**（実体は
+    // `fn grid_history(app, window, request: GridHistoryRequest)`）。
+    readHistory: (direction) =>
+      invokeCommand<GridEditResponse>(GRID_HISTORY_COMMAND, { request: { direction } }),
   };
 }

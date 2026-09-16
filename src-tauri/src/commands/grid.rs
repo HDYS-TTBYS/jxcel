@@ -32,6 +32,13 @@
 //! （移植口の `RendererHandle.copySelection`）へ渡す — 範囲の決定もテキストの作成も 1 つに
 //! 閉じる（9.5 の診断の導線と同じ形であり、新しい設計ではない）。
 //!
+//! **8.9 が同じ形で 2 つ足した** — `編集 > 元に戻す` / `編集 > やり直し`
+//! （`data-grid.undo` / `data-grid.redo`。非 macOS `Ctrl+Z` / `Ctrl+Shift+Z`、macOS
+//! `Cmd+Z` / `Cmd+Shift+Z`）。**項目ごとにイベントを分けない** — どちらも
+//! [`GRID_HISTORY_REQUESTED_EVENT`] を送り、**どちらの項目かは荷が運ぶ**
+//! （`design.md` の「メニューの取り消し・やり直しの結線」）。画面側は
+//! `src/features/grid/history.ts` が購読して 1 つの入口へ渡す。
+//!
 //! **貼り付けの項目は登録しない。**障碍はクリップボードを読む経路が無いことであり、読み口が
 //! 無いまま `Ctrl+V` を登録すると、基盤のメニューが打鍵を先に受け取っていま動いている貼り付けを
 //! 壊す（[`install`] の doc に実測と併せて記録した。要件 7.8 の後半は未達である）。
@@ -250,11 +257,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use app_shell::ipc::{
     command_names, ColumnDescriptor, ColumnElementCount, ColumnExpandability, GridCellAddress,
     GridCoercionNotice, GridEditCommand, GridEditOutcome, GridEditRequest, GridEditResponse,
-    GridExpansionState, GridFilterSpec, GridHistoryDirection, GridHistoryRequest, GridOpenRequest,
+    GridExpansionState, GridFilterSpec, GridHistoryDirection, GridHistoryRequest,
+    GridHistoryRequestedEvent, GridOpenRequest,
     GridOpenResponse, GridPathSegment, GridSearchDirection, GridSheetSummary, GridViewRequest,
     GridViewResponse, GridViewSpec, GridViolation, GridViolationLocation, GridViolationRequest,
     GridViolationResponse, IpcError, IpcResult, TypeKindTag, WindowContext, WindowLabel,
-    GRID_COPY_REQUESTED_EVENT,
+    GRID_COPY_REQUESTED_EVENT, GRID_HISTORY_REQUESTED_EVENT,
 };
 use data_grid::{
     display_text, CellAddress, CoercionNotice, ColumnIndex, EditCommand, EditOutcome, ElementCount,
@@ -1917,8 +1925,145 @@ fn request_copy(app: &AppHandle, selection: &MenuSelection) {
 /// 先に受け取り、いま動いている貼り付け（DOM の `paste`）が届かなくなる** — 複製はメニュー側に
 /// 代わりの経路があるので安全だが、貼り付けにはそれが無い。**動いている半分を守り、動かない
 /// 項目は登録しない**（詳細と実測は `design.md`「貼り付けの項目を今 登録しない理由」）。
+///
+/// # 取り消し・やり直しの項目（タスク 8.9。要件 9.9）
+///
+/// **複製と同じ形で 2 つ登録する**（`編集 > 元に戻す` / `編集 > やり直し`）。どちらも
+/// **同じ 1 つのイベント**（[`GRID_HISTORY_REQUESTED_EVENT`]）を送り、**どちらの項目かは荷が
+/// 運ぶ** — 画面の側の入口が 1 つになる（[`install_history`]）。
+///
+/// **打鍵を奪う心配は無い。**複製の `Ctrl+C` と違い、`Ctrl+Z` を扱う経路は画面の側に
+/// **存在しない**（`./selection` の `selectionForKey` は空白と矢印だけを引き受け、`./renderer`
+/// の打鍵の聴取は `copy` / `paste` の 2 つだけである）ので、アクセラレータが黙って殺す経路が
+/// 無い。**アクセラレータが要件 9.9 の「キーボードからの指示」である**（`design.md` の
+/// 「メニューの取り消し・やり直しの結線」）。
 pub fn install(app: &AppHandle) {
     let registry = app.state::<MenuRegistry>();
+    install_copy(app, &registry);
+    install_history(app, &registry, GridHistoryDirection::Undo);
+    install_history(app, &registry, GridHistoryDirection::Redo);
+}
+
+// ---------------------------------------------------------------------------
+// メニューからの取り消しとやり直し（タスク 8.9。要件 9.9）
+// ---------------------------------------------------------------------------
+
+/// 取り消しの項目の識別子。**アプリ全体で一意でなければならない。**
+const UNDO_ITEM_ID: &str = "data-grid.undo";
+
+/// やり直しの項目の識別子。
+const REDO_ITEM_ID: &str = "data-grid.redo";
+
+/// 取り消しの項目の表示名。
+const UNDO_LABEL: &str = "元に戻す";
+
+/// やり直しの項目の表示名。
+const REDO_LABEL: &str = "やり直し";
+
+/// 取り消しの項目のショートカット（非 macOS）。**プラットフォーム解決済みの綴りである**
+/// （複製の [`COPY_ACCELERATOR_SPELLING`] と同じ規律。`CmdOrCtrl+Z` は渡さない）。
+#[cfg(not(target_os = "macos"))]
+const UNDO_ACCELERATOR_SPELLING: &str = "Ctrl+Z";
+
+/// 取り消しの項目のショートカット（macOS。メニュー上は `⌘Z` と描かれる）。
+#[cfg(target_os = "macos")]
+const UNDO_ACCELERATOR_SPELLING: &str = "Cmd+Z";
+
+/// やり直しの項目のショートカット（非 macOS）。
+///
+/// **`Ctrl+Y` ではなく `Ctrl+Shift+Z` を採る。**このアプリの打鍵の意味論は GTK の慣習
+/// （`Ctrl+Z` / `Ctrl+Shift+Z`）に揃っており、`Ctrl+Y` は Windows の一部のアプリの慣習である
+/// （両方を登録しても利用者の期待は 1 つに定まらず、競合検査の対象が増えるだけである。
+/// `design.md` の「メニューの取り消し・やり直しの結線」）。
+#[cfg(not(target_os = "macos"))]
+const REDO_ACCELERATOR_SPELLING: &str = "Ctrl+Shift+Z";
+
+/// やり直しの項目のショートカット（macOS。メニュー上は `⇧⌘Z` と描かれる）。
+#[cfg(target_os = "macos")]
+const REDO_ACCELERATOR_SPELLING: &str = "Cmd+Shift+Z";
+
+/// 履歴の項目を置く部分メニュー（複製と同じ `編集`。7.4 が決めたトップレベルの並び）。
+fn history_menu_path() -> MenuPath {
+    MenuPath::new([crate::menu::EDIT_MENU_LABEL]).expect("位置は空でない")
+}
+
+/// 履歴の項目（取り消し・やり直し）の**向きごとの綴り**を返す。
+///
+/// 2 つの項目は**識別子・表示名・ショートカットだけが違い、経路も活性化の形も同じ**である
+/// （向きは荷が運ぶ）。表にしないのは、向きを 1 つ足したときに**網羅的な `match` が
+/// コンパイルエラーになる**ようにするためである（`type_kind_tag` と同じ規律）。
+fn history_item_parts(direction: GridHistoryDirection) -> (&'static str, &'static str, &'static str) {
+    match direction {
+        GridHistoryDirection::Undo => (UNDO_ITEM_ID, UNDO_LABEL, UNDO_ACCELERATOR_SPELLING),
+        GridHistoryDirection::Redo => (REDO_ITEM_ID, REDO_LABEL, REDO_ACCELERATOR_SPELLING),
+    }
+}
+
+/// 履歴の項目の登録内容を組み立てる（向きごとに 1 つ。複製の [`copy_item_spec`] と同じ形）。
+///
+/// `handler` を差し替えられる形にしてあるのは、**GUI 無しで登録の受理と内容を検査できる**
+/// ようにするためである（[`MenuRegistry::enroll`] は画面を要しない）。
+fn history_item_spec(
+    direction: GridHistoryDirection,
+    handler: impl Fn(&MenuSelection) + Send + Sync + 'static,
+) -> MenuItemSpec {
+    let (item, label, accelerator) = history_item_parts(direction);
+    MenuItemSpec::new(OWNER, item, history_menu_path(), label, handler)
+        .with_accelerator(accelerator)
+}
+
+/// 履歴の要求（向きつき）を、**活性化の対象ウィンドウ**（7.5 の振り向け）へ通知する。
+///
+/// 送るのは 1 つのイベント（[`GRID_HISTORY_REQUESTED_EVENT`]）であり、**どちらの項目が
+/// 選ばれたかは荷が運ぶ**（9.5 の診断の導線と同じ形。複製は引数を取らないので荷を持たない）。
+/// 対象が無ければ何もしない — 送り先が無いのに全ウィンドウへ配ると、触っていないウィンドウの
+/// 文書が勝手に変わる（要件 3.5）。
+///
+/// **荷の型は境界の型をそのまま使う**（`app_shell::ipc::GridHistoryRequestedEvent` と同じ形を
+/// ここで組み立てる。`serde` の綴りが生成物と一致するのは、同じ `serde` の属性から出るためで
+/// ある — 向きは `#[serde(rename_all = "lowercase")]` の `"undo"` / `"redo"`）。
+fn request_history(app: &AppHandle, selection: &MenuSelection, direction: GridHistoryDirection) {
+    let Some(label) = selection.window().cloned() else {
+        log::warn!("グリッドの履歴: 対象ウィンドウが無いため画面へ送らない");
+        return;
+    };
+    let (item, _, _) = history_item_parts(direction);
+    match app.emit_to(
+        label.as_str(),
+        GRID_HISTORY_REQUESTED_EVENT,
+        GridHistoryRequestedEvent { direction },
+    ) {
+        Ok(()) => log::info!(
+            "グリッドの履歴の要求を送った: ウィンドウ = {} / 項目 = {item}",
+            label.as_str(),
+        ),
+        Err(error) => log::error!(
+            "グリッドの履歴の要求を送れなかった（ウィンドウ = {}、項目 = {item}）: {error}",
+            label.as_str(),
+        ),
+    }
+}
+
+/// 履歴の項目を 1 つ登録する（[`install`] が向きごとに 1 回呼ぶ）。
+///
+/// 登録に失敗しても起動は続ける（複製と同じ判断である — 項目が引けないことより、アプリが
+/// 立ち上がらないことの方が悪い）。**失敗は項目ごとに記録する**ので、片方だけが登録できな
+/// かった場合も記録から読める。
+fn install_history(app: &AppHandle, registry: &MenuRegistry, direction: GridHistoryDirection) {
+    let (item, _, _) = history_item_parts(direction);
+    let handling_app = app.clone();
+    let spec = history_item_spec(direction, move |selection| {
+        request_history(&handling_app, selection, direction);
+    });
+    if let Err(error) = registry.register(app, spec) {
+        log::error!("グリッドの履歴のメニュー項目を登録できなかった（{item}）: {error}");
+        return;
+    }
+    log::info!("グリッドの履歴の導線をメニューへ登録した（{item}）");
+}
+
+/// 複製の項目を登録する（8.7。`install` から切り出した）。
+fn install_copy(app: &AppHandle, registry: &MenuRegistry) {
     let handling_app = app.clone();
     let spec = copy_item_spec(move |selection| {
         request_copy(&handling_app, selection);
@@ -3711,5 +3856,79 @@ mod tests {
             items.iter().all(|item| !item.item().as_str().contains("paste")),
             "貼り付けの項目を作っていない"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // メニューからの取り消しとやり直し（タスク 8.9。要件 9.9）
+    // -----------------------------------------------------------------------
+
+    /// 取り消しとやり直しの項目が、**編集の部分メニューへ 2 つ**、プラットフォーム解決済みの
+    /// 綴りで登録されること（要件 9.9、3.3、3.4）。**GUI を起こさない**（8.7 の複製と同じ形）。
+    ///
+    /// **2 つの項目が同じ 1 つのイベントを送る**ことは、この検査では「項目が 2 つ在り、それぞれ
+    /// の綴りが違う」ことまでで、送り先の一致は [`history_item_spec`] の形（`request_history`
+    /// が向きを荷に載せる）が担う — 画面の側は `history.test.ts` が「2 つの項目が同じ入口へ
+    /// 着く」ことで固定する。
+    #[test]
+    fn the_history_items_are_registered_in_the_edit_submenu() {
+        let registry = MenuRegistry::new();
+        for direction in [GridHistoryDirection::Undo, GridHistoryDirection::Redo] {
+            registry
+                .enroll(history_item_spec(direction, |_: &MenuSelection| {}))
+                .expect("競合なく登録できる");
+        }
+
+        assert_eq!(
+            history_menu_path().segments(),
+            &[EDIT_MENU_LABEL.to_owned()],
+            "取り消しとやり直しは編集の部分メニューに置く"
+        );
+
+        let model = registry.model();
+        let items = model.items();
+        assert_eq!(items.len(), 2, "この module が置くのは 2 件である");
+        // **並びは登録の順ではない**（登録口の模型は識別子で整列する）ので、識別子で引く。
+        let node = |item: &str| {
+            items
+                .iter()
+                .find(|candidate| candidate.item().as_str() == item)
+                .copied()
+                .unwrap_or_else(|| panic!("{item} が登録されていない"))
+        };
+        let undo_item = node(UNDO_ITEM_ID);
+        assert_eq!(undo_item.label(), UNDO_LABEL);
+        let redo_item = node(REDO_ITEM_ID);
+        assert_eq!(redo_item.label(), REDO_LABEL);
+        for item in &items {
+            assert_eq!(item.owner().as_str(), OWNER, "本スペックの名前空間である");
+        }
+
+        // **綴りはプラットフォームで解決済みであり、`Accelerator::parse` と一致する。**
+        let undo = Accelerator::parse(UNDO_ACCELERATOR_SPELLING).expect("解決済みの綴り");
+        let redo = Accelerator::parse(REDO_ACCELERATOR_SPELLING).expect("解決済みの綴り");
+        assert_eq!(undo_item.accelerator(), Some(&undo));
+        assert_eq!(redo_item.accelerator(), Some(&redo));
+        // 正準形も固定する（非 macOS `Ctrl+Z` / `Ctrl+Shift+Z`、macOS `Cmd+Z` /
+        // `Cmd+Shift+Z`）。**修飾キーの並びは `MODIFIER_ORDER` が決める**
+        // （`ctrl` < `alt` < `shift` < `super`）ので、macOS のやり直しは `shift+super+KeyZ` で
+        // ある（`scripts/ci/macos/verify-menu-shortcuts.sh` の配置の記録もこの綴りを要求する。
+        // 既存の `Cmd+Shift+J` が `shift+super+KeyJ` であるのと同じ規則である）。
+        let (expected_undo, expected_redo) = if cfg!(target_os = "macos") {
+            ("super+KeyZ", "shift+super+KeyZ")
+        } else {
+            ("ctrl+KeyZ", "ctrl+shift+KeyZ")
+        };
+        assert_eq!(undo.as_str(), expected_undo);
+        assert_eq!(redo.as_str(), expected_redo);
+        // **2 つは別の組み合わせである**（同じ組み合わせなら、片方は到達できない経路になる）。
+        assert_ne!(undo, redo, "取り消しとやり直しが同じ打鍵になっている");
+        // **`CmdOrCtrl` は綴りとして受理されない**（4.6 の構文契約。受理すると、同じ論理
+        // ショートカットがプラットフォームごとに別の組み合わせとして扱われ、競合を見落とす）。
+        assert!(Accelerator::parse("CmdOrCtrl+Z").is_err());
+        // **非 macOS で `Ctrl+Y` を採らない**（GTK の慣習に揃える。`design.md` の
+        // 「メニューの取り消し・やり直しの結線」）。
+        if !cfg!(target_os = "macos") {
+            assert_ne!(redo.as_str(), "ctrl+KeyY");
+        }
     }
 }

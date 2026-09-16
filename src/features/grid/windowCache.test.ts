@@ -985,9 +985,77 @@ describe("行の識別子（編集の宛先）", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 8. 空の窓（失敗と世代違いの表現）
+// 8.9 取り消しの移動先（行の識別子から表示の序数へ。tasks.md 8.9。要件 9.8）
 // ---------------------------------------------------------------------------
 
+describe("行の識別子から表示の序数（取り消しの移動先）", () => {
+  /**
+   * その序数の行の識別子（**固定ファイルの 3 件は本物の Rust の符号化器が出した鍵である**。
+   * 4 件目以降は同じ鍵の最終バイトを進めたものであり、`keyFor` が作る）。
+   */
+  function idOf(row: number): string {
+    return rowKeyText(keyFor(row));
+  }
+
+  it("取得した窓の行の序数を返し、記憶に無い行は null を返す", async () => {
+    // 固定ファイルの 3 件と一致すること（綴りの源が 1 つであることの確認である）。
+    expect([idOf(0), idOf(1), idOf(2)]).toEqual([...FIXTURE_ROW_IDS]);
+
+    const harness = harnessOf();
+    const cache = cacheWith({ transport: harness.transport, rowCount: 12 });
+
+    // **未取得の行は null である**（要求も始めない — `rowId` と同じ規律である）。
+    expect(cache.ordinalOf(idOf(4))).toBeNull();
+    expect(harness.calls).toEqual([]);
+
+    cache.getCell({ row: 4, column: 0 });
+    await settle();
+
+    // 窓は 4 行ずつである（要求の量子化）：序数 4..7 の行が記憶に入っている。
+    expect(cache.ordinalOf(idOf(4))).toBe(4);
+    expect(cache.ordinalOf(idOf(7))).toBe(7);
+    // 別の窓の行（まだ取得していない）は null である。
+    expect(cache.ordinalOf(idOf(0))).toBeNull();
+  });
+
+  it("綴りの大小を問わない（`invalidate` の突き合わせと同じ綴りである）", async () => {
+    const harness = harnessOf();
+    const cache = cacheWith({ transport: harness.transport, rowCount: 12 });
+    cache.getCell({ row: 0, column: 0 });
+    await settle();
+
+    const id = FIXTURE_ROW_IDS[0];
+    expect(cache.ordinalOf(id)).toBe(0);
+    expect(cache.ordinalOf(id.toLowerCase())).toBe(0);
+    // 26 文字でない綴り・空文字も null である（推測で答えない）。
+    expect(cache.ordinalOf(id.slice(1))).toBeNull();
+    expect(cache.ordinalOf("")).toBeNull();
+  });
+
+  it("捨てた行は引けない（**捨てる前に引く**ことが取り消しの契約である）", async () => {
+    const harness = harnessOf();
+    const cache = cacheWith({ transport: harness.transport, rowCount: 12 });
+    cache.getCell({ row: 0, column: 0 });
+    cache.getCell({ row: 4, column: 0 });
+    await settle();
+
+    expect(cache.ordinalOf(idOf(0))).toBe(0);
+
+    // 影響を受けた行の通知（`invalidate`）は、その行を含む窓だけを捨てる。
+    cache.invalidate([idOf(0)]);
+    expect(cache.ordinalOf(idOf(0))).toBeNull();
+    // **別の窓の行は残る**（8.3 の編集の経路と同じ性質である）。
+    expect(cache.ordinalOf(idOf(4))).toBe(4);
+
+    // 記憶を作り直せば（`clear`）、どの行も引けない（序数と行の対応そのものが変わる）。
+    cache.clear(12);
+    expect(cache.ordinalOf(idOf(4))).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. 空の窓（失敗と世代違いの表現）
+// ---------------------------------------------------------------------------
 describe("空の窓", () => {
   it("記憶に入れず、空白として描かず、再試行できる", async () => {
     const harness = harnessOf(() => null);

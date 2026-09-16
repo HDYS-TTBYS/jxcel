@@ -498,6 +498,12 @@ pub fn run() -> Result<(), StartupError> {
     //   **貼り付けの項目は登録しない** — クリップボードの読み口が無く、読み口が無いまま
     //   `Ctrl+V` を登録すると、いま動いている打鍵の貼り付けを基盤のメニューが奪う
     //   （理由と実測は `commands/grid.rs` の `install` の doc）。
+    //   8.9 が同じ登録口へ `編集 > 元に戻す` / `編集 > やり直し`（非 macOS `Ctrl+Z` /
+    //   `Ctrl+Shift+Z`、macOS `Cmd+Z` / `Cmd+Shift+Z`）を足した。選択されたときの処理は、
+    //   **同じ 1 つのイベント**（`GRID_HISTORY_REQUESTED_EVENT`。どちらの項目かは荷が運ぶ）を
+    //   活性化の対象ウィンドウへ送るだけであり、往復（`grid_history`）と後始末は
+    //   フロントエンドの表の面が行う（`src/features/grid/history.ts`）。**キーボードの経路は
+    //   このアクセラレータである** — 画面は `Ctrl+Z` を扱う経路を持たない。
     commands::grid_install(app.handle());
 
     // 手順 4.3 の続き（検証専用）: 一括転送の結果を診断の記録へ流すリスナ（要件 4.5。タスク

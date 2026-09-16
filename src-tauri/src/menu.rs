@@ -142,7 +142,8 @@ pub(crate) const FILE_MENU_LABEL: &str = "ファイル";
 
 /// 編集メニューの部分メニュー名。**全プラットフォームで使う。**
 ///
-/// 範囲の複製（8.7 の `data-grid.copy`）と、9.9 が足す取り消し・やり直しがここに入る。
+/// 範囲の複製（8.7 の `data-grid.copy`）と、取り消し・やり直し（**8.9 が足した**
+/// `data-grid.undo` / `data-grid.redo`）がここに入る。
 /// **他のモジュールが位置を書き写さないよう公開する**（[`FILE_MENU_LABEL`] と同じ理由）。
 pub(crate) const EDIT_MENU_LABEL: &str = "編集";
 

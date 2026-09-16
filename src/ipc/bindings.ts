@@ -42,6 +42,7 @@ export const SETTINGS_CHANGED_EVENT = "settings_changed";
 export const DIAGNOSTICS_REQUESTED_EVENT = "diagnostics_requested";
 export const DOCUMENT_SESSION_CHANGED_EVENT = "document_session_changed";
 export const GRID_COPY_REQUESTED_EVENT = "grid_copy_requested";
+export const GRID_HISTORY_REQUESTED_EVENT = "grid_history_requested";
 
 // ---------------------------------------------------------------------------
 // 境界を越える型（crates/app-shell/src/ipc/ の定義から ts-rs が生成）
@@ -776,6 +777,22 @@ export type GridHistoryDirection = "undo" | "redo";
 export type GridHistoryRequest = { 
 /**
  * 進める向き。
+ */
+direction: GridHistoryDirection, };
+/**
+ * メニューの活性化を画面へ引き渡す通知（タスク 8.9。要件 9.9）。
+ *
+ * メニューの処理はイベントループのスレッドで走り、対象ウィンドウのフロントエンドへ届ける
+ * 必要がある。そこで 7.4 の登録口が受けた選択を、この 1 つのイベントとして**活性化の対象
+ * ウィンドウへ**送る（7.5 の振り向けの結果を使う。要件 3.5）。
+ *
+ * **運ぶのは向きだけである。**`direction` は 6.2 の閉じた列挙（[`GridHistoryDirection`]）を
+ * そのまま使い、**画面は綴りを書かない**（生成物の型で分岐する）。取り消しとやり直しの
+ * 2 項目しか無いので、運ぶ値はこの 1 つで足りる。
+ */
+export type GridHistoryRequestedEvent = { 
+/**
+ * 利用者が選んだ向き（取り消し・やり直し）。
  */
 direction: GridHistoryDirection, };
 /**

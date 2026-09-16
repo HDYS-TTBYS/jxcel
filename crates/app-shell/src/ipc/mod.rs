@@ -55,6 +55,10 @@
 //!   （[`GRID_COPY_REQUESTED_EVENT`]）。**ペイロード型を持たない** — 複製は引数を取らず、
 //!   対象は「そのとき移植口が持っている選択」であり、運ぶ値が 1 つも無いためである
 //!   （9.5 の診断の導線が `DiagnosticsRequestedEvent` でどの導線かを運ぶのと対照的である）
+//! - 8.9: グリッドの履歴（取り消し・やり直し）のメニューの活性化を画面へ引き渡すイベント
+//!   （[`GRID_HISTORY_REQUESTED_EVENT`] / [`GridHistoryRequestedEvent`]）。**荷は向きだけ**
+//!   であり、2 つの項目（取り消し・やり直し）を 1 つのイベントで運ぶ（9.5 の診断の導線と
+//!   同じ形。8.7 の複製は引数を取らないので荷を持たない）
 
 use serde::{Deserialize, Serialize};
 
@@ -619,6 +623,39 @@ pub struct DiagnosticsRequestedEvent {
 /// 自分で判断する。器は関知しない）。
 pub const GRID_COPY_REQUESTED_EVENT: &str = "grid_copy_requested";
 
+/// グリッドの履歴（取り消し・やり直し）がメニューから要求されたことを伝える Tauri イベントの
+/// 名前（タスク 8.9。要件 9.9）。
+///
+/// `invoke` の宛先を持たないためコマンド名の配列（[`COMMAND_NAMES`]）には現れない。設定変更の
+/// 通知（[`SETTINGS_CHANGED_EVENT`]）と同じく、**生成物（`src/ipc/bindings.ts`）へ定数として
+/// 出す**ことで、フロントエンドが文字列リテラルを綴り間違える経路を塞ぐ（タスク 2.3 の
+/// ドリフト検査がこの定数もバイト比較する）。
+///
+/// **項目は 2 つ（取り消し・やり直し）であり、イベントは 1 つである。**どちらの項目が選ばれたか
+/// は荷（[`GridHistoryRequestedEvent`]）が運ぶ — 9.5 の診断の導線が 3 つの導線を 1 つのイベントで
+/// 運ぶのと同じ形である。**画面の側の入口も 1 つになる**（2 つのイベントに分けると、片方だけを
+/// 購読した画面が作れてしまう）。
+///
+/// 送り先は**活性化の対象ウィンドウ**（7.5 の振り向け）1 つだけである。グリッドの画面を
+/// 出していないウィンドウには購読者が居ないので、そこで選んでも何も起きない（画面が
+/// 自分で判断する。器は関知しない）。
+pub const GRID_HISTORY_REQUESTED_EVENT: &str = "grid_history_requested";
+
+/// メニューの活性化を画面へ引き渡す通知（タスク 8.9。要件 9.9）。
+///
+/// メニューの処理はイベントループのスレッドで走り、対象ウィンドウのフロントエンドへ届ける
+/// 必要がある。そこで 7.4 の登録口が受けた選択を、この 1 つのイベントとして**活性化の対象
+/// ウィンドウへ**送る（7.5 の振り向けの結果を使う。要件 3.5）。
+///
+/// **運ぶのは向きだけである。**`direction` は 6.2 の閉じた列挙（[`GridHistoryDirection`]）を
+/// そのまま使い、**画面は綴りを書かない**（生成物の型で分岐する）。取り消しとやり直しの
+/// 2 項目しか無いので、運ぶ値はこの 1 つで足りる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridHistoryRequestedEvent {
+    /// 利用者が選んだ向き（取り消し・やり直し）。
+    pub direction: GridHistoryDirection,
+}
+
 /// TypeScript の生成物を再生成する、唯一の文書化されたコマンド（タスク 2.2）。
 ///
 /// 生成物のヘッダにもこの文字列を埋め込むため、定数として一箇所に持つ。実行ファイルは
@@ -661,12 +698,14 @@ fn command_names_constant() -> String {
     out
 }
 
-/// イベント名の定数を生成する（タスク 7.1 / 9.5 / 3.1 / 8.7。要件 7.4、8.1、8.6、8.7、1.6、7.8）。
+/// イベント名の定数を生成する（タスク 7.1 / 9.5 / 3.1 / 8.7 / 8.9。要件 7.4、8.1、8.6、8.7、1.6、
+/// 7.8、9.9）。
 ///
 /// 設定変更の通知（[`SETTINGS_CHANGED_EVENT`]）・診断の導線の要求
 /// （[`DIAGNOSTICS_REQUESTED_EVENT`]）・ドキュメントの状態変化
 /// （[`DOCUMENT_SESSION_CHANGED_EVENT`]）・グリッドの複製の要求
-/// （[`GRID_COPY_REQUESTED_EVENT`]）は `invoke` の宛先を持たないため
+/// （[`GRID_COPY_REQUESTED_EVENT`]）・グリッドの履歴の要求
+/// （[`GRID_HISTORY_REQUESTED_EVENT`]）は `invoke` の宛先を持たないため
 /// [`command_names::COMMAND_NAMES`] には現れないが、**フロントエンドが文字列リテラルを
 /// 綴り間違えない**ように、名前を生成物へ定数として出す。生成物はタスク 2.3 のドリフト検査が
 /// バイト比較するので、名前の変更は生成のやり直しを強制する。
@@ -690,6 +729,10 @@ fn event_names_constant() -> String {
             DOCUMENT_SESSION_CHANGED_EVENT,
         ),
         ("GRID_COPY_REQUESTED_EVENT", GRID_COPY_REQUESTED_EVENT),
+        (
+            "GRID_HISTORY_REQUESTED_EVENT",
+            GRID_HISTORY_REQUESTED_EVENT,
+        ),
     ] {
         out.push_str(&format!("export const {constant} = \"{event}\";\n"));
     }
@@ -1041,6 +1084,7 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<GridEditResponse>(&cfg),
         declared::<GridHistoryDirection>(&cfg),
         declared::<GridHistoryRequest>(&cfg),
+        declared::<GridHistoryRequestedEvent>(&cfg),
         declared::<GridSearchDirection>(&cfg),
         declared::<GridViolationRequest>(&cfg),
         declared::<GridViolation>(&cfg),
@@ -1846,6 +1890,34 @@ mod tests {
         assert!(
             ts.contains(declaration),
             "生成物に `{declaration}` が無い:\n{ts}"
+        );
+    }
+
+    /// 生成物が 8.9 の履歴の要求（イベント名と荷の型）を宣言していることを固定する
+    /// （タスク 8.9。要件 9.9）。
+    ///
+    /// **ドリフト検査だけでは足りない**（[`bindings_declare_the_document_surface`] と同じ理由）。
+    /// 画面はこの定数だけを参照する — 文字列リテラルを綴り間違えると、メニューの活性化が
+    /// **無言で届かなくなる**（購読側の名前が一致しないため。エラーにもならない）。荷の型も
+    /// 名指しで固定する: 向きの腕の綴り（`"undo"` / `"redo"`）は生成物の閉じた列挙であり、
+    /// 画面はそれを読んで分岐する（綴りが変われば画面の分岐が黙って落ちる）。
+    #[test]
+    fn bindings_declare_the_grid_history_event() {
+        let ts = render_bindings().unwrap();
+        for declaration in [
+            "export const GRID_HISTORY_REQUESTED_EVENT = \"grid_history_requested\";",
+            "export type GridHistoryRequestedEvent = {",
+            "export type GridHistoryDirection = \"undo\" | \"redo\";",
+        ] {
+            assert!(
+                ts.contains(declaration),
+                "生成物に `{declaration}` が無い:\n{ts}"
+            );
+        }
+        // 荷の欄の名前も固定する（**画面が読むのはこの欄である**）。
+        assert!(
+            ts.contains("direction: GridHistoryDirection"),
+            "荷の欄の名前が違う（画面は `direction` を読む）:\n{ts}"
         );
     }
 

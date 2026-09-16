@@ -343,6 +343,7 @@ import type {
   GridCoercionNotice,
   GridEditOutcome,
   GridExpansionState,
+  GridHistoryDirection,
   GridSheetSummary,
   GridViolationLocation,
   GridViewSpec,
@@ -391,6 +392,11 @@ import {
   type RowSendIntent,
 } from "./rowOps";
 import { createGlideAdapter } from "./renderer/glideAdapter";
+import {
+  applyHistory,
+  installGridHistoryRequests,
+  type HistorySettlement,
+} from "./history";
 import {
   createClipboardSurface,
   runPastePlan,
@@ -1331,6 +1337,47 @@ export function gridScreenPasteSettled(
   }
 }
 
+/**
+ * 取り消しとやり直しの 1 往復（8.9。要件 9.2、9.3、9.8）の結果を画面へ反映する。
+ *
+ * **反映の形は 8.6 / 8.7 と同じ 1 つである**（[`appliedRowOperation`] を通る）— 取り消しは
+ * **行数を変えうる**ので、提示する行数・窓が覆う行数・現在位置と選択の寄せ・消えた行の面を
+ * 閉じることが要る。形を 2 つに割れば、片方だけが寄せを持つ日が来る（利用者には「現在位置
+ * 10 行」と名乗りながら表は 3 行、という食い違いとして現れる）。
+ *
+ * | 結果 | 何が起きるか |
+ * |---|---|
+ * | 適用された | 行数と位置を置き換え、**対象となった範囲へ現在位置を移す**（要件 9.8） |
+ * | 進める履歴が無い | **何も動かさない**（失敗でも、告知を出す理由でもない。要件 9.2、9.3） |
+ * | 適用できなかった | 理由を**告知**へ出す（表も状態も動かない） |
+ *
+ * **対象となった範囲へ移す**のは `affectedRow`（**表示の序数**。`./history` が窓の記憶から
+ * 解決したもの）である。列は現在位置のものを保つ（変わったのは行だけであり、影響を受けた列は
+ * 境界が運ばない）。引けなかった（`null`）ときは**動かさない** — 推測した序数へ動かせば、
+ * 無関係な行を名乗ることになる（要件 8.6 の取り違えの行版）。
+ *
+ * 移した先が新しい表の範囲の外なら、**既存の寄せ**（[`clampSelection`]）が表の端へ寄せる
+ * （8.6 が行数の減少で通るのと同じ道である）。移した選択が表示範囲の外にあれば、**追随**
+ * （要件 2.4）が `handle.scrollTo` を呼んで見えるようにする — 9.8 の後半はこの既存の 1 本で
+ * 満たす（`./history` の module doc「移動した先が見えること」）。
+ */
+export function gridScreenHistorySettled(
+  model: GridScreenModel,
+  settlement: HistorySettlement,
+): GridScreenModel {
+  switch (settlement.status) {
+    case "failed":
+      return gridScreenFailed(model, `取り消し・やり直しを実行できませんでした: ${settlement.message}`);
+    case "empty":
+      // **文書が動いていない。**作り直すものも、移すものも、名乗るものも無い（要件 9.2、9.3）。
+      return model;
+    case "applied":
+      return appliedRowOperation(model, settlement.outcome, settlement.affectedRow);
+    default:
+      return assertNever(settlement, "履歴の結果の分岐が網羅されていない");
+  }
+}
+
 /** 確認を入れ替える（**表を描いていないときは何もしない**）。 */
 function withPendingDelete(
   model: GridScreenModel,
@@ -1346,6 +1393,11 @@ function withPendingDelete(
 function appliedRowOperation(
   model: GridScreenModel,
   outcome: GridEditOutcome | null,
+  /**
+   * 現在位置を移す先（**表示の序数**。8.9 の要件 9.8）。`null` なら**動かさない** —
+   * 8.6 / 8.7 の経路はつねに `null` であり、現在位置は寄せだけを受ける。
+   */
+  target: number | null = null,
 ): GridScreenModel {
   if (model.state.status !== "ready") {
     return model;
@@ -1368,6 +1420,17 @@ function appliedRowOperation(
    * （[`needsViewRefresh`]）。
    */
   const rowBound = hasRowRestriction(state.view) ? state.visibleRows : rowCount;
+  /**
+   * 反映の出発点になる選択（要件 9.8）。
+   *
+   * **移す先があるとき（取り消し・やり直し）は、その行へ現在位置を移して選択を 1 セルへ畳む。**
+   * 列は現在位置のものを保つ（境界が運ぶのは行の識別子だけであり、影響を受けた列は分からない）。
+   * 移す先が無ければいまの選択のままであり、**下の寄せだけ**を受ける（8.6 / 8.7 の経路である）。
+   */
+  const moved =
+    target === null
+      ? state.selection
+      : selectionAt({ row: target, column: state.selection.current.column });
   return {
     attempt: model.attempt,
     state: {
@@ -1381,7 +1444,8 @@ function appliedRowOperation(
       // **窓が覆う行数も新しい行数である**（上の `rowBound`）。
       visibleRows: rowBound,
       // **縮んだ表へ現在位置と選択を寄せる**（要件 6.5 の「行の位置の提示が直ちに更新される」）。
-      selection: clampSelection(state.selection, { rowCount: rowBound, columnCount }),
+      // 8.9 の移動先が新しい範囲の外にある場合も、この 1 つの寄せが端へ寄せる。
+      selection: clampSelection(moved, { rowCount: rowBound, columnCount }),
       // 消えた行に開いていた面は閉じる（`rowBound === 0` なら両方とも閉じる）。
       editing:
         state.editing !== null && state.editing.position.row >= rowBound ? null : state.editing,
@@ -1934,6 +1998,13 @@ interface GridSurfaceProps {
    * 貼り付けは行を補充しうるので、反映の形は行の操作と同じ 1 つを通る。
    */
   readonly onPasteSettled: (settlement: PasteSettlement) => void;
+  /**
+   * 取り消し・やり直しの 1 往復（8.9。要件 9.2、9.3、9.8）の結果を画面へ上げる口。
+   *
+   * **画面の中の 2 つの操作とメニューの活性化が、この 1 つの口へ着く**（`./history` の
+   * `HistoryEntry`）。反映（[`gridScreenHistorySettled`]）は 8.6 の行の操作と同じ形を通る。
+   */
+  readonly onHistorySettled: (settlement: HistorySettlement) => void;
   /** 削除の確認を求める（要件 6.5。**送っていない**。数を示して尋ねるだけである）。 */
   readonly onDeleteRequested: (confirmation: DeleteConfirmation) => void;
   /** 確認への取り消し（**送らない**）。 */
@@ -2047,6 +2118,7 @@ function GridSurface({
   onColumnMove,
   onRowOperationSettled,
   onPasteSettled,
+  onHistorySettled,
   onDeleteRequested,
   onDeleteCancelled,
   onRefused,
@@ -2470,10 +2542,72 @@ function GridSurface({
     );
   };
 
+  /**
+   * 履歴（取り消し・やり直し）の 1 往復（8.9。要件 9.2、9.3、9.8）。
+   *
+   * **画面の中の 2 つの操作と、メニューの活性化が、この 1 つの関数へ来る**（`./history` の
+   * `HistoryEntry` がその口である）。判断（捨てる前の移動先の解決、行数の作り直し）は
+   * `./history` が持ち、ここが担うのは往復の起動と、結果の行き先（画面の遷移と違反の引き直し）
+   * だけである（8.6 / 8.7 と同じ分担である）。
+   *
+   * **器がまだ無いときは送らない。**履歴は文書のものであり表のものではないが、応答を受けた
+   * あとに**窓の記憶を作り直す**（`clear`）ので、その先が無ければ往復を起こす意味が無い
+   * （`runRowOperation` と同じ判断である。**投げない** — `applyHistory` が投げない）。
+   */
+  const runHistory = (direction: GridHistoryDirection): void => {
+    const cache = cacheRef.current;
+    if (cache === null) {
+      return;
+    }
+    void applyHistory({ client, cache, direction }).then((settlement) => {
+      onHistorySettled(settlement);
+      if (settlement.status !== "applied") {
+        // **進める履歴が無い**（要件 9.2、9.3 の正常な結果）か、経路が失敗したかである。
+        // どちらも文書も表示も動いていないので、違反を引き直す理由が無い。
+        return;
+      }
+      // **適用のあとは違反を引き直す**（要件 4.6。セルの編集・行の操作・貼り付けと同じ規律で
+      // ある）。取り消しは違反を消しも生みもする（保持された値が戻るためである）。
+      refreshViolation(selectionRef.current.current, true);
+    });
+  };
+
+  /**
+   * メニューの活性化（`編集 > 元に戻す` / `編集 > やり直し`）を、**画面の中の操作と同じ入口**へ
+   * 渡す（要件 9.9）。
+   *
+   * 購読は**1 回だけ**設置する（器の組み立ての効果に混ぜない — 組み立ては列の構成が変わるたびに
+   * 走り直す）。入口は**最新の値を指す参照**を通す: `runHistory` は毎回の描画で作られる関数で
+   * あり（`onHistorySettled` と `refreshViolation` を閉じ込めている）、1 回だけ設置した購読が
+   * 古い閉包を握ると、**反映先が古い状態のまま**になる（`handleRef` / `selectionRef` と同じ規律
+   * である）。下の効果が毎回の描画のあとに参照を最新へ差し替える。
+   */
+  const historyEntryRef = useRef<(direction: GridHistoryDirection) => void>(runHistory);
+  useEffect(() => {
+    historyEntryRef.current = runHistory;
+  });
+  useEffect(
+    () => installGridHistoryRequests((direction) => historyEntryRef.current(direction)),
+    [],
+  );
+
   return (
     // 窓の到着の回数を属性にも出す（**描き直しを起こした数の観測**であり、`arrivals` を使う
     // 唯一の場所である）。
     <div data-window-arrivals={arrivals} style={SURFACE_STYLE}>
+      {/*
+        取り消しとやり直し（8.9。要件 9.2、9.3、9.9）。**行の操作の行の隣に出す** — どちらも
+        文書を変える操作であり、表示だけを変える 8.8 の行（`ViewBar`）とは置き場所が違う。
+        **メニューの活性化と同じ入口**（`runHistory`）を叩く。
+      */}
+      <HistoryOperations
+        onUndo={() => {
+          runHistory("undo");
+        }}
+        onRedo={() => {
+          runHistory("redo");
+        }}
+      />
       {/*
         行の操作と、その対象の数（8.6。要件 6.1、6.2、6.3、6.5）。**表の上に出す** — 消す行も
         足す位置も**いまの選択**であり、その提示（数え上げの行）の隣に在るのが読める位置である。
@@ -2735,10 +2869,45 @@ function RowOperations({
   );
 }
 
+/**
+ * 取り消しとやり直しの 2 つの操作（8.9。要件 9.2、9.3、9.9）。
+ *
+ * **表の面が描く**のは、この 2 つが**窓の記憶**（取り消しの後の作り直しと、移動先の解決）を
+ * 要するためである（行の操作の 3 つと同じ理由である。呼び出し側（`GridSurface`）が判断と往復を
+ * 持ち、この面は**操作を出すだけ**である）。
+ *
+ * **表示名はメニューの項目と同じである**（`編集 > 元に戻す` / `編集 > やり直し`）— 同じ操作に
+ * 2 つの呼び名を作らない（`src-tauri/src/commands/grid.rs` の `UNDO_LABEL` / `REDO_LABEL` と
+ * `scripts/check-menu-shortcut.sh` の `EXPECTED` が同じ綴りを要求する）。
+ *
+ * 打鍵（`Ctrl+Z` / `Ctrl+Shift+Z`、macOS は `Cmd`）は**器のメニューのアクセラレータ**が担う
+ * （この画面は打鍵を聴かない。`./history` の module doc「キーボードの経路はアクセラレータで
+ * ある」）。
+ */
+function HistoryOperations({
+  onUndo,
+  onRedo,
+}: {
+  /** 直前の操作の前の状態へ戻す（要件 9.2）。 */
+  readonly onUndo: () => void;
+  /** 取り消した操作を再び適用する（要件 9.3）。 */
+  readonly onRedo: () => void;
+}): ReactElement {
+  return (
+    <div data-testid="jxcel-grid-history" style={ROW_OPS_STYLE}>
+      <button type="button" data-testid="jxcel-grid-undo" onClick={onUndo} style={BUTTON_STYLE}>
+        元に戻す
+      </button>
+      <button type="button" data-testid="jxcel-grid-redo" onClick={onRedo} style={BUTTON_STYLE}>
+        やり直し
+      </button>
+    </div>
+  );
+}
+
 // ===========================================================================
 // 5. 見た目（**配色は器のカスタムプロパティだけを参照する**）
 // ===========================================================================
-
 /** 画面の枠。**領域いっぱいに広がる**（領域は中央寄せなので、自前で伸ばさないと縦に潰れる）。 */
 const ROOT_STYLE = {
   display: "flex",
@@ -2869,6 +3038,7 @@ function GridScreenBody({
   onView,
   onRowOperationSettled,
   onPasteSettled,
+  onHistorySettled,
   onDeleteRequested,
   onDeleteCancelled,
   onRefused,
@@ -2902,6 +3072,8 @@ function GridScreenBody({
   readonly onRowOperationSettled: (settlement: RowOperationSettlement) => void;
   /** 貼り付けの 1 往復の結果（8.7。要件 7.3、7.4、1.7）。 */
   readonly onPasteSettled: (settlement: PasteSettlement) => void;
+  /** 取り消し・やり直しの 1 往復の結果（8.9。要件 9.2、9.3、9.8）。 */
+  readonly onHistorySettled: (settlement: HistorySettlement) => void;
   /** 削除の確認を求める（8.6。要件 6.5。**送っていない**）。 */
   readonly onDeleteRequested: (confirmation: DeleteConfirmation) => void;
   /** 確認への取り消し（8.6。**送らない**）。 */
@@ -3039,6 +3211,7 @@ function GridScreenBody({
             onColumnMove={onColumnMove}
             onRowOperationSettled={onRowOperationSettled}
             onPasteSettled={onPasteSettled}
+            onHistorySettled={onHistorySettled}
             onDeleteRequested={onDeleteRequested}
             onDeleteCancelled={onDeleteCancelled}
             onRefused={onRefused}
@@ -3109,6 +3282,8 @@ export interface GridScreenViewProps {
   readonly onRowOperationSettled: (settlement: RowOperationSettlement) => void;
   /** 貼り付けの 1 往復の結果（8.7。要件 7.3、7.4、1.7）。 */
   readonly onPasteSettled: (settlement: PasteSettlement) => void;
+  /** 取り消し・やり直しの 1 往復の結果（8.9。要件 9.2、9.3、9.8）。 */
+  readonly onHistorySettled: (settlement: HistorySettlement) => void;
   /** 削除の確認を求める（8.6。要件 6.5。**送っていない**）。 */
   readonly onDeleteRequested: (confirmation: DeleteConfirmation) => void;
   /** 確認への取り消し（8.6。**送らない**）。 */
@@ -3141,6 +3316,7 @@ export function GridScreenView({
   onView,
   onRowOperationSettled,
   onPasteSettled,
+  onHistorySettled,
   onDeleteRequested,
   onDeleteCancelled,
   onRefused,
@@ -3235,6 +3411,7 @@ export function GridScreenView({
         onView={onView}
         onRowOperationSettled={onRowOperationSettled}
         onPasteSettled={onPasteSettled}
+        onHistorySettled={onHistorySettled}
         onDeleteRequested={onDeleteRequested}
         onDeleteCancelled={onDeleteCancelled}
         onRefused={onRefused}
@@ -3479,6 +3656,34 @@ export function GridScreen(): ReactElement {
     [model, sendView],
   );
 
+  /**
+   * 取り消し・やり直しの 1 往復の結果（8.9。要件 9.2、9.3、9.8）。
+   *
+   * **非同期の結果である**（`ScreenBoundary` は効果の同期の例外しか捕まえない）。遷移は全域で
+   * あり、投げない（`gridScreenHistorySettled`）。
+   */
+  const settleHistory = useCallback(
+    (settlement: HistorySettlement) => {
+      const state = model.state;
+      setModel((current) => gridScreenHistorySettled(current, settlement));
+      // 取り消しは**行数を変えうる**（行の追加・削除・複製・貼り付けの補充の逆命令である）ので、
+      // 行の操作・貼り付けと同じ判断を通る（要件 8.7）。指定が行を絞っている間は、応答が運ぶ
+      // 行数がシートの行数であって可視行数ではない — 数を知る唯一の源は表示の指定の応答である。
+      if (
+        state.status === "ready" &&
+        settlement.status === "applied" &&
+        needsViewRefresh({
+          view: state.view,
+          outcome: settlement.outcome,
+          sheetRowsBefore: state.summary.row_count,
+        })
+      ) {
+        sendView((view) => view);
+      }
+    },
+    [model, sendView],
+  );
+
   return (
     <GridScreenView
       model={model}
@@ -3500,6 +3705,7 @@ export function GridScreen(): ReactElement {
       onView={updateView}
       onRowOperationSettled={settleRowOperation}
       onPasteSettled={settlePaste}
+      onHistorySettled={settleHistory}
       onDeleteRequested={requestDelete}
       onDeleteCancelled={cancelDelete}
       onRefused={refuseRowOperation}
