@@ -62,20 +62,21 @@ echo "検証（配置の記録）: $line"
 # `the_builtin_quit_item_is_placed_in_the_platform_conventional_submenu`）。
 # ファイルメニューに入るのは「開く…」と**ドキュメントのセッションの「新規」「保存」**
 # （タスク 3.6。`crate::menu::FILE_MENU_LABEL` を位置に使うので Linux / Windows と同じ位置である）
-# であり、診断の 3 項目は 診断 に入る。**「新規」「保存」はアプリケーションメニューの項目ではない** —
+# であり、**8.7 の「複製」は `編集` に**入り、診断の 3 項目は 診断 に入る。**「新規」「保存」はアプリケーションメニューの項目ではない** —
 # アプリケーションメニューへ畳み込まれるのは `builtin_quit_path()` を使う組み込みの「終了」と、
 # 検証専用の 2 項目（`menu.rs` の検証用の登録が同じ位置を使う）だけである。
 # **以前この一覧は Linux / Windows と同じ「ファイル > 終了」を要求していた** —
 # macOS のアプリ全体のメニューでは成立せず、この段が初めて走った 2026-09-12 に露見した。
 for expected in \
   "配置=アプリ全体" \
-  "項目数=9" \
+  "項目数=10" \
   "app-shell.open-document(ファイル > 開く…, ショートカット=super+KeyO)" \
   "app-shell.quit(jxcel > 終了, ショートカット=super+KeyQ)" \
   "verification.document-only(jxcel > 検証: ドキュメント付きのみ, ショートカット=(なし))" \
   "verification.probe(jxcel > 検証: 対象ウィンドウを記録, ショートカット=shift+super+KeyJ)" \
   "document-session.new(ファイル > 新規, ショートカット=super+KeyN)" \
   "document-session.save(ファイル > 保存, ショートカット=super+KeyS)" \
+  "data-grid.copy(編集 > 複製, ショートカット=super+KeyC)" \
   "app-shell.diagnostics-export(診断 > 診断情報を書き出す…, ショートカット=shift+super+KeyE)" \
   "app-shell.diagnostics-log-location(診断 > 記録の保存場所を表示, ショートカット=shift+super+KeyL)" \
   "app-shell.diagnostics-verbosity(診断 > 記録の詳細度…, ショートカット=shift+super+KeyV)"
@@ -88,7 +89,7 @@ do
       ;;
   esac
 done
-echo "OK: macOS: アプリ全体のメニュー（配置=アプリ全体）に 9 項目が期待の位置・表示名で並び、ショートカットは super+…（Cmd）へ解決されている"
+echo "OK: macOS: アプリ全体のメニュー（配置=アプリ全体）に 10 項目が期待の位置・表示名で並び、ショートカットは super+…（Cmd）へ解決されている"
 
 # 記録が「配置」だけを覆うことを明示する（配布物のメニューは AX 無しには読めない）。
 echo "限界: macOS ではアクセシビリティ許可が無いため、ネイティブのメニューを外部から読めず、クリック・キー入力を配送できない（actions/runner-images#8214）"

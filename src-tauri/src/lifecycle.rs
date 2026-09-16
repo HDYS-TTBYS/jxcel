@@ -489,6 +489,17 @@ pub fn run() -> Result<(), StartupError> {
     //   活性化の時点（7.5 の `activation_target`）で行われる。
     commands::diagnostics_install(app.handle());
 
+    // 手順 4.3 の続き: グリッドの複製の登録（要件 7.8。タスク 8.7）。**7.4 と同じ登録口**へ
+    //   `編集 > 複製`（非 macOS `Ctrl+C` / macOS `Cmd+C`）を足す。選択されたときの処理は、
+    //   7.5 が解決した活性化の対象ウィンドウへ `GRID_COPY_REQUESTED_EVENT` を送るだけであり、
+    //   複製そのもの（範囲の決定・表形式テキスト・クリップボード）はフロントエンドの表の面が
+    //   移植口（`RendererHandle.copySelection`）を通して行う — **打鍵（DOM の `copy`）が着く
+    //   のと同じ入口である**（`src/features/grid/clipboardRequests.ts`）。
+    //   **貼り付けの項目は登録しない** — クリップボードの読み口が無く、読み口が無いまま
+    //   `Ctrl+V` を登録すると、いま動いている打鍵の貼り付けを基盤のメニューが奪う
+    //   （理由と実測は `commands/grid.rs` の `install` の doc）。
+    commands::grid_install(app.handle());
+
     // 手順 4.3 の続き（検証専用）: 一括転送の結果を診断の記録へ流すリスナ（要件 4.5。タスク
     //   10.8）。フロントエンド（`src/shell/verificationBulk.ts`）が `bulk_echo` の往復を検めた
     //   結果をイベントで送るので、ここで受けて記録の 1 行に写す。**記録機構のロガーは手順 4 で

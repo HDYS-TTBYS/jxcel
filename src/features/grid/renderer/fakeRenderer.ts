@@ -19,10 +19,13 @@
  * | 操作の時の引き | 動いた先の行・区間を引く | 選択の範囲・起動した行・動いた先の行・区間を引く |
  * | 知らせの時機 | その場で渡す | 次の微小タスクまで遅らせる |
  *
- * **どちらの実装も、`RendererHandle` の 4 つの口（`setSelection` / `scrollTo` / `invalidate` /
- * `destroy`）を持つ。**`destroy` の後は移植口を使えない（`mountedSpec` が投げる）— 実装の誤りを
- * テストの側で気づけるようにするためである。2 つの実装は `setSelection` の扱いでもわざと違う
- * （窓をまとめて引く側はその場で描き、必要になった行だけ引く側は引かない）。それでも外へ出る
+ * **どちらの実装も、`RendererHandle` の 5 つの口（`setSelection` / `scrollTo` / `invalidate` /
+ * `copySelection` / `destroy`）を持つ。**`copySelection` は 8.7 が足した**打鍵とメニューの唯一の
+ * 入口**であり（要件 7.8）、どちらの実装も「範囲は選択から決め、テキストは仕様に作らせる」と
+ * いう同じ意味論で答える。`destroy` の後は移植口を使えない（`mountedSpec` が投げる）— 実装の
+ * 誤りをテストの側で気づけるようにするためである。2 つの実装は `setSelection` の扱いでも
+ * わざと違う（窓をまとめて引く側はその場で描き、必要になった行だけ引く側は引かない —
+ * **複製の対象を知るために選択を覚えるのはどちらも同じである**）。それでも外へ出る
  * 呼び出しの並びは同じである。
  *
  * # 7.2（Glide の写し）への申し送り
@@ -33,7 +36,7 @@
  * `interactionDriver.ts` のヘッダにその旨を書いてある。
  */
 import type { DrivableRenderer } from "./interactionDriver";
-import type { RendererSpec, RowOrdinal } from "./port";
+import type { RendererSelection, RendererSpec, RowOrdinal } from "./port";
 
 /** 窓をまとめて引く実装が、マウントの時に一度に引く可視の行数。 */
 const EAGER_WINDOW_ROWS = 24;
@@ -56,6 +59,11 @@ function mountedSpec(spec: RendererSpec | null, operation: string): RendererSpec
 export function createEagerFakeRenderer(): DrivableRenderer {
   let spec: RendererSpec | null = null;
   let clipboard: string | null = null;
+  // **いまの選択**（`copySelection` が範囲を決めるのに要る。要件 7.8）。マウントの時点の値から
+  // 始まり、知らせ（利用者の操作）と指示（`setSelection`）の両方で更新する — 選択の所有者は
+  // 呼び出し側だが、**複製の対象を決めるのは移植口**である（`./port` の
+  // `RendererHandle.copySelection` の docs）。
+  let selection: RendererSelection | null = null;
 
   const draw = (start: RowOrdinal, count: number): void => {
     if (spec === null) return;
@@ -71,13 +79,16 @@ export function createEagerFakeRenderer(): DrivableRenderer {
       // 器は使わない（本物の描画器ではないので描画面を持たない）。**触れないことは前提ではなく
       // 確かめられる** — 駆動器はどの属性を読んでも投げる代役を渡す（`interactionDriver.ts`）。
       spec = initial;
+      selection = initial.selection;
       draw(0, EAGER_WINDOW_ROWS);
       return {
-        setSelection(selection) {
+        setSelection(next) {
+          // 下ろされた選択を覚える（複製の対象になる。上の `selection` の doc）。
+          selection = next;
           // **与えられた選択を描く**（下ろされた指示が描くものになる）。範囲の行を引くだけで
           // あり、外へ報せ返さない（報せ返せば `port.test.ts` の並びの比較に余計な 1 つが載る）。
-          if (selection !== null) {
-            draw(selection.range.start.row, selection.range.end.row - selection.range.start.row + 1);
+          if (next !== null) {
+            draw(next.range.start.row, next.range.end.row - next.range.start.row + 1);
           }
         },
         scrollTo(position) {
@@ -85,6 +96,15 @@ export function createEagerFakeRenderer(): DrivableRenderer {
         },
         invalidate(span) {
           draw(span.start, span.count);
+        },
+        async copySelection() {
+          // **打鍵とメニューの唯一の入口**（本物と同じ意味論: 範囲は選択から決め、テキストは
+          // 仕様が作り、クリップボードへ渡す）。
+          const current = selection;
+          if (current === null) {
+            return;
+          }
+          clipboard = await mountedSpec(spec, "copySelection").onCopy(current.range);
         },
         destroy() {
           spec = null;
@@ -111,9 +131,6 @@ export function createEagerFakeRenderer(): DrivableRenderer {
       mountedSpec(spec, "emitColumnMove").onColumnMove(from, to);
       return Promise.resolve();
     },
-    async emitCopy(range) {
-      clipboard = await mountedSpec(spec, "emitCopy").onCopy(range);
-    },
     async emitPaste(anchor, text) {
       await mountedSpec(spec, "emitPaste").onPaste(anchor, text);
     },
@@ -131,6 +148,13 @@ export function createEagerFakeRenderer(): DrivableRenderer {
 export function createLazyFakeRenderer(): DrivableRenderer {
   let spec: RendererSpec | null = null;
   let clipboard: string | null = null;
+  /**
+   * **いまの選択**（`copySelection` が範囲を決めるのに要る。要件 7.8）。**この実装は描かないが、
+   * 覚えるのは要る** — 複製の入口は範囲を引数に取らないので、対象を決められるのは移植口だけ
+   * である（`./port` の `RendererHandle.copySelection` の docs）。**覚えることと描くことの
+   * 違いが本実装の「必要になった行だけ引く」という性格であり、そこは変えていない。**
+   */
+  let selection: RendererSelection | null = null;
 
   const draw = (start: RowOrdinal, count: number): void => {
     if (spec === null) return;
@@ -145,16 +169,27 @@ export function createLazyFakeRenderer(): DrivableRenderer {
     mount(_container, initial) {
       // 器は使わない（理由は窓をまとめて引く実装と同じ）。
       spec = initial;
+      selection = initial.selection;
       return {
-        setSelection() {
-          // **この実装は引かない**（必要になった行だけを引く作りである）。下ろされた選択は
-          // 覚えない — 選択を持つのは呼び出し側であり、実装は描くだけである。
+        setSelection(next) {
+          // **この実装は引かない**（必要になった行だけを引く作りである）。選択は覚えるが
+          // （複製の対象）、報せ返しはしない — 選択の所有者は呼び出し側である。
+          selection = next;
         },
         scrollTo(position) {
           draw(position.row, 1);
         },
         invalidate(span) {
           draw(span.start, span.count);
+        },
+        async copySelection() {
+          await Promise.resolve();
+          // **打鍵とメニューの唯一の入口**（意味論は窓をまとめて引く実装と同じである）。
+          const current = selection;
+          if (current === null) {
+            return;
+          }
+          clipboard = await mountedSpec(spec, "copySelection").onCopy(current.range);
         },
         destroy() {
           spec = null;
@@ -184,10 +219,6 @@ export function createLazyFakeRenderer(): DrivableRenderer {
     async emitColumnMove(from, to) {
       await Promise.resolve();
       mountedSpec(spec, "emitColumnMove").onColumnMove(from, to);
-    },
-    async emitCopy(range) {
-      await Promise.resolve();
-      clipboard = await mountedSpec(spec, "emitCopy").onCopy(range);
     },
     async emitPaste(anchor, text) {
       await Promise.resolve();

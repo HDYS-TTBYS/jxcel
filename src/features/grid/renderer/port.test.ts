@@ -83,12 +83,16 @@ const CANONICAL_SEQUENCE: readonly RecordedCall[] = [
     args: [{ rows: { start: 0, count: 24 }, columns: { start: 0, count: 3 } }],
   },
   // **下ろした選択は報せ返らない。**返す実装では `onSelectionChange` がもう 1 つ現れる。
-  { call: "setSelection", args: [{ current: { row: 5, column: 2 }, range: { start: { row: 5, column: 2 }, end: { row: 5, column: 2 } } }] },
+  { call: "setSelection", args: [{ current: { row: 1, column: 1 }, range: { start: { row: 0, column: 0 }, end: { row: 1, column: 1 } } }] },
   { call: "onActivateEditor", args: [{ row: 2, column: 1 }] },
   { call: "onColumnResize", args: [1, 144] },
   { call: "onColumnMove", args: [2, 0] },
-  { call: "onCopy", args: [{ start: { row: 1, column: 0 }, end: { row: 2, column: 1 } }] },
-  { call: "onPaste", args: [{ row: 4, column: 0 }, "1:0\t1:1\n2:0\t2:1"] },
+  // **複製**（要件 7.8）。打鍵（DOM の `copy`）とメニューの活性化は**同じ入口**へ結線されて
+  // いるので、台本は 1 段だけである。範囲は**渡さない** — 実装が持つ選択から決まるので、
+  // 直前に下ろした選択（`setSelection` の矩形）が現れる。
+  { call: "copySelection", args: [] },
+  { call: "onCopy", args: [{ start: { row: 0, column: 0 }, end: { row: 1, column: 1 } }] },
+  { call: "onPaste", args: [{ row: 4, column: 0 }, "0:0\t0:1\n1:0\t1:1"] },
   { call: "scrollTo", args: [{ row: 40, column: 2 }] },
   { call: "invalidate", args: [{ start: 8, count: 4 }] },
   { call: "destroy", args: [] },
@@ -192,8 +196,9 @@ describe("外向きの知らせと呼び出し側の口の並び", () => {
     const paste = run.calls.find(({ call }) => call === "onPaste");
     const pastedText = paste?.args[1];
 
-    // 表形式（行の区切りは改行、列の区切りはタブ）であること。
-    expect(pastedText).toBe("1:0\t1:1\n2:0\t2:1");
+    // 表形式（行の区切りは改行、列の区切りはタブ）であること。複製の範囲は**入口が決める** —
+    // 直前に下ろした選択（2×2）であり、その表形式がそのまま貼り付けの入力になる。
+    expect(pastedText).toBe("0:0\t0:1\n1:0\t1:1");
     // 複製の約束の値が描き手（の代役）の側まで届いていること。**移植口は文字列を素通しするだけで、
     // 何行何列かも、どの列の型に掛けるかも知らない**（解釈は Rust 側の PasteCodec の仕事である）。
     expect(renderer.clipboard).toBe(pastedText);
@@ -233,7 +238,12 @@ describe("実装の差し替え（呼び出しの並びが変わらない）", (
     const lazyWithComputed = await drive(createLazyFakeRenderer(), lazyRowSource());
     // **実物（Glide の写し）**。行の出所は配列の模型を使う（実物は `getCell` を引かないので
     // どちらでも同じである — 引かないことは下の比較で見える）。
-    const adapter = await drive(glideDrivableRenderer(createGlideWiring), arrayRowSource());
+    // **複製の入口（`handle.copySelection`）はクリップボードへ書くので、口を差し替える** —
+    // `node` 環境には `document` が無い（`glideAdapter.tsx` の `ClipboardWriter`）。
+    const adapter = await drive(
+      glideDrivableRenderer((spec, write) => createGlideWiring(spec, write)),
+      arrayRowSource(),
+    );
 
     for (const { run } of [
       eagerWithArray,
@@ -300,7 +310,7 @@ const rendererSpecSurface: Exactly<
 > = true;
 const rendererHandleSurface: Exactly<
   keyof RendererHandle,
-  "setSelection" | "scrollTo" | "invalidate" | "destroy"
+  "setSelection" | "scrollTo" | "invalidate" | "copySelection" | "destroy"
 > = true;
 const renderColumnSurface: Exactly<keyof RenderColumn, "title" | "width"> = true;
 const cellPositionSurface: Exactly<keyof CellPosition, "row" | "column"> = true;

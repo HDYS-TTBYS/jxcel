@@ -140,12 +140,23 @@ const APPLICATION_MENU_LABEL: &str = "jxcel";
 /// 名前の定義を 2 箇所に持たない。
 pub(crate) const FILE_MENU_LABEL: &str = "ファイル";
 
+/// 編集メニューの部分メニュー名。**全プラットフォームで使う。**
+///
+/// 範囲の複製（8.7 の `data-grid.copy`）と、9.9 が足す取り消し・やり直しがここに入る。
+/// **他のモジュールが位置を書き写さないよう公開する**（[`FILE_MENU_LABEL`] と同じ理由）。
+pub(crate) const EDIT_MENU_LABEL: &str = "編集";
+
 /// トップレベルの部分メニューの慣習的な並び（要件 3.6）。
 ///
 /// ここに無い名前の部分メニューは、この並びの後ろに**辞書順**で置かれる。並びを固定するのは、
 /// 登録の順序（実体は登録元の識別子の辞書順）が部分メニューの見え方に漏れないようにするため
 /// である。**macOS ではアプリケーションメニューが常に先頭**になる（[`top_level_sort_key`]）。
-const TOP_LEVEL_ORDER: &[&str] = &["ファイル", "編集", "表示", "ヘルプ"];
+const TOP_LEVEL_ORDER: &[&str] = &[
+    FILE_MENU_LABEL,
+    EDIT_MENU_LABEL,
+    "表示",
+    "ヘルプ",
+];
 
 /// 組み込みの終了項目の表示名。
 const QUIT_LABEL: &str = "終了";

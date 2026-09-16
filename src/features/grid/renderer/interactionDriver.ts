@@ -55,7 +55,7 @@ import type { TypeKindTag } from "../../../ipc/bindings";
 // 実物の配線へ面をかぶせる薄い層（下の `glideDrivableRenderer`）が使う。**値として要るのは
 // `CompactSelection` と `emptyGridSelection` だけ**であり、Glide の部品そのものは読み込まない。
 import { CompactSelection, emptyGridSelection, type GridSelection, type Item } from "@glideapps/glide-data-grid";
-import type { GlideWiring } from "./glideAdapter";
+import type { ClipboardWriter, GlideWiring } from "./glideAdapter";
 import type {
   CellPosition,
   CellRange,
@@ -112,6 +112,7 @@ export type PortCall =
   | "onPaste"
   | "scrollTo"
   | "invalidate"
+  | "copySelection"
   | "destroy";
 
 /** 記録された 1 回の呼び出し。`args` は**移植口が受け取った引数そのもの**である。 */
@@ -141,9 +142,7 @@ export interface RendererEventSource {
   emitColumnResize(column: number, width: number): Promise<void>;
   /** 列の位置が変更された。 */
   emitColumnMove(from: number, to: number): Promise<void>;
-  /** 複製が指示された。 */
-  emitCopy(range: CellRange): Promise<void>;
-  /** 貼り付けが指示された。 */
+  /** 貼り付けが指示された（DOM の `paste`）。 */
   emitPaste(anchor: CellPosition, text: string): Promise<void>;
   /**
    * 直近に**クリップボードへ渡した**文字列（実装の側の控え）。複製の約束の値が移植口を通って
@@ -363,15 +362,18 @@ const SELECTION: RendererSelection = {
 const VISIBLE: VisibleSpan = { rows: { start: 0, count: 24 }, columns: { start: 0, count: 3 } };
 /** 画面が下ろす選択（移動の結果。要件 2.2）。**実装はこれを報せ返してはならない。** */
 const PUSHED_SELECTION: RendererSelection = {
-  current: { row: 5, column: 2 },
-  range: { start: { row: 5, column: 2 }, end: { row: 5, column: 2 } },
+  // **現在位置は矩形の右下**（左上へ潰す実装が並びの比較で落ちる形を保つ）。
+  // 矩形を行 0〜1 に置くのは、**未取得の行を限った出所（`lazyRowSource(2)`）でも複製の
+  // テキストが値を持つ**ようにするためである（台本の並びは 1 つであり、取得済みの範囲を
+  // 変える検査でも同じ期待値を使う）。
+  current: { row: 1, column: 1 },
+  range: { start: { row: 0, column: 0 }, end: { row: 1, column: 1 } },
 };
 const ACTIVATION: CellPosition = { row: 2, column: 1 };
 const RESIZE_COLUMN = 1;
 const RESIZE_WIDTH = 144;
 const MOVE_FROM = 2;
 const MOVE_TO = 0;
-const COPY_RANGE: CellRange = { start: { row: 1, column: 0 }, end: { row: 2, column: 1 } };
 const PASTE_ANCHOR: CellPosition = { row: 4, column: 0 };
 const SCROLL_TO: CellPosition = { row: 40, column: 2 };
 const INVALIDATE: RowSpan = { start: 8, count: 4 };
@@ -380,14 +382,19 @@ const INVALIDATE: RowSpan = { start: 8, count: 4 };
  * 決められた操作の並びを 1 回注ぎ、観測された呼び出しの並びを返す。
  *
  * 順は マウント → 選択の変化 → 見えている区間の変化 → **選択の指示**（`setSelection`）→
- * 編集の起動 → 列幅の変更 → 列の移動 → 複製 → 貼り付け → `scrollTo` → `invalidate` →
- * `destroy` である。
+ * 編集の起動 → 列幅の変更 → 列の移動 → 複製（打鍵）→ **複製（メニューの活性化）** → 貼り付け →
+ * `scrollTo` → `invalidate` → `destroy` である。
  *
  * 2 つの意味を持つ段が混ざっている。**利用者の操作は `emit*`**（実装が受け取り、callback として
  * 外へ出る）であり、**呼び出し側の指示は `handle` の口**（`setSelection` / `scrollTo` /
- * `invalidate` / `destroy`）である。選択は両方から来る — ポインタの操作（`emitSelectionChange`）
- * と、画面が決めた選択を下ろす指示（`setSelection`）である。**下ろした指示が報せ返らないこと**を
- * 並びの比較が固定する（返せば `onSelectionChange` がもう 1 つ現れる）。
+ * `invalidate` / `copySelection` / `destroy`）である。選択は両方から来る — ポインタの操作
+ * （`emitSelectionChange`）と、画面が決めた選択を下ろす指示（`setSelection`）である。
+ * **下ろした指示が報せ返らないこと**を並びの比較が固定する（返せば `onSelectionChange` が
+ * もう 1 つ現れる）。
+ *
+ * **複製は 2 段ある**（要件 7.8）。打鍵（`emitCopy` に範囲を渡す — DOM の `copy` が範囲を持つ）と、
+ * メニューの活性化（`handle.copySelection` — 範囲は実装が持つ選択から決まる）である。
+ * **両方が同じ入口へ着くこと**を、2 段が同じ種類の呼び出し（`onCopy`）を出すことで観測する。
  *
  * 複製で返った文字列は**そのまま貼り付けの入力に使う** — 移植口が中身を解釈しないこと
  * （素通しであること）を、同じバイトが往復することで示す。
@@ -426,7 +433,12 @@ export async function driveCanonicalSequence(
   await renderer.emitActivateEditor(ACTIVATION);
   await renderer.emitColumnResize(RESIZE_COLUMN, RESIZE_WIDTH);
   await renderer.emitColumnMove(MOVE_FROM, MOVE_TO);
-  await renderer.emitCopy(COPY_RANGE);
+  // **複製**（要件 7.8）。打鍵（DOM の `copy`）とメニューの活性化は**同じ入口**
+  // （`RendererHandle.copySelection`）へ結線されている（8.7 がそう決めた。本物は
+  // `attachCopyKeystroke` が DOM を繋ぎ、画面がメニューの活性化を同じメソッドへ渡す）。
+  // したがって台本もその入口を 1 回叩く — **範囲は渡さない**（実装が持つ選択から決まる）。
+  record("copySelection", []);
+  await handle.copySelection();
   await renderer.emitPaste(PASTE_ANCHOR, copiedText);
 
   record("scrollTo", [SCROLL_TO]);
@@ -484,15 +496,15 @@ function selectionOf(selection: RendererSelection | null): GridSelection {
  * | `emitActivateEditor` | `onCellActivated`（`Item` = 列, 行） | `onActivateEditor`（位置） |
  * | `emitColumnResize` | `onColumnResize`（列, 幅, 添字, grow 込み） | `onColumnResize`（添字, 幅） |
  * | `emitColumnMove` | `onColumnMoved`（from, to） | `onColumnMove`（from, to） |
- * | `emitCopy` | DOM の `copy`（本物は `GlideSurface` が受ける） | `onCopy`（範囲） |
- * | `emitPaste` | DOM の `paste`（同じ） | `onPaste`（錨, 文字列） |
+ * | （複製は `handle.copySelection`。下の段落） | DOM の `copy`（本物は `attachCopyKeystroke`） | `onCopy`（**選択から決めた範囲**） |
+ * | `emitPaste` | DOM の `paste`（本物は `GlideSurface` が受ける） | `onPaste`（錨, 文字列） |
  *
  * **複製と貼り付けだけは Glide の props を通らない。** 本物の経路は DOM の `copy` / `paste` を
  * `GlideSurface` が自分で受けて配線へ渡す（Glide 自身のクリップボードの経路は移植口を通らない
- * ので止めてある。`glideAdapter.tsx` のモジュール doc）。したがってこの層も `copyRange` /
- * `pasteAt` を直接叩く — **錨を選択から決める部分（`currentAnchor`）は本物と同じ関数である**
- * が、ここでは呼ばない（選択を動かすと並びに余計な `onSelectionChange` が載るためである。
- * 錨の決定は `glideAdapter.test.ts` が名指しで固定している）。
+ * ので止めてある。`glideAdapter.tsx` のモジュール doc）。**複製は 8.7 が入口を 1 つにした** —
+ * DOM の `copy` は `attachCopyKeystroke` が `RendererHandle.copySelection` へ結線し、メニューの
+ * 活性化も同じメソッドへ来る。したがってこの層は**その入口を直接叩く**（`pasteAt` と同じ形で
+ * あり、`emitCopy(range)` という形は「面が範囲を渡していた」7.2 の写しである）。
  *
  * # 器は使わない
  *
@@ -500,7 +512,7 @@ function selectionOf(selection: RendererSelection | null): GridSelection {
  * 2 つの実装と同じである — 触れないことは駆動器が確かめる）。
  */
 export function glideDrivableRenderer(
-  createWiring: (spec: RendererSpec) => GlideWiring,
+  createWiring: (spec: RendererSpec, write: ClipboardWriter) => GlideWiring,
 ): DrivableRenderer {
   let mounted: { readonly spec: RendererSpec; readonly wiring: GlideWiring } | null = null;
   let clipboard: string | null = null;
@@ -514,7 +526,15 @@ export function glideDrivableRenderer(
 
   return {
     mount(_container, initial) {
-      mounted = { spec: initial, wiring: createWiring(initial) };
+      // **クリップボードへ渡す口は駆動器が差し替える。**`node` 環境には `document` が無く、
+      // 既定の `writeClipboardText` の予備経路（`execCommand`）が落ちるためであり、
+      // 同時に「実装がクリップボードへ渡した文字列」を駆動器が控えられるようにするためである。
+      mounted = {
+        spec: initial,
+        wiring: createWiring(initial, async (text) => {
+          clipboard = text;
+        }),
+      };
       return mounted.wiring.handle;
     },
     async emitSelectionChange(selection) {
@@ -548,9 +568,6 @@ export function glideDrivableRenderer(
     },
     async emitColumnMove(from, to) {
       wiringOf("emitColumnMove").props.onColumnMoved(from, to);
-    },
-    async emitCopy(range) {
-      clipboard = await wiringOf("emitCopy").copyRange(range);
     },
     async emitPaste(anchor, text) {
       await wiringOf("emitPaste").pasteAt(anchor, text);

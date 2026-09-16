@@ -311,6 +311,23 @@ export interface RendererHandle {
 
   /** その区間を描き直させる（窓の内容が変わったとき。要件 1.7）。 */
   readonly invalidate: (span: RowSpan) => void;
+  /**
+   * **選択の範囲を複製する**（要件 7.1、7.2、7.8）。表形式のテキストを作るのは呼び出し側
+   * （[`RendererSpec.onCopy`]）であり、この口は範囲を決め（**移植口が持っている選択**から）
+   * クリップボードへ渡すところまでを担う。
+   *
+   * **打鍵（DOM の `copy`）とメニューの活性化の唯一の入口である。**範囲を引数に取らないのは、
+   * 取ると呼ぶ側が範囲を計算することになり、**範囲の決定が 2 箇所へ分かれる**ためである
+   * （打鍵は移植口の選択、メニューは画面の写し、という 2 つになる）。移植口は選択を両方向に
+   * 同期している（[`RendererSpec.selection`] / [`RendererHandle.setSelection`] /
+   * `onSelectionChange`）ので、決めるのは移植口 1 つに閉じられる。
+   *
+   * 選択が無いときは**何もしない**（`onCopy` を呼ばない）。複製できないとき（選択の範囲に
+   * 窓が届いていないセルがある）は [`RendererSpec.onCopy`] の契約どおり失敗し、その理由は
+   * 画面の告知へ出る（**空文字を渡さない** — クリップボードが空になり、利用者には
+   * 「複製できた」と見える）。
+   */
+  readonly copySelection: () => Promise<void>;
   /** 描き手を片付ける。**以後その `RendererHandle` を使ってはならない。** */
   readonly destroy: () => void;
 }

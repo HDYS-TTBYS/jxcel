@@ -1553,3 +1553,190 @@ design.md の File Structure Plan が名指ししており、実際に 3 つの�
 - [WebKit bug 262607](https://bugs.webkit.org/show_bug.cgi?id=262607) — DMA-BUF の無効化要求が WONTFIX で終了
 - [tauri-apps/tauri#15936](https://github.com/tauri-apps/tauri/issues/15936) — WebKitGTK 2.52.3 で「DOM はあるが何も塗られない」再現報告（2026-08-29）
 
+
+## 実測と固定: 範囲の複製と貼り付け（タスク 8.7）
+
+要件 7.1、7.2、7.8。**赤 → 緑**で実装した（**機能フラグは使っていない** — 本タスクは画面の機能で
+あり、段の切り替えを要する分岐が無い。`scripts/check-shipping-bundle.sh` の対象に新しい識別子は
+足していない）。追加したのは `clipboard.ts` / `clipboardRequests.ts`（+ それぞれの `.test.ts`）
+であり、`GridScreen.tsx` / `GridScreen.test.ts` と移植口（`renderer/port.ts` /
+`glideAdapter.tsx` / `fakeRenderer.ts` / `interactionDriver.ts` / `port.test.ts`）を変更した。
+
+**レビューの指摘を受けて、最初の版から 2 点を直した。**① **メニューの複製を結線した**（下の
+「メニューからの実行」— 最初の版は「器の登録口は TS から到達できない」として欠落のままにして
+いたが、**9.5 の診断の導線と同じイベントの形で到達できる**。誤っていた前提は下の表に実測と
+ともに残す）。② **画面の関数本体に在った貼り付けの入口を module へ切り出した** — 切り出す前は、
+レビューが名指しした 3 つの変異が**どの検査でも捕まらなかった**（下の「画面の面の切り出し」）。
+
+したがって本タスクは**境界の型（`crates/app-shell/src/ipc/mod.rs`）・生成物
+（`src/ipc/bindings.ts`）・器（`src-tauri/src/commands/grid.rs` / `menu.rs` /
+`commands/mod.rs` / `lifecycle.rs`）・メニューの検査の段（`scripts/check-menu-shortcut.sh`）へ
+**最小の手を入れた** — 画面の側だけで要件 7.8 の「メニューからの選択」に届かないためであり、
+その範囲と理由を design.md「メニューの複製の結線」に記録した。**貼り付けの半分は未達のまま
+止めた**（障碍はクリップボードの読み口の不在であり、下に実測を並べる）。
+
+### 赤 → 緑（実測）
+
+| 段 | 実測 |
+|---|---|
+| 赤（module） | `clipboard.ts` が無い状態で `clipboard.test.ts` が `Error: Cannot find module './clipboard'`（`0 test`）で落ちる |
+| 赤（画面） | 遷移 `gridScreenPasteSettled` が無い状態で `GridScreen.test.ts` が **6 件落ちる**（`gridScreenPasteSettled is not a function` ほか。`Tests 6 failed ／ 77 passed (83)`） |
+| 緑 | 実装後、vitest の全体（`npx vitest run`）が **442 件**通る（`clipboard.test.ts` 28 件、`GridScreen.test.ts` 83 件。タスク 8.7 の前は 409 件である） |
+| **赤（レビュー後。画面の面）** | `createClipboardSurface` を足す前の実装（`GridSurface` の関数本体）に下の 3 つの変異を入れると、**442 件すべてが緑のまま通る**（＝覆えていない穴だった）。切り出した後は 3 つとも落ちる（下の変異試験 A〜C） |
+| **赤（レビュー後。メニュー）** | イベント名をリテラルで綴り間違える（`"grid_copy_request"`）と購読の検査が落ち、メニューの入口を何もしない関数にすると「同じ入口へ着く」検査が落ちる（下の変異試験 D・E） |
+| **緑（レビュー後）** | 実装後、vitest の全体が **450 件**通る（`clipboard.test.ts` **32 件**（+4。画面の面）、`clipboardRequests.test.ts` **4 件**（新規）。`GridScreen.test.ts` 83 件は変わらない）。`src-tauri` の検査は **171 件**（`commands::grid` に 2 件追加） |
+
+### 決めたこと（**根拠は読んだ源である**）
+
+| 論点 | 決定 | 実測の根拠 |
+|---|---|---|
+| **複製のテキストを作る場所** | 画面（`./clipboard` の `tableText`）が作る。値は窓の記憶の `getCell`（表示文字列）から読み、規則は `paste.rs` の写しで書く | 移植口の `onCopy` は `Promise<string>` を返す口であり（`renderer/port.ts:284`）、7.2 の実装は**素通し**である（`glideAdapter.tsx` の `copyRange` は `liveSpec("onCopy").onCopy(range)` を返し、書き込みだけを行う）。ドメインには書く側（`PasteCodec::write`、`edit/paste.rs:174`）があるが、**境界の 6 本のコマンドに「範囲を読む」口が無い**（`crates/app-shell/src/ipc/command_names.rs` の 6 つは `document_state` / `grid_open_sheet` / `grid_set_view` / `grid_rows_window` / `grid_apply_edit` / `grid_find_violation`）。`grep -rn "PasteCodec" crates/data-grid/src/` は `edit` 層の内側と `lib.rs` の再輸出だけを返す（＝呼ぶ経路が 1 つも無い） |
+| **テキストの形式** | 行は LF、列は TAB。区切りと `"` を含む値は囲み、`"` を `""` へ倍にする | `edit/paste.rs` の module docs「規則（正典）」の表そのものである。**写しを実測で突き合わせた**（下の「複製のテキストの往復」） |
+| **複製できないとき** | 窓が届いていないセルが 1 つでもあれば、空文字を返さずに拒否して告知へ出す | `RenderCell.loading` は「未取得」であり、値なし（空文字）と区別がつかない（`renderer/port.ts` の `RenderCell` の doc）。空文字で埋めれば、利用者には「複製できた」と見えて**クリップボードは空**になる（8.1 の「黙って何もしない実装にしない」と同じ理由） |
+| **貼り付けの宛先** | 錨は `WindowCache.rowId`（物理の行）と `WindowCache.documentColumn`（文書の列）、`rows` は表示の並び（可視の序数から引く） | `PasteRange` の doc（`crates/app-shell/src/ipc/grid.rs` の生成物）が「起点は**物理の行**と列であり、`rows` は**表示されている行の並び**（順序を持つ側が導出したもの）」と定める。**8.6 の挿入の制約は掛からない** — 挿入が写せないのは `InsertRows.at` が文書の**位置**（行順の添字）だからであり、貼り付けが渡すのは識別子と表示の並びである（識別子は表示の並びに依らない） |
+| **行の補充の境目** | 渡す並びは「矩形の行数」と「錨から先に残る可視行数」の小さい方にする | `edit/mod.rs` の `paste_range_with_inverse` が `appended = rectangle.len().saturating_sub(available)`（`available = displayed.len() - start`）として**足りない行を文書の末尾へ足す**。したがって短く渡すと、既存の行へ書かずに**行が増える**。矩形の行数は囲みの中の改行を数えないので `split("\n")` では出せない（`PasteCodec::parse` の囲みの規則） |
+| **行数が変わったあと** | 影響を受けた行があれば `WindowCache.clear(row_count)`。反映の形は 8.6 と同一の遷移を通す | 貼り付けは行を補充しうる（上の行）ので、`invalidate`（影響を受けた行の窓を捨てる）では足りない（`WindowCache.clear` の doc と 7.3 の申し送り） |
+| **打鍵からの実行**（要件 7.8） | 移植口の `onCopy` / `onPaste` がその経路である（画面が打鍵を別に扱う経路を作らない）。**複製の着地点は `RendererHandle.copySelection` に集約した**（レビュー後。メニューの活性化が同じ口へ着く） | 7.2 の `GlideSurface` が DOM の `copy` / `paste` を**捕獲の段**で受け、`preventDefault` して移植口へ渡す（`glideAdapter.tsx:763-764`。Glide 自身の経路は `keybindings` で止めてあるので二重にならない）。打鍵（Ctrl+C / Ctrl+V）はこのイベントを起こす。**この DOM の経路は 7.2 が実物の起動で観測している**（canvas へ `copy` / `paste` を注ぎ、移植口が `1:0-3:1` と 23 文字を受け取り、貼り付けは `往復=一致`。research.md「実測（Linux・実画面）」）— ただし注いだのは**合成のイベント**であり、実機の打鍵そのものではない |
+
+### 複製のテキストの往復（**使い捨ての駆動器で実測した**）
+
+写しが正典と一致することを、**リポジトリの外**（`/tmp` の一時クレート。成果物には残していない）で
+`PasteCodec::write` / `parse` を呼んで突き合わせた:
+
+```
+$ cargo run --quiet      # data-grid / document-format を path 依存で使う一時クレート
+fixture 0: write="名前\t数量\nりんご\t3"          parse_round_trip=true
+fixture 1: write="\"a\tb\"\tc\nd\t\"e\nf\""      parse_round_trip=true
+fixture 2: write="\"say \"\"hi\"\"\"\t\n\t\"\"\"quoted\"\"\""  parse_round_trip=true
+fixture 3: write="\"cr\rhere\"\t\"tab\there\""    parse_round_trip=true
+fixture 4: write="\t\n\t"                        parse_round_trip=true
+fixture 5: write="1"                             parse_round_trip=true
+fixture 6: write="\"a\"\"b\"\t\"c\"\"d\""        parse_round_trip=true
+empty rows=0
+empty cell fixture: write="" rows=0
+rows("a\nb\nc") = 3 / rows("\"a\nb\"") = 1 / rows("a\n") = 1 / rows("a\n\n") = 2 / rows("\r\n") = 1 / rows("a\rb") = 1
+```
+
+この 7 件の出力はそのまま `clipboard.test.ts` の golden であり（`tableText` の**バイト一致**と、
+`tableTextRowCount` の一致を固定する）、`parse_round_trip=true` は**ドメインの読む側が、同じ
+綴りを同じセルへ読み戻すこと**の実測である（`PasteCodec::parse(write(cells)) == cells`）。
+**写しの側の往復**（`parseTableText(tableText(cells)) == cells`）も同じ検査が固定する。
+
+### メニューからの実行（要件 7.8 の後者）: **複製は結線した／貼り付けは障碍を実測して止めた**
+
+#### 最初の版が誤っていたこと（**レビューが指摘し、実測で裏づけた**）
+
+最初の版は「メニューからの実行は画面の側からは結線できない」として**複製も貼り付けも欠落の
+まま**にしていた。**誤りは 2 つである**（3 つ目の前提だけが正しかった）:
+
+| 最初の版の主張 | 実測 | 判定 |
+|---|---|---|
+| 「器の登録口は Rust 側の `MenuRegistry` であり、**TS の画面からは到達できない**」 | 画面が**メニューを登録**できないことは正しい（`src/shell` は画面の登録簿だけを持ち、`ScreenProps` は `screenId` / `navigate` の 2 つだけである）。しかし**活性化を画面へ届ける経路**は 9.5 が既に実測している — `app.emit_to(label, DIAGNOSTICS_REQUESTED_EVENT, payload)`（`src-tauri/src/commands/diagnostics_cmds.rs:499`）と、生成物の定数を購読する `installDiagnosticsRequests`（`src/features/diagnostics/requests.ts:126`）である。**「登録できない」と「届けられない」を混同していた** | **誤り** |
+| 「フロントエンドのメニュー登録 API は無い（capability は `core:default` だけ）」 | 正しい（`src-tauri/capabilities/default.json`）。**ただし複製の結線には不要である** — 登録は器（Rust）が行い、画面はイベントを購読するだけである | **誤り（判断に効かない前提）** |
+| 「クリップボードの読み口は DOM の `paste` イベントだけであり、メニューの活性化には `ClipboardEvent` が無い」 | 正しい。`tauri-plugin-clipboard-manager` は `src-tauri/Cargo.toml` に無く（`scripts/check-forbidden-plugins.sh` が禁じる 4 つ（fs / shell / store / dialog）には**含まれない** — 禁じているのは依存方針と本タスクの「新しい依存を足さない」制約である。この区別も訂正である）、`navigator.clipboard.readText()` は 7.2 の実起動で `不可`（`portProbeAdapter.tsx` が権限の拒否を `不可` として記録。research.md「実測: 移植口の実装（GlideAdapter）の操作の観測」） | **正しい（貼り付けの障碍）** |
+
+#### 結線した形（**新しい設計ではない。9.5 の写しである**）
+
+| 段 | 置いた場所 | 内容 |
+|---|---|---|
+| イベント名 | `crates/app-shell/src/ipc/mod.rs` | `GRID_COPY_REQUESTED_EVENT = "grid_copy_requested"`。**ペイロード型を持たない**（複製は引数を取らず、対象は「そのとき移植口が持っている選択」である）。`event_names_constant()` の表へ 1 行足し、**生成物へ定数として出る**（`cargo run -p app-shell --bin generate-bindings` で再生成。ドリフト検査が守る） |
+| 項目の登録と活性化 | `src-tauri/src/commands/grid.rs` の `install` | `data-grid.copy`（`編集 > 複製`、非 macOS `Ctrl+C` / macOS `Cmd+C`）を `MenuRegistry::register` へ登録し、選択時に**活性化の対象ウィンドウ**へ `emit_to` する。`編集` の部分メニューの名前は `menu::EDIT_MENU_LABEL` として 7.4 の並びと共有する（**書き写さない**） |
+| ショートカットの綴り | 同上 | `cfg!(target_os = "macos")` で `Ctrl+C` / `Cmd+C` を選ぶ（3.6 の「新規」「保存」と同じ形）。**`CmdOrCtrl` は渡さない** — `Accelerator::parse` が意図的に拒否し（`PlatformDependentModifier`）、競合検査が組み合わせを見分けられなくなる。検査は正準形（`ctrl+KeyC` / `super+KeyC`）まで固定する |
+| 画面の購読 | `src/features/grid/clipboardRequests.ts` | 生成物の定数だけを参照して購読し、入口を呼ぶ（文字列リテラルを書かない）。形は `installDocumentSessionChanged` / `installDiagnosticsRequests` の写し（`cancelled` と `unlisten` の 2 段。購読に失敗しても例外を外へ出さない） |
+| 入口 | `renderer/port.ts` の `RendererHandle.copySelection` | **打鍵とメニューの唯一の入口**。範囲を引数に取らない — 取ると呼ぶ側が範囲を計算することになり、**範囲の決定が 2 つに分かれる**（打鍵は移植口の選択、メニューは画面の写し）。画面は `createGridCopyEntry(() => handleRef.current)` で入口を組み（`GridScreen.tsx`）、器がまだ無ければ何もしない |
+| メニューの検査の段 | `scripts/check-menu-shortcut.sh` | 配置の記録の期待を **10 項目**へ、`編集 > 複製`（`ctrl+KeyC`）の行と、AT-SPI の期待（`編集` の 1 件）を足した — **項目を 1 つ足せばこの段の期待も動く**（越えた境界の 1 つ） |
+
+**`Ctrl+C` が打鍵を奪う件（正直な記録）**: 基盤のメニューがアクセラレータを先に処理する環境では、
+`Ctrl+C` は DOM の `copy` を起こさずにメニューの活性化だけが走りうる。**複製はどちらの経路でも
+同じ入口へ着くので、利用者から見た結果は変わらない**（片方だけが走れば 1 回、両方走れば同じ
+テキストが 2 回書かれる — 書き込みは冪等である）。**この段は実機で観測していない**（配布物を
+要する。下の「単体で示せること」）。
+
+#### 貼り付けを止めた理由（**要件 7.8 の後半は未達である**）
+
+**障碍は読み口の不在である。**読み口が無いまま `Ctrl+V` を項目に登録すると、基盤のメニューが
+打鍵を先に受け取り、**いま動いている打鍵の貼り付け（DOM の `paste`）が届かなくなる** — 複製は
+メニュー側に代わりの経路があるので安全だが、貼り付けにはそれが無い。**動いている半分を守り、
+動かない項目は登録しない。**検査は「登録していないこと」を固定する（`no_paste_item_is_registered`）
+— 判断を変えるときは、読み口を先に足すことになる。
+
+**誰が埋めるか**: ① クリップボードを読む口（プラグインか、`readText` が使えることの実測）、
+② その口から `RendererSpec.onPaste`（＝画面の `planPaste` / `applyPaste`）へ繋ぐ経路、
+③ 項目の登録（`data-grid.paste`）と活性化（`GRID_PASTE_REQUESTED_EVENT`）。**①〜③ とも 8.7 が
+敷いた形（登録 ＋ イベント ＋ 購読 ＋ 入口）にそのまま乗る**（`install` の doc に記録）。
+
+### 画面の面の切り出し（**レビューが名指しした 3 つの穴**）
+
+**8.7 の最初の版は、貼り付け・複製の入口を `GridSurface`（React の部品）の関数本体に置いていた。**
+そのため次の 3 つの変異が**どの検査でも捕まらなかった**（実測: 442 件すべてが緑のまま通った。
+`GridSurface` は `node` 環境の検査から組み立てられない — `jsdom` を足していない)。
+
+| # | 変異 | 捕まえられなかった理由 |
+|---|---|---|
+| A | `planRangePaste` が `cache.documentColumn` を通さず、**表示の列**を文書の列として送る | 貼り付けの判断（`planPaste`）自体は `clipboard.test.ts` が固定していたが、**材料の組み立て**（表示の位置 → 文書の列の写像）は部品の中にあった |
+| B | `sendPaste` が**何もしない**（境界へ 1 つも送らない） | `runPastePlan` の腕の振り分けは固定していたが、**渡される関数**（`runPaste`）は部品の中にあった |
+| C | 往復の結果を**画面へ渡さない**（`onPasteSettled` を呼ばない） | 遷移（`gridScreenPasteSettled`）は固定していたが、**呼び出しの結線**は部品の中にあった |
+
+**直した形**: 3 つの口を組む仕事を `./clipboard` の `createClipboardSurface` へ出した（材料と
+行き先を引数で受ける）。画面に残るのは「いつ組み立てるか」だけである。8.6 が `planRowOperation`
+を `./rowOps` へ出したのと同じ形であり、8.1 が効果の本体（`followSelection`）を出したのと同じ
+理由である。**検査は 3 つとも落ちるようになった**（下表 A〜C）。
+
+### 変異試験（md5 は記録時のバイト。**変異前 = 復帰後**）
+
+**変異前の md5（レビュー後）**: `clipboard.ts` = `e02bf214c6094ab37a44355db7a4de37`、
+`GridScreen.tsx` = `2ab9fa699001fb296725dbcda96bc74d`、
+`clipboardRequests.ts` = `5497031cf326a62d1dcaba44b0fb31e2`
+（復帰のたびに `md5sum` の一致を確かめた）。
+
+| # | 変異 | 落ちた検査 | 結果 |
+|---|---|---|---|
+| A | `createClipboardSurface` の `documentColumn` を `position.column`（表示の列）にする | `clipboard.test.ts`「貼り付けの宛先は表示の列ではなく文書の列である」（1 件。`npx vitest run src/features/grid` が `Tests 1 failed ／ 445 passed`） | 期待どおり落ちる |
+| B | `sendPaste` を「送らずに適用されたことにする」（`applyPaste` を呼ばない） | `clipboard.test.ts` 2 件（「送る腕は境界へ `PasteRange` を 1 つ送る」「往復の結果を画面へ渡し、適用されたときだけ後始末を呼ぶ」。`2 failed ／ 444 passed`） | 期待どおり落ちる |
+| C | `sendPaste` が `onSettled` を呼ばない（`void settlement;`） | `clipboard.test.ts`「往復の結果を画面へ渡し、適用されたときだけ後始末を呼ぶ」（`1 failed ／ 445 passed`） | 期待どおり落ちる |
+| D | 購読の宛先を**リテラル**にする（`listen("grid_copy_request", …)` — 綴り間違い） | `clipboardRequests.test.ts`「購読は生成物の定数を宛先にし、活性化のたびに入口を 1 回呼ぶ」（`1 failed ／ 449 passed`） | 期待どおり落ちる |
+| E | メニューの入口を何もしない関数にする（`createGridCopyEntry` が `copySelection` を呼ばない） | `clipboardRequests.test.ts`「どちらも同じ範囲を同じテキストにして、クリップボードへ 1 回ずつ渡す」（`1 failed ／ 449 passed`） | 期待どおり落ちる |
+
+**最初の版の変異試験**（md5 は記録時のバイト。**変異前 = 復帰後**）
+
+変異前の md5: `clipboard.ts` = `f97aefe24e65f70048581d61d7e199be`、
+`clipboard.test.ts` = `b382ac76bc22aa975a2db4c71bff7b7a`、
+`GridScreen.tsx` = `f5fdcf15800523ba42f48aa76bd706db`、
+`GridScreen.test.ts` = `2a2c22e04cb1ccf5a53b39194f2b8c6d`（復帰のたびに `md5sum` の一致を
+確かめた）。
+
+| # | 変異 | 落ちた検査 | 結果 |
+|---|---|---|---|
+| 1 | 行の区切りを `\n` → `\t`（配置が崩れる） | `clipboard.test.ts` **6 件**（配置・空の値・往復・golden 一致・複製の 2 件） | 期待どおり落ちる |
+| 2 | 囲みの中の `"` を `""` へ倍にしない（往復が壊れる） | `clipboard.test.ts` 3 件（囲みの規則・往復・golden 一致） | 期待どおり落ちる |
+| 3 | `onPaste` の送る腕が往復を起こさない（`runPastePlan` の `send` を何もしない非同期関数にする） | `GridScreen.test.ts`「編集の起動・複製・貼り付けは結線され…」（貼り付けが境界へ届かない） | 期待どおり落ちる |
+| 4 | `applyPaste` で `clear(outcome.row_count)` を外す | `clipboard.test.ts`「行が増えたとき、増えた行を要求して読める」 | 期待どおり落ちる |
+
+### 単体で示せること / **起動でしか示せないこと**（正直な分界）
+
+| 主張 | どこまで示したか |
+|---|---|
+| 選択の範囲の配置を保った複製 | `tableText` の**バイト**を、Rust の `PasteCodec::write` の実測出力と一致させることで固定した（上の golden） |
+| 区切りを持つ一般的な表形式 | 行 LF・列 TAB・囲みの規則を固定し、**ドメインの読む側が同じセルへ読み戻すこと**を Rust 側の実測（`parse_round_trip=true`）で確かめた |
+| 貼り付けの宛先（座標空間） | `PasteRange` の欄（`anchor.row` = `RowId`、`anchor.column` = 文書の列、`rows` = 表示の並び、`text` は 1 バイトも変えない）を生成物の型で固定した |
+| 打鍵からの実行 | 移植口の 2 つの口が結線され、貼り付けが境界の `PasteRange` に届くことを固定した（**打鍵が DOM のイベントを実際に起こすこと**は 7.2 の配線の検査までであり、実機の打鍵は観測していない） |
+| **メニューからの実行（複製）** | 結線した。**イベント名が生成物から来ること**（`clipboardRequests.test.ts`）と、**打鍵とメニューが同じ入口（`RendererHandle.copySelection`）へ着き、同じ範囲・同じテキストになること**（同ファイル）を固定した。**実機で項目が現れ、活性化が届くことは観測していない** — 段は配布物を要する（`scripts/check-menu-shortcut.sh`。期待の項目数と綴りは更新したが、走らせるのは CI / 9.2 の領分である） |
+| **メニューからの実行（貼り付け）** | **結線していない**（障碍はクリップボードの読み口の不在。上の「貼り付けを止めた理由」）。**検査は「登録していないこと」を固定する**（`no_paste_item_is_registered`） |
+| **他の表計算アプリケーションとの往復**（要件 7.2 の後半） | **観測していない。**実機のクリップボードと他のアプリケーションを要する。7.2 のレビューは、システムのクリップボードの**読み戻しがこの観測環境では確かめられない**ことを記録している（書き込みの経路は `navigator.clipboard.writeText`、無ければ `document.execCommand("copy")` であり（`glideAdapter.tsx` の `writeClipboardText`）、**7.2 の実測では読み戻しが `不可` であった** — 「クリップボードへ渡す経路まで届いた」ところまでしか確かめていない）。**8.7 は「往復できることを実際に操作して確かめた」とは主張しない** — 観測の場所は 9.2 の台本（実起動）と人手の手順である |
+
+### 限界（正直な記録）
+
+- **貼り付けの宛先に使える行は、窓が届いている範囲に限る** — 矩形が可視行の先へ伸び、その行の
+  識別子が窓に無ければ、**送らずに理由を出す**（部分的な並びを送るとドメインが行を足すため）。
+  窓が保つのは `MAX_WINDOWS`（12）× `WINDOW_ROWS`（256）＝ 3072 行である。8.6 の削除・複製と
+  同じ限界であり、同じ理由（識別子の源は窓だけである）である
+- **複製できる範囲も同じ制限を持つ** — 窓が届いていないセルを含む選択は拒否する（空文字で
+  埋めない）。理由は告知に出るので、利用者は走査し直して試せる
+- **`tableText` / `parseTableText` / `tableTextRowCount` はドメインの規則の写しである。**正典は
+  `edit/paste.rs` であり、写しを消せるのは境界に「範囲を読む」コマンドを足す仕事である
+  （4.7 の依存方針とは別の話であり、**新しい依存は要らない** — `PasteCodec::write` を呼ぶ
+  コマンドを 1 本足すだけである）。限界は**規則が 2 箇所にあること**であり、片方だけが動けば
+  往復が壊れる（本節の golden と往復の検査が、その日を捕まえる網である）
+- **並べ替え・絞り込みの下での貼り付けは、本タスクでは実際に操作していない** — 8.8 が指定を
+  結線するまでは `EMPTY_GRID_VIEW`（並べ替え無し・絞り込み無し）しかない。判断の側は識別子と
+  表示の並びで宛先を決めるので並べ替え・絞り込みの下でも成り立つが、**実測は 8.8 の段である**

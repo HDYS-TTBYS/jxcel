@@ -81,6 +81,7 @@ mod shell_cmds;
 use app_shell::ipc::command_names;
 
 pub use diagnostics_cmds::install as diagnostics_install;
+pub use grid::install as grid_install;
 pub use shell_cmds::start_settings_notifications;
 
 /// 登録一覧から、ハンドラの根と「登録された名前」の一覧を同時に作る。

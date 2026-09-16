@@ -41,6 +41,7 @@ export const COMMAND_NAMES = [
 export const SETTINGS_CHANGED_EVENT = "settings_changed";
 export const DIAGNOSTICS_REQUESTED_EVENT = "diagnostics_requested";
 export const DOCUMENT_SESSION_CHANGED_EVENT = "document_session_changed";
+export const GRID_COPY_REQUESTED_EVENT = "grid_copy_requested";
 
 // ---------------------------------------------------------------------------
 // 境界を越える型（crates/app-shell/src/ipc/ の定義から ts-rs が生成）

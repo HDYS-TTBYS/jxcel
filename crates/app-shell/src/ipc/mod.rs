@@ -51,6 +51,10 @@
 //! - 6.3: 生バイト経路（`grid_rows_window`）の引数の型は**ここに無い** — 封筒を運べない
 //!   経路のものであり、境界の型（`ts-rs` の derive を持つ型）として表せない
 //!   （`design.md`「WindowCodec」）
+//! - 7.8: グリッドの複製のメニューの活性化を画面へ引き渡すイベント
+//!   （[`GRID_COPY_REQUESTED_EVENT`]）。**ペイロード型を持たない** — 複製は引数を取らず、
+//!   対象は「そのとき移植口が持っている選択」であり、運ぶ値が 1 つも無いためである
+//!   （9.5 の診断の導線が `DiagnosticsRequestedEvent` でどの導線かを運ぶのと対照的である）
 
 use serde::{Deserialize, Serialize};
 
@@ -597,6 +601,24 @@ pub struct DiagnosticsRequestedEvent {
     pub section: DiagnosticsSection,
 }
 
+/// グリッドの範囲の複製がメニューから要求されたことを伝える Tauri イベントの名前
+/// （タスク 8.7。要件 7.8）。
+///
+/// `invoke` の宛先を持たないためコマンド名の配列（[`COMMAND_NAMES`]）には現れない。設定変更の
+/// 通知（[`SETTINGS_CHANGED_EVENT`]）と同じく、**生成物（`src/ipc/bindings.ts`）へ定数として
+/// 出す**ことで、フロントエンドが文字列リテラルを綴り間違える経路を塞ぐ（タスク 2.3 の
+/// ドリフト検査がこの定数もバイト比較する）。
+///
+/// **ペイロード型を持たない。**複製は引数を取らない — 対象は「そのとき移植口が持っている
+/// 選択」であり、メニューの項目が選んだものを運ぶ必要が無い（9.5 の診断の導線は 3 つの導線の
+/// どれが選ばれたかを運ぶので [`DiagnosticsRequestedEvent`] を持つ）。境界を越える値が 1 つも
+/// 無いので、型を足すことは「空の構造体を 1 つ越えさせる」ことになる。
+///
+/// 送り先は**活性化の対象ウィンドウ**（7.5 の振り向け）1 つだけである。グリッドの画面を
+/// 出していないウィンドウには購読者が居ないので、そこで選んでも何も起きない（画面が
+/// 自分で判断する。器は関知しない）。
+pub const GRID_COPY_REQUESTED_EVENT: &str = "grid_copy_requested";
+
 /// TypeScript の生成物を再生成する、唯一の文書化されたコマンド（タスク 2.2）。
 ///
 /// 生成物のヘッダにもこの文字列を埋め込むため、定数として一箇所に持つ。実行ファイルは
@@ -639,11 +661,12 @@ fn command_names_constant() -> String {
     out
 }
 
-/// イベント名の定数を生成する（タスク 7.1 / 9.5 / 3.1。要件 7.4、8.1、8.6、8.7、1.6）。
+/// イベント名の定数を生成する（タスク 7.1 / 9.5 / 3.1 / 8.7。要件 7.4、8.1、8.6、8.7、1.6、7.8）。
 ///
 /// 設定変更の通知（[`SETTINGS_CHANGED_EVENT`]）・診断の導線の要求
 /// （[`DIAGNOSTICS_REQUESTED_EVENT`]）・ドキュメントの状態変化
-/// （[`DOCUMENT_SESSION_CHANGED_EVENT`]）は `invoke` の宛先を持たないため
+/// （[`DOCUMENT_SESSION_CHANGED_EVENT`]）・グリッドの複製の要求
+/// （[`GRID_COPY_REQUESTED_EVENT`]）は `invoke` の宛先を持たないため
 /// [`command_names::COMMAND_NAMES`] には現れないが、**フロントエンドが文字列リテラルを
 /// 綴り間違えない**ように、名前を生成物へ定数として出す。生成物はタスク 2.3 のドリフト検査が
 /// バイト比較するので、名前の変更は生成のやり直しを強制する。
@@ -666,6 +689,7 @@ fn event_names_constant() -> String {
             "DOCUMENT_SESSION_CHANGED_EVENT",
             DOCUMENT_SESSION_CHANGED_EVENT,
         ),
+        ("GRID_COPY_REQUESTED_EVENT", GRID_COPY_REQUESTED_EVENT),
     ] {
         out.push_str(&format!("export const {constant} = \"{event}\";\n"));
     }
@@ -1807,6 +1831,21 @@ mod tests {
         assert!(
             ts.contains("\"kind\": \"Document\""),
             "封筒の失敗の原因にドキュメントの種別が無い:\n{ts}"
+        );
+    }
+
+    /// 生成物が 7.8 の複製の要求のイベント名を宣言していることを固定する（タスク 8.7）。
+    ///
+    /// **ドリフト検査だけでは足りない**（[`bindings_declare_the_document_surface`] と同じ理由）。
+    /// 画面はこの定数だけを参照する — 文字列リテラルを綴り間違えると、メニューの活性化が
+    /// **無言で届かなくなる**（購読側の名前が一致しないため。エラーにもならない）。
+    #[test]
+    fn bindings_declare_the_grid_copy_event() {
+        let ts = render_bindings().unwrap();
+        let declaration = "export const GRID_COPY_REQUESTED_EVENT = \"grid_copy_requested\";";
+        assert!(
+            ts.contains(declaration),
+            "生成物に `{declaration}` が無い:\n{ts}"
         );
     }
 

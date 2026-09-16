@@ -78,6 +78,7 @@ import {
   gridScreenFailed,
   gridScreenLoaded,
   gridScreenNoticeDismissed,
+  gridScreenPasteSettled,
   gridScreenRetried,
   gridScreenRowOperationSettled,
   gridScreenSelectionChanged,
@@ -94,6 +95,7 @@ import { withExpansion } from "./nestedInspector";
 import { followTarget, initialSelection, selectionAt } from "./selection";
 import type { GridClient } from "./gridClient";
 import type { DeleteConfirmation } from "./rowOps";
+import type { PastePayload } from "./clipboard";
 import type { CellPosition, RendererSelection, VisibleSpan } from "./renderer/port";
 import { nextViolation, reasonInRow, type ViolationPresentation } from "./violations";
 
@@ -269,6 +271,7 @@ function markOf(model: GridScreenModel): string {
       onDeleteRequested: () => undefined,
       onDeleteCancelled: () => undefined,
       onRowOperationSettled: () => undefined,
+      onPasteSettled: () => undefined,
       onRefused: () => undefined,
     }),
   );
@@ -491,9 +494,11 @@ describe("画面内の失敗の経路（器に届かない失敗）", () => {
 });
 
 describe("移植口の操作（8.3〜8.9 が結線する）", () => {
-  it("編集の起動は結線され、まだ結線していない操作は黙って捨てずに画面内の告知へ流す", async () => {
+  it("編集の起動・複製・貼り付けは結線され、まだ結線していない操作は黙って捨てずに画面内の告知へ流す", async () => {
     const unavailable: string[] = [];
     const activated: [CellPosition, string][] = [];
+    const refused: string[] = [];
+    const pasted: PastePayload[] = [];
     const spec = createGridRendererSpec({
       columns: [{ title: "名前", width: 120 }],
       rowCount: 3,
@@ -505,6 +510,19 @@ describe("移植口の操作（8.3〜8.9 が結線する）", () => {
       onVisibleSpanChange: () => undefined,
       onActivateEditor: (position, initialText) => {
         activated.push([position, initialText]);
+      },
+      // 複製と貼り付け（8.7）。**判断は `./clipboard` が持ち、ここはその 2 つの口を移植口へ
+      // 渡すだけである**（8.6 が `./rowOps` の判断を表の面から呼んだのと同じ分担）。
+      copyRange: (range) => ({ kind: "text", text: `複製:${String(range.start.row)}` }),
+      pasteAt: (anchor, text) => ({
+        kind: "send",
+        payload: { anchor: { row: `id:${String(anchor.row)}`, column: anchor.column }, rows: [], text },
+      }),
+      sendPaste: async (payload) => {
+        pasted.push(payload);
+      },
+      onRefused: (message) => {
+        refused.push(message);
       },
       onUnavailable: (operation) => {
         unavailable.push(operation);
@@ -528,25 +546,82 @@ describe("移植口の操作（8.3〜8.9 が結線する）", () => {
 
     spec.onColumnResize(0, 200);
     spec.onColumnMove(0, 1);
-    // 値を持つ 2 つは**拒否**である（空文字を返せばクリップボードが空になり、黙って解決すれば
-    // 貼り付けが消える。移植口の実装は拒否を記録するだけで、描画を止めない）。
+    // **複製と貼り付け（要件 7.1、7.2）ももう「まだ使えない操作」ではない。**複製は文字列を
+    // 返し（器がクリップボードへ書く）、貼り付けは 1 往復を起こす。
     await expect(
       spec.onCopy({ start: { row: 0, column: 0 }, end: { row: 0, column: 0 } }),
-    ).rejects.toThrow("選択の範囲の複製");
-    await expect(spec.onPaste({ row: 0, column: 0 }, "1\t2")).rejects.toThrow(
-      "表形式のテキストの貼り付け",
-    );
-
-    expect(unavailable).toEqual([
-      "列の幅の変更",
-      "列の位置の変更",
-      "選択の範囲の複製",
-      "表形式のテキストの貼り付け",
+    ).resolves.toBe("複製:0");
+    await expect(spec.onPaste({ row: 0, column: 0 }, "1\t2")).resolves.toBeUndefined();
+    expect(pasted).toEqual([
+      { anchor: { row: "id:0", column: 0 }, rows: [], text: "1\t2" },
     ]);
+    expect(refused).toEqual([]);
+
+    expect(unavailable).toEqual(["列の幅の変更", "列の位置の変更"]);
 
     // 選択の知らせは**操作ではない**（8.2 が消費する。告知へは流さない）。
     spec.onSelectionChange(null);
-    expect(unavailable).toHaveLength(4);
+    expect(unavailable).toHaveLength(2);
+  });
+
+  it("送れない複製・貼り付けは、拒否して理由を告知へ流す（空文字を返さない）", async () => {
+    const refused: string[] = [];
+    const pasted: PastePayload[] = [];
+    const spec = createGridRendererSpec({
+      columns: [{ title: "名前", width: 120 }],
+      rowCount: 3,
+      selection: initialSelection(),
+      rowMarkers: "clickable-number",
+      getCell: () => ({ text: "標本", variant: "Text", violated: false, loading: false }),
+      onSelectionChange: () => undefined,
+      onVisibleSpanChange: () => undefined,
+      onActivateEditor: () => undefined,
+      copyRange: () => ({ kind: "refused", message: "選択の範囲のセルがまだ届いていないため、複製できません" }),
+      pasteAt: () => ({ kind: "refused", message: "貼り付けの宛先の行の識別子がまだ届いていないため、貼り付けできません" }),
+      sendPaste: async (payload) => {
+        pasted.push(payload);
+      },
+      onRefused: (message) => {
+        refused.push(message);
+      },
+      onUnavailable: () => undefined,
+    });
+
+    // **空文字を返さない**（返せばクリップボードが空になり、利用者には「複製できた」と見える）。
+    await expect(
+      spec.onCopy({ start: { row: 0, column: 0 }, end: { row: 0, column: 0 } }),
+    ).rejects.toThrow("複製できません");
+    // **黙って捨てない**（捨てれば貼り付けが消える）。
+    await expect(spec.onPaste({ row: 0, column: 0 }, "1\t2")).rejects.toThrow("貼り付けできません");
+    expect(pasted).toEqual([]);
+    expect(refused).toEqual([
+      "選択の範囲のセルがまだ届いていないため、複製できません",
+      "貼り付けの宛先の行の識別子がまだ届いていないため、貼り付けできません",
+    ]);
+  });
+
+  it("貼り付けるものが無い（空のテキスト）ときは、往復を起こさずに成功する", async () => {
+    const pasted: PastePayload[] = [];
+    const spec = createGridRendererSpec({
+      columns: [{ title: "名前", width: 120 }],
+      rowCount: 3,
+      selection: initialSelection(),
+      rowMarkers: "clickable-number",
+      getCell: () => ({ text: "標本", variant: "Text", violated: false, loading: false }),
+      onSelectionChange: () => undefined,
+      onVisibleSpanChange: () => undefined,
+      onActivateEditor: () => undefined,
+      copyRange: () => ({ kind: "text", text: "" }),
+      pasteAt: () => ({ kind: "nothing" }),
+      sendPaste: async (payload) => {
+        pasted.push(payload);
+      },
+      onRefused: () => undefined,
+      onUnavailable: () => undefined,
+    });
+
+    await expect(spec.onPaste({ row: 0, column: 0 }, "")).resolves.toBeUndefined();
+    expect(pasted).toEqual([]);
   });
 });
 
@@ -747,6 +822,11 @@ describe("現在位置と選択（8.2。要件 2.1、2.3、2.5）", () => {
         spans.push(span);
       },
       onActivateEditor: () => undefined,
+      // 複製と貼り付け（8.7）は本検査の主題ではない（結線は下の 8.7 の検査が固定する）。
+      copyRange: () => ({ kind: "text", text: "" }),
+      pasteAt: () => ({ kind: "nothing" }),
+      sendPaste: async () => undefined,
+      onRefused: () => undefined,
       onUnavailable: () => undefined,
     });
 
@@ -1534,6 +1614,10 @@ describe("違反のバーと巡回（8.4。要件 4.1〜4.4、4.6）", () => {
       onSelectionChange: () => undefined,
       onVisibleSpanChange: () => undefined,
       onActivateEditor: () => undefined,
+      copyRange: () => ({ kind: "text", text: "" }),
+      pasteAt: () => ({ kind: "nothing" }),
+      sendPaste: async () => undefined,
+      onRefused: () => undefined,
       onUnavailable: () => undefined,
     });
 
@@ -2322,6 +2406,61 @@ describe("削除の確認（8.6。要件 6.5）", () => {
       throw new Error("表を描く状態でなくなった");
     }
     expect(after.state.pendingDelete).toBeNull();
+  });
+});
+
+describe("貼り付けの反映（8.7。要件 7.3、7.4、1.7）", () => {
+  it("行が増えたとき、提示する行数と窓が覆う行数が新しい数になり、選択は動かない", () => {
+    // 要件 7.4 の行の補充である（矩形が表の末尾を越えると行が足される）。**行数が変わりうる
+    // 操作は、反映の形が 8.6 と同じ 1 つである**（`clear(row_count)` ＋ 寄せ）。
+    const before = readyModel(initialSelection());
+
+    const after = gridScreenPasteSettled(before, {
+      status: "applied",
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 22, violation_total: 1 }),
+    });
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.visibleRows).toBe(22);
+    expect(after.state.summary.row_count).toBe(22);
+    expect(after.state.violationTotal).toBe(1);
+    expect(after.state.generation).toBe(2);
+    // 行が増えたので、現在位置（先頭のセル）は寄せられない。
+    expect(after.state.selection).toEqual(before.state.status === "ready" ? before.state.selection : null);
+    expect(markOf(after)).toContain('data-row-count="22"');
+  });
+
+  it("行数が減ったとき、現在位置と選択が新しい表の範囲へ寄る（消えた行の面は閉じる）", () => {
+    // 貼り付けは行を減らさない（`PasteRange` の逆命令が減らすのは取り消しの側である）が、
+    // **反映の形は行数が変わる操作に共通**である — 寄せが無ければ「現在位置 10 行」と名乗り
+    // ながら表は 3 行になる（8.6 が閉じたのと同じ欠陥）。
+    const editing = gridScreenEditStarted(readyModel(initialSelection()), { row: 9, column: 0 }, "打ちかけ");
+
+    const after = gridScreenPasteSettled(editing, {
+      status: "applied",
+      outcome: outcomeOf({ affected: [EDITED_ROW], row_count: 3 }),
+    });
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(after.state.summary.row_count).toBe(3);
+    expect(after.state.editing).toBeNull();
+  });
+
+  it("適用できなかったときは、内容を消さずに理由を告知へ出す（表も状態も動かない）", () => {
+    const before = readyModel(initialSelection());
+
+    const after = gridScreenPasteSettled(before, {
+      status: "failed",
+      message: "ドキュメントの失敗: 経路が不達である",
+    });
+
+    expect(after.state).toEqual(before.state);
+    expect(after.notice).toBe("貼り付けを適用できませんでした: ドキュメントの失敗: 経路が不達である");
+    expect(markOf(after)).toContain("jxcel-grid-table");
   });
 });
 

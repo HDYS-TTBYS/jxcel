@@ -106,6 +106,11 @@
  *   - DOM の `copy` と `paste` は `GlideSurface` が自分で受ける（`preventDefault` する）。
  *     経路は `RendererSpec.onCopy` / `onPaste` の 1 本だけになる。
  *
+ * **複製の着地点は [`RendererHandle.copySelection`] である**（要件 7.8。打鍵とメニューの双方が
+ * ここへ着く）。このメソッドが範囲を選択から決め、`RendererSpec.onCopy` にテキストを作らせ、
+ * クリップボードへ渡す。**入口を 1 つに保つのは、2 つの経路で範囲の決め方が食い違わないように
+ * するためである**（メニュー側が範囲を自前で計算すると、同じ選択から別の範囲が出る日が来る）。
+ *
  * これは要件 7.1 / 7.2 の「行と列の配置を保った形」「一般的な表形式」を**移植口の側の 1 箇所**で
  * 決めるための措置である（表形式の規則を 2 箇所に持たない）。
  *
@@ -519,8 +524,15 @@ function damageForSpan(span: RowSpan, columnCount: number): readonly { readonly 
  * **選択だけは仕様の外からも動く**（8.2）: 仕様の [`RendererSpec.selection`] はマウントの時点の
  * 値であり、以後は呼び出し側が [`RendererHandle.setSelection`] で下ろす。下ろされた選択は
  * **外へ報せ返さない**（報せ返すと、画面の状態と実装の状態が往復して食い違いの種になる）。
+ *
+ * `write` は**クリップボードへ渡す口**（既定は [`writeClipboardText`]）である。引数にしてある
+ * のは、[`RendererHandle.copySelection`] の 1 往復を **DOM を持たない検査で観測できる**ように
+ * するためである（`node` 環境には `document` が無い）。
  */
-export function createGlideWiring(spec: RendererSpec): GlideWiring {
+export function createGlideWiring(
+  spec: RendererSpec,
+  write: ClipboardWriter = writeClipboardText,
+): GlideWiring {
   // 列は**見出しと幅だけ**を写す（`RenderColumn` の面そのままである）。
   const columns: readonly GridColumn[] = spec.columns.map(({ title, width }) => ({ title, width }));
   // 幅は骨組みの棒のために引く。**`GridColumn` から読まない** — Glide の `GridColumn` は
@@ -656,6 +668,24 @@ export function createGlideWiring(spec: RendererSpec): GlideWiring {
         selection = NO_SELECTION;
         reported = null;
       },
+      /**
+       * **打鍵とメニューの唯一の入口**（要件 7.8）。範囲は**配線が持つ選択**から決め、
+       * テキストは仕様（`spec.onCopy`）に作らせ、クリップボードへ渡す（`write`）。
+       *
+       * 呼ぶ側は 2 つある: 器の DOM の `copy`（[`attachCopyKeystroke`] が結線する）と、
+       * メニューの活性化（`src/features/grid/clipboardRequests.ts` の購読 → 画面 →
+       * `RendererHandle.copySelection`）である。**どちらも同じこのメソッドである。**
+       *
+       * 選択が無いときは何もしない（複製する範囲が無い）。拒否（窓が届いていないセルを含む）は
+       * 仕様の `onCopy` が投げ、理由は画面の告知へ出る。
+       */
+      async copySelection() {
+        const range = rangeOfSelection(selection, spec.rowCount, columns.length);
+        if (range === null) {
+          return;
+        }
+        await write(await liveSpec("onCopy").onCopy(range));
+      },
     },
   };
 }
@@ -696,17 +726,33 @@ async function writeClipboardText(text: string): Promise<void> {
 }
 
 /**
- * 選択の範囲を複製してクリップボードへ渡す。**文字列を作るのは呼び出し側である**
- * （`RendererSpec.onCopy`。Rust 側の `PasteCodec` が表形式を組み立てる）。
- *
- * 選択が無いときは移植口を呼ばない（複製する範囲が無い）。
+ * クリップボードへ文字列を渡す口。**既定は [`writeClipboardText`]**（`navigator.clipboard`）。
+ * 差し替えられるようにしてあるのは、**DOM を持たない検査で複製の 1 往復を観測できる**ように
+ * するためである（`node` 環境には `document` も `navigator.clipboard` も無い）。
  */
-async function copySelection(wiring: GlideWiring): Promise<void> {
-  const range = wiring.currentRange();
-  if (range === null) {
-    return;
-  }
-  await writeClipboardText(await wiring.copyRange(range));
+export type ClipboardWriter = (text: string) => Promise<void>;
+
+/**
+ * 器の DOM の `copy` を配線の入口へ結線する（**React の外にある関数である**）。
+ *
+ * 外に出してあるのは、**打鍵とメニューの 2 つの入口が同じ 1 つへ着くこと**を、DOM を持たない
+ * 検査で観測できるようにするためである（器の代役は `addEventListener` を覚えるだけでよい）。
+ * 入口そのものは `GlideWiring.handle.copySelection` であり、この関数はそれを DOM へ繋ぐ。
+ */
+export function attachCopyKeystroke(
+  node: Pick<HTMLElement, "addEventListener" | "removeEventListener">,
+  handle: RendererHandle,
+): () => void {
+  const listener = (event: Event): void => {
+    event.preventDefault();
+    void handle.copySelection().catch((error: unknown) => {
+      console.error("選択の範囲をクリップボードへ渡せなかった", error);
+    });
+  };
+  node.addEventListener("copy", listener, true);
+  return () => {
+    node.removeEventListener("copy", listener, true);
+  };
 }
 
 /**
@@ -726,16 +772,6 @@ function GlideSurface({ wiring }: { readonly wiring: GlideWiring }): ReactElemen
   const containerRef = useRef<HTMLDivElement | null>(null);
   // 選択は配線が持つ。**写しを React の状態として持たない**（所有者を 1 つにする）。
   const selection = useSyncExternalStore(wiring.subscribeSelection, () => wiring.selection);
-
-  const onCopy = useCallback(
-    (event: Event) => {
-      event.preventDefault();
-      void copySelection(wiring).catch((error: unknown) => {
-        console.error("選択の範囲をクリップボードへ渡せなかった", error);
-      });
-    },
-    [wiring],
-  );
 
   const onPaste = useCallback(
     (event: Event) => {
@@ -760,13 +796,17 @@ function GlideSurface({ wiring }: { readonly wiring: GlideWiring }): ReactElemen
     if (node === null) {
       return;
     }
-    node.addEventListener("copy", onCopy, true);
+    // 複製は**配線の入口**（`RendererHandle.copySelection`。打鍵とメニューの唯一の入口）へ
+    // 結線する。関数を [`attachCopyKeystroke`] として外に出してあるのは、2 つの入口が同じ 1 つへ
+    // 着くことを DOM を持たない検査で観測できるようにするためである（この面は React の部品で
+    // あり、`node` 環境の検査から組み立てられない）。
+    const detachCopy = attachCopyKeystroke(node, wiring.handle);
     node.addEventListener("paste", onPaste, true);
     return () => {
-      node.removeEventListener("copy", onCopy, true);
+      detachCopy();
       node.removeEventListener("paste", onPaste, true);
     };
-  }, [onCopy, onPaste]);
+  }, [wiring, onPaste]);
 
   return (
     <div ref={containerRef} style={SURFACE_STYLE}>
@@ -806,6 +846,8 @@ export function createGlideAdapter(): GridRendererPort {
         invalidate: (span) => {
           wiring.handle.invalidate(span);
         },
+        // **複製の入口は配線のものがそのまま入る**（打鍵の面とメニューの購読が同じ 1 つを叩く）。
+        copySelection: () => wiring.handle.copySelection(),
         destroy: () => {
           // 先に配線を破棄する（以後の知らせは投げる）。そのうえで React の根を片付ける。
           wiring.handle.destroy();

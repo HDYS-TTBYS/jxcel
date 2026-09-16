@@ -23,6 +23,19 @@
 //! ウィンドウは現れない — 要求が運ぶのは操作の対象（シートの識別子・表示の指定・編集命令・
 //! 進める向き・探索の起点・窓の区間）だけである。
 //!
+//! # 7 つ目の経路: メニューからの複製（タスク 8.7。要件 7.8）
+//!
+//! 本モジュールは**コマンド面だけではない** — [`install`] が 7.4 の登録口へ `編集 > 複製`
+//! （`data-grid.copy`。非 macOS `Ctrl+C` / macOS `Cmd+C`）を登録し、活性化を
+//! [`GRID_COPY_REQUESTED_EVENT`] として**活性化の対象ウィンドウ**（7.5）へ送る。画面側は
+//! `src/features/grid/clipboardRequests.ts` が購読して、**打鍵（DOM の `copy`）と同じ入口**
+//! （移植口の `RendererHandle.copySelection`）へ渡す — 範囲の決定もテキストの作成も 1 つに
+//! 閉じる（9.5 の診断の導線と同じ形であり、新しい設計ではない）。
+//!
+//! **貼り付けの項目は登録しない。**障碍はクリップボードを読む経路が無いことであり、読み口が
+//! 無いまま `Ctrl+V` を登録すると、基盤のメニューが打鍵を先に受け取っていま動いている貼り付けを
+//! 壊す（[`install`] の doc に実測と併せて記録した。要件 7.8 の後半は未達である）。
+//!
 //! # 失敗の載せ方（design.md「Error Handling」の表）
 //!
 //! **利用者の入力の結果は封筒の成功腕に載る。** 型に合わない値を保持して違反として返すこと
@@ -241,6 +254,7 @@ use app_shell::ipc::{
     GridOpenResponse, GridPathSegment, GridSearchDirection, GridSheetSummary, GridViewRequest,
     GridViewResponse, GridViewSpec, GridViolation, GridViolationLocation, GridViolationRequest,
     GridViolationResponse, IpcError, IpcResult, TypeKindTag, WindowContext, WindowLabel,
+    GRID_COPY_REQUESTED_EVENT,
 };
 use data_grid::{
     display_text, CellAddress, CoercionNotice, ColumnIndex, EditCommand, EditOutcome, ElementCount,
@@ -254,9 +268,10 @@ use schema_engine::{
     ValidationOptions, ValuePathSegment, Violation, ViolationReason,
 };
 use tauri::ipc::{InvokeBody, Request, Response};
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri_plugin_log::log;
 
+use crate::menu::{MenuItemSpec, MenuPath, MenuRegistry, MenuSelection};
 use crate::session::watch::{TauriWindowEvents, WindowDestroyEvents};
 
 // ---------------------------------------------------------------------------
@@ -1814,6 +1829,108 @@ pub fn grid_find_violation(
 }
 
 // ---------------------------------------------------------------------------
+// メニューからの引き金（7.4 の登録口を通す。タスク 8.7。要件 7.8）
+// ---------------------------------------------------------------------------
+
+/// 登録元の識別子（`AcceleratorOwner`）。**本スペックの項目はこの名前空間を使う。**
+///
+/// 7.4 の組み込み項目（`app-shell`）と分けるのは、**項目の識別子の重複を登録元ごとに閉じる**
+/// ためである（`MenuRegistrationError::ItemIdConflict` は別の登録元の重複を拒否する）。
+const OWNER: &str = "data-grid";
+
+/// 複製の項目の識別子。**アプリ全体で一意でなければならない。**
+const COPY_ITEM_ID: &str = "data-grid.copy";
+
+/// 複製の項目の表示名。
+const COPY_LABEL: &str = "複製";
+
+/// 複製の項目のショートカット（非 macOS）。**プラットフォーム解決済みの綴りである** —
+/// `CmdOrCtrl+C` は 4.6 の構文契約が受理せず（`PlatformDependentModifier`）、
+/// **競合検査が組み合わせを見分けられなくなる**（`crate::menu` の module doc）。
+#[cfg(not(target_os = "macos"))]
+const COPY_ACCELERATOR_SPELLING: &str = "Ctrl+C";
+
+/// 複製の項目のショートカット（macOS。メニュー上は `⌘C` と描かれる）。
+#[cfg(target_os = "macos")]
+const COPY_ACCELERATOR_SPELLING: &str = "Cmd+C";
+
+/// 複製の項目を置く部分メニュー。**7.4 が決めたトップレベルの並び**（`編集`）に従う。
+///
+/// 位置の名前をここで書き写さず、`menu` モジュールの定数を参照する（並びと名前の食い違いを
+/// 作らない。3.6 の「新規」「保存」が `ファイル` を参照するのと同じ形）。
+fn copy_menu_path() -> MenuPath {
+    MenuPath::new([crate::menu::EDIT_MENU_LABEL]).expect("位置は空でない")
+}
+
+/// 複製の項目の登録内容を組み立てる（登録口へ渡す値の組み立てだけを切り出す）。
+///
+/// `handler` を差し替えられる形にしてあるのは、**GUI 無しで登録の受理と内容を検査できる**
+/// ようにするためである（[`MenuRegistry::enroll`] は画面を要しない。9.5 の診断の導線と
+/// 同じ形）。
+fn copy_item_spec(handler: impl Fn(&MenuSelection) + Send + Sync + 'static) -> MenuItemSpec {
+    MenuItemSpec::new(OWNER, COPY_ITEM_ID, copy_menu_path(), COPY_LABEL, handler)
+        .with_accelerator(COPY_ACCELERATOR_SPELLING)
+}
+
+/// 複製の要求を、**活性化の対象ウィンドウ**（7.5 の振り向け）へ通知する。
+///
+/// メニューの処理はイベントループのスレッドで走るため、ここでブロックしてはならない。送るのは
+/// 1 つのイベント（[`GRID_COPY_REQUESTED_EVENT`]）だけで、送り先は**選ばれた時点で対象に
+/// なっているウィンドウ**である（要件 3.5: ショートカットの操作は操作対象のウィンドウにのみ
+/// 適用する）。対象が無い場合（どのウィンドウもフォーカスされていない）は何もしない —
+/// 送り先が無いのに全ウィンドウへ配ると、触っていないウィンドウの画面が勝手に変わる。
+///
+/// **荷（ペイロード）を運ばない。**複製は引数を取らない — 対象は「そのとき移植口が持って
+/// いる選択」である（`crates/app-shell/src/ipc/mod.rs` の定数の doc）。グリッドの画面を
+/// 出していないウィンドウには購読者が居ないので、そこで選んでも何も起きない。
+fn request_copy(app: &AppHandle, selection: &MenuSelection) {
+    let Some(label) = selection.window().cloned() else {
+        log::warn!("グリッドの複製: 対象ウィンドウが無いため画面へ送らない");
+        return;
+    };
+    match app.emit_to(label.as_str(), GRID_COPY_REQUESTED_EVENT, ()) {
+        Ok(()) => log::info!(
+            "グリッドの複製の要求を送った: ウィンドウ = {}",
+            label.as_str(),
+        ),
+        Err(error) => log::error!(
+            "グリッドの複製の要求を送れなかった（ウィンドウ = {}）: {error}",
+            label.as_str(),
+        ),
+    }
+}
+
+/// 起動時に 1 回だけ複製の項目を 7.4 の登録口へ登録する。`lifecycle::run` がメニューの構築
+/// （[`crate::menu::install`]）の後に呼ぶ。
+///
+/// 登録は [`MenuRegistry::register`] を通すので、**ショートカットの競合（要件 3.4）と項目の
+/// 識別子の重複（7.4 の `ItemIdConflict`）は登録時に検出され、登録元（このモジュール）へ
+/// 報告される** — 片方を黙って無効化する経路は無い。登録に失敗しても起動は続ける
+/// （メニュー項目が引けないことより、アプリが立ち上がらないことの方が悪い。診断の導線と同じ
+/// 判断）。
+///
+/// # 貼り付けの項目を登録しない理由（**要件 7.8 の後半は未達である**）
+///
+/// 障碍は**クリップボードを読む経路が無いこと**である。本アプリの読み口は DOM の `paste`
+/// イベントだけであり（7.2 が面で捕獲する形に決めた）、メニューの活性化には `ClipboardEvent`
+/// が無い。加えて**読み口が無いまま `Ctrl+V` を項目に登録すると、基盤のメニューが打鍵を
+/// 先に受け取り、いま動いている貼り付け（DOM の `paste`）が届かなくなる** — 複製はメニュー側に
+/// 代わりの経路があるので安全だが、貼り付けにはそれが無い。**動いている半分を守り、動かない
+/// 項目は登録しない**（詳細と実測は `design.md`「貼り付けの項目を今 登録しない理由」）。
+pub fn install(app: &AppHandle) {
+    let registry = app.state::<MenuRegistry>();
+    let handling_app = app.clone();
+    let spec = copy_item_spec(move |selection| {
+        request_copy(&handling_app, selection);
+    });
+    if let Err(error) = registry.register(app, spec) {
+        log::error!("グリッドの複製のメニュー項目を登録できなかった（{COPY_ITEM_ID}）: {error}");
+        return;
+    }
+    log::info!("グリッドの複製の導線をメニューへ登録した（{COPY_ITEM_ID}）");
+}
+
+// ---------------------------------------------------------------------------
 // テスト（タスク 6.2、6.3）
 //
 // Tauri の実体（`WebviewWindow` / `AppHandle`）を要するのはコマンド関数の 6 つだけであり、
@@ -1844,7 +1961,10 @@ mod tests {
     };
     use tauri::ipc::{InvokeResponseBody, IpcResponse};
 
+    use app_shell::accelerator::{Accelerator, MenuItemId};
+
     use super::*;
+    use crate::menu::EDIT_MENU_LABEL;
     use crate::session::watch::testing::AlwaysPresent;
     use crate::session::watch::DestroyHandler;
 
@@ -3518,6 +3638,78 @@ mod tests {
             TypeKindTag::ALL.len(),
             unique.len(),
             "2 つの種別が同じ札へ写っている"
+        );
+    }
+    // -----------------------------------------------------------------------
+    // メニューからの引き金（タスク 8.7。要件 7.8）
+    // -----------------------------------------------------------------------
+
+    /// 複製の項目が**編集の部分メニュー**へ、プラットフォーム解決済みの綴りで登録されること
+    /// （要件 7.8、3.3、3.4）。**GUI を起こさない** — `MenuRegistry::enroll` は画面を要しない
+    /// （9.5 の診断の導線と同じ検査の形）。
+    #[test]
+    fn the_copy_item_is_registered_in_the_edit_submenu() {
+        let registry = MenuRegistry::new();
+        registry
+            .enroll(copy_item_spec(|_: &MenuSelection| {}))
+            .expect("競合なく登録できる");
+
+        assert_eq!(
+            copy_menu_path().segments(),
+            &[EDIT_MENU_LABEL.to_owned()],
+            "複製は編集の部分メニューに置く"
+        );
+
+        let model = registry.model();
+        let items = model.items();
+        assert_eq!(items.len(), 1, "この module が置くのは複製の 1 件だけである");
+        let node = items[0];
+        assert_eq!(node.item(), &MenuItemId::new(COPY_ITEM_ID));
+        assert_eq!(node.label(), COPY_LABEL);
+        assert_eq!(node.owner().as_str(), OWNER);
+
+        let accelerator =
+            Accelerator::parse(COPY_ACCELERATOR_SPELLING).expect("プラットフォーム解決済みの綴り");
+        assert_eq!(node.accelerator(), Some(&accelerator));
+        // 慣習どおりの組み合わせであり、**正準形がプラットフォームごとに違う**こと
+        // （非 macOS `Ctrl+C` / macOS `Cmd+C`）がここに現れる。`scripts/check-menu-shortcut.sh`
+        // の配置の記録もこの綴りを要求する。
+        let expected = if cfg!(target_os = "macos") {
+            "super+KeyC"
+        } else {
+            "ctrl+KeyC"
+        };
+        assert_eq!(accelerator.as_str(), expected);
+        // **`CmdOrCtrl` は綴りとして受理されない**（4.6 の構文契約。受理すると、同じ論理
+        // ショートカットがプラットフォームごとに別の組み合わせとして扱われ、競合を見落とす）。
+        assert!(Accelerator::parse("CmdOrCtrl+C").is_err());
+    }
+
+    /// **貼り付けの項目を登録していない**（要件 7.8 の後半は未達である。理由は [`install`] の doc）。
+    ///
+    /// 読み口が無いまま `Ctrl+V` を登録すると、基盤のメニューが打鍵を先に受け取り、**いま
+    /// 動いている打鍵の貼り付け（DOM の `paste`）が届かなくなる**。この検査は「登録しない」と
+    /// いう判断が実装に現れていることを固定する（判断を変えるときは、読み口を先に足す）。
+    #[test]
+    fn no_paste_item_is_registered() {
+        let registry = MenuRegistry::new();
+        registry
+            .enroll(copy_item_spec(|_: &MenuSelection| {}))
+            .expect("競合なく登録できる");
+
+        let model = registry.model();
+        let items = model.items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].item().as_str(), COPY_ITEM_ID);
+
+        let paste = Accelerator::parse("Ctrl+V").expect("正準形");
+        assert!(
+            items.iter().all(|item| item.accelerator() != Some(&paste)),
+            "貼り付けのショートカットを登録していない"
+        );
+        assert!(
+            items.iter().all(|item| !item.item().as_str().contains("paste")),
+            "貼り付けの項目を作っていない"
         );
     }
 }

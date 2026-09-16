@@ -260,21 +260,53 @@
  * 単体テストは「状態と提示の数が変わること」までである。観測の場所は実起動（9.2 の台本と
  * `smoke-port-probe`。**標本の面は行の番号を描いている**）である。
  *
+ * # 8.7 が足したもの（範囲の複製・貼り付けと、打鍵・メニューの 2 つの入口。`./clipboard`）
+ *
+ * **判断と往復は `./clipboard` が持ち、状態を持つのは本 module である**（8.3 のセルの編集・
+ * 8.6 の行の操作と同じ分担である）。本 module が足したのは、① 遷移 1 つ
+ * （`gridScreenPasteSettled`）、② 移植口の 3 つの口（`onCopy` / `onPaste` / `copySelection`）の
+ * 結線、③ 表の面から判断へ渡す材料（窓の記憶の 3 つの口）である — ③ は `./clipboard` の
+ * [`createClipboardSurface`] が組み立て、**本 module は材料と行き先を渡すだけ**である。
+ *
+ * **メニューの活性化は本 module が購読する**（`./clipboardRequests`。要件 7.8 の後者）。器
+ * （`src-tauri`）が `編集 > 複製` の選択を対象ウィンドウへイベントで送り、本 module が
+ * **打鍵と同じ入口**（`RendererHandle.copySelection`）へ渡す。**貼り付けの項目は器が登録して
+ * いない**（クリップボードの読み口が無いため。理由は `design.md` と `./clipboardRequests` の doc）。
+ *
+ * | 論点 | 決定 | どこが担うか |
+ * |---|---|---|
+ * | 複製のテキストを作る場所 | **画面が作る**（移植口の `onCopy` は文字列を返す口であり、7.2 の実装は素通しである）。値は**窓の記憶の `getCell`** から読み、規則は `crates/data-grid/src/edit/paste.rs` の写しで書く — **境界に「範囲を読む」コマンドが無い**ため、ドメインの書く側（`PasteCodec::write`）は画面から到達できない | `./clipboard` の `planCopy` / `tableText` |
+ * | テキストの形式（要件 7.2） | 行の区切りは LF、列の区切りは TAB。区切りと `"` を含む値は囲み、囲みの中の `"` を `""` へ倍にする。**Rust の `PasteCodec::write` と 1 バイトも違わないことを実測で突き合わせた**（`clipboard.test.ts` の golden） | `./clipboard` の `tableText` |
+ * | 複製できないとき | **空文字を返さない。**窓が届いていないセルが 1 つでもあれば、拒否して理由を告知へ出す（空文字を返せば、利用者には「複製できた」と見え、クリップボードは空になる） | `planCopy` の `refused` と `createGridRendererSpec` の `refusePromise` |
+ * | **貼り付けの宛先の座標空間**（要件 8.6、8.9） | 錨は**物理の行（`RowId`）と文書の列**であり、歩く順序（`rows`）は**表示されている行の並び**である。**8.6 の「挿入の位置を写せない」制約は掛からない** — 渡すのは行の識別子であり、可視の序数から引ける（識別子で対象を決めた削除・複製と同じ理由） | `./clipboard` の `planPaste` |
+ * | 行の補充の境目（要件 7.4） | 渡す並びは「矩形の行数」と「錨から先に残る可視行数」の小さい方である。**短く渡すとドメインが行を足し、既存の行へ書かない**（利用者から見れば貼り付けたはずの行が増える）ので、矩形の行数を `./clipboard` が数える（囲みの中の改行を数えない） | `./clipboard` の `tableTextRowCount` |
+ * | 貼り付けのテキスト | **1 バイトも変えない**（改行の正規化も、列の解釈もしない）。解釈はドメインの `PasteCodec::parse` が唯一の源である | `./clipboard` の `planPaste` |
+ * | 行数が変わったあと（要件 1.7） | 適用が影響を受けた行を持てば `WindowCache.clear(row_count)` を呼び、**反映の形は 8.6 と同じ 1 つを通る**（行数を置き換え、現在位置と選択を寄せ、消えた行の面を閉じる）。貼り付けは**行を補充しうる**ので、`invalidate` では足りない | `./clipboard` の `applyPaste` と `gridScreenPasteSettled`（`appliedRowOperation`） |
+ * | **打鍵からの実行**（要件 7.8 の前者） | **移植口の 2 つの口がその経路である。**7.2 の面（`GlideSurface`）が DOM の `copy` / `paste` を捕獲の段で受け、移植口へ渡す — 打鍵（Ctrl+C / Ctrl+V）はそのイベントを起こす | `createGridRendererSpec` の `onCopy` / `onPaste` |
+ * | **メニューからの実行**（要件 7.8 の後者） | **複製は結線した**（器が `編集 > 複製` を登録し、活性化をイベントで送り、本 module が購読して**打鍵と同じ入口**を呼ぶ）。**貼り付けは結線していない** — 障碍は**クリップボードの読み口が無いこと**であり（読み口は DOM の `paste` だけ、プラグインは依存に無い、`navigator.clipboard.readText()` は 7.2 の実起動で `不可`）、**読み口が無いまま `Ctrl+V` を項目に登録すると、いま動いている打鍵の貼り付けを基盤のメニューが奪って壊す** | 複製は `./clipboardRequests` と `src-tauri/src/commands/grid.rs`。貼り付けは `design.md`「貼り付けの項目を今 登録しない理由」 |
+ *
+ * **単体テストが観測しないもの（8.7）。**① **文書へ実際に値が書かれること**と、補充される行の
+ * 既定値は Rust 側の契約である（`crates/data-grid` の検査）— 本 module は「何を送ったか」まで
+ * しか主張しない。② **クリップボードとの往復**（要件 7.2 の後半。他の表計算アプリケーションとの
+ * 間で範囲を往復できること）は、**実機のクリップボードと他のアプリケーション**を要するので
+ * `node` の環境（DOM なし）では観測できない。7.2 のレビューは、システムのクリップボードの
+ * 読み戻しがこの観測環境では確かめられないことを記録している。観測の場所は実起動（9.2 の台本と
+ * `smoke-port-probe`）と人手の手順である。③ **打鍵が DOM の `copy` / `paste` を実際に起こすこと**
+ * も同じ環境では観測できない（7.2 の `glideAdapter.test.ts` が固定するのは捕獲の段の配線であり、
+ * 実機の打鍵ではない）。
+ *
  * # 8.3〜8.9 への申し送り（本 module が足す予定の場所）
  *
- * - **8.5〜8.9**: 移植口の 4 つの**操作**（`onColumnResize` / `onColumnMove` / `onCopy` /
- *   `onPaste`）を実装で置き換える（8.4 はこの 4 つに触っていない）。8.1 はそれらを
- *   `onUnavailable` へ流すだけである
- *   （**黙って何もしない実装にしない** — `onCopy` が空文字を返せばクリップボード
- *   が空になり、`onPaste` が黙って捨てれば貼り付けが消える。無反応より悪い）
- * - **8.7（範囲の複製・貼り付けと、メニュー・打鍵）**: 本 module が 8.6 で出した 3 つの操作は
- *   **表の面の上に行として在るだけ**であり、**メニューからの選択とキーボードからの指示は
- *   まだ無い**（要件 7.8 / 9.9 が要求する「いずれによっても」は 8.7 が満たす）。8.7 が足すのは、
- *   ① 器の登録口（`app-shell` のメニュー登録）へ項目を登録すること、② プラットフォームで解決した
- *   綴りのショートカットを渡すこと、③ 3 つの操作（追加・削除・複製）も同じ登録へ載せること、
- *   ④ 移植口の `onCopy` / `onPaste` を結線することである。**8.6 の入口
- *   （`RowOperationTarget` を渡す 1 つの関数）はそのまま使える** — 打鍵から来る指示も同じ
- *   判断（`./rowOps` の `planRowOperation`）を通すこと
+ * - **8.8〜8.9**: 移植口の残る 2 つの**操作**（`onColumnResize` / `onColumnMove`）を実装で
+ *   置き換える。本 module はそれらを `onUnavailable` へ流す
+ *   （**黙って何もしない実装にしない** — 幅や順を変えたつもりの利用者に何も起きないより、
+ *   理由を出す方が読める）
+ * - **8.7（範囲の複製・貼り付けと、メニュー・打鍵）**: 移植口の `onCopy` / `onPaste` を結線し、
+ *   **複製はメニューからも実行できるようにした**（器の `MenuRegistry` への `data-grid.copy` の
+ *   登録・プラットフォームで解決した綴り・活性化のイベント・本 module の購読。上の「8.7 が
+ *   足したもの」）。**残っているのはメニューからの貼り付けだけである** — クリップボードの
+ *   読み口が無い（`./clipboard` の module doc と design.md に理由を記録した）。
+ *   **9.9（取り消しとやり直しのメニュー）は 8.9 が同じ形（器の登録 ＋ イベント ＋ 購読）で足す**
  * - **8.4（違反の提示）**: 実装済みである（上の「8.4 が確定させたもの」）。本 module が受け取る
  *   `violation_total` は 6.2 の時点で既に**シート全体**の数であり、広げる作業は無かった
  * - **8.6（行の増減）**: 実装済みである（下の「8.6 が足したもの」）。7.3 の申し送り（行数が
@@ -351,6 +383,15 @@ import {
 } from "./rowOps";
 import { createGlideAdapter } from "./renderer/glideAdapter";
 import {
+  createClipboardSurface,
+  runPastePlan,
+  type CopyPlan,
+  type PastePayload,
+  type PastePlan,
+  type PasteSettlement,
+} from "./clipboard";
+import { installGridCopyRequests, type CopyEntry } from "./clipboardRequests";
+import {
   clampSelection,
   followTarget,
   initialSelection,
@@ -360,6 +401,7 @@ import {
 } from "./selection";
 import type {
   CellPosition,
+  CellRange,
   GridRendererPort,
   RenderCell,
   RenderColumn,
@@ -1195,6 +1237,30 @@ export function gridScreenRowOperationSettled(
   }
 }
 
+/**
+ * 貼り付けの 1 往復（`./clipboard`）の結果を画面へ反映する（8.7。要件 7.3、7.4、1.7）。
+ *
+ * **反映の形は 8.6 の行の操作と同じ 1 つである**（[`appliedRowOperation`] を通る）— 貼り付けは
+ * **行を補充しうる**ので、行数を置き換え、現在位置と選択を寄せ、消えた行の面を閉じる必要が
+ * ある。形を 2 つに割ると、片方だけが寄せを持つ日が来る（利用者には「現在位置 10 行」と名乗り
+ * ながら表は 3 行、という食い違いとして現れる）。
+ *
+ * **適用できなかったときは内容を消さない**（1 行の告知として理由を出す。8.1 の失敗の隔離の表）。
+ */
+export function gridScreenPasteSettled(
+  model: GridScreenModel,
+  settlement: PasteSettlement,
+): GridScreenModel {
+  switch (settlement.status) {
+    case "failed":
+      return gridScreenFailed(model, `貼り付けを適用できませんでした: ${settlement.message}`);
+    case "applied":
+      return appliedRowOperation(model, settlement.outcome);
+    default:
+      return assertNever(settlement, "貼り付けの結果の分岐が網羅されていない");
+  }
+}
+
 /** 確認を入れ替える（**表を描いていないときは何もしない**）。 */
 function withPendingDelete(
   model: GridScreenModel,
@@ -1359,13 +1425,12 @@ export async function loadGridScreenState(client: GridClient): Promise<GridScree
 
 /**
  * まだ結線していない操作の名前（**利用者に見える語**である）。8.4〜8.9 がそれぞれ実装したら、
- * その名前はここから落ちる（8.3 が「セルの編集の起動」を実装したので、それはもう無い）。
+ * その名前はここから落ちる（8.3 が「セルの編集の起動」を、8.7 が「選択の範囲の複製」と
+ * 「表形式のテキストの貼り付け」を実装したので、それらはもう無い）。
  */
 const OPERATION_NAMES = {
   columnResize: "列の幅の変更",
   columnMove: "列の位置の変更",
-  copy: "選択の範囲の複製",
-  paste: "表形式のテキストの貼り付け",
 } as const;
 
 /**
@@ -1382,10 +1447,15 @@ const OPERATION_NAMES = {
  * 見せるべき値が**いま描かれている値そのもの**だからである — 画面が別の経路で値を持ち寄ると、
  * 描かれている値と打ち直しの初期値が食い違いうる。
  *
- * 残る 4 つは**操作**であり（8.4〜8.9 の担当）、本 module はそれらを [`onUnavailable`] へ流す。
- * **黙って何もしない実装にしない**理由は 2 つある: `onCopy` が空文字を返せばクリップボードが
- * 空になり、`onPaste` が黙って捨てれば貼り付けが消える（どちらも無反応より悪い）。拒否（`Promise`
- * の失敗）にしておくのは、移植口の実装が**クリップボードへ書かず・適用もしない**ためである
+ * **複製と貼り付けは 8.7 が結線した**（要件 7.1、7.2）。移植口の 2 つの口は `Promise` を返すので、
+ * 判断（`./clipboard` の [`planCopy`] / [`planPaste`]）と往復（同 [`applyPaste`]）を**この組の
+ * 中で繋ぐ**。表の面（`GridSurface`）が渡すのは、窓の記憶を読む 2 つの判断と、境界へ送る 1 つで
+ * ある — **移植口は文字列を解釈せず、境界の形も知らない**（7.1 の契約）。
+ *
+ * 残る 2 つは**操作**であり（8.8 の担当）、本 module はそれらを [`onUnavailable`] へ流す。
+ * **黙って何もしない実装にしない**理由は 2 つある: `onColumnResize` が何も告げなければ幅を変えた
+ * つもりの利用者に何も起きず、`onColumnMove` も同じである。拒否（`Promise` の失敗ではなく、
+ * 同期的な失敗）にしておくのは、移植口の実装が**描画を止めない**ためである
  * （`glideAdapter.tsx` の `GlideSurface` は拒否を記録して描画を止めない）。
  */
 export function createGridRendererSpec(options: {
@@ -1398,11 +1468,25 @@ export function createGridRendererSpec(options: {
   readonly onVisibleSpanChange: (span: VisibleSpan) => void;
   /** 編集の起動（要件 3.1）。**位置と、いま描かれている値**を渡す。 */
   readonly onActivateEditor: (position: CellPosition, initialText: string) => void;
+  /** 選択の範囲の複製の判断（要件 7.1、7.2。`./clipboard` の [`planCopy`]）。 */
+  readonly copyRange: (range: CellRange) => CopyPlan;
+  /** 貼り付けの判断（要件 7.3、7.4、8.6、8.9。`./clipboard` の [`planPaste`]）。 */
+  readonly pasteAt: (anchor: CellPosition, text: string) => PastePlan;
+  /** 貼り付けの 1 往復（要件 7.3、1.7。`./clipboard` の [`applyPaste`]）。 */
+  readonly sendPaste: (payload: PastePayload) => Promise<void>;
+  /** **送らなかった理由**を画面へ上げる口（複製と貼り付けの拒否。8.6 の `onRefused` と同じ）。 */
+  readonly onRefused: (message: string) => void;
   readonly onUnavailable: (operation: string) => void;
 }): RendererSpec {
   const refuse = (operation: string): Error => {
     options.onUnavailable(operation);
     return new Error(operation);
+  };
+  const refusePromise = (message: string): Promise<never> => {
+    // **告知へ上げてから拒否する。**移植口の実装は拒否を記録するだけで、クリップボードへは
+    // 書かず・適用もしない（`glideAdapter.tsx` の `GlideSurface`）。
+    options.onRefused(message);
+    return Promise.reject(new Error(message));
   };
 
   return {
@@ -1424,8 +1508,50 @@ export function createGridRendererSpec(options: {
     onColumnMove: () => {
       refuse(OPERATION_NAMES.columnMove);
     },
-    onCopy: () => Promise.reject(refuse(OPERATION_NAMES.copy)),
-    onPaste: () => Promise.reject(refuse(OPERATION_NAMES.paste)),
+    onCopy: (range) => {
+      const plan = options.copyRange(range);
+      return plan.kind === "refused"
+        ? refusePromise(plan.message)
+        : Promise.resolve(plan.text);
+    },
+    onPaste: (anchor, text) =>
+      // **腕の振り分けは `./clipboard` が持つ**（8.6 の `runRowOperationPlan` と同じ形である。
+      // ここで分岐を書き直すと、腕が増えた日に片方だけが追随する）。
+      runPastePlan(options.pasteAt(anchor, text), {
+        send: options.sendPaste,
+        refuse: refusePromise,
+      }),
+  };
+}
+
+/**
+ * メニューの活性化を複製の入口へ渡す口を組む（要件 7.8 の後者。8.7）。
+ *
+ * **`GridSurface` の効果の本体である**（`followSelection` と同じ理由で切り出してある — 効果は
+ * 走らせないと観測できず、この module は React の部品なので `node` 環境の検査から組み立てられ
+ * ない）。`handleOf` は移植口の取っ手を引く関数であり、画面は `() => handleRef.current` を渡す
+ * （器を組み立て直しても新しい取っ手を指す）。
+ *
+ * 入口は**移植口の `copySelection` だけ**である — 範囲の決定も、テキストの作成も、クリップ
+ * ボードへ渡すことも、移植口の内側で 1 つに閉じている（打鍵が着くのと同じメソッドである）。
+ * ここが持つのは 2 つだけである:
+ *
+ * 1. **器がまだ無いとき（`null`）は何もしない。**投げない — 活性化は非同期に届くので、
+ *    片付いた後の画面を叩く経路を作らない（打鍵の面も同じである。`glideAdapter.tsx` の
+ *    `attachCopyKeystroke`）
+ * 2. **失敗を記録する。**複製できない理由（窓が届いていないセルを含む）は、移植口の `onCopy` が
+ *    **告知へ出してから**拒否する（`createGridRendererSpec` の `refusePromise`）ので、ここでは
+ *    記録だけを行う
+ */
+export function createGridCopyEntry(handleOf: () => RendererHandle | null): CopyEntry {
+  return () => {
+    const handle = handleOf();
+    if (handle === null) {
+      return;
+    }
+    void handle.copySelection().catch((error: unknown) => {
+      console.error("選択の範囲を複製できなかった", error);
+    });
   };
 }
 
@@ -1581,6 +1707,13 @@ interface GridSurfaceProps {
    * 結果を `onEditSettled` で上げるのと同じ形である）。
    */
   readonly onRowOperationSettled: (settlement: RowOperationSettlement) => void;
+  /**
+   * 貼り付けの 1 往復（8.7。要件 7.3、7.4、1.7）の結果を画面へ上げる口。
+   *
+   * **行数を置き換え、現在位置を寄せるのは画面の遷移である**（[`gridScreenPasteSettled`]）。
+   * 貼り付けは行を補充しうるので、反映の形は行の操作と同じ 1 つを通る。
+   */
+  readonly onPasteSettled: (settlement: PasteSettlement) => void;
   /** 削除の確認を求める（要件 6.5。**送っていない**。数を示して尋ねるだけである）。 */
   readonly onDeleteRequested: (confirmation: DeleteConfirmation) => void;
   /** 確認への取り消し（**送らない**）。 */
@@ -1677,6 +1810,7 @@ function GridSurface({
   onViolationRead,
   onUnavailable,
   onRowOperationSettled,
+  onPasteSettled,
   onDeleteRequested,
   onDeleteCancelled,
   onRefused,
@@ -1844,6 +1978,20 @@ function GridSurface({
       },
     });
 
+    // 貼り付け・複製の面（要件 7.1、7.2、7.3、7.4）。**材料と行き先を渡すだけで、判断も往復も
+    // 本 module には書かない** — `GridSurface` は React の部品であり、`node` 環境の検査から
+    // 組み立てられないので、ここに判断を置くと覆えない穴になる（`createClipboardSurface` の doc）。
+    const clipboard = createClipboardSurface({
+      client,
+      cache: () => cacheRef.current,
+      visibleRows,
+      onSettled: onPasteSettled,
+      // 適用のあとは違反を引き直す（要件 4.6。セルの編集・行の操作と同じ規律である）。
+      onApplied: () => {
+        refreshViolation(selectionRef.current.current, true);
+      },
+    });
+
     const handle = GRID_RENDERER_PORT.mount(
       container,
       createGridRendererSpec({
@@ -1866,6 +2014,13 @@ function GridSurface({
           cache.setVisibleSpan(span.rows);
         },
         onUnavailable,
+        // 複製と貼り付け（8.7。要件 7.1、7.2、7.3、7.4）。**3 つの口は `./clipboard` の
+        // 面が組む**（材料と行き先を渡すだけであり、判断も往復も本 module には書かない —
+        // 画面の関数本体に置くと `node` 環境の検査から組み立てられない。`createClipboardSurface`）。
+        copyRange: clipboard.copyRange,
+        pasteAt: clipboard.pasteAt,
+        sendPaste: clipboard.sendPaste,
+        onRefused,
       }),
     );
     handleRef.current = handle;
@@ -1880,6 +2035,22 @@ function GridSurface({
       cacheRef.current = null;
     };
   }, [sheet, summary, visibleRows, onUnavailable]);
+
+  /**
+   * **メニューの活性化による複製を購読する**（要件 7.8 の後者。8.7）。
+   *
+   * 器（`src-tauri`）が `編集 > 複製` の選択を、活性化の対象ウィンドウへイベントとして送る。
+   * 入口は**打鍵と同じ 1 つ**（`RendererHandle.copySelection`）であり、範囲の決め方もテキストの
+   * 作り方も打鍵と共通である（`./clipboardRequests` の doc）。
+   *
+   * **この効果を器の組み立ての効果に混ぜない。** 組み立ては列の構成が変わるたびに走り直すが、
+   * 購読は 1 回で足りる — 入口は `handleRef` を通して引くので、器を組み立て直しても新しい取っ手を
+   * 指す（`selectionRef` と同じ規律である）。購読の解除は効果の後始末が行う。
+   *
+   * 複製できないとき（窓が届いていないセルを含む）は、打鍵と同じく `RendererSpec.onCopy` が
+   * 理由を告知へ出してから拒否する。ここは**記録だけ**する。
+   */
+  useEffect(() => installGridCopyRequests(createGridCopyEntry(() => handleRef.current)), []);
 
   /**
    * **世代を記憶へ下ろす**（8.5）。**組み直さない** — 適用は世代だけを進め、列の構成を変えない
@@ -2453,6 +2624,7 @@ function GridScreenBody({
   onDetailEditSettled,
   onDetailClosed,
   onRowOperationSettled,
+  onPasteSettled,
   onDeleteRequested,
   onDeleteCancelled,
   onRefused,
@@ -2479,6 +2651,8 @@ function GridScreenBody({
   readonly onDetailClosed: () => void;
   /** 行の操作の 1 往復の結果（8.6。要件 6.1、6.2、6.3）。 */
   readonly onRowOperationSettled: (settlement: RowOperationSettlement) => void;
+  /** 貼り付けの 1 往復の結果（8.7。要件 7.3、7.4、1.7）。 */
+  readonly onPasteSettled: (settlement: PasteSettlement) => void;
   /** 削除の確認を求める（8.6。要件 6.5。**送っていない**）。 */
   readonly onDeleteRequested: (confirmation: DeleteConfirmation) => void;
   /** 確認への取り消し（8.6。**送らない**）。 */
@@ -2579,6 +2753,7 @@ function GridScreenBody({
             onViolationRead={onViolationRead}
             onUnavailable={onUnavailable}
             onRowOperationSettled={onRowOperationSettled}
+            onPasteSettled={onPasteSettled}
             onDeleteRequested={onDeleteRequested}
             onDeleteCancelled={onDeleteCancelled}
             onRefused={onRefused}
@@ -2637,6 +2812,8 @@ export interface GridScreenViewProps {
   readonly onDetailClosed: () => void;
   /** 行の操作の 1 往復の結果（8.6。要件 6.1、6.2、6.3、6.5）。 */
   readonly onRowOperationSettled: (settlement: RowOperationSettlement) => void;
+  /** 貼り付けの 1 往復の結果（8.7。要件 7.3、7.4、1.7）。 */
+  readonly onPasteSettled: (settlement: PasteSettlement) => void;
   /** 削除の確認を求める（8.6。要件 6.5。**送っていない**）。 */
   readonly onDeleteRequested: (confirmation: DeleteConfirmation) => void;
   /** 確認への取り消し（8.6。**送らない**）。 */
@@ -2666,6 +2843,7 @@ export function GridScreenView({
   onDetailEditSettled,
   onDetailClosed,
   onRowOperationSettled,
+  onPasteSettled,
   onDeleteRequested,
   onDeleteCancelled,
   onRefused,
@@ -2757,6 +2935,7 @@ export function GridScreenView({
         onDetailEditSettled={onDetailEditSettled}
         onDetailClosed={onDetailClosed}
         onRowOperationSettled={onRowOperationSettled}
+        onPasteSettled={onPasteSettled}
         onDeleteRequested={onDeleteRequested}
         onDeleteCancelled={onDeleteCancelled}
         onRefused={onRefused}
@@ -2925,6 +3104,15 @@ export function GridScreen(): ReactElement {
   const refuseRowOperation = useCallback((message: string) => {
     setModel((current) => gridScreenFailed(current, message));
   }, []);
+  /**
+   * 貼り付けの 1 往復の結果（8.7。要件 7.3、7.4、1.7）。
+   *
+   * **非同期の結果である**（`ScreenBoundary` は効果の同期の例外しか捕まえない）。遷移は全域で
+   * あり、投げない（`gridScreenPasteSettled`）。
+   */
+  const settlePaste = useCallback((settlement: PasteSettlement) => {
+    setModel((current) => gridScreenPasteSettled(current, settlement));
+  }, []);
 
   return (
     <GridScreenView
@@ -2944,6 +3132,7 @@ export function GridScreen(): ReactElement {
       onDetailEditSettled={settleDetailEdit}
       onDetailClosed={closeDetail}
       onRowOperationSettled={settleRowOperation}
+      onPasteSettled={settlePaste}
       onDeleteRequested={requestDelete}
       onDeleteCancelled={cancelDelete}
       onRefused={refuseRowOperation}
