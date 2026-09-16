@@ -90,6 +90,30 @@ export interface DisplayState {
   readonly columnWidths: ReadonlyMap<number, number>;
   /** 要件 8.2。**表示位置 → 文書の列の添字**（左から順）。描画時の並べ替えのみに効く。 */
   readonly columnOrder: readonly number[];
+  /** 宣言された列数（[`DisplayState.columnOrder`] は常にこの長さを持つ）。 */
+  readonly columnCount: number;
+  /**
+   * その**表示位置**に描かれる列が、**構成（`columnOrder` の像）の何番目**であるかを答える
+   * （要件 8.1、8.2。8.8 が足した読み口である）。範囲の外の位置は `null`。
+   *
+   * **列幅の鍵と表示の位置を結ぶ唯一の口である。**`columnOrder[表示位置]` がそのまま答えであり、
+   * [`DisplayStateStore.setColumnWidth`] の内部の引きと**同じ 1 つの式**である（画面が
+   * `columnOrder` を自分で引くと、向きの取り違えが片方だけに起きる）。
+   *
+   * **返るのは構成の位置であって、文書の列ではない。**両者は恒等（展開が 1 つも無く、並びも
+   * 動かしていないとき）に一致するが、展開した構成では離れる — 文書の列が要る側は、構成の
+   * その位置の記述（`ColumnDescriptor.column`）を通すこと（`./columnSpace` の表）。
+   */
+  layoutColumnAt(displayPosition: number): number | null;
+  /**
+   * その**表示位置**に描かれる列の幅（要件 8.1）。
+   *
+   * 未設定の列は [`DisplayStateOptions.defaultWidth`] である（幅を設定されていない列も
+   * 描かれるため、画面は「いくつと表示するか」を要る）。範囲の外の位置は `null` —
+   * **0 や既定の幅で答えてはならない**（知らせの宛先が無いことを、幅 120 という値で
+   * 隠さない）。
+   */
+  widthAt(displayPosition: number): number | null;
 }
 
 /**
@@ -121,8 +145,6 @@ export interface DisplayStateOptions {
  * 要る側（描画層へ渡す列を組む側、要件 8.2 の並びを見る側）へはこの値をそのまま渡せる。
  */
 export interface DisplayStateStore extends DisplayState {
-  /** 宣言された列数（[`DisplayState.columnOrder`] は常にこの長さを持つ）。 */
-  readonly columnCount: number;
   /**
    * 列の幅を変更する（要件 8.1。`RendererSpec.onColumnResize` の知らせを受ける口）。
    *
@@ -219,6 +241,22 @@ export function createDisplayState(options: DisplayStateOptions): DisplayStateSt
         title: titles[column] ?? "",
         width: widths.get(column) ?? defaultWidth,
       }));
+    },
+    layoutColumnAt(displayPosition) {
+      if (!inRange(displayPosition)) {
+        return null;
+      }
+      return order[displayPosition] ?? null;
+    },
+    widthAt(displayPosition) {
+      if (!inRange(displayPosition)) {
+        return null;
+      }
+      const column = order[displayPosition];
+      if (column === undefined) {
+        return null;
+      }
+      return widths.get(column) ?? defaultWidth;
     },
   };
 }

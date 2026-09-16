@@ -297,10 +297,11 @@
  *
  * # 8.3〜8.9 への申し送り（本 module が足す予定の場所）
  *
- * - **8.8〜8.9**: 移植口の残る 2 つの**操作**（`onColumnResize` / `onColumnMove`）を実装で
- *   置き換える。本 module はそれらを `onUnavailable` へ流す
- *   （**黙って何もしない実装にしない** — 幅や順を変えたつもりの利用者に何も起きないより、
- *   理由を出す方が読める）
+ * - **8.8〜8.9**: 移植口の残る 2 つの**操作**（`onColumnResize` / `onColumnMove`）。
+ *   **8.8 が結線した**（`./viewOps` の判断を通し、画面の遷移へ渡す。`createGridRendererSpec`
+ *   の doc「列幅と列の移動は 8.8 が結線した」）— 8.1 が「黙って何もしない実装にしない」ために
+ *   置いた `onUnavailable` の経路は、**結線と同時に落とした**（未結線の操作が 1 つも無くなった
+ *   ためである）
  * - **8.7（範囲の複製・貼り付けと、メニュー・打鍵）**: 移植口の `onCopy` / `onPaste` を結線し、
  *   **複製はメニューからも実行できるようにした**（器の `MenuRegistry` への `data-grid.copy` の
  *   登録・プラットフォームで解決した綴り・活性化のイベント・本 module の購読。上の「8.7 が
@@ -360,7 +361,7 @@ import {
   type ViolationPresentation,
   type ViolationReading,
 } from "./violations";
-import { createDisplayState } from "./displayState";
+import { createDisplayState, type DisplayStateStore } from "./displayState";
 import { columnEditor } from "./editors";
 import type { ColumnConstraints, EditCarrier } from "./editorRegistry";
 import { createColumnSpace } from "./columnSpace";
@@ -368,8 +369,16 @@ import {
   NestedColumnControls,
   NestedInspector,
   declaredInnerPositions,
-  withExpansion,
 } from "./nestedInspector";
+import {
+  applyViewOperation,
+  drawnColumns,
+  hasRowRestriction,
+  layoutKeyOf,
+  rowOrderKeyOf,
+  type ViewOperation,
+} from "./viewOps";
+import { ViewBar } from "./viewBar";
 import { WINDOW_ROWS, createWindowCache, type WindowCache } from "./windowCache";
 import {
   applyRowOperation,
@@ -465,6 +474,45 @@ export type GridScreenState =
        * 渡す行数はこれである（シートの行数ではない。絞り込みが効けば両者は食い違う）。
        */
       readonly visibleRows: number;
+      /**
+       * **絞り込みによって表示されていない行の数**（要件 8.7。8.8 が足した）。
+       *
+       * 源は `grid_set_view` の応答（`GridViewResponse.hidden_rows`）だけである — **画面は
+       * 数え直さない**（数えるにはシートの行数が要り、それは絞り込みの結果ではない）。
+       * `visibleRows` とこの数の和が**シートの行数**であることは、ドメインの
+       * `RowOrder::hidden` の doc が定めている。
+       */
+      readonly hiddenRows: number;
+      /**
+       * **列幅と表示上の列順**（8.8 がここへ載せた。要件 8.1、8.2）。
+       *
+       * 7.5 はこれを表の面（`GridSurface`）の中に組んでいたが、8.8 は**画面の状態へ上げた**。
+       * 上げた理由は、表示上の列順が**表示の位置の空間そのもの**であり、画面の複数の場所が
+       * それを読むためである（表が描く列、列ごとの操作の行、違反の提示と巡回の着地点）。
+       * 表の面だけが持つと、同じ写像が 2 箇所に現れ、片方だけが並びに追随する
+       * （`./viewOps` の module doc「表示の並びは 1 つである」）。
+       *
+       * **境界へは渡らない**（要件 8.5。設計の割り方の根拠）。この値が `grid_set_view` の
+       * 要求に現れないことは、`viewOps.test.ts` と `GridScreen.test.ts` の両方が固定する。
+       */
+      readonly display: DisplayStateStore;
+      /**
+       * **描かれる列の内容の同一性**（表示の並びと、描かれる幅。[`layoutKeyOf`]）。
+       *
+       * 列幅と表示上の列順は、移植口へ**次の `mount` の仕様として**届く（`RendererHandle` に
+       * 幅や順を押し込む口が無い。design.md「列幅・列順の反映」）。この鍵は、その組み直しが
+       * 要るかを決める 1 つの依存である（[`DisplayState`] は可変の値なので、参照の同一性では
+       * 変化を観測できない）。
+       */
+      readonly layoutKey: string;
+      /**
+       * **行の集合の同一性**（並べ替えと絞り込み。[`rowOrderKeyOf`]）。
+       *
+       * これが変わると、**取得済みの窓は別の行を指す**（7.3 の `clear` の doc）— 表の面は
+       * この鍵が変わったときに組み直す（窓の記憶も器も作り直す）。**世代だけでは足りない**:
+       * 世代は編集でも進むが（`./cellEdit`）、編集は行の並びを変えない（要件 8.8）。
+       */
+      readonly rowOrderKey: string;
       /**
        * 選択（**現在位置と矩形**。要件 2.1、2.2、2.3）。
        *
@@ -833,6 +881,8 @@ export type GridViewSettlement =
       readonly columns: readonly ColumnDescriptor[];
       /** 可視行数（絞り込みが効けばシートの行数と違う）。窓が覆う行数である。 */
       readonly visibleRows: number;
+      /** **絞り込みによって表示されていない行の数**（要件 8.7。応答が運ぶ数そのものである）。 */
+      readonly hiddenRows: number;
       /** **シート全体**の違反の総数（要件 4.3）。 */
       readonly violationTotal: number;
     }
@@ -860,6 +910,8 @@ export async function applyGridView(
     view,
     columns: answer.data.columns,
     visibleRows: answer.data.visible_rows,
+    // **隠れている行の数も応答が運ぶ**（要件 8.7）。画面は数え直さない。
+    hiddenRows: answer.data.hidden_rows,
     violationTotal: answer.data.violation_total,
   };
 }
@@ -911,7 +963,9 @@ function sameLayout(
  * 以上、走査の位置は元の意味を保たない）。構成が**同じ並び**であるときは据え置く（[`sameLayout`]）
  * — 窓が運ぶ列は変わらないので、記憶している窓の内容はそのまま正しい（変わったのは世代だけ
  * である — `GridSurface` が世代を記憶へ下ろす）。並べ替え・絞り込みのように**行の並びを変える**
- * 指定は、8.8 が `WindowCache.clear` を伴って足す。
+ * 指定は `rowOrderKey` が変わる — 8.8 はそれを組み立ての効果の依存に入れた（**`WindowCache.clear`
+ * を別に呼ばない**。序数を鍵とする窓は行の集合が変われば別の行を指すので、**組み直しが同じ
+ * ことをする**。合図が 2 つあると、片方だけが古い記憶を残す日が来る）。
  */
 export function gridScreenViewSettled(
   model: GridScreenModel,
@@ -921,7 +975,14 @@ export function gridScreenViewSettled(
     return model;
   }
   switch (settlement.status) {
-    case "applied":
+    case "applied": {
+      // **表示状態は列数が変わったら作り直す**（7.5 の規律 — 列数は作るときに 1 度だけ受け取り、
+      // `columnOrder` は常に「いまの列数」の置換である）。列数が同じなら据え置く（幅と並びは
+      // 利用者の操作の結果であり、指定の適用で捨てる理由が無い）。
+      const display =
+        settlement.columns.length === model.state.summary.columns.length
+          ? model.state.display
+          : createDisplayState({ columnCount: settlement.columns.length });
       return {
         attempt: model.attempt,
         state: {
@@ -933,6 +994,14 @@ export function gridScreenViewSettled(
             ? model.state.summary
             : { ...model.state.summary, columns: [...settlement.columns] },
           visibleRows: settlement.visibleRows,
+          // **隠れている行の数も採用する**（要件 8.7）。表示の指定の適用がその数を知る唯一の
+          // 経路である（編集の応答は行の側の数を運ばない）。
+          hiddenRows: settlement.hiddenRows,
+          display,
+          // 組み直しの 2 つの合図を**採用した値から引き直す**（構成が変われば列数も変わり、
+          // 表示状態は作り直されるので、幅と並びの鍵も新しい構成のものになる）。
+          layoutKey: layoutKeyOf(display),
+          rowOrderKey: rowOrderKeyOf(settlement.view),
           violationTotal: settlement.violationTotal,
           // **縮んだ構成へ現在位置を寄せる**（要件 2.1、5.2）。入れ子を折りたたむと列数が減り、
           // 最後の列にあった現在位置が**描かれる表の外**へ残る — そのまま移植口へ渡すと、
@@ -956,6 +1025,7 @@ export function gridScreenViewSettled(
         notice: model.notice,
         editReport: model.editReport,
       };
+    }
     case "failed":
       // **適用されていないので、状態は 1 つも動かさない**（打たれた指定を捨てる理由が無い）。
       return gridScreenFailed(model, settlement.message);
@@ -1288,6 +1358,16 @@ function appliedRowOperation(
   const state = model.state;
   const rowCount = outcome.row_count;
   const columnCount = state.summary.columns.length;
+  /**
+   * いまの表の行数（**窓が覆う数**）。
+   *
+   * 絞り込みが無い間は可視の順序が文書の順序そのものであるので、適用の応答が運ぶ行数
+   * （`GridEditOutcome.row_count` ＝ シートの行数）をそのまま使える。**指定が行を絞っている間は
+   * 使えない** — 応答の数はシートの行数であり可視行数ではない（要件 8.7 の 2 つの数の
+   * 区別）。その場合は**いまの可視行数を据え置き**、画面が表示の指定を送り直して取り直す
+   * （[`needsViewRefresh`]）。
+   */
+  const rowBound = hasRowRestriction(state.view) ? state.visibleRows : rowCount;
   return {
     attempt: model.attempt,
     state: {
@@ -1298,15 +1378,14 @@ function appliedRowOperation(
         state.summary.row_count === rowCount
           ? state.summary
           : { ...state.summary, row_count: rowCount },
-      // **窓が覆う行数も新しい行数である**（絞り込みが無い間、可視の順序は文書の順序そのもので
-      // ある。上の doc）。
-      visibleRows: rowCount,
+      // **窓が覆う行数も新しい行数である**（上の `rowBound`）。
+      visibleRows: rowBound,
       // **縮んだ表へ現在位置と選択を寄せる**（要件 6.5 の「行の位置の提示が直ちに更新される」）。
-      selection: clampSelection(state.selection, { rowCount, columnCount }),
-      // 消えた行に開いていた面は閉じる（`rowCount === 0` なら両方とも閉じる）。
+      selection: clampSelection(state.selection, { rowCount: rowBound, columnCount }),
+      // 消えた行に開いていた面は閉じる（`rowBound === 0` なら両方とも閉じる）。
       editing:
-        state.editing !== null && state.editing.position.row >= rowCount ? null : state.editing,
-      detail: state.detail !== null && state.detail.position.row >= rowCount ? null : state.detail,
+        state.editing !== null && state.editing.position.row >= rowBound ? null : state.editing,
+      detail: state.detail !== null && state.detail.position.row >= rowBound ? null : state.detail,
       pendingDelete: null,
       // 違反の総数は適用の応答が運ぶ数（**シート全体**）で置き換え、いまの提示は取り下げる
       // （要件 4.6。解消されたかどうかは、窓の印の取り直しと境界への問い合わせで決まる）。
@@ -1318,6 +1397,106 @@ function appliedRowOperation(
     notice: model.notice,
     editReport: model.editReport,
   };
+}
+
+// ===========================================================================
+// 2.7 表示の操作（8.8。要件 8.1、8.2、8.3、8.4、8.5、8.7）
+// ===========================================================================
+
+/**
+ * 列の幅を変える（要件 8.1）。`RendererSpec.onColumnResize` の知らせと、列ごとの操作の入力の
+ * **両方がここへ来る**（同じ空間（表示位置）を取り、同じ 1 つの状態を動かす）。
+ *
+ * **境界へは 1 つも送らない。**列幅は窓の中身を変えないので、保存される列の順序を変える経路が
+ * 無い（要件 8.5）— 送る口を作れば、その経路が生まれる。
+ *
+ * 返すのは**新しいモデル**である（値が変わったときだけ）。変わらない知らせ（範囲の外、
+ * 同じ幅）では**引数をそのまま返す** — 状態は可変の値（[`DisplayStateStore`]）なので、
+ * 参照の同一性だけが「変わっていない」ことの印であり、そのまま返すことが組み直しを止める。
+ */
+export function gridScreenColumnResized(
+  model: GridScreenModel,
+  displayPosition: number,
+  width: number,
+): GridScreenModel {
+  return withDisplayChange(model, (display) => {
+    display.setColumnWidth(displayPosition, width);
+  });
+}
+
+/**
+ * 列を表示の並びの中で運ぶ（要件 8.2）。`RendererSpec.onColumnMove` の知らせと、列ごとの左右の
+ * 操作の**両方がここへ来る**（幅と同じ理由である）。
+ *
+ * **幅は動かない** — 幅の鍵は列そのものであり、位置ではない（7.5 の規則。並びを変えても同じ列が
+ * 同じ幅で描かれる）。
+ */
+export function gridScreenColumnMoved(
+  model: GridScreenModel,
+  from: number,
+  to: number,
+): GridScreenModel {
+  return withDisplayChange(model, (display) => {
+    display.moveColumn(from, to);
+  });
+}
+
+/**
+ * 表示状態（幅・並び）への変更を 1 つの形で反映する（[`gridScreenColumnResized`] /
+ * [`gridScreenColumnMoved`] の本体）。
+ *
+ * **変えたあとの鍵と比べて、変わっていなければ状態を据え置く** — 範囲の外の知らせや恒等の移動は
+ * 状態を変えない（7.5 の規律）ので、組み直しの合図も動かしてはならない（動かすと、描画層が
+ * 宣言の外の位置を報せるたびに器を作り直すことになる）。
+ */
+function withDisplayChange(
+  model: GridScreenModel,
+  change: (display: DisplayStateStore) => void,
+): GridScreenModel {
+  if (model.state.status !== "ready") {
+    // 表を描いていないときは列が無い（知らせの宛先が無い。7.5 の「範囲の外の入力と同じ扱い」）。
+    return model;
+  }
+  const before = model.state.layoutKey;
+  change(model.state.display);
+  const after = layoutKeyOf(model.state.display);
+  if (after === before) {
+    return model;
+  }
+  return { ...model, state: { ...model.state, layoutKey: after } };
+}
+
+/**
+ * 行を増減したあとに、**表示の指定を送り直して数を取り直す**必要があるか（要件 8.7）。
+ *
+ * 要るのは 2 つが同時に成り立つときだけである。
+ *
+ * 1. **行の集合が変わった**（適用の応答の行数が、適用前のシートの行数と違う）。値だけを書く
+ *    適用（`SetCells` と、行を補充しない `PasteRange`）ではドメインも順序を導出し直さないので
+ *    （`api.rs` の `settle`「値だけの編集では順序を導出し直さない」）、画面が数を取り直す理由が
+ *    無い — **そして取り直してはならない**: 絞り込みの条件に合う値へ書き換えた行が、確定と
+ *    同時に画面から消えることになる（要件 8.8 が名指しした「編集した行を見失う」経路である）。
+ * 2. **行の集合を絞っている指定が効いている**（[`hasRowRestriction`]）。指定が無ければ、適用の
+ *    応答が運ぶ行数がそのまま可視行数である（可視の順序は文書の順序そのものである）。
+ *
+ * 数を知る唯一の源は `grid_set_view` の応答である（`GridViewResponse.visible_rows` /
+ * `hidden_rows`）— 適用の応答は行の側の数を運ばない（生成物の `GridEditOutcome` の doc）。
+ */
+export function needsViewRefresh(options: {
+  readonly view: GridViewSpec;
+  readonly outcome: GridEditOutcome | null;
+  /** 適用の前の**シートの行数**（`ready.summary.row_count`）。 */
+  readonly sheetRowsBefore: number;
+}): boolean {
+  const outcome = options.outcome;
+  if (outcome === null || outcome.affected.length === 0) {
+    // 何も変わっていない（行数も位置も動かない）。
+    return false;
+  }
+  if (!hasRowRestriction(options.view)) {
+    return false;
+  }
+  return outcome.row_count !== options.sheetRowsBefore;
 }
 
 // ===========================================================================
@@ -1390,6 +1569,8 @@ export async function loadGridScreenState(client: GridClient): Promise<GridScree
   if (derived.status === "error") {
     return { status: "failed", message: describeIpcError(derived.error), canRetry: true };
   }
+  // 開いた直後の表示状態（7.5。幅は 1 つも設定されておらず、並びは構成そのものである）。
+  const display = createDisplayState({ columnCount: summary.columns.length });
   return {
     status: "ready",
     sheet: sheet.id,
@@ -1397,6 +1578,9 @@ export async function loadGridScreenState(client: GridClient): Promise<GridScree
     // **窓が覆うのは可視行である**（窓の区間は可視行の序数で表される。`RowSpan` の doc）ので、
     // 記憶へ渡す行数はシートの行数ではなく応答の可視行数である。
     visibleRows: derived.data.visible_rows,
+    // **絞り込みで隠れている行の数**（要件 8.7）。空の指定では 0 である（可視の順序は文書の
+    // 順序そのもの）が、**画面は数え直さない** — 置くのは応答が運んだ数である。
+    hiddenRows: derived.data.hidden_rows,
     // **表を描き始める時点から現在位置が 1 つある**（要件 2.1）。先頭のセルである（開いた直後に
     // 見えているのは先頭の窓なので、追随も要らない）。
     selection: initialSelection(),
@@ -1410,6 +1594,11 @@ export async function loadGridScreenState(client: GridClient): Promise<GridScree
     // 開いた直後の表示の指定は空である（絞り込み無し・並べ替え無し・展開無し。要件 5.1 の
     // 展開は利用者の操作で足す）。
     view: EMPTY_GRID_VIEW,
+    // **列幅と表示上の列順**（8.8。要件 8.1、8.2）。開いた直後は構成そのものであり、幅は
+    // 1 つも設定されていない — 2 つの鍵もその状態から引き直す（組み直しの合図である）。
+    display,
+    layoutKey: layoutKeyOf(display),
+    rowOrderKey: rowOrderKeyOf(EMPTY_GRID_VIEW),
     // いま `grid_set_view` を 1 度呼んだところである（世代は 0 から 1 へ進んだ）。
     generation: GENERATION_AFTER_OPEN,
     // 開いた直後は詳細表示を開いていない（要件 5.5。開くのは利用者の操作である）。
@@ -1422,16 +1611,6 @@ export async function loadGridScreenState(client: GridClient): Promise<GridScree
 // ===========================================================================
 // 3. 移植口へ渡す仕様（**キャンバスを要さない純粋な部分**）
 // ===========================================================================
-
-/**
- * まだ結線していない操作の名前（**利用者に見える語**である）。8.4〜8.9 がそれぞれ実装したら、
- * その名前はここから落ちる（8.3 が「セルの編集の起動」を、8.7 が「選択の範囲の複製」と
- * 「表形式のテキストの貼り付け」を実装したので、それらはもう無い）。
- */
-const OPERATION_NAMES = {
-  columnResize: "列の幅の変更",
-  columnMove: "列の位置の変更",
-} as const;
 
 /**
  * 移植口へ渡す仕様を組む。**引く口（`getCell`）・列・行数と、選択に関わる 3 つである。**
@@ -1452,11 +1631,15 @@ const OPERATION_NAMES = {
  * 中で繋ぐ**。表の面（`GridSurface`）が渡すのは、窓の記憶を読む 2 つの判断と、境界へ送る 1 つで
  * ある — **移植口は文字列を解釈せず、境界の形も知らない**（7.1 の契約）。
  *
- * 残る 2 つは**操作**であり（8.8 の担当）、本 module はそれらを [`onUnavailable`] へ流す。
- * **黙って何もしない実装にしない**理由は 2 つある: `onColumnResize` が何も告げなければ幅を変えた
- * つもりの利用者に何も起きず、`onColumnMove` も同じである。拒否（`Promise` の失敗ではなく、
- * 同期的な失敗）にしておくのは、移植口の実装が**描画を止めない**ためである
- * （`glideAdapter.tsx` の `GlideSurface` は拒否を記録して描画を止めない）。
+ * **列幅と列の移動は 8.8 が結線した**（要件 8.1、8.2）。2 つは**表示位置**で報せられる
+ * （`port.ts` の doc。Glide の添字をそのまま位置として渡す）ので、`./viewOps` の内部の翻訳を
+ * 通さずに画面の遷移へ渡せる — **画面の遷移も表示位置を取る**（幅の鍵は列そのものであり、
+ * 位置を列へ写すのは 7.5 の状態 1 箇所である）。
+ *
+ * **未結線の操作は 1 つも残っていない。**8.1 が「黙って何もしない実装にしない」ために置いた
+ * `onUnavailable` の経路（と、その語の一覧 `OPERATION_NAMES`）は、8.8 が最後の 2 つを結線した
+ * 時点で**落とした** — 残せば、6 つすべてが結線された後に「まだ使えない」という語だけが
+ * 増えも減りもしないまま残る（到達しない分岐は検査で覆えない）。
  */
 export function createGridRendererSpec(options: {
   readonly getCell: (position: CellPosition) => RenderCell;
@@ -1476,12 +1659,11 @@ export function createGridRendererSpec(options: {
   readonly sendPaste: (payload: PastePayload) => Promise<void>;
   /** **送らなかった理由**を画面へ上げる口（複製と貼り付けの拒否。8.6 の `onRefused` と同じ）。 */
   readonly onRefused: (message: string) => void;
-  readonly onUnavailable: (operation: string) => void;
+  /** 列の幅が変わった（要件 8.1。**表示位置**で報せられる）。 */
+  readonly onColumnResize: (displayPosition: number, width: number) => void;
+  /** 列が並びの中で運ばれた（要件 8.2。**表示順の位置どうし**で報せられる）。 */
+  readonly onColumnMove: (from: number, to: number) => void;
 }): RendererSpec {
-  const refuse = (operation: string): Error => {
-    options.onUnavailable(operation);
-    return new Error(operation);
-  };
   const refusePromise = (message: string): Promise<never> => {
     // **告知へ上げてから拒否する。**移植口の実装は拒否を記録するだけで、クリップボードへは
     // 書かず・適用もしない（`glideAdapter.tsx` の `GlideSurface`）。
@@ -1502,12 +1684,11 @@ export function createGridRendererSpec(options: {
       // ここで例外が画面を巻き込むことはない（`RendererSpec.getCell` の不変条件）。
       options.onActivateEditor(position, options.getCell(position).text);
     },
-    onColumnResize: () => {
-      refuse(OPERATION_NAMES.columnResize);
-    },
-    onColumnMove: () => {
-      refuse(OPERATION_NAMES.columnMove);
-    },
+    // **2 つの知らせはそのまま画面の遷移へ渡る**（要件 8.1、8.2）。移植口の実装は Glide の
+    // 添字をそのまま位置として渡すので、ここで写し直す必要が無い（`port.ts` の doc。
+    // 写し直すと、向きの取り違えが片方だけに起きる）。
+    onColumnResize: options.onColumnResize,
+    onColumnMove: options.onColumnMove,
     onCopy: (range) => {
       const plan = options.copyRange(range);
       return plan.kind === "refused"
@@ -1651,8 +1832,45 @@ interface GridSurfaceProps {
   readonly sheet: string;
   /** 開いた応答の要約（列の構成と行数）。 */
   readonly summary: GridSheetSummary;
+  /**
+   * **描かれる列の並び**（表示順。要件 8.2）。
+   *
+   * 画面が 1 度だけ組んで渡す（`./viewOps` の [`drawnColumns`]）— 表・列ごとの操作の行・
+   * 窓の記憶の写像が**同じ 1 つの並び**を見るようにするためである（写像が 2 つあると、
+   * 描かれている値と編集の宛先が別の列を指す）。
+   */
+  readonly columns: readonly ColumnDescriptor[];
+  /**
+   * **いまの表示状態**（8.8。要件 8.1、8.2）。列幅と表示上の列順である。
+   *
+   * ここへ渡るのは**読み取りのためだけ**である（`renderColumns` は描画のための組み立てであり、
+   * 状態を変えない）。表がこの値から組むのは、移植口へ渡す列（見出しと幅）だけである — 表示の
+   * 位置の空間（[`columns`]）は画面が 1 度だけ組んで渡す。
+   */
+  readonly display: DisplayStateStore;
+  /**
+   * 描かれる列の内容の同一性（[`layoutKeyOf`]）。**面を組み直す合図である。**
+   *
+   * 幅と並びは移植口へ次の `mount` の仕様として届く（押し込む口が無い）ので、この鍵が
+   * 変わったときに器・窓の記憶・移植口を**揃って組み直す**。
+   */
+  readonly layoutKey: string;
+  /**
+   * 行の集合の同一性（[`rowOrderKeyOf`]）。**面を組み直す合図である。**
+   *
+   * 並べ替えと絞り込みは「何番目の行がどの行か」を変えるので、**取得済みの窓は別の行を指す**
+   * （7.3 の `clear` の doc）。世代（`generation`）では代用できない — 世代は値だけの編集でも
+   * 進む（`./cellEdit` の `generationAfterEdit`）が、そのとき行の並びは動かない（要件 8.8）。
+   */
+  readonly rowOrderKey: string;
   /** 可視行の数（窓が覆う行数）。 */
   readonly visibleRows: number;
+  /**
+   * 絞り込みで隠れている行の数（要件 8.7）。**面を組み直す合図でもある** — 行の増減のあとに
+   * 隠れている数だけが変わった場合（絞り込みの条件に合わない行を足した場合）は、可視行数も
+   * 並びも動かないので、この数が唯一の手掛かりである。
+   */
+  readonly hiddenRows: number;
   /**
    * いまの世代（8.5。`grid_set_view` と適用で進む）。
    *
@@ -1698,8 +1916,10 @@ interface GridSurfaceProps {
    * 画面の状態へ入れるのは遷移（[`gridScreenViolationReason`]）である。
    */
   readonly onViolationRead: (reading: ViolationReading) => void;
-  /** 器が捕まえない失敗を画面内へ流す口。 */
-  readonly onUnavailable: (operation: string) => void;
+  /** 列の幅が変わった（要件 8.1。**表示位置**で報せられる）。 */
+  readonly onColumnResize: (displayPosition: number, width: number) => void;
+  /** 列が並びの中で運ばれた（要件 8.2。**表示順の位置どうし**で報せられる）。 */
+  readonly onColumnMove: (from: number, to: number) => void;
   /**
    * 行の操作（8.6。要件 6.1、6.2、6.3）を画面へ上げる口。
    *
@@ -1746,10 +1966,20 @@ const GENERATION_AFTER_OPEN = 1;
  * **列の写像をここで 1 度だけ引く**（`./columnSpace`）— 表示の位置から文書の列への写像は、
  * 窓の読み（`getCell`）と編集の宛先（`./cellEdit` が [`WindowCache.documentColumn`] を通して
  * 読む）の**両方**がこれを使う。8.5 の申し送り（8.3 のレビューが実測）はこれを求めていた。
+ *
+ * **写像を組む並びは「描かれる列の並び」である**（8.8）。表示上の列順を変えると表示の位置の
+ * 意味が変わるので、構成の順で組むと**描かれている値と編集の宛先が別の列を指す**。
  */
 export function createGridSurfaceCache(options: {
   readonly sheet: string;
-  readonly summary: GridSheetSummary;
+  /**
+   * **描かれる列の並び**（表示順。`./viewOps` の [`drawnColumns`] が組む）。
+   *
+   * 構成（`summary.columns`）ではなくこれを渡すのは、**表示上の列順を変えると写像そのものが
+   * 変わる**ためである（要件 8.2）— 構成の順で組むと、描かれている値と編集の宛先が別の列を
+   * 指す（`./viewOps` の module doc「表示の並びは 1 つである」）。
+   */
+  readonly columns: readonly ColumnDescriptor[];
   readonly visibleRows: number;
   /** いまの世代（`grid_set_view` と適用で進む）。 */
   readonly generation: number;
@@ -1759,8 +1989,8 @@ export function createGridSurfaceCache(options: {
 }): WindowCache {
   return createWindowCache({
     sheet: options.sheet,
-    // 構成の並びがそのまま表示の位置の空間である（入れ子の展開を含む）。
-    columns: createColumnSpace(options.summary.columns),
+    // **描かれる並びが、そのまま表示の位置の空間である**（入れ子の展開と表示上の列順を含む）。
+    columns: createColumnSpace(options.columns),
     // **窓が覆うのは可視行である**（絞り込みが効いていればシートの行数と食い違う）。
     rowCount: options.visibleRows,
     generation: options.generation,
@@ -1794,7 +2024,12 @@ export function createGridSurfaceCache(options: {
 function GridSurface({
   sheet,
   summary,
+  columns,
+  display,
+  layoutKey,
+  rowOrderKey,
   visibleRows,
+  hiddenRows,
   generation,
   selection,
   editing,
@@ -1808,7 +2043,8 @@ function GridSurface({
   onDetailEditSettled,
   onDetailClosed,
   onViolationRead,
-  onUnavailable,
+  onColumnResize,
+  onColumnMove,
   onRowOperationSettled,
   onPasteSettled,
   onDeleteRequested,
@@ -1875,10 +2111,10 @@ function GridSurface({
    * いまの構成の写像（**境界の列を表示の位置へ落とす口**。要件 4.2、4.4）。
    *
    * 窓の記憶が組む写像（[`createGridSurfaceCache`]）と**同じ並びから引く**（どちらも
-   * `summary.columns` ＝ 導出後の構成である）。したがって写像は 1 つのままである — 表が読む
+   * [`columns`] ＝ 表示順の構成である）。したがって写像は 1 つのままである — 表が読む
    * セルと、違反の提示が名乗る位置は、同じ並びの同じ位置を指す。
    */
-  const space = useMemo(() => createColumnSpace(summary.columns), [summary]);
+  const space = useMemo(() => createColumnSpace(columns), [columns]);
 
   /**
    * いまの位置の違反の理由を引き直す（要件 4.2）。
@@ -1919,7 +2155,7 @@ function GridSurface({
   };
 
   // 表の大きさ（現在位置を寄せる先。要件 2.2 の端の扱いと、行・列の全体の選択に要る）。
-  const bounds = { rowCount: visibleRows, columnCount: summary.columns.length };
+  const bounds = { rowCount: visibleRows, columnCount: columns.length };
 
   /**
    * 表の器が打鍵を受ける口。**方向の指示だけを引き受け、残りは流す**（`./selection` の
@@ -1948,19 +2184,18 @@ function GridSurface({
       return undefined;
     }
 
-    // 表示状態（7.5）。8.1 は初期の並び（宣言の順・既定の幅）だけを組む。
-    const display = createDisplayState({ columnCount: summary.columns.length });
     // 開いた直後に見えている区間の見当。**実装が知らせてくるまでの値である**（Glide は
     // マウントの直後に本当の区間を知らせる）。
     const openingSpan: VisibleSpan = {
       rows: { start: 0, count: Math.min(visibleRows, WINDOW_ROWS) },
-      columns: { start: 0, count: summary.columns.length },
+      columns: { start: 0, count: columns.length },
     };
     visibleRef.current = openingSpan;
 
     const cache = createGridSurfaceCache({
       sheet,
-      summary,
+      // **描かれる列の並び**である（表示上の列順を含む。要件 8.2）。
+      columns,
       // **窓が覆うのは可視行である**（絞り込みが効いていればシートの行数と食い違う）。
       visibleRows,
       // 組み立ての時点の世代。以後の変化は下の効果が記憶へ下ろす（**組み直さない**）。
@@ -1995,6 +2230,7 @@ function GridSurface({
     const handle = GRID_RENDERER_PORT.mount(
       container,
       createGridRendererSpec({
+        // **表示順の見出しを渡す**（幅は表示状態が持ち、並びも表示状態が決める。要件 8.1、8.2）。
         columns: display.renderColumns(summary.columns.map((column) => column.name)),
         rowCount: visibleRows,
         // **マウントの時点で現在位置が 1 つある**（要件 2.1）。
@@ -2013,7 +2249,10 @@ function GridSurface({
           viewportRowsRef.current = span.rows.count;
           cache.setVisibleSpan(span.rows);
         },
-        onUnavailable,
+        // 列幅と列の移動（8.8。要件 8.1、8.2）。**知らせは表示位置で来る**ので、そのまま
+        // 画面の遷移へ渡す（写し直さない）。
+        onColumnResize,
+        onColumnMove,
         // 複製と貼り付け（8.7。要件 7.1、7.2、7.3、7.4）。**3 つの口は `./clipboard` の
         // 面が組む**（材料と行き先を渡すだけであり、判断も往復も本 module には書かない —
         // 画面の関数本体に置くと `node` 環境の検査から組み立てられない。`createClipboardSurface`）。
@@ -2034,7 +2273,10 @@ function GridSurface({
       handleRef.current = null;
       cacheRef.current = null;
     };
-  }, [sheet, summary, visibleRows, onUnavailable]);
+    // **組み直しの合図は 3 つである**（列の構成は `summary` の同一性で観測する — 同じ並びなら
+    // 8.5 が据え置く）。幅と並びは `layoutKey`、行の集合（並べ替え・絞り込みと行数）は
+    // `rowOrderKey` / `visibleRows` / `hiddenRows` である。
+  }, [sheet, summary, layoutKey, rowOrderKey, visibleRows, hiddenRows]);
 
   /**
    * **メニューの活性化による複製を購読する**（要件 7.8 の後者。8.7）。
@@ -2105,7 +2347,7 @@ function GridSurface({
    * なければ詳細表示は開けない）。`getCell` は未取得なら要求も始めるので、開いた時点で窓が
    * 無い行でも、到着（`arrivals`）で中身が埋まる。
    */
-  const detailColumn = detail === null ? null : (summary.columns[detail.position.column] ?? null);
+  const detailColumn = detail === null ? null : (columns[detail.position.column] ?? null);
   const detailCell =
     detail === null ? UNKNOWN_CELL : (cacheRef.current?.getCell(detail.position) ?? UNKNOWN_CELL);
   const detailMarks = detail === null ? null : (cacheRef.current?.nestedMarks(detail.position) ?? null);
@@ -2157,7 +2399,7 @@ function GridSurface({
     settle(
       position,
       { kind: "cancel" },
-      columnEditor(summary.columns[position.column] ?? null).carrier,
+      columnEditor(columns[position.column] ?? null).carrier,
       onDetailEditSettled,
     );
   };
@@ -2282,7 +2524,7 @@ function GridSurface({
       {editing === null ? null : (
         <CellEditorPanel
           edit={editing}
-          column={summary.columns[editing.position.column] ?? null}
+          column={columns[editing.position.column] ?? null}
           onCommit={(text, carrier) => {
             settle(editing.position, { kind: "commit", text }, carrier, onEditSettled);
           }}
@@ -2613,7 +2855,6 @@ function GridScreenBody({
   model,
   client,
   onRetry,
-  onUnavailable,
   onSelectionChange,
   onEditStarted,
   onEditSettled,
@@ -2623,6 +2864,9 @@ function GridScreenBody({
   onDetailOpened,
   onDetailEditSettled,
   onDetailClosed,
+  onColumnWidth,
+  onColumnMove,
+  onView,
   onRowOperationSettled,
   onPasteSettled,
   onDeleteRequested,
@@ -2633,7 +2877,6 @@ function GridScreenBody({
   /** 境界の口（表を描く腕が、編集の 1 往復に使う）。 */
   readonly client: GridClient;
   readonly onRetry: () => void;
-  readonly onUnavailable: (operation: string) => void;
   readonly onSelectionChange: (selection: RendererSelection | null) => void;
   readonly onEditStarted: (position: CellPosition, initialText: string) => void;
   readonly onEditSettled: (settlement: CellEditSettlement) => void;
@@ -2645,6 +2888,12 @@ function GridScreenBody({
   readonly onExpansion: (state: GridExpansionState) => void;
   /** 詳細表示の入口（要件 5.4、5.5）。 */
   readonly onDetailOpened: (position: CellPosition) => void;
+  /** 列の幅の変更（8.8。要件 8.1。**表示位置**で指す）。 */
+  readonly onColumnWidth: (displayPosition: number, width: number) => void;
+  /** 列の表示位置の変更（8.8。要件 8.2。**表示順の位置どうし**で指す）。 */
+  readonly onColumnMove: (from: number, to: number) => void;
+  /** 並べ替え・絞り込みの操作（8.8。要件 8.3、8.4）。 */
+  readonly onView: (operation: ViewOperation) => void;
   /** 詳細表示の中の編集の結果（要件 5.7）。 */
   readonly onDetailEditSettled: (settlement: CellEditSettlement) => void;
   /** 詳細表示を閉じる（**値も文書も動かない**）。 */
@@ -2661,6 +2910,18 @@ function GridScreenBody({
   readonly onRefused: (message: string) => void;
 }): ReactElement {
   const state = model.state;
+  /**
+   * **描かれる列の並び**（表示順。要件 8.2）。**1 度だけ組んで 3 つの読み手へ渡す** —
+   * 表（窓の記憶の写像と、描く列）、列ごとの操作の行（8.5）、表示の操作の行（8.8）である。
+   *
+   * 読み手ごとに組むと、**片方だけが並びに追随する**日が来る（`./viewOps` の module doc
+   * 「表示の並びは 1 つである」）。依存に `state` を取るのは、[`DisplayState`] が可変の値で
+   * あり、変化が**状態の置き換え**としてしか観測できないためである。
+   */
+  const columns = useMemo(
+    () => (state.status === "ready" ? drawnColumns(state.summary.columns, state.display) : []),
+    [state],
+  );
   switch (state.status) {
     case "loading":
       return (
@@ -2727,17 +2988,40 @@ function GridScreenBody({
             名前と操作を並べる方が、どの列の操作かが読める。
           */}
           <NestedColumnControls
-            columns={state.summary.columns}
+            // **表示順の構成を渡す**（8.8）。列ごとの操作は「その位置に描かれている列」に
+            // つくものであり、位置（詳細表示の宛先）は表示の位置である — 構成の順で渡すと、
+            // 並びを変えた後で**別の列の名前と操作**が並ぶ。
+            columns={columns}
             view={state.view}
             // 詳細表示は**現在位置の行**の値について開く。
             currentRow={state.selection.current.row}
             onExpansion={onExpansion}
             onDetail={onDetailOpened}
           />
+          {/*
+            表示の操作（8.8。要件 8.1、8.2、8.3、8.4、8.7）。**表の上に出す** — 列幅も列順も
+            並べ替えも絞り込みも、対象は利用者がいま見ている列であり、その提示（表）の隣に在るのが
+            読める位置である（8.6 の行の操作と同じ判断である）。
+          */}
+          <ViewBar
+            columns={columns}
+            display={state.display}
+            view={state.view}
+            visibleRows={state.visibleRows}
+            hiddenRows={state.hiddenRows}
+            onColumnWidth={onColumnWidth}
+            onColumnMove={onColumnMove}
+            onView={onView}
+          />
           <GridSurface
             sheet={state.sheet}
             summary={state.summary}
+            columns={columns}
+            display={state.display}
+            layoutKey={state.layoutKey}
+            rowOrderKey={state.rowOrderKey}
             visibleRows={state.visibleRows}
+            hiddenRows={state.hiddenRows}
             generation={state.generation}
             selection={state.selection}
             editing={state.editing}
@@ -2751,7 +3035,8 @@ function GridScreenBody({
             onDetailEditSettled={onDetailEditSettled}
             onDetailClosed={onDetailClosed}
             onViolationRead={onViolationRead}
-            onUnavailable={onUnavailable}
+            onColumnResize={onColumnWidth}
+            onColumnMove={onColumnMove}
             onRowOperationSettled={onRowOperationSettled}
             onPasteSettled={onPasteSettled}
             onDeleteRequested={onDeleteRequested}
@@ -2777,8 +3062,6 @@ export interface GridScreenViewProps {
   readonly onRetry: () => void;
   /** 告知を閉じる。 */
   readonly onDismissNotice: () => void;
-  /** 移植口の操作がまだ結線されていないことを知らせる。 */
-  readonly onUnavailable: (operation: string) => void;
   /**
    * 選択が変わった（打鍵・ポインタのどちらでも）。要件 2.1、2.2、2.3。
    *
@@ -2810,6 +3093,18 @@ export interface GridScreenViewProps {
   readonly onDetailEditSettled: (settlement: CellEditSettlement) => void;
   /** 詳細表示を閉じる（8.5）。 */
   readonly onDetailClosed: () => void;
+  /**
+   * 列の幅の変更（8.8。要件 8.1）。
+   *
+   * **移植口の知らせ（`RendererSpec.onColumnResize`）と、列ごとの操作の入力の両方がここへ
+   * 来る** — 2 つを別の経路にすると、片方だけが幅を動かす日が来る（8.7 が複製の入口を
+   * 1 つに寄せたのと同じ判断である）。
+   */
+  readonly onColumnWidth: (displayPosition: number, width: number) => void;
+  /** 列の表示位置の変更（8.8。要件 8.2。**表示順の位置どうし**である）。 */
+  readonly onColumnMove: (from: number, to: number) => void;
+  /** 並べ替え・絞り込みの操作（8.8。要件 8.3、8.4）。 */
+  readonly onView: (operation: ViewOperation) => void;
   /** 行の操作の 1 往復の結果（8.6。要件 6.1、6.2、6.3、6.5）。 */
   readonly onRowOperationSettled: (settlement: RowOperationSettlement) => void;
   /** 貼り付けの 1 往復の結果（8.7。要件 7.3、7.4、1.7）。 */
@@ -2832,7 +3127,6 @@ export function GridScreenView({
   onRetry,
   onDismissNotice,
   onDismissEditReport,
-  onUnavailable,
   onSelectionChange,
   onEditStarted,
   onEditSettled,
@@ -2842,6 +3136,9 @@ export function GridScreenView({
   onDetailOpened,
   onDetailEditSettled,
   onDetailClosed,
+  onColumnWidth,
+  onColumnMove,
+  onView,
   onRowOperationSettled,
   onPasteSettled,
   onDeleteRequested,
@@ -2924,7 +3221,6 @@ export function GridScreenView({
         model={model}
         client={client}
         onRetry={onRetry}
-        onUnavailable={onUnavailable}
         onSelectionChange={onSelectionChange}
         onEditStarted={onEditStarted}
         onEditSettled={onEditSettled}
@@ -2934,6 +3230,9 @@ export function GridScreenView({
         onDetailOpened={onDetailOpened}
         onDetailEditSettled={onDetailEditSettled}
         onDetailClosed={onDetailClosed}
+        onColumnWidth={onColumnWidth}
+        onColumnMove={onColumnMove}
+        onView={onView}
         onRowOperationSettled={onRowOperationSettled}
         onPasteSettled={onPasteSettled}
         onDeleteRequested={onDeleteRequested}
@@ -3003,11 +3302,6 @@ export function GridScreen(): ReactElement {
     // 表を描いていないときは遷移が自分で何もしない（`gridScreenSelectionChanged`）。
     setModel((current) => gridScreenSelectionChanged(current, selection));
   }, []);
-  const noteUnavailable = useCallback((operation: string) => {
-    // **器に届かない失敗である**（イベントハンドラ。`ScreenBoundary` は捕まえない）。内容の
-    // 領域は変えず、告知として 1 行出す。
-    setModel((current) => gridScreenFailed(current, `この操作はまだ使えません: ${operation}`));
-  }, []);
   const startEdit = useCallback((position: CellPosition, initialText: string) => {
     setModel((current) => gridScreenEditStarted(current, position, initialText));
   }, []);
@@ -3032,12 +3326,14 @@ export function GridScreen(): ReactElement {
     const token = (traversalRef.current += 1);
     // 起点（いまの行の次）を決めるのは `./violations` である（そこに規則があり、検査もある）。
     // **写像も渡す**（`./columnSpace`）— 着地点は表示の位置でなければならない（境界が運ぶのは
-    // 文書の列であり、展開があると一致しない。`./violations` の module doc）。
+    // 文書の列であり、展開と**表示上の列順**があると一致しない。`./violations` の module doc）。
+    // 並びは**描かれる列**（表示順）である — 構成の順で組むと、並びを変えた後で**別の列へ
+    // 現在位置が着く**（要件 8.2、8.6 と同じ取り違えである）。
     void nextViolation({
       client: DEFAULT_CLIENT,
       current: state.selection.current,
       rowCount: state.visibleRows,
-      space: createColumnSpace(state.summary.columns),
+      space: createColumnSpace(drawnColumns(state.summary.columns, state.display)),
     }).then((reading) => {
       if (token !== traversalRef.current) {
         return;
@@ -3047,20 +3343,26 @@ export function GridScreen(): ReactElement {
   }, [model]);
 
   /**
-   * 列の展開の操作（要件 5.1、5.2、5.3）。**送るのは「いまの指定に 1 件を足した」完全な記述で
-   * ある**（ドメインは要求に現れない展開を折りたたみへ戻す）。
+   * **表示の指定を 1 つ適用する**（要件 5.1、5.2、5.3、8.3、8.4）。
+   *
+   * 4 つの入口（展開・並べ替え・絞り込み・数の取り直し）がここへ集まる。**送るのは常に
+   * 「完全な記述」である**（ドメインは要求に現れない指定を既定へ戻す）ので、操作は
+   * [`applyViewOperation`] で 1 つの指定へ写してから送る — 部分的な指定を送る経路を作らない。
    *
    * 送る途中の指定は [`pendingViewRef`] へ積む — 2 つの押下が続くと、2 つ目は 1 つ目の応答を
    * 待たずに組まれるので、`ready.view` を起点にすると**1 つ目の押下が指定から消える**。
+   *
+   * `update` は**いま送ろうとしている指定**（まだ応答が返っていない押下を含む）から組み立てる
+   * 関数である。状態（`ready.view`）から組むと、押下が続いたときに前の押下を落とす。
    */
-  const expand = useCallback(
-    (expansion: GridExpansionState) => {
+  const sendView = useCallback(
+    (update: (view: GridViewSpec) => GridViewSpec) => {
       const state = model.state;
       if (state.status !== "ready") {
         return;
       }
       const token = (viewRef.current += 1);
-      const next = withExpansion(pendingViewRef.current ?? state.view, expansion);
+      const next = update(pendingViewRef.current ?? state.view);
       pendingViewRef.current = next;
       void applyGridView(DEFAULT_CLIENT, next).then((settlement) => {
         if (token !== viewRef.current) {
@@ -3073,6 +3375,35 @@ export function GridScreen(): ReactElement {
     },
     [model],
   );
+
+  /** 列の展開の操作（要件 5.1、5.2、5.3）。**他の 2 つの指定を落とさないためにここを通る。** */
+  const expand = useCallback(
+    (expansion: GridExpansionState) => {
+      sendView((view) => applyViewOperation(view, { kind: "expansion", state: expansion }));
+    },
+    [sendView],
+  );
+
+  /** 並べ替えと絞り込みの操作（8.8。要件 8.3、8.4）。 */
+  const updateView = useCallback(
+    (operation: ViewOperation) => {
+      sendView((view) => applyViewOperation(view, operation));
+    },
+    [sendView],
+  );
+
+  /**
+   * 列の幅の変更（8.8。要件 8.1）。**移植口の知らせと列ごとの入力が同じここへ来る**
+   * （2 つを別の経路にすると、片方だけが幅を動かす日が来る）。
+   */
+  const resizeColumn = useCallback((displayPosition: number, width: number) => {
+    setModel((current) => gridScreenColumnResized(current, displayPosition, width));
+  }, []);
+
+  /** 列の表示位置の変更（8.8。要件 8.2。**幅は動かない** — 7.5 の規則である）。 */
+  const moveColumn = useCallback((from: number, to: number) => {
+    setModel((current) => gridScreenColumnMoved(current, from, to));
+  }, []);
   const openDetail = useCallback((position: CellPosition) => {
     setModel((current) => gridScreenDetailOpened(current, position));
   }, []);
@@ -3089,9 +3420,27 @@ export function GridScreen(): ReactElement {
    * **非同期の結果である**（`ScreenBoundary` は効果の同期の例外しか捕まえない）。遷移は全域で
    * あり、投げない（`gridScreenRowOperationSettled`）。
    */
-  const settleRowOperation = useCallback((settlement: RowOperationSettlement) => {
-    setModel((current) => gridScreenRowOperationSettled(current, settlement));
-  }, []);
+  const settleRowOperation = useCallback(
+    (settlement: RowOperationSettlement) => {
+      const state = model.state;
+      setModel((current) => gridScreenRowOperationSettled(current, settlement));
+      // **行の集合が変わったなら数を取り直す**（要件 8.7）。指定が行を絞っている間、適用の
+      // 応答が運ぶ行数はシートの行数であり、可視行数でも隠れた行の数でもない — 数を知る
+      // 唯一の源は表示の指定の応答である（`needsViewRefresh` の doc）。
+      if (
+        state.status === "ready" &&
+        settlement.status === "applied" &&
+        needsViewRefresh({
+          view: state.view,
+          outcome: settlement.outcome,
+          sheetRowsBefore: state.summary.row_count,
+        })
+      ) {
+        sendView((view) => view);
+      }
+    },
+    [model, sendView],
+  );
   /** 削除の確認を求める（**送っていない。**数を示して尋ねるだけである。要件 6.5）。 */
   const requestDelete = useCallback((confirmation: DeleteConfirmation) => {
     setModel((current) => gridScreenDeleteRequested(current, confirmation));
@@ -3110,9 +3459,25 @@ export function GridScreen(): ReactElement {
    * **非同期の結果である**（`ScreenBoundary` は効果の同期の例外しか捕まえない）。遷移は全域で
    * あり、投げない（`gridScreenPasteSettled`）。
    */
-  const settlePaste = useCallback((settlement: PasteSettlement) => {
-    setModel((current) => gridScreenPasteSettled(current, settlement));
-  }, []);
+  const settlePaste = useCallback(
+    (settlement: PasteSettlement) => {
+      const state = model.state;
+      setModel((current) => gridScreenPasteSettled(current, settlement));
+      // 貼り付けも**行を補充しうる**ので、行の操作と同じ判断を通る（要件 7.4、8.7）。
+      if (
+        state.status === "ready" &&
+        settlement.status === "applied" &&
+        needsViewRefresh({
+          view: state.view,
+          outcome: settlement.outcome,
+          sheetRowsBefore: state.summary.row_count,
+        })
+      ) {
+        sendView((view) => view);
+      }
+    },
+    [model, sendView],
+  );
 
   return (
     <GridScreenView
@@ -3121,7 +3486,6 @@ export function GridScreen(): ReactElement {
       onRetry={retry}
       onDismissNotice={dismissNotice}
       onDismissEditReport={dismissEditReport}
-      onUnavailable={noteUnavailable}
       onSelectionChange={select}
       onEditStarted={startEdit}
       onEditSettled={settleEdit}
@@ -3131,6 +3495,9 @@ export function GridScreen(): ReactElement {
       onDetailOpened={openDetail}
       onDetailEditSettled={settleDetailEdit}
       onDetailClosed={closeDetail}
+      onColumnWidth={resizeColumn}
+      onColumnMove={moveColumn}
+      onView={updateView}
       onRowOperationSettled={settleRowOperation}
       onPasteSettled={settlePaste}
       onDeleteRequested={requestDelete}

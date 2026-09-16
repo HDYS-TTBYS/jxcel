@@ -71,7 +71,10 @@ import {
   gridScreenDetailEditSettled,
   gridScreenDetailOpened,
   gridScreenEditReportDismissed,
+  gridScreenColumnMoved,
+  gridScreenColumnResized,
   gridScreenNextViolation,
+  needsViewRefresh,
   gridScreenViolationReason,
   gridScreenEditSettled,
   gridScreenEditStarted,
@@ -91,13 +94,21 @@ import {
 } from "./GridScreen";
 import { EMPTY_GRID_VIEW } from "./gridClient";
 import { createColumnSpace } from "./columnSpace";
+import { DEFAULT_COLUMN_WIDTH, createDisplayState } from "./displayState";
+import { applyViewOperation, drawnColumns, layoutKeyOf, rowOrderKeyOf } from "./viewOps";
 import { withExpansion } from "./nestedInspector";
 import { followTarget, initialSelection, selectionAt } from "./selection";
 import type { GridClient } from "./gridClient";
 import type { DeleteConfirmation } from "./rowOps";
 import type { PastePayload } from "./clipboard";
+import { createClipboardSurface } from "./clipboard";
+import { settleCellEdit } from "./cellEdit";
 import type { CellPosition, RendererSelection, VisibleSpan } from "./renderer/port";
 import { nextViolation, reasonInRow, type ViolationPresentation } from "./violations";
+
+// 窓の二進形式の言語をまたぐ固定（7.3）。**生のテキストとして**取り込む（`windowCache.test.ts`
+// と同じ経路。ファイルを実行時に開く口は使わない — 検査の環境を node の API へ結び付けない）。
+import windowFixtureText from "../../../crates/data-grid/tests/fixtures/window_protocol.txt?raw";
 
 // ===========================================================================
 // 検査の道具（偽の境界と、状態からの描画）
@@ -258,7 +269,9 @@ function markOf(model: GridScreenModel): string {
       onRetry: () => undefined,
       onDismissNotice: () => undefined,
       onDismissEditReport: () => undefined,
-      onUnavailable: () => undefined,
+      onColumnWidth: () => undefined,
+      onColumnMove: () => undefined,
+      onView: () => undefined,
       onSelectionChange: () => undefined,
       onEditStarted: () => undefined,
       onEditSettled: () => undefined,
@@ -285,6 +298,19 @@ function markOfState(state: GridScreenState): string {
 /** 列の構成として出た見出し（**宣言の順**に読む）。 */
 function columnNamesIn(markup: string): readonly string[] {
   return [...markup.matchAll(/data-grid-column="[^"]*"[^>]*>([^<]*)</g)].map((match) => match[1] ?? "");
+}
+
+/**
+ * 列ごとの操作の並びに出た列の名前（**表示の順**。要件 5.1、5.2 の見える結果）。
+ *
+ * 表そのもの（移植口）は `node` の環境では走らない（効果が無い）ので、**描かれる列の並び**は
+ * 状態から描かれるこの 1 行で読む（`./nestedInspector` が構成の列ごとに 1 件を出す）。
+ * 8.5 と 8.8 の節が同じ行を読む（**同じ規則を 2 つ書かない**）。
+ */
+function controlNamesIn(markup: string): readonly string[] {
+  return [...markup.matchAll(/data-column-control="\d+"[^>]*><span>([^<]*)<\/span>/g)].map(
+    (match) => match[1] ?? "",
+  );
 }
 
 // ===========================================================================
@@ -440,6 +466,10 @@ describe("画面内の失敗の経路（器に届かない失敗）", () => {
       sheet: "s1",
       summary: { columns: [descriptor(0, "名前")], row_count: 3 },
       visibleRows: 3,
+      hiddenRows: 0,
+      display: createDisplayState({ columnCount: 1 }),
+      layoutKey: layoutKeyOf(createDisplayState({ columnCount: 1 })),
+      rowOrderKey: rowOrderKeyOf(EMPTY_GRID_VIEW),
       selection: initialSelection(),
       editing: null,
       violationTotal: 0,
@@ -494,8 +524,9 @@ describe("画面内の失敗の経路（器に届かない失敗）", () => {
 });
 
 describe("移植口の操作（8.3〜8.9 が結線する）", () => {
-  it("編集の起動・複製・貼り付けは結線され、まだ結線していない操作は黙って捨てずに画面内の告知へ流す", async () => {
-    const unavailable: string[] = [];
+  it("6 つの知らせがすべて結線され、列幅と列の移動は画面の遷移へそのまま渡る", async () => {
+    const resized: [number, number][] = [];
+    const moved: [number, number][] = [];
     const activated: [CellPosition, string][] = [];
     const refused: string[] = [];
     const pasted: PastePayload[] = [];
@@ -524,8 +555,12 @@ describe("移植口の操作（8.3〜8.9 が結線する）", () => {
       onRefused: (message) => {
         refused.push(message);
       },
-      onUnavailable: (operation) => {
-        unavailable.push(operation);
+      // 列幅と列の移動（8.8。要件 8.1、8.2）。**知らせは表示位置で来る**ので、そのまま渡る。
+      onColumnResize: (displayPosition, width) => {
+        resized.push([displayPosition, width]);
+      },
+      onColumnMove: (from, to) => {
+        moved.push([from, to]);
       },
     });
 
@@ -542,10 +577,14 @@ describe("移植口の操作（8.3〜8.9 が結線する）", () => {
     // 値が画面へ上がる。
     spec.onActivateEditor({ row: 0, column: 0 });
     expect(activated).toEqual([[{ row: 0, column: 0 }, "標本"]]);
-    expect(unavailable).toEqual([]);
 
+    // **列幅と列の移動（要件 8.1、8.2）も結線された。**2 つの知らせは表示位置のまま画面の
+    // 遷移へ渡る（移植口の実装が Glide の添字をそのまま位置として渡すので、写し直さない）。
     spec.onColumnResize(0, 200);
-    spec.onColumnMove(0, 1);
+    spec.onColumnMove(1, 0);
+    expect(resized).toEqual([[0, 200]]);
+    expect(moved).toEqual([[1, 0]]);
+
     // **複製と貼り付け（要件 7.1、7.2）ももう「まだ使えない操作」ではない。**複製は文字列を
     // 返し（器がクリップボードへ書く）、貼り付けは 1 往復を起こす。
     await expect(
@@ -557,11 +596,10 @@ describe("移植口の操作（8.3〜8.9 が結線する）", () => {
     ]);
     expect(refused).toEqual([]);
 
-    expect(unavailable).toEqual(["列の幅の変更", "列の位置の変更"]);
-
     // 選択の知らせは**操作ではない**（8.2 が消費する。告知へは流さない）。
     spec.onSelectionChange(null);
-    expect(unavailable).toHaveLength(2);
+    expect(resized).toEqual([[0, 200]]);
+    expect(refused).toEqual([]);
   });
 
   it("送れない複製・貼り付けは、拒否して理由を告知へ流す（空文字を返さない）", async () => {
@@ -584,7 +622,8 @@ describe("移植口の操作（8.3〜8.9 が結線する）", () => {
       onRefused: (message) => {
         refused.push(message);
       },
-      onUnavailable: () => undefined,
+      onColumnResize: () => undefined,
+      onColumnMove: () => undefined,
     });
 
     // **空文字を返さない**（返せばクリップボードが空になり、利用者には「複製できた」と見える）。
@@ -617,7 +656,8 @@ describe("移植口の操作（8.3〜8.9 が結線する）", () => {
         pasted.push(payload);
       },
       onRefused: () => undefined,
-      onUnavailable: () => undefined,
+      onColumnResize: () => undefined,
+      onColumnMove: () => undefined,
     });
 
     await expect(spec.onPaste({ row: 0, column: 0 }, "")).resolves.toBeUndefined();
@@ -659,6 +699,8 @@ function readyModel(
     readonly generation?: number;
     /** 開いている詳細表示（8.5）。 */
     readonly detail?: CellDetail | null;
+    /** 絞り込みで隠れている行の数（8.8。要件 8.7）。 */
+    readonly hiddenRows?: number;
   } = {},
 ): GridScreenModel {
   const visibleRows = options.visibleRows ?? SAMPLE_ROWS;
@@ -667,6 +709,9 @@ function readyModel(
     sheet: "s1",
     summary: { columns: [...SAMPLE_COLUMNS], row_count: visibleRows },
     visibleRows,
+    // 絞り込みで隠れている行（要件 8.7）。既定は 0 である（絞り込みが効いていない）。
+    hiddenRows: options.hiddenRows ?? 0,
+    ...displayFields(SAMPLE_COLUMNS.length),
     selection,
     editing: null,
     violationTotal: options.violationTotal ?? 0,
@@ -678,6 +723,21 @@ function readyModel(
     // 8.6 の欄（削除の確認）。既定は「尋ねていない」である。
     pendingDelete: null,
   });
+}
+
+/**
+ * 表を描く状態の**表示状態の 3 つの欄**（8.8。要件 8.1、8.2）。
+ *
+ * 状態を手で組む検査が使う（開く流れを通す検査は `loadGridScreenState` が組む）。**開いた直後と
+ * 同じ値**である — 幅は 1 つも設定されておらず、並びは構成そのものである。
+ */
+function displayFields(columnCount: number): {
+  readonly display: ReturnType<typeof createDisplayState>;
+  readonly layoutKey: string;
+  readonly rowOrderKey: string;
+} {
+  const display = createDisplayState({ columnCount });
+  return { display, layoutKey: layoutKeyOf(display), rowOrderKey: rowOrderKeyOf(EMPTY_GRID_VIEW) };
 }
 
 /** マーク付けから数え上げを読む（**文字ではなく属性の数を読む**）。 */
@@ -827,7 +887,8 @@ describe("現在位置と選択（8.2。要件 2.1、2.3、2.5）", () => {
       pasteAt: () => ({ kind: "nothing" }),
       sendPaste: async () => undefined,
       onRefused: () => undefined,
-      onUnavailable: () => undefined,
+      onColumnResize: () => undefined,
+      onColumnMove: () => undefined,
     });
 
     // マウントの時点の選択がそのまま渡る（要件 2.1）。
@@ -934,6 +995,8 @@ function editingModel(
       sheet: "s1",
       summary: { columns: [...columns], row_count: SAMPLE_ROWS },
       visibleRows: SAMPLE_ROWS,
+      hiddenRows: 0,
+      ...displayFields(columns.length),
       selection: initialSelection(),
       editing: null,
       violationTotal: 0,
@@ -1618,7 +1681,8 @@ describe("違反のバーと巡回（8.4。要件 4.1〜4.4、4.6）", () => {
       pasteAt: () => ({ kind: "nothing" }),
       sendPaste: async () => undefined,
       onRefused: () => undefined,
-      onUnavailable: () => undefined,
+      onColumnResize: () => undefined,
+      onColumnMove: () => undefined,
     });
 
     expect(spec.getCell({ row: 0, column: 0 }).violated).toBe(true);
@@ -1711,6 +1775,8 @@ function nestedModel(
     sheet: "s1",
     summary: { columns: [...NESTED_COLUMNS], row_count: visibleRows },
     visibleRows,
+    hiddenRows: 0,
+    ...displayFields(NESTED_COLUMNS.length),
     selection: options.selection ?? initialSelection(),
     editing: null,
     violationTotal: 0,
@@ -1760,6 +1826,7 @@ describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
       // **境界が運んだ導出後の構成をそのまま持ち帰る**（要件 5.1）。
       columns: EXPANDED_NESTED_COLUMNS,
       visibleRows: SAMPLE_ROWS,
+      hiddenRows: 0,
       violationTotal: 0,
     });
   });
@@ -1774,6 +1841,7 @@ describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
       // 導出前の 3 列（`SAMPLE_COLUMNS`）を受け取った場合。
       columns: SAMPLE_COLUMNS,
       visibleRows: SAMPLE_ROWS,
+      hiddenRows: 0,
       violationTotal: 3,
     });
 
@@ -1799,6 +1867,7 @@ describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
       view,
       columns: SAMPLE_COLUMNS,
       visibleRows: SAMPLE_ROWS,
+      hiddenRows: 0,
       violationTotal: 0,
     });
 
@@ -1832,6 +1901,7 @@ describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
       // 構成そのものはこの検査の対象ではない（見るのは展開の状態の保持である）。
       columns: EXPANDED_NESTED_COLUMNS,
       visibleRows: SAMPLE_ROWS,
+      hiddenRows: 0,
       violationTotal: 0,
     });
 
@@ -1964,7 +2034,8 @@ describe("表の窓と列の空間（8.5。要件 5.1、8.6）", () => {
 
     const cache = createGridSurfaceCache({
       sheet: "s1",
-      summary,
+      // **描かれる列の並び**（表示順）を渡す（8.8。表示上の列順が写像を決める）。
+      columns: summary.columns,
       visibleRows: SAMPLE_ROWS,
       generation: 1,
       client,
@@ -1978,18 +2049,6 @@ describe("表の窓と列の空間（8.5。要件 5.1、8.6）", () => {
     // 恒等を仮定していないことは、同じ構成から作った写像そのもので確かめる（`./columnSpace`）。
     expect(createColumnSpace(summary.columns).documentColumn(2)).toBe(1);
   });
-
-  /**
-   * 列ごとの操作の並びに出た列の名前（**表示の順**。要件 5.1、5.2 の見える結果）。
-   *
-   * 表そのもの（移植口）は `node` の環境では走らない（効果が無い）ので、**描かれる列の並び**は
-   * 状態から描かれるこの 1 行で読む（`./nestedInspector` が構成の列ごとに 1 件を出す）。
-   */
-  function controlNamesIn(markup: string): readonly string[] {
-    return [...markup.matchAll(/data-column-control="\d+"[^>]*><span>([^<]*)<\/span>/g)].map(
-      (match) => match[1] ?? "",
-    );
-  }
 
   it("展開を指定すると描かれる列が入れ子の内側へ広がり、折りたたむと元へ戻る（要件 5.1、5.2）", async () => {
     // **境界の写し**: `view` の展開に応じて**導出後**の構成を返す（列 1 = 提供元 が展開されて
@@ -2040,7 +2099,7 @@ describe("表の窓と列の空間（8.5。要件 5.1、8.6）", () => {
     // はどちらも文書の列 1 を指す（恒等なら 2 になる）。
     const cache = createGridSurfaceCache({
       sheet: "s1",
-      summary: after.state.summary,
+      columns: after.state.summary.columns,
       visibleRows: after.state.visibleRows,
       generation: after.state.generation,
       client: scripted,
@@ -2105,6 +2164,7 @@ describe("展開した構成の違反の位置（要件 4.2、4.4。8.5 との�
       view: withExpansion(EMPTY_GRID_VIEW, { column: 1, expanded: true, depth: 1 }),
       columns: EXPANDED_NESTED_COLUMNS,
       visibleRows: SAMPLE_ROWS,
+      hiddenRows: 0,
       violationTotal: 1,
     });
   }
@@ -2464,6 +2524,411 @@ describe("貼り付けの反映（8.7。要件 7.3、7.4、1.7）", () => {
   });
 });
 
+// ===========================================================================
+// 2.8 表示の操作（tasks.md 8.8。要件 8.1〜8.7）
+// ===========================================================================
+
+/**
+ * 列幅・表示上の列順（要件 8.1、8.2）、並べ替え・絞り込み（8.3、8.4）、隠れた行の提示（8.7）を、
+ * **画面の結線の側から**固定する。判断そのもの（`./viewOps`）と表示状態（`./displayState`）は
+ * それぞれの検査が持つので、ここが見るのは次の 4 つである:
+ *
+ * 1. **列幅と列順は境界へ 1 つも渡らない**（要件 8.5 の線引きが結線でも守られていること）。
+ *    送る指定は `sort` / `filters` / `expansion` の 3 つの欄だけであり、2 つの操作は
+ *    **1 つの往復も起こさない** — 越える経路が無いことを、送った値そのものを見て確かめる
+ * 2. **描かれる列の並びは 1 つである**（要件 8.2、8.6）。列ごとの操作の行と、窓の記憶の写像が
+ *    **同じ並び**から組まれる（片方だけが追随すると、描かれている値と編集の宛先が食い違う）
+ * 3. **隠れた行の数は応答が運んだ数そのものである**（要件 8.7。画面は数え直さない）
+ * 4. **並べ替えや絞り込みの下の編集・貼り付けが、その行そのものへ届く**（要件 8.6、8.8、8.9）。
+ *    窓は `window_protocol.txt` の**本物の Rust の符号化器が出したバイト列**を使う
+ *    （偽のサーバを書かない。形式の真は 7.3 の固定が持つ）
+ *
+ * # 単体テストが観測しないもの（**正直に書く**）
+ *
+ * - **実際のドラッグと絞り込みの入力**（マウスの操作が移植口の知らせになること、選択肢が
+ *   切り替わること）は `node` の環境では観測できない。台本 `smoke/gridProbe` の実起動と 9.2 が
+ *   観測する（`viewOps.ts` の module doc「単体テストが観測しないもの」と同じ分担である）
+ * - **幅・並びの変化が次の `mount` に載ること**は、ここでは組み直しの合図（`layoutKey`）までを
+ *   見る。器へ実際に載ることは実起動の観測である
+ */
+
+/**
+ * 窓の二進形式の言語をまたぐ固定（`windowCache.test.ts` と同じファイル）。
+ *
+ * **検査の側で符号化器を書かない** — 本物の Rust の符号化器が出した列を使う（形式の真は
+ * 7.3 の固定である）。
+ */
+const WINDOW_FIXTURE: ArrayBuffer = windowFixtureBytes("window");
+
+function windowFixtureBytes(key: string): ArrayBuffer {
+  const line = windowFixtureText
+    .split("\n")
+    .map((found) => found.trim())
+    .find((found) => found.startsWith(`${key} = `));
+  if (line === undefined) {
+    throw new Error(`固定ファイルに ${key} が無い`);
+  }
+  const hex = line.slice(key.length + 3).trim();
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let at = 0; at < bytes.length; at += 1) {
+    bytes[at] = Number.parseInt(hex.slice(at * 2, at * 2 + 2), 16);
+  }
+  return bytes.buffer as ArrayBuffer;
+}
+
+/** 窓の固定が運ぶ行の識別子（`window_protocol.txt` の表。**検査の側で組み立てない**）。 */
+const WINDOW_FIXTURE_ROWS = [
+  "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+  "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+  "01ARZ3NDEKTSV4RRFFQ69G5FAY",
+] as const;
+
+/** 偽の移送の約束を反映させる（時間に依らない待ち方。`windowCache.test.ts` と同じ）。 */
+async function settleTasks(): Promise<void> {
+  for (let tick = 0; tick < 4; tick += 1) {
+    await Promise.resolve();
+  }
+}
+
+/** 表を描いている状態を取り出す（描いていなければ検査の誤りである）。 */
+function readyStateOf(model: GridScreenModel): Extract<GridScreenState, { status: "ready" }> {
+  if (model.state.status !== "ready") {
+    throw new Error("表を描く状態でなかった");
+  }
+  return model.state;
+}
+
+/** 境界へ渡された表示の指定を**丸ごと**控える偽の境界（欄の漏れを読むためである）。 */
+interface ViewRecordingClient extends FakeClient {
+  readonly views: readonly GridViewSpec[];
+}
+
+function viewRecordingClient(
+  answers: Parameters<typeof fakeClient>[0],
+  answer: (view: GridViewSpec) => IpcResult<GridViewResponse, IpcClientError>,
+): ViewRecordingClient {
+  const client = fakeClient(answers);
+  const views: GridViewSpec[] = [];
+  return {
+    ...client,
+    views,
+    setView: async (view: GridViewSpec) => {
+      // **境界へ届いた値そのもの**を控える（送る側の写しではなく、渡された値の深い写しである）。
+      views.push(JSON.parse(JSON.stringify(view)) as GridViewSpec);
+      return answer(view);
+    },
+  };
+}
+
+/** 表示の操作の行に出た列（**表示の順**。属性から文書の列と名前を読む）。 */
+function viewBarColumnsIn(markup: string): readonly { readonly column: number; readonly name: string }[] {
+  return [...markup.matchAll(/data-document-column="(\d+)"[^>]*><span[^>]*>([^<]*)</g)].map(
+    (match) => ({ column: Number(match[1]), name: match[2] ?? "" }),
+  );
+}
+
+describe("表示の操作（8.8。要件 8.1〜8.7）", () => {
+  it("列幅と表示上の列順は境界へ 1 つも渡らず、渡る指定は 3 つの欄だけである（要件 8.1、8.2、8.5）", async () => {
+    const client = viewRecordingClient(
+      {
+        state: ok(openDocument([sheetOf("s1", "標本シート", 3, SAMPLE_ROWS)])),
+        open: ok(openedSheet({ columns: [...SAMPLE_COLUMNS], row_count: SAMPLE_ROWS })),
+      },
+      () => ok(derivedView(12, 0, SAMPLE_COLUMNS)),
+    );
+
+    const state = await loadGridScreenState(client);
+    if (state.status !== "ready") {
+      throw new Error("表を描く状態にならなかった");
+    }
+    let model = gridScreenLoaded(initialGridScreenModel(), state);
+
+    // 開く流れは**空の指定を 1 度だけ**渡す（操作ではない。8.1）。
+    expect(client.views).toHaveLength(1);
+    expect(client.views[0]).toEqual(EMPTY_GRID_VIEW);
+
+    // 並べ替えと絞り込みを、**画面の操作から指定を組む経路そのもの**（`./viewOps`）で通す。
+    const sorted = applyViewOperation(EMPTY_GRID_VIEW, { kind: "sortCycle", column: 1 });
+    model = gridScreenViewSettled(model, await applyGridView(client, sorted));
+    const filteredView = applyViewOperation(sorted, {
+      kind: "filter",
+      column: 0,
+      filter: { filter: "Contains", column: 0, text: "名" },
+    });
+    model = gridScreenViewSettled(model, await applyGridView(client, filteredView));
+
+    // **境界へ渡ったのは指定の 3 つの欄だけである**（列幅も列順も 1 つも現れない）。
+    // 欄の集合を**そのまま**比べるのは、入れ子の漏れ（`sort` の下に幅を混ぜる形）も
+    // 捕まえるためである（3 つの欄の外に何かあれば落ちる）。
+    for (const payload of client.views) {
+      expect(Object.keys(payload).sort()).toEqual(["expansion", "filters", "sort"]);
+      expect(JSON.stringify(payload)).not.toMatch(/width|order/i);
+    }
+    // 送った中身も操作の結果そのものである（並べ替えと絞り込みが両方載っている）。
+    expect(client.views.at(-1)?.sort).toEqual(sorted.sort);
+    expect(client.views.at(-1)?.filters).toHaveLength(1);
+
+    // ここからが本題である。列幅の変更と列の移動。
+    const sent = client.views.length;
+    const filteredKey = readyStateOf(model).layoutKey;
+    const resized = gridScreenColumnResized(model, 0, 240);
+    // **幅は列に付く**（表示位置ではない。7.5 の規則）— 位置 0 にいる列（文書の列 0）の幅である。
+    expect(readyStateOf(resized).display.widthAt(0)).toBe(240);
+    const resizedKey = readyStateOf(resized).layoutKey;
+    const moved = gridScreenColumnMoved(resized, 2, 0);
+
+    // **1 つの往復も起こさない**（列幅と表示上の列順は窓の中身を 1 つも変えないので、境界を
+    // 越える理由が無い。越えれば、保存される列の順序が変わる経路が生まれる。要件 8.5）。
+    expect(client.views).toHaveLength(sent);
+
+    // 画面の側では 2 つとも効いている（組み直しの合図が動く。幅と並びの変化は次の `mount` に
+    // 載る — 器へ押し込む口が無い。7.1 の申し送り）。
+    expect(resizedKey).not.toBe(filteredKey);
+    expect(readyStateOf(moved).layoutKey).not.toBe(resizedKey);
+    // 列を運ぶと、幅は**同じ列に残る**（位置 1 へ運ばれた文書の列 0 が 240 のままである）。
+    expect(readyStateOf(moved).display.widthAt(1)).toBe(240);
+    // 位置 0 へ運ばれた文書の列 2 は幅を設定されていないので、既定の幅である。
+    expect(readyStateOf(moved).display.widthAt(0)).toBe(DEFAULT_COLUMN_WIDTH);
+
+    // そのあとの操作も、指定の 3 つの欄だけを送る（列幅と並びは 1 つも混ざらない）。
+    const afterMove = gridScreenViewSettled(
+      moved,
+      await applyGridView(client, applyViewOperation(readyStateOf(moved).view, { kind: "sortNone" })),
+    );
+    expect(afterMove.state.status).toBe("ready");
+    expect(client.views.at(-1)?.filters).toHaveLength(1);
+    expect(Object.keys(client.views.at(-1) ?? {}).sort()).toEqual(["expansion", "filters", "sort"]);
+    expect(client.views).toHaveLength(sent + 1);
+  });
+
+  it("描かれる列の並びは 1 つであり、列ごとの操作と窓の写像が同じ並びに従う（要件 8.2、8.6）", () => {
+    const before = readyModel(initialSelection());
+    // 表示位置 2（提供元）を先頭へ運ぶ。
+    const moved = gridScreenColumnMoved(before, 2, 0);
+    const state = readyStateOf(moved);
+
+    // **描かれる列の並び**（表示順。これが表示の位置の空間そのものである）。
+    const drawn = drawnColumns(state.summary.columns, state.display);
+    expect(drawn.map((column) => column.column)).toEqual([2, 0, 1]);
+
+    // 列ごとの操作（8.5）も、表示の操作の行（8.8）も**同じ並び**で並ぶ。
+    expect(controlNamesIn(markOf(moved))).toEqual(["提供元", "名前", "数量"]);
+    expect(viewBarColumnsIn(markOf(moved))).toEqual([
+      { column: 2, name: "提供元" },
+      { column: 0, name: "名前" },
+      { column: 1, name: "数量" },
+    ]);
+
+    // **窓の写像も描かれる並びから組まれる**（表の面が渡す値そのものである）。恒等で組むと、
+    // 描かれている値と編集の宛先が別の列を指す（要件 8.6 の列版）。
+    const cache = createGridSurfaceCache({
+      sheet: "s1",
+      columns: drawn,
+      visibleRows: state.visibleRows,
+      generation: state.generation,
+      client: fakeClient({ state: err<DocumentStateResponse>() }),
+    });
+    expect(cache.documentColumn({ row: 0, column: 0 })).toBe(2);
+    expect(cache.documentColumn({ row: 0, column: 2 })).toBe(1);
+    // 対照: 構成の順（恒等）で組むと別の答えになる（この差が取り違えの正体である）。
+    expect(createColumnSpace(state.summary.columns).documentColumn(0)).toBe(0);
+  });
+
+  it("絞り込みで隠れている行の数は、応答が運んだ数そのものである（要件 8.7）", async () => {
+    let answered = 0;
+    const client = viewRecordingClient(
+      {
+        state: ok(openDocument([sheetOf("s1", "標本シート", 3, SAMPLE_ROWS)])),
+        open: ok(openedSheet({ columns: [...SAMPLE_COLUMNS], row_count: SAMPLE_ROWS })),
+      },
+      () => {
+        answered += 1;
+        // 開く流れ（空の指定）は絞り込みが 1 つも無いので隠れは 0 である。
+        if (answered === 1) {
+          return ok<GridViewResponse>({
+            context: CONTEXT,
+            visible_rows: SAMPLE_ROWS,
+            hidden_rows: 0,
+            violation_total: 0,
+            columns: [...SAMPLE_COLUMNS],
+          });
+        }
+        // **この応答は、画面が数え直すと食い違う数を運ぶ**（可視 13 ＋ 隠れ 10 = 23 であり、
+        // 開いたときの要約が運んだシートの行数 20 と一致しない — 別の窓が行を足した後の状態で
+        // ある）。数え直す画面は「20 − 13 = 7」と名乗り、**応答が運んだ数を写す画面**だけが
+        // 10 と名乗る。数の唯一の源は応答である（`GridViewResponse.hidden_rows`）。
+        return ok<GridViewResponse>({
+          context: CONTEXT,
+          visible_rows: 13,
+          hidden_rows: 10,
+          violation_total: 0,
+          columns: [...SAMPLE_COLUMNS],
+        });
+      },
+    );
+
+    const state = await loadGridScreenState(client);
+    if (state.status !== "ready") {
+      throw new Error("表を描く状態にならなかった");
+    }
+    const loaded = gridScreenLoaded(initialGridScreenModel(), state);
+    expect(readyStateOf(loaded).hiddenRows).toBe(0);
+
+    const filtered = gridScreenViewSettled(
+      loaded,
+      await applyGridView(
+        client,
+        applyViewOperation(EMPTY_GRID_VIEW, {
+          kind: "filter",
+          column: 0,
+          filter: { filter: "Contains", column: 0, text: "名" },
+        }),
+      ),
+    );
+    const filteredState = readyStateOf(filtered);
+    expect(filteredState.hiddenRows).toBe(10);
+    expect(filteredState.visibleRows).toBe(13);
+
+    // 提示は**応答が運んだ数そのもの**である（利用者が読む文字と、状態が持つ数が一致する）。
+    const markup = markOf(filtered);
+    expect(markup).toContain('data-hidden-rows="10"');
+    expect(markup).toContain("絞り込みにより表示していない行: 10 行");
+    expect(markup).toContain("表示 13 行");
+    // 数え直した数（20 − 13）ではない。
+    expect(markup).not.toContain("絞り込みにより表示していない行: 7 行");
+  });
+
+  it("並べ替えや絞り込みが効いている間の値だけの編集では、表示の指定を送り直さない（要件 8.8）", () => {
+    const sorted: GridViewSpec = applyViewOperation(EMPTY_GRID_VIEW, { kind: "sortCycle", column: 1 });
+    const filteredView: GridViewSpec = applyViewOperation(EMPTY_GRID_VIEW, {
+      kind: "filter",
+      column: 0,
+      filter: { filter: "Contains", column: 0, text: "名" },
+    });
+
+    // 基準列の値だけを書く編集（行数は変わらない）。**送り直さない** — 送り直せばドメインが
+    // 順序を導出し直し、確定と同時に行の表示位置が動く（要件 8.8 の本体である）。
+    expect(
+      needsViewRefresh({
+        view: sorted,
+        outcome: outcomeOf({ affected: [EDITED_ROW], row_count: SAMPLE_ROWS }),
+        sheetRowsBefore: SAMPLE_ROWS,
+      }),
+    ).toBe(false);
+
+    // **絞り込みの条件に合う値へ書き換えた行も、画面から消えない**（数を取り直すと、条件に
+    // 合わなくなった行が確定と同時に消える。8.8 が名指しした「編集した行を見失う」経路）。
+    expect(
+      needsViewRefresh({
+        view: filteredView,
+        outcome: outcomeOf({ affected: [EDITED_ROW], row_count: SAMPLE_ROWS }),
+        sheetRowsBefore: SAMPLE_ROWS,
+      }),
+    ).toBe(false);
+
+    // 行を増減したときだけ取り直す（可視行数を知る唯一の源は表示の指定の応答である）。
+    expect(
+      needsViewRefresh({
+        view: sorted,
+        outcome: outcomeOf({ affected: [EDITED_ROW], row_count: SAMPLE_ROWS + 1 }),
+        sheetRowsBefore: SAMPLE_ROWS,
+      }),
+    ).toBe(true);
+    // 指定が 1 つも無ければ、応答が運ぶ行数がそのまま可視行数である（取り直す理由が無い）。
+    expect(
+      needsViewRefresh({
+        view: EMPTY_GRID_VIEW,
+        outcome: outcomeOf({ affected: [EDITED_ROW], row_count: SAMPLE_ROWS + 1 }),
+        sheetRowsBefore: SAMPLE_ROWS,
+      }),
+    ).toBe(false);
+  });
+
+  it("並べ替えや絞り込みの下の編集と貼り付けは、表示の位置ではなく記憶が答える行と文書の列へ届く（要件 8.6、8.8、8.9）", async () => {
+    const edited = outcomeOf({ affected: [WINDOW_FIXTURE_ROWS[2]] });
+    const base = fakeClient({
+      state: err<DocumentStateResponse>(),
+      edit: ok<GridEditResponse>({ context: CONTEXT, outcome: edited }),
+    });
+    // 窓は**本物の符号化器が出した固定**である（3 行 4 列・世代 7）。窓が運ぶ行の並びは
+    // **ドメインの可視の並び**そのものであり、画面はそれを並べ替えない。
+    const client: FakeClient = { ...base, readWindow: async () => WINDOW_FIXTURE };
+
+    // 表示上の列順を変える（表示の位置 0 の列を末尾へ運ぶ）。**表示の位置 3 が文書の列 0**である。
+    const display = createDisplayState({ columnCount: 4 });
+    display.moveColumn(0, 3);
+    const columns = [descriptor(0, "A"), descriptor(1, "B"), descriptor(2, "C"), descriptor(3, "D")];
+    const drawn = drawnColumns(columns, display);
+    expect(drawn.map((column) => column.column)).toEqual([1, 2, 3, 0]);
+
+    // 画面が組むのと同じ引数で窓の記憶を組む（表の面と同じ 1 つの経路）。
+    const cache = createGridSurfaceCache({
+      sheet: "s1",
+      columns: drawn,
+      visibleRows: 3,
+      generation: 7,
+      client,
+    });
+    // 取得を始める（同期の契約: 未取得は読み込み中を返して要求を始める）。
+    expect(cache.getCell({ row: 0, column: 3 }).loading).toBe(true);
+    await settleTasks();
+
+    // **読みも、表示の位置ではなく文書の列で引く**（表示の位置 3 の値は文書の列 0 の値 =
+    // 「日本語」である。恒等なら空文字（文書の列 3 は `Null`）になる）。
+    const read = cache.getCell({ row: 0, column: 3 });
+    expect(read.text).toBe("日本語");
+    expect(read.loading).toBe(false);
+
+    // **行の身元は窓が答える**（表示の序数 2 の行は、窓の 3 番目の行 = `…FAY` である）。
+    const row = cache.rowId({ row: 2, column: 3 });
+    expect(row).toBe(WINDOW_FIXTURE_ROWS[2]);
+
+    // 貼り付けの錨も同じ 1 つの写像から組まれ、**歩く並びは表示されている行**である
+    // （表示の位置 1 の行 = 窓の 2 番目の行。矩形の 2 行ぶんだけを渡す）。
+    const clipboard = createClipboardSurface({
+      client,
+      cache: () => cache,
+      visibleRows: 3,
+      onSettled: () => undefined,
+      onApplied: () => undefined,
+    });
+    expect(clipboard.pasteAt({ row: 1, column: 2 }, "a\nb")).toEqual({
+      kind: "send",
+      payload: {
+        anchor: { row: WINDOW_FIXTURE_ROWS[1], column: 3 },
+        rows: [WINDOW_FIXTURE_ROWS[1], WINDOW_FIXTURE_ROWS[2]],
+        text: "a\nb",
+      },
+    });
+
+    // **表示されている行の外は渡せない**（表示されている行にのみ及ぶ。要件 8.9）— 錨が可視行
+    // （絞り込みが効いていればシートの行数より少ない）の外へ出ると、画面は行を足さずに拒否する
+    // （行の補充はドメインの仕事である。要件 7.4）。
+    expect(clipboard.pasteAt({ row: 3, column: 0 }, "a")).toEqual({
+      kind: "refused",
+      message: "貼り付けの起点が表の外にあるため、貼り付けできません",
+    });
+
+    // 編集の宛先は**行の識別子と文書の列**である（表示の序数でも表示の列でもない）。
+    // **編集は適用の後で記憶を捨てる**（`EditOutcome.affected` の行の窓。7.3・8.3）ので、
+    // 貼り付けの検査を先に置いてある — 順序を入れ替えると、影響を受けた行の識別子が
+    // 引けなくなる（それが正しい振る舞いである）。
+    const settlement = await settleCellEdit({
+      client,
+      cache,
+      position: { row: 2, column: 3 },
+      carrier: "text",
+      intent: { kind: "commit", text: "訂正" },
+    });
+    expect(settlement.status).toBe("applied");
+    expect(client.edits).toEqual([
+      { command: "SetCells", cells: [{ cell: { row, column: 0 }, text: "訂正" }] },
+    ]);
+    // 影響を受けた行の窓は捨てられる（取り直すまで、その行の識別子は引けない）。
+    expect(cache.rowId({ row: 2, column: 3 })).toBeNull();
+  });
+});
+
 describe("画面の契約（受け取るのは器が渡す引数だけ）", () => {
   it("`ScreenProps` だけで描ける（それ以外の props を要求しない）", () => {
     const registered: ComponentType<ScreenProps> = GridScreen;
@@ -2579,17 +3044,18 @@ describe("自前の配色を持たない（器が与える変数のみを参照�
  * node の API（`node:fs`）へ結び付けない（`displayState.test.ts` / `windowCache.test.ts` と
  * 同じ方針）。
  *
- * **画面が持つ源は 1 つではない**（8.4 がバーを `violationBar.tsx` へ分けた）。走査を画面本体
- * だけに当てると、**分けた側へ色の値を書いても緑のまま**になる — 実際に 8.4 のレビューが
- * 確かめられるよう、源の一覧をここに並べる。
+ * **画面が持つ源は 1 つではない**（8.4 がバーを `violationBar.tsx` へ、8.8 が表示の操作の行を
+ * `viewBar.tsx` へ分けた）。走査を画面本体だけに当てると、**分けた側へ色の値を書いても緑の
+ * まま**になる — 確かめられるよう、源の一覧をここに並べる。
  */
 const SOURCE_PATHS = [
   "/src/features/grid/GridScreen.tsx",
   "/src/features/grid/violationBar.tsx",
   "/src/features/grid/nestedInspector.tsx",
+  "/src/features/grid/viewBar.tsx",
 ] as const;
 
-const SOURCES = import.meta.glob("/src/features/grid/{GridScreen,violationBar,nestedInspector}.tsx", {
+const SOURCES = import.meta.glob("/src/features/grid/{GridScreen,violationBar,nestedInspector,viewBar}.tsx", {
   query: "?raw",
   import: "default",
   eager: true,
