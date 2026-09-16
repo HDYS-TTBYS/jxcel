@@ -131,3 +131,94 @@ describe("答えられない表示の位置", () => {
     expect(empty.variants).toEqual([]);
   });
 });
+
+// ===========================================================================
+// 4. 逆向き（文書の列 + 内側の位置 → 表示の位置。8.4 の提示が使う）
+// ===========================================================================
+
+describe("文書の列から表示の位置へ（逆向き）", () => {
+  /**
+   * 実測に使った構成である（表示の位置 1・2 が同じ文書の列 1 を指す）。境界の修復（入れ子の
+   * 展開）が描かれる並びを変えたため、**逆行きは関数ではない** — 内側の位置が無ければ
+   * 答えられない。
+   */
+  const EXPANDED: readonly ColumnDescriptor[] = [
+    descriptor(0, [], "名前", "Text"),
+    descriptor(1, [field("name")], "提供元.name", "Text"),
+    descriptor(1, [field("code")], "提供元.code", "Text"),
+    descriptor(2, [], "深い入れ子", "Text"),
+    descriptor(3, [], "明細", "Text"),
+  ];
+
+  it("展開が無ければ、文書の列がそのまま表示の位置である", () => {
+    const space = createColumnSpace([
+      descriptor(0, [], "名前", "Text"),
+      descriptor(1, [], "数量", "Int"),
+      descriptor(2, [], "提供元", "Text"),
+    ]);
+
+    expect(space.displayPosition(0, [])).toBe(0);
+    expect(space.displayPosition(2, [])).toBe(2);
+  });
+
+  it("内側の位置で解く（同じ文書の列を指す 2 つの位置を選び分ける）", () => {
+    const space = createColumnSpace(EXPANDED);
+
+    expect(space.displayPosition(1, [field("name")])).toBe(1);
+    expect(space.displayPosition(1, [field("code")])).toBe(2);
+    // 4 番目に描かれる列（深い入れ子）は文書の列 2 である。
+    expect(space.displayPosition(2, [])).toBe(3);
+    expect(space.displayPosition(3, [])).toBe(4);
+  });
+
+  it("内側の位置が無ければ、展開された列では答えない（推測しない）", () => {
+    const space = createColumnSpace(EXPANDED);
+
+    // 表示の位置 1 と 2 のどちらも文書の列 1 を表示している。**最初の候補を返さない** —
+    // 返すと、違反していないセルを違反として名乗る／そこへ現在位置を動かす経路になる。
+    expect(space.displayPosition(1)).toBeNull();
+    expect(space.displayPosition(1, [])).toBeNull();
+  });
+
+  it("折りたたんだ列は、内側の位置の違反も表示している（空の位置が祖先である）", () => {
+    const space = createColumnSpace([
+      descriptor(0, [], "名前", "Text"),
+      descriptor(1, [], "提供元", "Object"),
+    ]);
+
+    // 展開が無ければ内側の位置は描かれないが、その値は 1 本の列に要約として載っている。
+    expect(space.displayPosition(1, [field("inner")])).toBe(1);
+    expect(space.displayPosition(1, [field("inner"), index(0), field("deep")])).toBe(1);
+  });
+
+  it("描かれた列より深い違反は、その値を表示している列へ落ちる", () => {
+    const space = createColumnSpace(EXPANDED);
+
+    // 表示の位置 1 は「提供元.name」であり、その内側（さらに深い位置）の違反もそこで見える。
+    expect(space.displayPosition(1, [field("name"), field("first")])).toBe(1);
+    // 段の種類まで見る（同じ綴りでも添字は別の段である）。
+    expect(space.displayPosition(1, [field("name"), index(0)])).toBe(1);
+  });
+
+  it("段が 1 つでも食い違えば祖先ではない（別の枝の違反へ答えない）", () => {
+    const space = createColumnSpace(EXPANDED);
+
+    // 提供元（文書の列 1）の内側は name と code だけである。`zip` は構成に無い枝であり、
+    // **どの列も表示していない**（名乗れる位置が無い）。
+    expect(space.displayPosition(1, [field("zip")])).toBeNull();
+    // 段が食い違えば祖先ではない（`code` は `zip` の祖先ではない）。
+    expect(space.displayPosition(1, [field("zip"), field("code")])).toBeNull();
+    expect(space.displayPosition(1, [field("name"), field("zip")])).toBe(1);
+  });
+
+  it("構成に無い文書の列では答えない（負・非整数も同じ）", () => {
+    const space = createColumnSpace(EXPANDED);
+
+    expect(space.displayPosition(4, [])).toBeNull();
+    expect(space.displayPosition(-1)).toBeNull();
+    expect(space.displayPosition(1.5)).toBeNull();
+    expect(space.displayPosition(Number.NaN, [])).toBeNull();
+    // 列が 1 本も無い構成でも投げない。
+    expect(createColumnSpace([]).displayPosition(0, [])).toBeNull();
+  });
+});

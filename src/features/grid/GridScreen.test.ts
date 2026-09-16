@@ -88,7 +88,7 @@ import {
 import { EMPTY_GRID_VIEW } from "./gridClient";
 import { createColumnSpace } from "./columnSpace";
 import { withExpansion } from "./nestedInspector";
-import { initialSelection, selectionAt } from "./selection";
+import { followTarget, initialSelection, selectionAt } from "./selection";
 import type { GridClient } from "./gridClient";
 import type { CellPosition, RendererSelection, VisibleSpan } from "./renderer/port";
 import { nextViolation, reasonInRow, type ViolationPresentation } from "./violations";
@@ -552,6 +552,12 @@ const SAMPLE_COLUMNS: readonly ColumnDescriptor[] = [
   descriptor(2, "提供元"),
 ];
 const SAMPLE_ROWS = 20;
+
+/**
+ * 標本の構成の写像。**展開を含まないので恒等である**（表示の位置がそのまま文書の列）。
+ * 違反の読み取りへ渡す写像はこれであり、8.5 の節だけが展開した構成の写像を使う。
+ */
+const SAMPLE_SPACE = createColumnSpace(SAMPLE_COLUMNS);
 
 /**
  * 表を描いている状態（選択を指定して組む）。違反の総数と、いま出している違反の提示も指定できる
@@ -1247,6 +1253,7 @@ describe("違反のバーと巡回（8.4。要件 4.1〜4.4、4.6）", () => {
       client,
       current: { row: 5, column: 1 },
       rowId: OTHER_ROW,
+      space: SAMPLE_SPACE,
     });
     const after = gridScreenViolationReason(model, reading);
 
@@ -1284,6 +1291,7 @@ describe("違反のバーと巡回（8.4。要件 4.1〜4.4、4.6）", () => {
       client,
       current: { row: 2, column: 0 },
       rowId: EDITED_ROW,
+      space: SAMPLE_SPACE,
     });
     const after = gridScreenViolationReason(model, reading);
 
@@ -1302,6 +1310,7 @@ describe("違反のバーと巡回（8.4。要件 4.1〜4.4、4.6）", () => {
       client,
       current: { row: 5, column: 1 },
       rowId: OTHER_ROW,
+      space: SAMPLE_SPACE,
     });
     const after = gridScreenViolationReason(model, reading);
 
@@ -1330,6 +1339,7 @@ describe("違反のバーと巡回（8.4。要件 4.1〜4.4、4.6）", () => {
       client,
       current: { row: 0, column: 0 },
       rowCount: 100_000,
+      space: SAMPLE_SPACE,
     });
     const after = gridScreenNextViolation(model, reading);
 
@@ -1380,6 +1390,7 @@ describe("違反のバーと巡回（8.4。要件 4.1〜4.4、4.6）", () => {
       client,
       current: { row: 3, column: 1 },
       rowCount: SAMPLE_ROWS,
+      space: SAMPLE_SPACE,
     });
     const after = gridScreenNextViolation(model, reading);
 
@@ -1408,6 +1419,7 @@ describe("違反のバーと巡回（8.4。要件 4.1〜4.4、4.6）", () => {
       client,
       current: { row: 3, column: 1 },
       rowCount: SAMPLE_ROWS,
+      space: SAMPLE_SPACE,
     });
     const after = gridScreenNextViolation(model, reading);
 
@@ -1968,6 +1980,99 @@ describe("表の窓と列の空間（8.5。要件 5.1、8.6）", () => {
     expect(shrunk.state.selection.current.column).toBe(3);
     // 文言の側も実際の列数と一致する（食い違わない）。
     expect(markOf(shrunk)).toContain("現在位置 1 行 4 列");
+  });
+});
+
+/**
+ * **展開した構成の違反の位置**（8.4 と 8.5 の合わせ。要件 4.2、4.4）。
+ *
+ * 境界の `GridViolationLocation.column` は**文書の列**であり、提示が名乗る列（バーの「M 列目」）
+ * と巡回の着地点は**表示の位置**である（`./violations` の module doc）。8.5 の展開が描かれる
+ * 並びを変えたため、写像を通さないと**描かれている列と違う列**を名乗る — 実測に使った並び
+ * （[`EXPANDED_NESTED_COLUMNS`]。表示の位置 1・2 が同じ文書の列 1 を指す）で固定する。
+ */
+describe("展開した構成の違反の位置（要件 4.2、4.4。8.5 との合わせ）", () => {
+  /** 4 番目に描かれる列（深い入れ子 ＝ 文書の列 2）に違反がある標本。 */
+  const VIOLATED = [
+    { ordinal: 5, row: OTHER_ROW, column: 2, reason: "参照先の行が無い" },
+  ] as const;
+
+  /**
+   * 提供元を 1 段展開した表を描いている状態（**境界が返す導出後の構成**を採用した状態である）。
+   * 画面の効果（[`GridSurface`] のマップ）と、巡回の経路が組む写像は、どちらも
+   * `summary.columns` から引く — 検査も同じ 1 本から引く。
+   */
+  function expandedModel(): GridScreenModel {
+    return gridScreenViewSettled(nestedModel(), {
+      status: "applied",
+      view: withExpansion(EMPTY_GRID_VIEW, { column: 1, expanded: true, depth: 1 }),
+      columns: EXPANDED_NESTED_COLUMNS,
+      visibleRows: SAMPLE_ROWS,
+      violationTotal: 1,
+    });
+  }
+
+  it("巡回は違反しているセル（4 番目に描かれる列）へ着く", async () => {
+    const opened = expandedModel();
+    if (opened.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    const client = fakeClient({ state: err<DocumentStateResponse>(), search: indexOf(VIOLATED) });
+
+    const reading = await nextViolation({
+      client,
+      current: opened.state.selection.current,
+      rowCount: opened.state.visibleRows,
+      space: createColumnSpace(opened.state.summary.columns),
+    });
+    const after = gridScreenNextViolation(opened, reading);
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // **着地点は表示の位置 3 である**（文書の列 2 ではない。文書の列のままだと、3 番目に
+    // 描かれる列（提供元.code）＝違反していないセルへ移る）。
+    expect(after.state.selection.current).toEqual({ row: 5, column: 3 });
+    expect(after.state.violation).toEqual({
+      kind: "reason",
+      position: { row: 5, column: 3 },
+      reason: "参照先の行が無い",
+    });
+
+    // バーが名乗るのも**4 番目**である（`./violationBar` は表示の位置へ 1 を足して書く）。
+    const markup = markOf(after);
+    expect(markup).toContain('data-violation-column="3"');
+    expect(markup).toContain("6 行 4 列目");
+
+    // 追随（要件 2.4）の宛先も**表示の位置 3** である — 可視の区間の外なら、8.2 の
+    // `followTarget` がこの位置を `scrollTo` へ渡す（文書の列のままだと 1 本左へ走査する）。
+    const span: VisibleSpan = { rows: { start: 0, count: 10 }, columns: { start: 0, count: 3 } };
+    expect(followTarget(span, after.state.selection)).toEqual({ row: 5, column: 3 });
+  });
+
+  it("理由の提示も、4 番目に描かれる列を名乗る", async () => {
+    const opened = expandedModel();
+    if (opened.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    const client = fakeClient({ state: err<DocumentStateResponse>(), search: indexOf(VIOLATED) });
+
+    // 画面の効果（`GridSurface` の `refreshViolation`）が行う合成そのものである。
+    const reading = await reasonInRow({
+      client,
+      current: { row: 5, column: 3 },
+      rowId: OTHER_ROW,
+      space: createColumnSpace(opened.state.summary.columns),
+    });
+    const after = gridScreenViolationReason(opened, reading);
+
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    const markup = markOf(after);
+    expect(markup).toContain("jxcel-grid-violation-reason");
+    expect(markup).toContain("6 行 4 列目");
+    expect(markup).not.toContain("6 行 3 列目");
   });
 });
 

@@ -41,8 +41,9 @@
  */
 import { describe, expect, it } from "vitest";
 
-import type { GridViolationResponse } from "../../ipc/bindings";
+import type { ColumnDescriptor, GridPathSegment, GridViolationResponse } from "../../ipc/bindings";
 import type { IpcClientError, IpcClientResult } from "../../ipc/client";
+import { createColumnSpace } from "./columnSpace";
 import type { GridClient } from "./gridClient";
 import type { RenderCell } from "./renderer/port";
 import { nextViolation, reasonInRow, violationMark } from "./violations";
@@ -78,6 +79,8 @@ interface FakeViolation {
   readonly ordinal: number;
   readonly row: string;
   readonly column: number;
+  /** 違反している**内側の位置**（既定は空 ＝ セル直下。要件 4.5）。 */
+  readonly path?: readonly GridPathSegment[];
   readonly reason: string;
 }
 
@@ -116,7 +119,7 @@ function searchOf(
       return ok<GridViolationResponse>({
         context: CONTEXT,
         violation: {
-          location: { row, column: found.column, path: [] },
+          location: { row, column: found.column, path: [...(found.path ?? [])] },
           reason: found.reason,
         },
       });
@@ -130,6 +133,49 @@ const SAMPLE: readonly FakeViolation[] = [
   { ordinal: 5, row: ROW_B, column: 1, reason: "値が 0 以上 100 以下の外の値である" },
   { ordinal: 9, row: ROW_C, column: 2, reason: "参照先の行が無い" },
 ];
+
+/** 内側の位置の 1 段（フィールド名）。 */
+function field(name: string): GridPathSegment {
+  return { segment: "Field", name };
+}
+
+/** 構成の 1 列（`ColumnDescriptor` の必須の欄をすべて埋める）。 */
+function descriptor(
+  column: number,
+  path: readonly GridPathSegment[],
+  name: string,
+): ColumnDescriptor {
+  return { column, path: [...path], name, kind: "Text", element_count: null, expandability: "leaf" };
+}
+
+/**
+ * **展開の無い**構成の写像（宣言 4 列。表示の位置がそのまま文書の列である）。
+ *
+ * 1〜3 の節はこの写像で検査する — 8.1〜8.4 が依拠してきた前提（恒等）そのものであり、
+ * 恒等が壊れていないことも同時に固定される。
+ */
+const IDENTITY = createColumnSpace([
+  descriptor(0, [], "名前"),
+  descriptor(1, [], "数量"),
+  descriptor(2, [], "提供元"),
+  descriptor(3, [], "明細"),
+]);
+
+/**
+ * **展開した**構成（境界の実測に使った並びそのもの）。宣言は 4 列（名前 / 提供元 / 深い入れ子 /
+ * 明細）であり、**提供元（文書の列 1）を 1 段展開した**導出後の並びである。
+ *
+ * 表示の位置 1・2 が同じ文書の列 1 を指すため、**文書の列を表示の位置として読むと、描かれて
+ * いる列と違う列を名乗る**（4 番目に描かれるのは「深い入れ子」＝表示の位置 3 であり、
+ * 文書の列 2 である）。
+ */
+const EXPANDED = createColumnSpace([
+  descriptor(0, [], "名前"),
+  descriptor(1, [field("name")], "提供元.name"),
+  descriptor(1, [field("code")], "提供元.code"),
+  descriptor(2, [], "深い入れ子"),
+  descriptor(3, [], "明細"),
+]);
 
 // ===========================================================================
 // 1. 窓の印（要件 4.1）
@@ -154,7 +200,7 @@ describe("いまの行の違反の理由（要件 4.2）", () => {
   it("起点は現在の行であり、返った理由をその位置とともに出す", async () => {
     const search = searchOf(SAMPLE);
 
-    const reading = await reasonInRow({ client: search, current: { row: 5, column: 1 }, rowId: ROW_B });
+    const reading = await reasonInRow({ client: search, current: { row: 5, column: 1 }, rowId: ROW_B, space: IDENTITY });
 
     expect(reading).toEqual({
       kind: "reason",
@@ -170,7 +216,7 @@ describe("いまの行の違反の理由（要件 4.2）", () => {
     // （索引は行ごとに最小の列しか返さない）。位置を名乗るので、どのセルの理由かは読める。
     const search = searchOf(SAMPLE);
 
-    const reading = await reasonInRow({ client: search, current: { row: 5, column: 3 }, rowId: ROW_B });
+    const reading = await reasonInRow({ client: search, current: { row: 5, column: 3 }, rowId: ROW_B, space: IDENTITY });
 
     expect(reading).toEqual({
       kind: "reason",
@@ -184,7 +230,7 @@ describe("いまの行の違反の理由（要件 4.2）", () => {
 
     // いまの行は ROW_A（序数 2）だが、起点 2 の答えは…序数 2 の違反である。ここでは
     // **答えの行が食い違う**場面を作る（別の行の識別子を渡す）。
-    const reading = await reasonInRow({ client: search, current: { row: 3, column: 0 }, rowId: ROW_A });
+    const reading = await reasonInRow({ client: search, current: { row: 3, column: 0 }, rowId: ROW_A, space: IDENTITY });
 
     // 起点 3 の答えは序数 5（ROW_B）であり、いまの行（ROW_A）の違反ではない。
     expect(reading).toEqual({ kind: "cleared" });
@@ -193,7 +239,7 @@ describe("いまの行の違反の理由（要件 4.2）", () => {
   it("行の識別子が無ければ問い合わせない（答えが現在の行のものかを確かめられない）", async () => {
     const search = searchOf(SAMPLE);
 
-    const reading = await reasonInRow({ client: search, current: { row: 5, column: 1 }, rowId: null });
+    const reading = await reasonInRow({ client: search, current: { row: 5, column: 1 }, rowId: null, space: IDENTITY });
 
     expect(reading).toEqual({ kind: "cleared" });
     // **推測で出さない。** 窓が届いていない行では、返った答えが別の行のものでありうる。
@@ -203,7 +249,7 @@ describe("いまの行の違反の理由（要件 4.2）", () => {
   it("違反が 1 件も無ければ取り下げる", async () => {
     const search = searchOf([]);
 
-    const reading = await reasonInRow({ client: search, current: { row: 5, column: 1 }, rowId: ROW_B });
+    const reading = await reasonInRow({ client: search, current: { row: 5, column: 1 }, rowId: ROW_B, space: EXPANDED });
 
     expect(reading).toEqual({ kind: "cleared" });
     expect(search.calls).toEqual([5]);
@@ -212,7 +258,7 @@ describe("いまの行の違反の理由（要件 4.2）", () => {
   it("行の識別子の綴りの大小は問わない（同じ行を別の綴りで名指ししても同じ答えになる）", async () => {
     const search = searchOf(SAMPLE);
 
-    const reading = await reasonInRow({ client: search, current: { row: 5, column: 1 }, rowId: ROW_B.toLowerCase() });
+    const reading = await reasonInRow({ client: search, current: { row: 5, column: 1 }, rowId: ROW_B.toLowerCase(), space: IDENTITY });
 
     expect(reading.kind).toBe("reason");
   });
@@ -220,7 +266,7 @@ describe("いまの行の違反の理由（要件 4.2）", () => {
   it("問い合わせが失敗したら、その理由を返す（握り潰さない）", async () => {
     const search = searchOf(SAMPLE, { failOnCall: 1 });
 
-    const reading = await reasonInRow({ client: search, current: { row: 5, column: 1 }, rowId: ROW_B });
+    const reading = await reasonInRow({ client: search, current: { row: 5, column: 1 }, rowId: ROW_B, space: IDENTITY });
 
     expect(reading).toEqual({
       kind: "failed",
@@ -239,7 +285,7 @@ describe("次の違反への移動（要件 4.4）", () => {
 
     // いまの行は 2（ROW_A の違反の行）である。次は序数 5 の ROW_B。
     // いまの行は 2（ROW_A の違反の行）である。起点はその次（3）である。
-    const reading = await nextViolation({ client: search, current: { row: 2, column: 0 }, rowCount: 100 });
+    const reading = await nextViolation({ client: search, current: { row: 2, column: 0 }, rowCount: 100, space: IDENTITY });
 
     expect(reading).toEqual({
       kind: "reason",
@@ -264,6 +310,7 @@ describe("次の違反への移動（要件 4.4）", () => {
       client: search,
       current: { row: 9, column: 0 },
       rowCount: 100_000,
+      space: IDENTITY,
     });
 
     expect(reading).toEqual({
@@ -280,7 +327,7 @@ describe("次の違反への移動（要件 4.4）", () => {
 
     // いまの行が 2 であるとき、答えは序数 5 である（**いまの行の違反（序数 2）を返さない**）。
     // いまの行は 2（ROW_A の違反の行）である。起点はその次（3）である。
-    const reading = await nextViolation({ client: search, current: { row: 2, column: 0 }, rowCount: 100 });
+    const reading = await nextViolation({ client: search, current: { row: 2, column: 0 }, rowCount: 100, space: IDENTITY });
     if (reading.kind !== "reason") {
       throw new Error("次の違反が見つからなかった");
     }
@@ -292,7 +339,7 @@ describe("次の違反への移動（要件 4.4）", () => {
 
     // 最後の違反（序数 9）より後ろから探す。
     // 最後の違反（序数 9）が、いまの行そのものである。
-    const reading = await nextViolation({ client: search, current: { row: 9, column: 0 }, rowCount: 100 });
+    const reading = await nextViolation({ client: search, current: { row: 9, column: 0 }, rowCount: 100, space: IDENTITY });
 
     // **正常な結果である**（封筒の失敗でも、告知でもない）。
     expect(reading).toEqual({ kind: "exhausted" });
@@ -302,7 +349,7 @@ describe("次の違反への移動（要件 4.4）", () => {
   it("違反が 1 件も無いシートでも「尽きた」を返す", async () => {
     const search = searchOf([]);
 
-    const reading = await nextViolation({ client: search, current: { row: 0, column: 0 }, rowCount: 100 });
+    const reading = await nextViolation({ client: search, current: { row: 0, column: 0 }, rowCount: 100, space: IDENTITY });
 
     expect(reading).toEqual({ kind: "exhausted" });
   });
@@ -314,7 +361,7 @@ describe("次の違反への移動（要件 4.4）", () => {
     const search = searchOf(SAMPLE, { rowlessAt: [5] });
 
     // いまの行は 2（ROW_A の違反の行）である。起点はその次（3）である。
-    const reading = await nextViolation({ client: search, current: { row: 2, column: 0 }, rowCount: 100 });
+    const reading = await nextViolation({ client: search, current: { row: 2, column: 0 }, rowCount: 100, space: IDENTITY });
 
     expect(reading).toEqual({
       kind: "failed",
@@ -330,6 +377,7 @@ describe("次の違反への移動（要件 4.4）", () => {
       client: search,
       current: { row: 9, column: 0 },
       rowCount: 100_000,
+      space: IDENTITY,
     });
 
     expect(reading).toEqual({
@@ -338,5 +386,144 @@ describe("次の違反への移動（要件 4.4）", () => {
     });
     // 途中で止まっている（最後まで問い合わせない）。
     expect(search.calls.length).toBeLessThan(20);
+  });
+});
+
+// ===========================================================================
+// 4. 表示の位置への写像（**境界が運ぶのは文書の列である**）
+// ===========================================================================
+
+/**
+ * # なぜ本節が要るか（境界修復が露わにした取り違え）
+ *
+ * `GridViolationLocation.column` は**文書の列**である（`Row::values()` に対する位置。
+ * `crates/data-grid/src/view/violations.rs` の索引がその添字で引かれている）。一方
+ * [`ViolationPresentation.position`] の列は**表示の位置**であり、そのまま
+ * `./selection` の [`selectionAt`] へ渡り、バーが「M 列目」（1 起点）として名乗る。
+ *
+ * 8.5 の入れ子の展開（`push_column` は内側の位置を**親と同じ文書の列**の下へ並べる）が
+ * 入ると、2 つは一致しない — 文書の列を表示の位置として読むと、**描かれている列と違う列**を
+ * 名乗り、巡回も**違うセル**へ着く。恒等を仮定していたのは 8.3 までの前提であり、展開が
+ * 描かれる並びを変えた時点で崩れている。
+ */
+describe("展開した構成では、名乗る列も着地点も表示の位置である", () => {
+  /** 実測の索引。**4 番目に描かれる列**（深い入れ子 ＝ 文書の列 2）に違反がある。 */
+  const MEASURED: readonly FakeViolation[] = [
+    { ordinal: 5, row: ROW_B, column: 2, reason: "参照先の行が無い" },
+  ];
+
+  it("理由が名乗る列は、4 番目に描かれる列（表示の位置 3）である", async () => {
+    const search = searchOf(MEASURED);
+
+    const reading = await reasonInRow({ client: search, current: { row: 5, column: 3 }, rowId: ROW_B, space: EXPANDED });
+
+    // **文書の列（2）をそのまま名乗らない。** 名乗ると 3 番目に描かれる列（提供元.code）を
+    // 指すことになり、バーの「M 列目」が描かれているセルと食い違う。
+    expect(reading).toEqual({
+      kind: "reason",
+      position: { row: 5, column: 3 },
+      reason: "参照先の行が無い",
+    });
+  });
+
+  it("巡回の着地点も表示の位置である（違反しているセルへ着く）", async () => {
+    const search = searchOf(MEASURED);
+
+    // いまの行は 2 である（起点はその次＝3）。
+    const reading = await nextViolation({ client: search, current: { row: 2, column: 0 }, rowCount: 100, space: EXPANDED });
+
+    // 行は**写像しない**（可視行の序数は 1 つの空間しか持たない。行の識別子は序数の解決で
+    // 既に畳んである）— 動くのは列だけである。
+    expect(reading).toEqual({
+      kind: "reason",
+      position: { row: 5, column: 3 },
+      reason: "参照先の行が無い",
+    });
+  });
+
+  it("描かれた列の内側の違反は、その列（表示の位置）へ落ちる", async () => {
+    // 提供元.name は「提供元」の内側の位置である。深い位置（さらに内側）の違反も、
+    // **その値を表示している列**へ落ちる（構成が既にアンカーである。
+    // `./columnSpace` の `displayPosition` の規則）。
+    const deeper: readonly FakeViolation[] = [
+      { ordinal: 5, row: ROW_B, column: 1, path: [field("name"), field("first")], reason: "値が空である" },
+    ];
+    const search = searchOf(deeper);
+
+    const reading = await reasonInRow({ client: search, current: { row: 5, column: 1 }, rowId: ROW_B, space: EXPANDED });
+
+    expect(reading).toEqual({
+      kind: "reason",
+      position: { row: 5, column: 1 },
+      reason: "値が空である",
+    });
+  });
+
+  it("展開された親の値そのものの違反は、名乗らない（取り下げる）", async () => {
+    // 提供元（文書の列 1）は展開されており、**親の列そのものは描かれない**（構成の位置 1・2 は
+    // 内側の 2 つの位置である）。親の値の違反は、どちらの描かれた列のものでもない —
+    // **推測して片方を名乗らない**（`./columnSpace` の `displayPosition` の規則）。
+    const parent: readonly FakeViolation[] = [
+      { ordinal: 5, row: ROW_B, column: 1, reason: "必須の項目が無い" },
+    ];
+    const search = searchOf(parent);
+
+    const reading = await reasonInRow({ client: search, current: { row: 5, column: 1 }, rowId: ROW_B, space: EXPANDED });
+
+    expect(reading).toEqual({ kind: "cleared" });
+  });
+
+  it("巡回では、名乗れない違反へ動かさない（推測した列へ着かない）", async () => {
+    // 同じ場面を巡回で引く。**動かさない**（行を持たない違反を移動先にしないのと同じ規律。
+    // 動かすと、違反していないセルへ現在位置が移り、そこが違反として提示される）。
+    const parent: readonly FakeViolation[] = [
+      { ordinal: 5, row: ROW_B, column: 1, reason: "必須の項目が無い" },
+    ];
+    const search = searchOf(parent);
+
+    const reading = await nextViolation({ client: search, current: { row: 2, column: 0 }, rowCount: 100, space: EXPANDED });
+
+    expect(reading).toEqual({
+      kind: "failed",
+      message: "違反の列を特定できませんでした",
+    });
+  });
+});
+
+describe("展開が無ければ、表示の位置がそのまま文書の列である（恒等）", () => {
+  it("理由も巡回も、宣言の列の添字をそのまま名乗る", async () => {
+    const search = searchOf(SAMPLE);
+
+    // 5 行目の違反は文書の列 1 にあり、展開が無いので表示の位置も 1 である。
+    const reason = await reasonInRow({ client: search, current: { row: 5, column: 1 }, rowId: ROW_B, space: IDENTITY });
+    expect(reason).toEqual({
+      kind: "reason",
+      position: { row: 5, column: 1 },
+      reason: "値が 0 以上 100 以下の外の値である",
+    });
+
+    const next = await nextViolation({ client: search, current: { row: 2, column: 0 }, rowCount: 100, space: IDENTITY });
+    expect(next).toEqual({
+      kind: "reason",
+      position: { row: 5, column: 1 },
+      reason: "値が 0 以上 100 以下の外の値である",
+    });
+  });
+
+  it("折りたたんだ列の内側の違反も、その列（表示の位置）へ落ちる", async () => {
+    // 展開が無ければ内側の位置は描かれないが、**その値を表示している列**は存在する
+    // （セルの値は要約としてその列に載る）。
+    const inner: readonly FakeViolation[] = [
+      { ordinal: 5, row: ROW_B, column: 2, path: [field("inner")], reason: "値が空である" },
+    ];
+    const search = searchOf(inner);
+
+    const reading = await reasonInRow({ client: search, current: { row: 5, column: 2 }, rowId: ROW_B, space: IDENTITY });
+
+    expect(reading).toEqual({
+      kind: "reason",
+      position: { row: 5, column: 2 },
+      reason: "値が空である",
+    });
   });
 });

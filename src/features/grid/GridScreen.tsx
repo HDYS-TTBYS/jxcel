@@ -243,10 +243,17 @@
  *   `WindowCache.getCell` と編集の宛先 `WindowCache.documentColumn` が同じ値を引く）。①（8.8）
  *   は**同じ 1 つへ揃える**こと — 列の並びの変更は窓の中身を変えないので、揃えるのは `getCell`
  *   へ渡す位置の側である（8.8 の担当）
+ * - **8.4 の提示も同じ写像を通る（境界修復の後に足した是正）**: 境界の `GridViolationLocation`
+ *   が運ぶ列は**文書の列**であるため、`./violations` の `reasonInRow` / `nextViolation` は
+ *   `ColumnSpace.displayPosition`（**逆向き**。文書の列 + 内側の位置 → 表示の位置）で落としてから
+ *   名乗る・着く。本 module は写像を渡すだけであり（`GridSurface` は `summary` から 1 つ引き、
+ *   巡回は押下ごとに `summary.columns` から引く）、**バー（`./violationBar`）と
+ *   `gridScreenNextViolation` は表示の位置を受け取る側なので変わっていない**
  */
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
@@ -1449,6 +1456,14 @@ function GridSurface({
    * 新しく生じた違反**（印がまだ無い）を取りこぼさないためである（要件 4.6）。
    */
   const violationWaitingRef = useRef(false);
+  /**
+   * いまの構成の写像（**境界の列を表示の位置へ落とす口**。要件 4.2、4.4）。
+   *
+   * 窓の記憶が組む写像（[`createGridSurfaceCache`]）と**同じ並びから引く**（どちらも
+   * `summary.columns` ＝ 導出後の構成である）。したがって写像は 1 つのままである — 表が読む
+   * セルと、違反の提示が名乗る位置は、同じ並びの同じ位置を指す。
+   */
+  const space = useMemo(() => createColumnSpace(summary.columns), [summary]);
 
   /**
    * いまの位置の違反の理由を引き直す（要件 4.2）。
@@ -1475,7 +1490,12 @@ function GridSurface({
       onViolationRead({ kind: "cleared" });
       return;
     }
-    void reasonInRow({ client, current: position, rowId: cache.rowId(position) }).then((reading) => {
+    void reasonInRow({
+      client,
+      current: position,
+      rowId: cache.rowId(position),
+      space,
+    }).then((reading) => {
       if (token !== violationTokenRef.current) {
         return;
       }
@@ -2317,10 +2337,13 @@ export function GridScreen(): ReactElement {
     }
     const token = (traversalRef.current += 1);
     // 起点（いまの行の次）を決めるのは `./violations` である（そこに規則があり、検査もある）。
+    // **写像も渡す**（`./columnSpace`）— 着地点は表示の位置でなければならない（境界が運ぶのは
+    // 文書の列であり、展開があると一致しない。`./violations` の module doc）。
     void nextViolation({
       client: DEFAULT_CLIENT,
       current: state.selection.current,
       rowCount: state.visibleRows,
+      space: createColumnSpace(state.summary.columns),
     }).then((reading) => {
       if (token !== traversalRef.current) {
         return;

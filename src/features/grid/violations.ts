@@ -24,6 +24,24 @@
  * 失敗の 1 行（`failed`）だけは `src/ipc/client.ts` の [`describeIpcError`] の写しであり、
  * 画面の告知へ載る。
  *
+ * # 位置は**表示の位置**である（境界は文書の列しか運ばない）
+ *
+ * `GridViolationLocation.column` は**文書の列**（`Row::values()` に対する位置）であり、
+ * `crates/data-grid` の索引もその添字で引かれている。他方、返る
+ * [`ViolationPresentation.position`] の列は**表示の位置**でなければならない — そのまま
+ * `./selection` の `selectionAt` へ渡り（巡回の着地点）、バーが「M 列目」として名乗る
+ * （`./violationBar`）。
+ *
+ * **入れ子の展開が 2 つを離す**（`crates/data-grid/src/view/mod.rs` の `push_column` は内側の
+ * 位置を**親と同じ文書の列**の下へ並べる。`./columnSpace` の module doc）。したがって 2 つの
+ * 関数は `ColumnSpace.displayPosition`（文書の列 + 内側の位置 → 表示の位置）を通してから返す。
+ * **落とせないときは名乗らない** — [`reasonInRow`] は取り下げ（`cleared`）、[`nextViolation`] は
+ * **現在位置を動かさずに**失敗を返す（推測した列へ着かない。規則と、答えられない場合の定義は
+ * `ColumnSpace.displayPosition` の doc が唯一の源である）。
+ *
+ * **行は写像しない。**可視行の序数は 1 つの空間しか持たない（行の識別子から序数への解決は
+ * 下の「序数の解決」であり、それ以外の行の空間は無い）。
+ *
  * # 序数の解決（**境界が可視行の序数を運ばないことへの答え**）
  *
  * `grid_find_violation` の応答が運ぶのは**行の識別子**（26 文字の ULID）と列の添字であり、
@@ -54,6 +72,7 @@
  * ため、一致する区間が別の形になる）ので、**探索をそのまま反転してはならない**。
  */
 import { describeIpcError } from "../../ipc/client";
+import type { ColumnSpace } from "./columnSpace";
 import type { GridClient } from "./gridClient";
 import type { CellPosition, RenderCell } from "./renderer/port";
 
@@ -82,7 +101,10 @@ export function violationMark(cell: RenderCell): ViolationMark {
  */
 export type ViolationPresentation =
   | {
-      /** 違反の理由（要件 4.2）。`position` は**その理由が属するセル**である。 */
+      /**
+       * 違反の理由（要件 4.2）。`position` は**その理由が属するセル**であり、**表示の位置**で
+       * ある（境界が運ぶ文書の列ではない。module doc「位置は表示の位置である」）。
+       */
       readonly kind: "reason";
       readonly position: CellPosition;
       readonly reason: string;
@@ -131,7 +153,12 @@ function sameRow(left: string, right: string): boolean {
  * 索引は行ごとに**最小の列**の違反しか返さない（`crates/data-grid/src/view/violations.rs`
  * の `find`）。利用者が指した列と違うことがあるので、返る [`ViolationPresentation.position`]
  * は**その理由が属するセル**を名乗る（表示は位置を名乗る。`./violationBar`）。
- * 行の同じセルを指していれば、それがそのまま要件 4.2 の答えである。
+ * 行の同じセルを指していれば、それがそのまま要件 4.2 の答えである。**名乗る列は表示の位置で
+ * あり、境界の文書の列ではない**（module doc「位置は表示の位置である」）。
+ *
+ * 名乗れる位置が無ければ（展開された親の値そのものの違反など。規則は
+ * [`ColumnSpace::displayPosition`] の doc）**取り下げる** — 名乗れない理由を、推測した列の
+ * 理由として見せるより、出さない方が事実に合う。
  *
  * 行の識別子が無ければ**問い合わせない**（確かめる手段が無いため。上の理由）。
  */
@@ -141,6 +168,8 @@ export async function reasonInRow(options: {
   readonly current: CellPosition;
   /** いまの行の識別子（窓から読む。無ければ `null`）。 */
   readonly rowId: string | null;
+  /** いまの構成の写像（**境界の列を表示の位置へ落とす唯一の口**）。 */
+  readonly space: Pick<ColumnSpace, "displayPosition">;
 }): Promise<ViolationReading> {
   if (options.rowId === null) {
     return { kind: "cleared" };
@@ -159,9 +188,16 @@ export async function reasonInRow(options: {
   if (found === null || found.location.row === null || !sameRow(found.location.row, options.rowId)) {
     return { kind: "cleared" };
   }
+  const column = options.space.displayPosition(found.location.column, found.location.path);
+  if (column === null) {
+    // **名乗れる位置が無い**（展開された親の値そのものの違反など）。推測した列を名乗ると、
+    // バーが**描かれている違反のセルと違うセル**を指す（取り下げておけば、間違った場所を
+    // 指すことはない）。
+    return { kind: "cleared" };
+  }
   return {
     kind: "reason",
-    position: { row: options.current.row, column: found.location.column },
+    position: { row: options.current.row, column },
     reason: found.reason,
   };
 }
@@ -176,6 +212,10 @@ export async function reasonInRow(options: {
  *
  * 返る [`ViolationPresentation.position`] の行は**可視行の序数**であり、そのまま現在位置に
  * できる（行の識別子ではない）。序数の解決は module doc「序数の解決」の二分探索である。
+ *
+ * **列は表示の位置である**（module doc「位置は表示の位置である」）。名乗れる位置が無ければ
+ * **現在位置を動かさずに**失敗を返す — 行を持たない違反を移動先にしないのと同じ規律であり、
+ * 推測した列へ動かすと、**違反していないセル**へ現在位置が移り、そこが違反として提示される。
  */
 export async function nextViolation(options: {
   readonly client: ViolationSearcher;
@@ -183,6 +223,8 @@ export async function nextViolation(options: {
   readonly current: CellPosition;
   /** 可視行の総数（序数の上限。窓が覆う行数である）。 */
   readonly rowCount: number;
+  /** いまの構成の写像（**境界の列を表示の位置へ落とす唯一の口**）。 */
+  readonly space: Pick<ColumnSpace, "displayPosition">;
 }): Promise<ViolationReading> {
   // 起点は**いまの行の次**である（いまの行の違反は「次の違反」ではない）。
   const from = options.current.row + 1;
@@ -223,9 +265,16 @@ export async function nextViolation(options: {
     }
   }
 
+  const column = options.space.displayPosition(found.location.column, found.location.path);
+  if (column === null) {
+    // **名乗れる位置が無い違反へは動かさない**（行を持たない違反を移動先にしないのと同じ規律。
+    // 動かすと、違反していないセルへ現在位置が移り、そこが違反として提示される）。
+    return { kind: "failed", message: "違反の列を特定できませんでした" };
+  }
+
   return {
     kind: "reason",
-    position: { row: lo, column: found.location.column },
+    position: { row: lo, column },
     reason: found.reason,
   };
 }
