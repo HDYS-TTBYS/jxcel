@@ -26,11 +26,11 @@
 //! | 列を返す（[`GridSession::columns`]） | 5.1〜5.4 | `view`（[`derive_layout`]） | 展開の状態を保った構成の保持 |
 //! | 表示の指定を変える（[`GridSession::set_view`]） | 8.3, 8.4, 8.7 | `view` | **索引の鍵の張り直し**と据え付けの入れ替え |
 //! | 窓を符号化する（[`GridSession::encode_window`]） | 1.1, 1.2 | `transport` | いまの世代と、行の値を引く口 |
-//! | 編集を適用する（[`GridSession::apply`]） | 3.3, 6.1, 7.3 | `edit` / `history` | **違反の差分での索引の更新**と、行の集合が変わったときの順序の導出 |
-//! | 履歴を進める（[`GridSession::undo`] / [`GridSession::redo`]） | 9.2, 9.3 | `history` | 同上（編集と**同じ 1 つの道**を通る） |
+//! | 編集を適用する（[`GridSession::apply`]） | 3.3, 6.1, 7.3 | `edit` / `history` | **違反の差分での索引の更新**と、行の集合が変わったときの順序の導出
+//! | 履歴を進める（[`GridSession::undo`] / [`GridSession::redo`]） | 9.2, 9.3 | `history` | 同上（編集と**同じ 1 つの道**を通る）
 //! | 次の違反を探す（[`GridSession::find_violation`]） | 4.4 | — | 索引への委譲だけである |
 //!
-//! # `Document` を所有しない（design.md の Responsibility）
+//! # `Document` と履歴を所有しない（design.md の Responsibility）
 //!
 //! [**本型は `Document` の欄を持たない。**] 文書の所有者は `document-session` であり
 //! （design.md「GridSession」の Responsibilities & Constraints）、本型は呼び出しごとに
@@ -43,6 +43,24 @@
 //! 所有しないことは**型の上に現れている**（欄の一覧に `Document` が無い）。文書を所有する
 //! 実装を後から足そうとすれば欄が増え、[`GridSession::open`] の signature が変わる —
 //! この 2 つの事実が同時に壊れるので、黙って所有者になることはできない。
+//!
+//! [**同じことが取り消し履歴（[`UndoStack`]）にも言える**]（要件 9.5、9.6。design.md
+//! 「UndoStack（拡張点の所有者）」）。本型は履歴の欄を持たず、
+//! [`GridSession::apply`] / [`GridSession::undo`] / [`GridSession::redo`] が
+//! `&mut UndoStack` を**受け取る**。[`GridSession::set_view`] と
+//! [`GridSession::encode_window`] は `&Document` だけを受け取るため、**履歴に触れる経路が
+//! 型の上に無い**（表示の指定と窓の符号化は履歴を進めない）。
+//!
+//! **所有者は適応層のウィンドウの保持である**（`src-tauri/src/commands/grid.rs` の
+//! `SheetEntry`）。所有者をこう置くのは、履歴が**ドキュメント単位**（要件 9.5）であり、
+//! 本型が**シートごとに作り直される**（計画は開いたシートの列の宣言から落とす）ためである
+//! — 履歴を本型が持つと、**シートを切り替えた瞬間に文書の履歴が消える**（9.5 の違反）。
+//! 保持の側の規律（同じ文書ならシートの切り替えを越えて引き継ぎ、**保持しているシートが
+//! 文書に無い**ときは捨てる）は適応層の docs が正典である。
+//!
+//! 取り違えても**古い履歴が別の文書へ届かない**ことは、本型が保証する: 文書を触る 3 つの
+//! 経路はどれも `GridSession::sheet_of` を最初に通るため、履歴の材料が名乗るシートが
+//! 文書に無ければ [`GridError::SchemaUnusable`] で止まる（命令は 1 つも適用されない）。
 //!
 //! # 違反の総数をどう閉じるか（本タスクの核心。要件 4.3, 4.6, 11.4）
 //!
@@ -94,6 +112,16 @@
 //! 据える先が無い。そのときは**据え置く**（[`GridSession::violation_total`] は 0 のままであり、
 //! 「索引はまだ組み立てられていない」という `open` 直後の状態と同じである）。最初の
 //! [`GridSession::set_view`] がシート全体から索引を組み立てるので、以後はつねに最新になる。
+//!
+//! ## 履歴の 1 歩が別のシートへ落ちたときは据え直さない
+//!
+//! 履歴はドキュメント単位であるため（要件 9.5）、[`GridSession::undo`] / [`GridSession::redo`]
+//! が進める 1 歩は**表示しているシートとは別のシート**を指しうる。適用先は結果が名乗る
+//! （[`EditOutcome::sheet`]）ため本層はそれを見分けられ、**別のシートのときは索引にも順序にも
+//! 1 つも触れない** — 表示中のシートの中身は 1 つも変わっておらず、`set_view` が組み立てた
+//! 総数・据え付け・鍵がそのまま最新だからである。据え直せば**表示中のシートの違反が黙って
+//! 消える**（別のシートの報告で置き換えるためである）。規則の本体と限界は
+//! [`GridSession::settle`] の docs「履歴の 1 歩が別のシートへ落ちたとき」にある。
 //!
 //! ## 据え付け（2.2 への引き渡し）も同じ差分で動く
 //!
@@ -172,7 +200,7 @@
 //! |---|---|---|
 //! | `columns` の戻り値の型（`ColumnDescriptor` は 6.1 の境界型） | **`&[LayoutColumn]`**（2.3 の列の構成）を返す | 6.1 が境界型へ写すのに要るもの（列の添字・内側の位置・表示名・型の札・要素数の能力・展開の可否）は `LayoutColumn` が既に全部持つ。**並行する記述子を本クレートに足さない**（写しを 2 つ持つと必ず食い違う。design.md の File Structure Plan も境界型を 6.1 に割り当てている） |
 //! | `GridSession` の構築（design.md は `open` だけを示す） | [`GridSession::open`] と、縫い目を差し替える [`GridSession::with_query`] の 2 つ | 要件 11.4 の観測（**全件検証を呼ばない**ことの証拠）は、本番の実装を包んだ縫い目を差し込んで**呼び出しの形を数える**ことでしか取れない（`structure.md`「一括メソッドを置くだけでは足りない」）。`open` は本番の縫い目（[`SchemaEngineQuery`]）で開く薄い入口である |
-//! | 履歴の上限（design.md は「上限を持つ」とだけ定める） | [`DEFAULT_UNDO_LIMIT`] | 10 万行を扱う道具で、有界でない記憶の伸びる経路を既定で開かない（`history` のモジュール docs の同じ判断） |
+//! | 履歴の上限（design.md は「上限を持つ」とだけ定める） | [`DEFAULT_UNDO_LIMIT`]（**履歴の所有者**が履歴を作るときの既定） | 10 万行を扱う道具で、有界でない記憶の伸びる経路を既定で開かない（`history` のモジュール docs の同じ判断） |
 //! | 展開の指定の口（design.md は `ViewState.expansion` を持つとだけ定める） | [`GridSession::set_expansion`] / [`GridSession::expansion`] | 展開は表示状態の一部であり（2.3）、順序の再計算では失われない（要件 5.3）。境界（6.1）が展開の指定を運ぶには、セッションに指定口と読み口が要る |
 //! | 違反の総数の閉じ方（design.md は「差分で更新する」とだけ定める） | 前節「違反の総数をどう閉じるか」 | 要件 11.4 の下で厳密に成り立つ唯一の式である（覆った列の旧違反数を索引から引き、報告の総数を足す） |
 //! | 編集が返す違反の運搬（design.md の `EditOutcome` は総数だけ） | `EditOutcome` が違反そのものを運ぶ（`edit` 層の変更） | 差分を組むには「どの違反が消えて生じたか」が要る。情報は適用の経路に既にあり（判定と報告）、捨てられていた。**追加の検証は 1 回も呼ばない**（`edit` のモジュール docs「違反は結果が運ぶ」） |
@@ -220,11 +248,15 @@ use crate::view::{
     ViolationIndex,
 };
 
-/// セッションが持つ取り消し履歴の上限（要件 9.6 の既定）。
+/// 取り消し履歴の上限の既定（要件 9.6）。
+///
+/// **履歴を作る側（所有者）が使う値である** — 本層の [`GridSession`] は履歴を所有しない
+/// （モジュール docs「`Document` と履歴を所有しない」）ため、本定数は適応層のウィンドウの
+/// 保持（`src-tauri/src/commands/grid.rs` の `SheetEntry`）が履歴を作るときの既定である。
 ///
 /// [`UndoStack`] は上限を超えた対を**古い側から捨てる**（要件 9.6）。上限 **0 は「1 件も
-/// 保持しない」** である（`history` のモジュール docs）。本層は 0 を既定にしない —
-/// 取り消しが 1 回も効かないセッションを黙って作らないためである。
+/// 保持しない」** である（`history` のモジュール docs）。本定数は 0 を既定にしない —
+/// 取り消しが 1 回も効かない保持を黙って作らないためである。
 ///
 /// 値そのものは本層の決定である（design.md は「上限を持ち、超えたら古い側から捨てる」と
 /// だけ定める）。1,000 件は、1 セルずつ打った 1,000 操作を取り消せることを意味する。
@@ -233,10 +265,13 @@ pub const DEFAULT_UNDO_LIMIT: usize = 1_000;
 /// 画面 1 枚ぶんの操作口（design.md「GridSession」の Service Interface。要件 4.3, 4.6,
 /// 11.4）。
 ///
-/// 表示状態（[`ViewState`] / [`RowOrder`] / [`ViolationIndex`]）と取り消し履歴
-/// （[`UndoStack`]）を所有し、編集の適用（[`EditApply`]）と窓の符号化（[`WindowCodec`]）を
-/// 束ねる。**文書は所有しない** — 文書を触る呼び出しはすべて参照または可変参照を受け取る
-/// （モジュール docs「`Document` を所有しない」）。
+/// 表示状態（[`ViewState`] / [`RowOrder`] / [`ViolationIndex`]）を所有し、編集の適用
+/// （[`EditApply`]）と窓の符号化（[`WindowCodec`]）を束ねる。**文書と取り消し履歴は
+/// 所有しない** — 文書を触る呼び出しは参照または可変参照を受け取り（モジュール docs
+/// 「`Document` を所有しない」）、履歴は [`GridSession::apply`] / [`GridSession::undo`] /
+/// [`GridSession::redo`] が `&mut UndoStack` として受け取る（同「履歴を所有しない」）。
+/// 履歴の所有者は適応層のウィンドウの保持であり、**同じ文書のシートを切り替えても保たれる**
+/// （要件 9.5）。
 ///
 /// # スキーマは開いた時点で固定する
 ///
@@ -266,8 +301,6 @@ pub struct GridSession {
     view: ViewState,
     /// 可視行の順序（[`GridSession::set_view`] と、行の集合が変わった編集の後に導出する）。
     order: RowOrder,
-    /// 取り消し履歴（上限 [`DEFAULT_UNDO_LIMIT`]。要件 9.6）。
-    history: UndoStack,
     /// 編集の適用の経路（判定は縫い目へ委ねる。要件 11.4）。
     apply: EditApply,
     /// 可視行の序数に対する違反の索引（要件 4.1, 4.3, 4.4, 4.5）。
@@ -351,7 +384,6 @@ impl GridSession {
             schema,
             view,
             order: RowOrder::default(),
-            history: UndoStack::new(DEFAULT_UNDO_LIMIT),
             apply,
             index: ViolationIndex::default(),
             layout,
@@ -397,10 +429,15 @@ impl GridSession {
     /// **絞り込みに依らない** — 隠れている行の違反も、行に属さない列そのものの問題も数える
     /// （`view/violations.rs` のモジュール docs「違反の総数」）。
     ///
-    /// [`GridSession::set_view`] を呼ぶまでは 0 である（索引をまだ組み立てていない）。
+    /// [`GridSession::set_view`] をまだ呼ぶまでは 0 である（索引をまだ組み立てていない）。
     /// 以後は [`GridSession::apply`] / [`GridSession::undo`] / [`GridSession::redo`] の直後に
     /// つねに最新である（design.md の Invariants）。更新は**全件検証の再実行ではなく、
     /// 判定が返した違反との差分**で行う（モジュール docs「違反の総数をどう閉じるか」）。
+    ///
+    /// **適用先が表示中のシートであるとき**の話である — [`GridSession::undo`] /
+    /// [`GridSession::redo`] が進める 1 歩は別のシートへ落ちうる（履歴はドキュメント単位で
+    /// ある。要件 9.5）。そのときは索引に触れないので、この数は**表示中のシートの違反の
+    /// 総数のまま**である（規則は [`GridSession::settle`] の docs）。
     #[inline]
     #[must_use]
     pub fn violation_total(&self) -> usize {
@@ -524,10 +561,17 @@ impl GridSession {
     /// 適用そのものは `edit` 層（[`EditApply::apply_with_inverse`]）が行い、本層は 3 つを足す:
     ///
     /// 1. **表示の並びの補完** — 貼り付けの宛先（要件 8.9。モジュール docs「貼り付けの宛先」）
-    /// 2. **履歴への積み込み** — 適用が組んだ対（逆命令とやり直しの命令）を [`UndoStack`] へ
-    ///    積む（要件 9.1。状態を変えない適用は対を持たないため積まない）
+    /// 2. **履歴への積み込み** — 適用が組んだ対（逆命令とやり直しの命令）を、**渡された履歴**
+    ///    （`history`）へ積む（要件 9.1。状態を変えない適用は対を持たないため積まない）
     /// 3. **索引と順序の整合** — 判定が返した違反との差分で索引を更新し（要件 4.6, 11.4）、
     ///    行の集合が変わったときだけ順序を導出し直す（要件 8.8, 1.7）
+    ///
+    /// # 履歴は受け取る（所有しない）
+    ///
+    /// `history` は**呼び出し側（適応層のウィンドウの保持）が所有する**履歴であり、本型は
+    /// 借りて 1 件積むだけである（要件 9.5 の「ドキュメント単位」を、シートごとに作り直される
+    /// 本型の上で保つ唯一の形。モジュール docs「履歴を所有しない」）。**不可分な単位で借りる**
+    /// ので、「積む先がその呼び出しの間だけ別の履歴へ差し替わる」経路は無い。
     ///
     /// # 誤り
     ///
@@ -536,6 +580,7 @@ impl GridSession {
     pub fn apply(
         &mut self,
         doc: &mut Document,
+        history: &mut UndoStack,
         command: EditCommand,
     ) -> Result<EditOutcome, GridError> {
         let rows_before = self.sheet_of(doc)?.rows().len();
@@ -546,7 +591,7 @@ impl GridSession {
 
         let (outcome, pair) = self.apply.apply_with_inverse(doc, command)?;
         if let Some(pair) = pair {
-            self.history.push(UndoEntry {
+            history.push(UndoEntry {
                 label,
                 inverse: pair.inverse,
                 redo: pair.redo,
@@ -564,13 +609,25 @@ impl GridSession {
     /// 戻る操作が無ければ `Ok(None)` である（失敗ではない — 履歴の先頭である）。適用の失敗は
     /// そのまま返り、**履歴の位置も文書も動かない**（[`UndoRedo::undo`] の契約）。
     ///
+    /// **履歴は所有せず受け取る**（[`GridSession::apply`] と同じ。要件 9.5）。
+    ///
     /// 適用が成功したときは [`GridSession::apply`] と**同じ道**（`GridSession::settle`）を
     /// 通って索引と順序を整合させる — 取り消しもやり直しも「文書が変わった」という点で
     /// 編集と変わらない。
-    pub fn undo(&mut self, doc: &mut Document) -> Result<Option<EditOutcome>, GridError> {
+    ///
+    /// **ただし、進めた 1 歩が表示しているシートと別のシートへ落ちたときは何も変わらない**
+    /// — 履歴はドキュメント単位であるため（要件 9.5）、シートを切り替えた後の取り消しは
+    /// 前のシートの操作を指す。そのとき `settle` は索引にも順序にも触れず、違反の総数と
+    /// 探索の答えは表示中のシートのままである（規則は [`GridSession::settle`] の docs
+    /// 「履歴の 1 歩が別のシートへ落ちたとき」）。
+    pub fn undo(
+        &mut self,
+        doc: &mut Document,
+        history: &mut UndoStack,
+    ) -> Result<Option<EditOutcome>, GridError> {
         let rows_before = self.sheet_of(doc)?.rows().len();
         // 借用はこの 1 文で切れる（履歴と適用の経路を同時に借りるため、束ねた型を通す）。
-        let outcome = UndoRedo::new(&mut self.history, &mut self.apply).undo(doc)?;
+        let outcome = UndoRedo::new(history, &mut self.apply).undo(doc)?;
         match outcome {
             Some(outcome) => {
                 // 戻る操作の種類は本層に届かないため、行の集合の変化は行数だけで見る。
@@ -587,10 +644,16 @@ impl GridSession {
     /// 取り消した操作を**再び適用**する（要件 9.3。design.md の `redo`）。
     ///
     /// やり直す操作が無ければ `Ok(None)` である。取り消しの後に新しい操作が積まれていれば、
-    /// やり直しの対象は破棄されている（要件 9.4）。誤りの扱いは [`GridSession::undo`] と同じである。
-    pub fn redo(&mut self, doc: &mut Document) -> Result<Option<EditOutcome>, GridError> {
+    /// やり直しの対象は破棄されている（要件 9.4）。誤りの扱いと履歴の受け取り方は
+    /// [`GridSession::undo`] と同じである（要件 9.5）— **別のシートへ落ちた 1 歩で表示中の
+    /// シートの索引に触れないこと**も同じである（[`GridSession::settle`] の docs）。
+    pub fn redo(
+        &mut self,
+        doc: &mut Document,
+        history: &mut UndoStack,
+    ) -> Result<Option<EditOutcome>, GridError> {
         let rows_before = self.sheet_of(doc)?.rows().len();
-        let outcome = UndoRedo::new(&mut self.history, &mut self.apply).redo(doc)?;
+        let outcome = UndoRedo::new(history, &mut self.apply).redo(doc)?;
         match outcome {
             Some(outcome) => {
                 self.settle(doc, &outcome, rows_before, false)?;
@@ -650,6 +713,33 @@ impl GridSession {
     /// 何もしない — 据える先の索引が無く、総数も据え置きである（モジュール docs「違反の総数を
     /// どう閉じるか」）。最初の [`GridSession::set_view`] がシート全体から索引を組み立てる。
     ///
+    /// # 履歴の 1 歩が別のシートへ落ちたとき（本層は何もしない）
+    ///
+    /// 履歴はドキュメント単位であるため（要件 9.5）、[`GridSession::undo`] /
+    /// [`GridSession::redo`] が進める 1 歩は、**表示しているシートとは別のシート**を指しうる。
+    /// その適用の結果が記述するのは**別のシート**であり（[`EditOutcome::sheet`]）、その違反も
+    /// 行数も影響を受けた行も別のシートのものである。したがって本層は**索引にも順序にも
+    /// 1 つも触れない**:
+    ///
+    /// - **索引はそのままで正しい** — 表示中のシートの中身は 1 つも変わっていないため、
+    ///   `set_view` が組み立てた違反の総数・据え付け・鍵はそのまま最新である
+    /// - 触れば**表示中のシートの違反が黙って消える**（別のシートの報告で据え直すためである。
+    ///   10.2 のレビューが実測した欠陥）
+    /// - 行数の構造判定（`rows_before` / `rows_after`）も見ない — それは**適用先のシート**の
+    ///   行数であり、表示中のシートの順序を導出し直す理由にはならない
+    ///
+    /// **世代はここでは扱わない** — `undo` / `redo` が「適用が何かを書いた」ときに進める
+    /// （モジュール docs「世代をいつ進めるか」）。進んでも表示中のシートの窓の内容は変わらない
+    /// ため、画面は同じ内容を取り直すだけである。
+    ///
+    /// # 限界（申し送り）
+    ///
+    /// **別のシートを参照する列**（`Expected::RowsOf`）を持つときは、参照先のシートの行が
+    /// 変わることで表示中のシートの違反が変わりうる。本層はその経路を知らない（索引は
+    /// `set_view` の 1 回の全件検証から組み立て、以後は差分で保つ）ため、この場合は表示中の
+    /// シートの違反が据え置きになる。**本ラウンドは「表示中のシートの索引を触らない」を
+    /// 優先する**（誤った材料で据え直すより、参照先の変化を反映しないほうが害が小さい）。
+    ///
     /// # 誤り
     ///
     /// 名指されたシートが文書に無い場合（[`GridError::SchemaUnusable`]）。適用が成功した後に
@@ -662,7 +752,7 @@ impl GridSession {
         rows_before: usize,
         structural_hint: bool,
     ) -> Result<(), GridError> {
-        if !self.indexed {
+        if !self.indexed || outcome.sheet != self.sheet {
             return Ok(());
         }
         let rows_after = self.sheet_of(doc)?.rows().len();

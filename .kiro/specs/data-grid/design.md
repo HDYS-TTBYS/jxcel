@@ -33,7 +33,7 @@
 - **セルの編集の意味論**: 編集の開始・確定・取消、`schema-engine` への判定依頼、判定結果と型強制の提示、違反値の保持
 - **行の構造操作**: 追加・削除・複製と、既定値の適用
 - **範囲の複製と貼り付け**: 表形式テキストとセル値の相互変換、貼り付け時の一括判定
-- **取り消し履歴（拡張点・所有者）**: ドキュメント単位の命令スタック。`formula-engine` と `macro-runtime` が後から同じ履歴に加わる
+- **取り消し履歴（拡張点・所有者）**: ドキュメント単位の命令スタック。`formula-engine` と `macro-runtime` が後から同じ履歴に加わる。**所有者はウィンドウのグリッドの保持である**（10.2。`GridSession` は所有せず `&mut UndoStack` を受け取る — 要件 9.5）
 - **セル入力手段の登録簿（拡張点・所有者）**: 型 → 入力手段の対応表。`custom-types` が登録する
 - **表示状態**: 列幅・列順・並べ替え・絞り込み・展開状態。**ドキュメントに保存されない、画面に閉じた状態**
 - **行データの窓単位の転送**: どの範囲を、どの形で、いつ運ぶか
@@ -65,7 +65,9 @@
 | 変更 | 再検証を要する相手 |
 |---|---|
 | 取り消し履歴の命令の形（何が 1 操作か、何を復元するか） | `formula-engine`, `macro-runtime` |
+| **取り消し履歴の所有者と、履歴を渡す signature**（10.2 が `GridSession` からウィンドウの保持へ降ろし、`apply` / `undo` / `redo` が `&mut UndoStack` を受け取る形にした） | **`formula-engine`, `macro-runtime`** — 同じ 1 つの `UndoStack` に乗る側である。`UndoStack::push` の形（拡張点の契約）は変えていないが、**履歴の寿命と所有者が変わった**: 履歴はセッションではなく**ウィンドウの保持**が持ち、文書が差し替わると捨てられる（要件 9.5）。数式の再計算とマクロの実行が履歴へ積む口を足すときは、**どの保持へ積むのか**（誰がその `&mut UndoStack` を握るのか）を本節の規則に合わせること |
 | セル入力手段の登録簿の登録インターフェース | `custom-types` |
+| **本機能の外の経路が文書へ直接書くようになる**（要件 9.7 の数式の再計算・マクロの実行。**いまのコマンド面では到達しない**） | **`formula-engine`, `macro-runtime`** — 履歴の 1 歩が**別のシート**を名乗る合成（`HistoryCommand::Composite`）は、いまは「すべての部分が表示中のシートを名乗るときだけ適用し、そうでなければ何も書かずに拒む」ことで部分適用を防いでいる（10.2 が実測して足した）。**この規則は「履歴の対が組まれた時点の文書が、適用の時点でも同じである」ことに依存している** — 保持している文書を変更する経路が `documents.edit` の 2 箇所（`grid_apply_edit` / `grid_history`）だけであり、両方が同じ保持の履歴を通るため、いまは成り立っている。**外の経路が同じ文書へ直接書くと、合成の途中で `UnknownRow` になり、部分適用が起きうる**（前半の復元だけが届く）。数式・マクロが文書へ書くようになった時点で、この前提を再検証し、必要なら合成の適用を「1 つの臨界区間で全部か無か」にする |
 | **境界に選択肢・参照先・ユーザー定義型の識別子を足す**（7.4 が記録した隙間 1〜3） | 8.3 の画面（`ColumnConstraints` の組み立て）と 7.4 の面 |
 | **確定の文字の運び手を登録に足す設計の改訂**（7.4 が記録した隙間 4。入れ子は `SetNested` でなければ適合しない） | 8.3 の画面、`custom-types`、7.4 の面 |
 | 窓の転送単位・符号化の形 | 要件 11 の予算の再測定 |
@@ -341,7 +343,7 @@ stateDiagram-v2
 | 8.5 | 保存される順序を変更しない | RowOrder | 表示順は `Document` を書き換えない | — |
 | 8.6, 8.9 | 並べ替え・絞り込み中の編集と貼り付け | RowOrder, EditApply | 表示位置ではなく `RowId` で対象を決める | 編集の適用と判定 |
 | 8.8 | 並べ替えの基準列の編集で行が動かない | RowOrder | 順序は明示の指示でのみ再計算する | — |
-| 9.1, 9.2, 9.3, 9.4, 9.5, 9.6 | 取り消しとやり直しの対象・復元・破棄・単位・上限 | UndoStack, UndoRedo | `undo`, `redo`, `push`（上限） | UndoRedo が履歴と `EditApply` を借用で束ねてドキュメントへ適用する |
+| 9.1, 9.2, 9.3, 9.4, 9.5, 9.6 | 取り消しとやり直しの対象・復元・破棄・単位・上限 | UndoStack, UndoRedo, **GridCommands の保持（`SheetEntry`）** | `apply` / `undo` / `redo` が `&mut UndoStack` を受け取る（**10.2 が所有者を `GridSession` から降ろした**）、`push`（上限） | UndoRedo が履歴と `EditApply` を借用で束ねてドキュメントへ適用する。**履歴の所有者はウィンドウの保持であり、シートの切り替えを越えて引き継ぎ、文書が差し替わったら捨てる**（要件 9.5） |
 | 9.7 | 数式とマクロが同じ履歴に加わる | UndoStack | `UndoStack.push` の公開 | — |
 | 9.8 | 取り消し後に対象範囲を見せる | GridScreen（`history.ts`）, WindowCache, RendererPort | `WindowCache.ordinalOf`（**8.9 が足した** — 行の識別子 → 表示の序数の唯一の口）、`RendererHandle.setSelection` / `scrollTo`（既存の追従が打つ） | — |
 | 10.1, 10.2, 10.3, 10.4, 10.5, 10.6 | 入力手段の登録簿と既定・重複検出 | EditorRegistry | `CellEditorRegistry` | — |
@@ -354,7 +356,7 @@ stateDiagram-v2
 
 | Component | Domain/Layer | Intent | Req Coverage | Key Dependencies | Contracts |
 |-----------|--------------|--------|--------------|------------------|-----------|
-| GridSession | data-grid api | 画面 1 枚ぶんの操作口 | 1, 4, 8, 9 | RowOrder (P0), EditApply (P0), UndoStack (P0), ViolationIndex (P0) | Service |
+| GridSession | data-grid api | 画面 1 枚ぶんの操作口。**履歴は所有しない**（10.2 がウィンドウの保持へ移した） | 1, 4, 8, 9 | RowOrder (P0), EditApply (P0), ViolationIndex (P0), UndoStack（**借用で受け取る**） | Service |
 | RowOrder | data-grid view | 並べ替え・絞り込みの結果としての行の順序 | 8 | document-format (P0) | Service, State |
 | EditApply | data-grid edit | 編集命令の適用と判定の依頼 | 3, 5, 6, 7 | schema-engine (P0), document-format (P0) | Service |
 | PasteCodec | data-grid edit | 表形式テキストとセル値の相互変換 | 7 | EditApply (P0) | Service |
@@ -378,21 +380,32 @@ stateDiagram-v2
 
 | Field | Detail |
 |-------|--------|
-| Intent | 画面 1 枚ぶんの操作口。表示状態と履歴を保持する |
+| Intent | 画面 1 枚ぶんの操作口。表示状態を保持する（**取り消し履歴は保持しない** — 10.2） |
 | Requirements | 1.1, 1.3, 1.4, 4.3, 4.4, 8.3, 8.4, 8.7, 9.2, 9.3 |
 
 **Responsibilities & Constraints**
-- シートに対する表示状態（行の順序・違反の索引）と取り消し履歴を所有する
+- シートに対する表示状態（行の順序・違反の索引）を所有する
 - **`Document` を所有しない。**呼び出しごとに参照または可変参照を受け取る（所有者は `document-session`）
+- **取り消し履歴を所有しない**（要件 9.5。10.2 が直した）。`apply` / `undo` / `redo` が
+  `&mut UndoStack` を**受け取る**。所有者は**適応層のウィンドウの保持**
+  （`src-tauri/src/commands/grid.rs` の `SheetEntry`）である — 本型は開いたシートの計画を
+  固定して持つためシートごとに作り直され、履歴を持たせると**シートを切り替えた瞬間に
+  文書の履歴が消える**（要件 9.5 は履歴をシートごとではなく**ドキュメント単位**で保つことを
+  求める）。`set_view` と `encode_window` は `&Document` だけを受け取るため、**履歴に触れる
+  経路が signature の上に無い**
+- **古い履歴が差し替え後の文書へ届く経路も、本型が塞ぐ**: 文書を触る 3 つの経路はどれも
+  最初に「名指されたシートが文書に在り、列数が計画と一致する」を検査し（`sheet_of`）、
+  満たさなければ `SchemaUnusable` で止まる。文書が差し替わると保持しているシートは
+  もう無いので、**履歴の材料が何を名乗っていても命令は 1 つも適用されない**
 - スキーマは開いた時点の `CompiledSchema` を保持する。スキーマが変わったらセッションを作り直す
-- **違反の総数は、索引を組み立てた後（最初の `set_view` の後）は編集・取り消し・やり直しの直後に差分で最新に保つ。**材料は `EditOutcome` が運ぶ違反と再検証した列であり、**全件検証は 1 回も呼ばない**（要件 4.3, 4.6, 11.4。式と、`set_view` の前に据え置く理由は Implementation Notes）
+- **違反の総数は、索引を組み立てた後（最初の `set_view` の後）は編集・取り消し・やり直しの直後に差分で最新に保つ。**材料は `EditOutcome` が運ぶ違反と再検証した列であり、**全件検証は 1 回も呼ばない**（要件 4.3, 4.6, 11.4。式と、`set_view` の前に据え置く理由は Implementation Notes）。**ただし適用先が表示中のシートでないときは索引に触れない**（履歴はドキュメント単位であり、1 歩が別のシートへ落ちうる。要件 9.5。規則は下の Invariants と「UndoStack」の同項目）
 - 公開面は根（`lib.rs`）の再輸出に集める。本型は `api` 層にあり、層の鎖の文言をモジュール冒頭に置く（`structure.md`「ドメインクレートの内部構造」）
 
 **Dependencies**
 - Outbound: RowOrder — 行の順序の導出 (P0)
 - Outbound: EditApply — 編集の適用 (P0)
-- Outbound: UndoStack — 履歴 (P0)
 - Outbound: ViolationIndex — 違反の索引の組み立てと差分更新 (P0)
+- Inbound（呼び出しごとの借用）: UndoStack — 履歴は所有者が持ち、`apply` / `undo` / `redo` へ貸される (P0)
 - External: `schema-engine` — 判定と列の情報 (P0)
 
 **Contracts**: Service [x] / API [ ] / Event [ ] / Batch [ ] / State [x]
@@ -400,7 +413,7 @@ stateDiagram-v2
 ##### Service Interface
 ```rust
 pub struct GridSession { /* sheet: SheetId, schema: CompiledSchema, view: ViewState, order: RowOrder,
-                            history: UndoStack, apply: EditApply, index: ViolationIndex,
+                            apply: EditApply, index: ViolationIndex,
                             layout: ColumnLayout, codec: WindowCodec,
                             query: Arc<dyn EditSchemaQuery>, indexed: bool */ }
 
@@ -422,24 +435,43 @@ impl GridSession {
 
     pub fn set_view(&mut self, doc: &Document, spec: ViewSpec) -> Result<ViewSummary, GridError>;
     pub fn encode_window(&self, doc: &Document, span: RowSpan) -> Result<Vec<u8>, GridError>;
-    pub fn apply(&mut self, doc: &mut Document, command: EditCommand) -> Result<EditOutcome, GridError>;
-    pub fn undo(&mut self, doc: &mut Document) -> Result<Option<EditOutcome>, GridError>;
-    pub fn redo(&mut self, doc: &mut Document) -> Result<Option<EditOutcome>, GridError>;
+    /// 履歴は**所有者**（ウィンドウの保持）が持ち、呼び出しごとに貸す（要件 9.5。10.2）
+    pub fn apply(
+        &mut self,
+        doc: &mut Document,
+        history: &mut UndoStack,
+        command: EditCommand,
+    ) -> Result<EditOutcome, GridError>;
+    pub fn undo(
+        &mut self,
+        doc: &mut Document,
+        history: &mut UndoStack,
+    ) -> Result<Option<EditOutcome>, GridError>;
+    pub fn redo(
+        &mut self,
+        doc: &mut Document,
+        history: &mut UndoStack,
+    ) -> Result<Option<EditOutcome>, GridError>;
     pub fn find_violation(&self, from: RowOrdinal, direction: SearchDirection) -> Option<CellAddress>;
 }
 
 pub const DEFAULT_UNDO_LIMIT: usize = 1_000;
 ```
 - Preconditions: `schema` は同一シートを `compile` したものであること（列の添字は `Row::values()` に対する位置である）。`open` / `with_query` は列 0 本の計画を `GridError::SchemaUnusable` で拒む（要件 1.6 の提示はセッション無しに画面が行う）
+- Preconditions: `history` は呼び出し元（ウィンドウの保持）が所有する**そのドキュメントの**履歴であること。**本型はこれを検査しない** — 差し替え後の文書を名指す履歴は、`sheet_of` の検査（列の 1 つ目の不変条件）で止まる
 - Postconditions: `apply` / `undo` / `redo` は `EditOutcome.affected` に影響を受けた `RowId` を必ず含める
-- Invariants: `set_view` と `encode_window` は `Document` を変更しない
+- Postconditions: `apply` は適用が対を組んだとき、**渡された履歴**へ `UndoStack::push` で 1 件積む（要件 9.1。状態を変えない適用は積まない）
+- Invariants: `set_view` と `encode_window` は `Document` を変更しない。**履歴にも触れない**（signature が `&Document` だけを受け取る — 10.2）
 - Invariants: `violation_total` は**索引を組み立てた後（`set_view` を 1 度呼んだ後）**は `apply` / `undo` / `redo` の直後につねに最新である。**全件検証の再実行ではなく、判定が返した違反との差分で索引を更新する**（要件 11.4 が全件検証を禁じているため）。**`set_view` の前は据え置き（0 のまま）である** — これは実装の逃げではなく**固定の前提**である: `open(sheet, schema)` は**文書を受け取らない** signature であり、索引はシートを読まなければ組み立てられないため、`set_view(&doc, spec)` が文書を渡すまで物理的に作れない（据え置きの規則は Implementation Notes「索引をまだ組み立てていないセッション」）
+- Invariants: **適用先が表示中のシートでないとき（`EditOutcome.sheet != self.sheet`）は、索引にも順序にも 1 つも触れない。**そのときの `violation_total` と `find_violation` は**表示中のシートの答えのまま**である — 表示中のシートの中身は 1 つも変わっておらず、`set_view` が組み立てた総数・据え付け・鍵がそのまま最新だからである。別のシートの報告で据え直せば**表示中のシートの違反が黙って消える**（10.2 のレビューが実測した欠陥。実装は `GridSession::settle` が `EditOutcome.sheet` を見て早期に返る）。規則と限界は「UndoStack」の同項目にある
 - **`columns` の戻り値は `view` 層の `LayoutColumn` である。**design.md の `ColumnDescriptor` は 6.1 の境界型であり、本クレートに写しを足さない — `LayoutColumn` が写しに要るもの（列の添字・内側の位置・表示名・葉の型の札・要素数の能力・展開の可否）を全部持つためである。**6.1 はここから境界型へ写す**
 - **判定の縫い目を差し替える `with_query` を公開する。**要件 11.4 の観測（編集・取り消し・やり直しの経路で `validate_sheet` が 0 回であること）は、本番の縫い目を包んだ実装を差し込んで**呼び出しの形を数える**ことでしか取れない（`open` は本番の縫い目で開く薄い入口である）
 - **入れ子の展開（`set_expansion` / `expansion`）と世代（`generation`）も公開する。**展開は表示状態の一部であり（要件 5.3）、境界（6.1）が展開の指定を運ぶにはセッションに指定口と読み口が要る
 
 **Implementation Notes**
-- Integration: `GridCommands` がウィンドウごとに 1 つ保持する。ウィンドウが閉じたら破棄する
+- Integration: `GridCommands` がウィンドウごとに 1 つ保持する。ウィンドウが閉じたら破棄する。
+  **その保持が履歴も持ち**（本型は所有しない。10.2）、置き換えのときに引き継ぐか捨てるかを
+  決める（規則は下の「GridCommands」の Implementation Notes）
 - Validation: `visible_row_count` と `encode_window` の範囲の整合を型で守る（`RowSpan` は可視行の序数で表す）
 - **差分の入口は `ViolationIndex::apply_report_delta`**（`view` 層）。`EditOutcome.revalidated_columns` が**全列**を覆っていれば `EditOutcome.violation_total` をそのままシートの総数とする（行の構造を変える命令と、補充を伴う貼り付けは全列を再検証する。長さが宣言の列数に等しいことで全列と判定する — `revalidated_columns` は昇順・重複なしである）。**一部の列**に閉じているときは `索引の旧総数 − ViolationIndex::violations_in_columns(覆った列) + EditOutcome.violation_total` とする。被減数は「索引が**載せている**その列の違反の数」であり、索引は `set_view` で `ValidationOptions::unlimited` の全件検証から組み立てるため、覆った列について「編集前のシートのその列の違反」に一致する（触っていない列は編集で変わらない）。`apply_report_delta` は行を鍵とする保持の載せ替え・据え付け（`ViolationPresence`）の作り直し・**変わった行だけ**の序数の修正までを行い、順序が変わったときだけ `ViolationIndex::rekey` を足で呼ぶ。索引をまだ組み立てていないセッション（`set_view` の前）は総数を据え置く
 - Risks: スキーマ変更時のセッション再作成を忘れると列の添字がずれる。`schema-editor` との継ぎ目として記録する
@@ -496,6 +528,12 @@ impl RowOrder {
 - `WriteOrigin::Edit` は決して拒否しない（`schema-engine` 要件 6.1）。したがって「編集が失敗して値が戻る」経路は存在しない
 - 1 セルの編集では `validate_columns` を**当該列に限定して**呼ぶ。全件検証は行わない（要件 11.4）
 - 行の追加は `CompiledSchema::default_row()` を使う（要件 6.1）
+- **履歴の合成（`HistoryCommand::Composite`。複数の書き込みを連ねる唯一の経路）は、適用の
+  前にすべての部分が名乗るシートを照合する**（`EditApply::ensure_parts_share_target`。
+  10.2 の 2 度目のレビューが実測した欠陥）。1 つでも適用先（`self.sheet`）と食い違えば
+  **何も書かずに** `GridError::SchemaUnusable`（その部分が名乗るシート）を返す — 部分を
+  順に適用すると、材料が名乗るシートへ書ける前半だけが文書へ届く（規則は「UndoStack」の
+  限界 ②）。**別のシートを名乗る部分が混ざったまま部分適用になる経路は、これで残らない**
 
 **Contracts**: Service [x]
 
@@ -511,6 +549,14 @@ pub enum EditCommand {
 }
 
 pub struct EditOutcome {
+    /// 10.2 が足した: **この結果が記述するシート**（適用先）。
+    ///
+    /// 編集（`EditCommand`）では開いた対象シートであり、履歴の命令では**材料が名乗る
+    /// シート**（`HistoryCommand::RestoreValues` / `RestoreRows`）である。履歴は
+    /// ドキュメント単位であるため（要件 9.5）、取り消し・やり直しの 1 歩は表示している
+    /// シートとは別のシートへ落ちうる — そのとき呼び出し側はこの欄で見分ける
+    /// （索引に触ってはならない。規則は「UndoStack」の同項目と `GridSession::settle`）。
+    pub sheet: SheetId,
     pub affected: Vec<RowId>,
     pub coercions: Vec<CoercionNotice>,
     pub violation_total: usize,
@@ -542,6 +588,51 @@ pub struct CoercionNotice { pub cell: CellAddress, pub before: String, pub after
 **Responsibilities & Constraints**
 - 命令と**逆命令の対**を積む。逆命令は適用時に生成する（適用後には作れないため）
 - 履歴は**ドキュメント単位**であり、シートごとではない（要件 9.5）。`macro-runtime` の実行が複数シートに跨るため
+- **所有者は適応層のウィンドウの保持である**（`src-tauri/src/commands/grid.rs` の
+  `SheetEntry`。10.2 が決めた）。`GridSession` は履歴を所有せず、文書を触る 3 つの経路
+  （`apply` / `undo` / `redo`）が `&mut UndoStack` を**受け取る**。理由は要件 9.5 と
+  `GridSession` の寿命である — セッションは開いたシートの計画を固定して持ち、**シートごとに
+  作り直される**ため、履歴を持たせると**シートを切り替えた瞬間に文書の履歴が消える**
+- したがって**引き継ぎと破棄の規則は所有者の側にある**: 同じ文書のシートの切り替えでは
+  置き換えを越えて引き継ぎ、**文書が差し替わった**（新規・開く・破棄）ら捨てる。判定は
+  「保持しているシートが差し替え後の文書に無い」であり、`grid_find_violation` が使う照合と
+  同じ 1 つの経路に揃えてある（規則の本体は下の「GridCommands」の Implementation Notes）
+- **古い履歴が差し替え後の文書へ適用される経路は残らない**: 文書を触る 3 つの経路が最初に
+  `GridSession` の側でシートを照合するため、保持しているシートが無ければ
+  `GridError::SchemaUnusable` で止まる（履歴の材料が名乗るシートは
+  `EditApply::apply_history` も照合する — 二重に閉じている）
+- **1 歩が表示しているシートと別のシートへ落ちたときの規則**（10.2 が閉じた）: 履歴が
+  ドキュメント単位である以上（要件 9.5）、取り消し・やり直しの 1 歩は**表示していない
+  シート**を指しうる。適用先は結果が名乗る（`EditOutcome.sheet`）ので、呼び出し側はそれで
+  見分けられる。**表示中のシートの中身は 1 つも変わっていない**ため、その表示の状態
+  （違反の索引・順序）は 1 つも触らない — 触れば別のシートの報告で据え直すことになり、
+  **表示中のシートの違反が黙って消える**（10.2 のレビューが実測した欠陥。実装は
+  `GridSession::settle` が `EditOutcome.sheet != self.sheet` で早期に返る）。層ごとの答えは
+  次の 3 つである:
+
+  | 層 | 別のシートへ落ちた 1 歩でどうするか |
+  |---|---|
+  | ドメイン（`GridSession::settle`） | 索引（`close_total` / `apply_report_delta` / `install` / `rekey`）にも順序の導出（行数の構造判定）にも触れない。`violation_total` と `find_violation` は**表示中のシートの答えのまま** |
+  | 適応層（`grid_history` の応答） | 応答は**表示中のシートを記述する**: `violation_total` は索引の値（表示中のシートの数）、`affected` / `coercions` / `violations` / `revalidated_columns` は**空**（別のシートの行・位置であり、画面は印と巡回と現在位置の移動に使う）、`row_count` は**表示中のシートの行数**（画面はこれを表示中の表の行数として採用する） |
+  | 画面（**既存の経路のまま**。変更しない） | 現在位置を動かさず（`affected` が空である）、窓の記憶も作り直さない（`WindowCache.clear` は `affected` が空でなければ呼ばれる）。違反のバーの数は応答の `violation_total`（＝表示中のシートの数）で置き換わり、**その数は変わらない** |
+
+  **限界（申し送り）**: ① 別のシートを**参照する**列（`Expected::RowsOf`）を持つときは、
+  参照先の行が変わることで表示中のシートの違反も変わりうるが、本規則はそれを反映しない
+  （別のシートの材料で据え直すより、反映しないほうが害が小さい）。② **合成
+  （`HistoryCommand::Composite`）は、すべての部分が表示中のシートを名乗るときだけ適用され、
+  そうでなければ何も書かずに拒まれる** — `EditApply::ensure_parts_share_target` が
+  `EditApply::apply_parts` の**適用の前**に照合し、食い違う部分があれば
+  `GridError::SchemaUnusable`（その部分が名乗るシート）を返す。拒まないと、材料が名乗る
+  シートへ書ける前半（`RestoreValues`）だけが届き、シートを運ばない後半
+  （`Edit(RemoveRows)`）が表示中のシートで `UnknownRow` に当たって止まる — 行の補充を伴う
+  貼り付けの逆命令がまさにその形であり、**台帳が 5 行のまま値だけ戻る**（10.2 の 2 度目の
+  レビューが実測した欠陥。10.2 が履歴をシートを跨がせたことで新たに到達可能になった）。
+  シートを名乗らない**単独の**命令（`HistoryCommand::Edit`。逆方向が `EditCommand` で表せる
+  もの）は**表示中のシート**へ書く — その材料の行識別子は元のシートにしか無いため、別の
+  シートで適用すると `UnknownRow` で止まり **1 つも書かない**（黙って別の行へ書く経路は
+  無い）。③ 世代は「適用が何かを書いた」ときに
+  進む（`GridSession::apply` / `undo` / `redo` の規則）— 別のシートへ落ちた 1 歩でも進むが、
+  表示中のシートの窓の内容は変わらないため、画面は同じ内容を取り直すだけである
 - 上限を持ち、超えたら古い側から捨てる（要件 9.6）。**上限 0 は「1 件も保持しない」**
 - **公開する登録口は `push` 1 つ**に絞る。乗る側が履歴の内部構造に触れない
 - 取り消し・やり直しの**適用**は `UndoRedo`（履歴と `EditApply` を借用で束ねた口）が担う。
@@ -692,9 +783,49 @@ impl<'a> UndoRedo<'a> {
   シートを選ぶ手段は本機能の外にあり（Out of Boundary）、境界を越える識別子は文字列である
   （64 ビット整数を出さない規約）。`grid_open_sheet` を同じウィンドウで 2 度呼ぶと**前の保持を
   置き換える**（シートの切り替えである）
+- **取り消し履歴はウィンドウの保持が所有し、置き換えを越えて引き継ぐ**（要件 9.5。10.2 が
+  直した）。`GridSession` は履歴を所有しない — セッションは開いたシートの計画を固定して持つ
+  ため**シートごとに作り直され**、持たせると**シートを 1 度切り替えただけで文書の履歴が消える**
+  （10.2 の直前の実装がまさにその形であり、`switching_sheets_keeps_the_history_of_the_document`
+  が落ちる）。したがって `grid_open_sheet` の本体は、置き換えの前に表示していたシートの識別子を
+  控え、**それが差し替え後の文書にも在るとき**だけ前の保持から履歴を**持ち出して**次の保持へ
+  渡す（無いときは空の履歴を作る）。判定に使う照合は `grid_find_violation` の
+  「保持しているシートが文書に無い」と同じ 1 つであり、シートの識別子は発行のたびに変わるため
+  新しい文書が同じ識別子を持つことは無い（＝「文書が差し替わった」の判定として使える）。
+  `grid_apply_edit` / `grid_history` は保持の履歴を `GridSession::apply` / `undo` / `redo` へ
+  `&mut UndoStack` として**貸す**（セッションは所有しない）。**古い履歴が差し替え後の文書へ
+  届かない**ことは 2 重に閉じている — 文書を触る 3 つの経路は最初に `GridSession` の側で
+  保持しているシートを照合し、履歴の材料が名乗るシートは `EditApply::apply_history` も照合する。
+
+  **履歴の持ち出しは保持のロックの下で行い、据え付け（`GridSessions::store`）まで握る**
+  （10.2 のレビューの Suggestion）。持ち出しと据え付けの間に同じウィンドウの `grid_open_sheet`
+  が割り込むと、その経路も「前の保持」から履歴を持ち出し、**先に据え付けた側の履歴が表から
+  消える**（持ち出した跡は空の履歴で埋めるためである）。ロックを握れば 2 つ目は表の項目が
+  入れ替わるまで待ち、**引き継いだ履歴の側**（いま表にある保持）から持ち出す。ロックの順序は
+  既存のままである（保持 → 文書。`SheetEntry` のロックは文書のロックより先に取る）。
+
+  **同じウィンドウの 2 つの `grid_open_sheet` が並行して走ることは前提にしない。**画面は開く
+  要求を 1 つずつ待って送る（開いたあとに表示の指定を送る。`./GridClient` の `openSheet`）。
+  この前提が破れたときに失われうるのは 1 点だけである — **先に表を読んだ側が持つ `Arc` が
+  古い保持を指すこと**（ロックは古い保持を守るため、2 つ目の持ち出しが空の履歴を引き継ぎうる）。
+  前提を型で保証する仕組みは本機能に無い ── 保証が要るなら、ウィンドウごとのコマンドの直列化を
+  `GridSessions` に足す（本ラウンドは**規則として記録する**方を選んだ）。
+
+  **限界（申し送り）**: 判定は「保持していたシートの識別子が差し替え後の文書に在るか」であり、
+  シートの識別子は**保存された文書のもの**である。したがって**同じファイルを開き直した**場合は
+  識別子が一致し、**履歴は引き継がれる**（文書の差し替えであるのに捨てない）。規則としては
+  受け入れる — 履歴の材料は行の識別子と値であり、その行が新しい文書に無ければ `edit` 層が
+  `UnknownRow` で止め（**黙って別の行へ書かない**）、在ればその行の直前の値へ戻すという
+  意味でそのまま妥当だからである。**同じファイルかどうか**を判定する材料（文書の同一性）は
+  境界にも `document-session` にも無いため、区別が要るなら `document-session` が文書の
+  世代を出す必要がある — 本ラウンドでは直さない（申し送り）。
 - **`grid_history` の応答は `grid_apply_edit` と同じ型である**（設計の API Contract の
   とおり）。「進める履歴が無い」ことは `outcome: null` という**成功腕の結果**であり、封筒の
-  失敗腕へは載せない（利用者の操作が失敗したことではない）
+  失敗腕へは載せない（利用者の操作が失敗したことではない）。**ただし 1 歩が表示中のシートと
+  別のシートへ落ちたときは、応答は表示中のシートを記述する**（要件 9.5）—
+  `affected` / `coercions` / `violations` / `revalidated_columns` は空（別のシートの行・
+  位置である）、`violation_total` は索引が持つ表示中のシートの数、`row_count` は**表示中の
+  シートの行数**である。規則と層ごとの答えは「UndoStack」の同項目にある
 - **違反の理由は `GridViolation`（位置と理由の対）にまとめる。** 位置だけを `location`、
   理由だけを `reason` という 2 つの `null` 許容の欄に分けると、「位置はあるが理由が無い」という
   状態が型の上で表現できてしまう。理由の文言は**適応層が組み立てる**（`ViolationReason` の
@@ -1678,7 +1809,7 @@ DOM へ出るか」と、要素が持つ受け口がどの操作を組み立て�
 | 論点 | 決定 | 根拠 |
 |---|---|---|
 | 2 つの操作の宛先 | `GridClient.readHistory(direction)` 1 つ（`grid_history`。向きは生成物の閉じた列挙 `GridHistoryDirection`） | 取り消しとやり直しは**別の利用者の指示**だが経路は 1 つである（`GridHistoryRequest` が向きを運ぶ）。口を 2 つ作れば、片方だけが後始末（`clear` と移動）を行う日が来る |
-| 適用のあとの作り直し（要件 1.7） | `EditOutcome.affected` が空でなければ **`WindowCache.clear(row_count)`**（応答の行数をそのまま渡す） | 取り消しは**行数を変えうる**（行の追加・削除・複製・貼り付けの補充の逆命令）。`invalidate` では、削除された行より後ろの窓が**別の行を指したまま残る**（`WindowCache.clear` の doc。design.md「行数が変わる編集は画面が `clear` を呼ぶ」が取り消しを名指ししている） |
+| 適用のあとの作り直し（要件 1.7） | `EditOutcome.affected` が空でなければ **`WindowCache.clear(row_count)`**（応答の行数をそのまま渡す） | 取り消しは**行数を変えうる**（行の追加・削除・複製・貼り付けの補充の逆命令）。`invalidate` では、削除された行より後ろの窓が**別の行を指したまま残る**（`WindowCache.clear` の doc。design.md「行数が変わる編集は画面が `clear` を呼ぶ」が取り消しを名指ししている）。**表示中のシートと別のシートへ落ちた 1 歩では呼ばれない** — 応答の `affected` が空であり（10.2）、表示中のシートは変わっていない（規則は「UndoStack」の同項目） |
 | **移動先の解決**（要件 9.8） | **作り直しの前に**、`WindowCache.ordinalOf` で `affected` の行の**表示の序数**を引く。引けた最初の 1 つへ現在位置を移し、選択をその 1 セルへ畳む | 序数と行の対応を持つのは**窓の記憶だけ**である（境界は行の識別子しか運ばない）。`invalidate` / `clear` は**影響を受けた行の窓そのものを捨てる**ので、**順序が意味を持つ** — 後に引けば答えは必ず `null` になる（`history.test.ts` が「捨てた後に引く偽の記憶」で落とす） |
 | 変更された箇所が見えること（要件 9.8） | 移した選択は**既存の追随**（要件 2.4）が `RendererHandle.setSelection` / `scrollTo` へ渡す（8.4 の巡回と同じ道） | 9.8 の「見える状態」は**追随が唯一の実装**である — 経路をもう 1 つ作れば、`scrollTo` へ何を渡すかが 2 箇所に現れる |
 | 序数が引けないとき | **動かさない**（`null`）。作り直しと違反の引き直しは行う | 行の識別子から序数への写像は**境界に無い**（`grid_history` は行の識別子しか返さない）。推測した序数へ動かすと**無関係な行**を名乗る（要件 8.6 が禁じた推測の行版）。**窓の記憶が保っていない行**がこれに当たる（実測では**行の追加のやり直し**である — 下の申し送り） |
@@ -1689,7 +1820,8 @@ DOM へ出るか」と、要素が持つ受け口がどの操作を組み立て�
 **同じ履歴であること（8.9 の受け入れ）**: 3 種の操作（セルの編集・行の操作・貼り付け）は
 **どれも `grid_apply_edit`** へ行き、取り消しとやり直しは**どれも同じ `grid_history`** へ行く。
 画面は**操作の種別を 1 つも持たない** — 種別で分ければ、5 つ目の操作（数式の再計算・マクロの
-実行。要件 9.7）が来た日に分岐が増える。履歴はドメインの `UndoStack` 1 つであり（4.1 / 4.2）、
+実行。要件 9.7）が来た日に分岐が増える。履歴はドメインの `UndoStack` 1 つであり（4.1 / 4.2。
+**所有者はウィンドウの保持である** — 10.2 が `GridSession` から降ろした）、
 画面が同じ遷移（`gridScreenHistorySettled` ＝ 8.6 の行の操作と同じ後始末）を通ることで、
 **3 種の往復が同じ 1 つの履歴に乗っている**ことが画面の側でも観測できる（`GridScreen.test.ts`
 の「同じ履歴の往復」）。

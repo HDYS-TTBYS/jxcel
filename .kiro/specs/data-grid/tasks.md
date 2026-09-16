@@ -352,7 +352,7 @@
   - _Requirements: 1.1, 5.1, 5.3_
   - _Boundary: crates/app-shell/src/ipc/grid.rs, src/ipc/bindings.ts, src-tauri/src/commands/grid.rs, src/features/grid/, crates/data-grid/src/api.rs, .kiro/specs/data-grid/design.md_
 
-- [ ] 10.2 履歴をドキュメント単位へ移す
+- [x] 10.2 履歴をドキュメント単位へ移す
   - `UndoStack` の所有者を `GridSession` から降ろし、**同じウィンドウでシートを切り替えても履歴が失われない**ようにする（要件 9.5。いまは `answer_open` がセッションごと作り直すため消える）
   - `GridSession` は履歴を所有せず、`apply` / `undo` / `redo` が**可変参照で受け取る**（`set_view`・`encode_window` は履歴に触れない）
   - **文書が差し替わったときは履歴を捨てる**（新規・開く・破棄）。判定は既存の経路（保持しているシートが文書に無い）に揃え、**その状態で古い履歴を決して適用しない**
@@ -360,7 +360,7 @@
   - **検査**: 文書を差し替えたあと、履歴が空であり、古い命令が新しい文書へ適用されない
   - design.md の「`UndoStack`」「履歴はドキュメント単位」の記述を差し替え、`formula-engine` / `macro-runtime` の再検証トリガとして記録する
   - _Requirements: 9.5, 9.6, 9.7_
-  - _Boundary: crates/data-grid/src/api.rs, crates/data-grid/src/history/mod.rs, crates/data-grid/tests/, src-tauri/src/commands/grid.rs, .kiro/specs/data-grid/design.md_
+  - _Boundary: crates/data-grid/src/api.rs, crates/data-grid/src/edit/, crates/data-grid/src/history/mod.rs, crates/data-grid/src/lib.rs, crates/data-grid/tests/, src-tauri/src/commands/grid.rs, .kiro/specs/data-grid/design.md_
 
 - [ ] 10.3 境界に列の材料（選択肢・参照先・入れ子の宣言）を足す
   - `ColumnDescriptor` に、その列の**宣言**から導ける材料を足す: ①選択肢を持つ型の値と名の一覧（`Enum`）②入れ子の型の内側のフィールドの宣言（名・型の札・内側の位置。**展開していない列でも読めること**）③参照の型の参照先のシートの名

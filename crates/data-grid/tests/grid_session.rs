@@ -68,15 +68,16 @@ use common::sample::{sample, Sample, SampleEditParts, SampleOptions};
 use data_grid::{
     decode_window, derive_layout, display_text, CellAddress, ColumnIndex, EditCommand, EditOutcome,
     EditSchemaQuery, ExpansionState, FilterSpec, Generation, GridError, GridSession, RowOrder,
-    RowOrdinal, RowSpan, SchemaEngineQuery, SearchDirection, SortKey, ViewSpec, ViewSummary,
-    WINDOW_FORMAT_VERSION,
+    RowOrdinal, RowSpan, SchemaEngineQuery, SearchDirection, SortKey, UndoStack, ViewSpec,
+    ViewSummary, DEFAULT_UNDO_LIMIT, WINDOW_FORMAT_VERSION,
 };
 use document_format::{
     to_json_bytes, CellValue, Document, NestedValue, Row, RowId, SchemaPart, SheetId,
 };
 use schema_engine::{
-    validate_sheet, CompiledSchema, EditVerdict, SchemaEngineApi, SheetReport, TypeRegistry,
-    ValidationOptions,
+    schema_to_text, validate_sheet, ColumnDecl, CompiledSchema, Constraints, DeclaredKind,
+    EditVerdict, Schema, SchemaEngine, SchemaEngineApi, SheetReport, TypeDecl, TypeKind,
+    TypeRegistry, ValidationOptions,
 };
 
 // ---------------------------------------------------------------------------
@@ -307,6 +308,8 @@ struct Fixture {
     plan: CompiledSchema,
     /// 縫い目を数える操作口。
     session: GridSession,
+    /// 取り消し履歴（**所有者は呼び出し側である** — 要件 9.5。セッションは所有しない）。
+    history: UndoStack,
     /// 縫い目の記録。
     calls: Arc<Mutex<Vec<QueryCall>>>,
 }
@@ -333,6 +336,8 @@ impl Fixture {
             premises,
             plan,
             session,
+            // 履歴は**呼び出し側が作る**（セッションは所有しない。要件 9.5）。
+            history: UndoStack::new(DEFAULT_UNDO_LIMIT),
             calls,
         }
     }
@@ -373,40 +378,69 @@ impl Fixture {
 
     /// 編集命令を適用する（`session` と `document` を同時に借りるため分解する）。
     fn apply(&mut self, command: EditCommand) -> EditOutcome {
-        let Self { session, parts, .. } = self;
+        let Self {
+            session,
+            parts,
+            history,
+            ..
+        } = self;
         session
-            .apply(&mut parts.document, command)
+            .apply(&mut parts.document, history, command)
             .expect("編集は適用できる")
     }
 
     /// 取り消しを適用する（取り消せる操作があることを前提にする）。
     fn undo(&mut self) -> EditOutcome {
-        let Self { session, parts, .. } = self;
+        let Self {
+            session,
+            parts,
+            history,
+            ..
+        } = self;
         session
-            .undo(&mut parts.document)
+            .undo(&mut parts.document, history)
             .expect("取り消しは適用できる")
             .expect("取り消せる操作がある")
     }
 
     /// やり直しを適用する（やり直せる操作があることを前提にする）。
     fn redo(&mut self) -> EditOutcome {
-        let Self { session, parts, .. } = self;
+        let Self {
+            session,
+            parts,
+            history,
+            ..
+        } = self;
         session
-            .redo(&mut parts.document)
+            .redo(&mut parts.document, history)
             .expect("やり直しは適用できる")
             .expect("やり直せる操作がある")
     }
 
     /// 取り消しの生の結果（履歴の端で `None` を観測する検査のため）。
     fn try_undo(&mut self) -> Option<EditOutcome> {
-        let Self { session, parts, .. } = self;
-        session.undo(&mut parts.document).expect("取り消せる")
+        let Self {
+            session,
+            parts,
+            history,
+            ..
+        } = self;
+        session
+            .undo(&mut parts.document, history)
+            .expect("取り消せる")
     }
 
     /// やり直しの生の結果（履歴の端で `None` を観測する検査のため）。
     fn try_redo(&mut self) -> Option<EditOutcome> {
-        let Self { session, parts, .. } = self;
-        session.redo(&mut parts.document).expect("やり直せる")
+        let Self {
+            session,
+            parts,
+            history,
+            ..
+        } = self;
+        session
+            .redo(&mut parts.document, history)
+            .expect("やり直せる")
     }
 
     fn sheet(&self) -> SheetId {
@@ -1551,6 +1585,11 @@ fn the_session_never_owns_the_document() {
         "前提: 編集はセルの値を実際に変える（前後を区別して観測できる）"
     );
 
+    // 取り消し履歴も所有しない（要件 9.5。design.md「UndoStack（拡張点の所有者）」）—
+    // **呼び出し側が持ち回る**。セッションを開き直しても同じ履歴の続きを進められることが、
+    // 「履歴がセッションの持ち物ではない」ことの観測である。
+    let mut history = UndoStack::new(DEFAULT_UNDO_LIMIT);
+
     {
         // 文書を**所有せずに**開き、すべての文書を触る呼び出しを参照で行う。
         let mut session = GridSession::open(sheet, plan.clone()).expect("セッションを開ける");
@@ -1565,6 +1604,7 @@ fn the_session_never_owns_the_document() {
         let applied = session
             .apply(
                 &mut parts.document,
+                &mut history,
                 EditCommand::SetCells {
                     cells: vec![(
                         CellAddress::new(edited, ColumnIndex::new(column)),
@@ -1583,7 +1623,7 @@ fn the_session_never_owns_the_document() {
         );
 
         let undone = session
-            .undo(&mut parts.document)
+            .undo(&mut parts.document, &mut history)
             .expect("取り消せる")
             .expect("取り消せる操作がある");
         assert_eq!(vec![edited], undone.affected, "取り消した操作の行を運ぶ");
@@ -1605,6 +1645,29 @@ fn the_session_never_owns_the_document() {
         value_of(&parts.document, sheet, edited, column),
         "文書はセッションを落とした後もそのまま使える"
     );
+
+    {
+        // **新しいセッション**（同じシート・同じ計画）へ同じ履歴を渡すと、前のセッションが
+        // 積んだ対の続きを進められる（取り消した編集のやり直し）。
+        let mut next = GridSession::open(sheet, plan.clone()).expect("セッションを開ける");
+        // やり直しの前に、**履歴が前のセッションの持ち物でないこと**を示す材料として、
+        // 取り消し済みの対が残っていることを深さで見る（取り消しは件数を減らさない）。
+        assert_eq!(1, history.depth(), "履歴の対はセッションの外に残っている");
+        let redone = next
+            .redo(&mut parts.document, &mut history)
+            .expect("やり直せる")
+            .expect("やり直せる操作がある");
+        assert_eq!(
+            vec![edited],
+            redone.affected,
+            "新しいセッションが前のセッションの履歴を進める"
+        );
+        assert_eq!(
+            CellValue::Int(7),
+            value_of(&parts.document, sheet, edited, column),
+            "やり直しは文書へ届く"
+        );
+    }
 }
 
 /// 同じ入力からは同じ観測結果が出る（決定性）。
@@ -2000,4 +2063,527 @@ fn history_operations_advance_the_generation() {
         fixture.session.generation(),
         "何も書かない命令は世代を進めない"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 履歴の 1 歩が**別のシート**へ落ちたとき（10.2 の差し戻し。要件 4.3、9.5）
+// ---------------------------------------------------------------------------
+
+/// 2 シートの標本の宣言: 品番（`text`・必須）と数量（`int`・0〜100）。
+///
+/// 数量の範囲を狭くしてあるのは、範囲外の値（`999`）を**値を書くだけで**置けるようにする
+/// ためである — 編集を 1 度も適用せずに違反の索引を作れることが、次の 2 つの検査の前提である。
+fn two_sheet_declaration() -> SchemaPart {
+    let schema = Schema {
+        columns: vec![
+            ColumnDecl {
+                name: "品番".into(),
+                ty: TypeDecl::Kind {
+                    kind: DeclaredKind::Known(TypeKind::Text),
+                    constraints: Constraints::default(),
+                },
+                required: true,
+                unique: false,
+                default: None,
+                description: None,
+            },
+            ColumnDecl {
+                name: "数量".into(),
+                ty: TypeDecl::Kind {
+                    kind: DeclaredKind::Known(TypeKind::Int),
+                    constraints: Constraints {
+                        min: Some(CellValue::Int(0)),
+                        max: Some(CellValue::Int(100)),
+                        ..Constraints::default()
+                    },
+                },
+                required: false,
+                unique: false,
+                default: None,
+                description: None,
+            },
+        ],
+    };
+    let root = schema_to_text(&schema).expect("宣言は正準出力できる");
+    SchemaPart::parse(&format!(r#"{{"root":{root},"types":[]}}"#)).expect("宣言は解析できる")
+}
+
+/// 2 つのシート（`台帳` と `補助`）を持つ標本。どちらも同じ宣言・同じ列数・同じ 3 行である。
+///
+/// 数量に範囲外の値を置くと**そのシートだけが違反を持つ**（列 1 に `999` を 1 つ置けば
+/// ちょうど 1 件）。
+fn two_sheet_sample(
+    ledger_quantities: [i64; 3],
+    supplement_quantities: [i64; 3],
+) -> (Document, SheetId, SheetId, RowId) {
+    let mut document = Document::new();
+    let ledger = document.add_sheet("台帳");
+    let supplement = document.add_sheet("補助");
+    let mut ledger_row = None;
+    for (sheet, quantities) in [
+        (ledger, ledger_quantities),
+        (supplement, supplement_quantities),
+    ] {
+        document
+            .set_sheet_columns(sheet, vec!["品番".to_owned(), "数量".to_owned()])
+            .expect("標本のシートは実在する");
+        document
+            .set_root_schema(sheet, two_sheet_declaration())
+            .expect("標本のシートは実在する");
+        for (index, label) in ["A", "B", "C"].into_iter().enumerate() {
+            let row = document.add_row(sheet).expect("標本のシートは実在する");
+            document
+                .set_row_values(
+                    sheet,
+                    row,
+                    vec![
+                        CellValue::Text(label.to_owned()),
+                        CellValue::Int(quantities[index]),
+                    ],
+                )
+                .expect("標本の行は実在する");
+            if sheet == ledger && index == 0 {
+                ledger_row = Some(row);
+            }
+        }
+    }
+    let ledger_row = ledger_row.expect("標本の台帳には先頭の行がある");
+    (document, ledger, supplement, ledger_row)
+}
+
+/// **表示しているシートと履歴の 1 歩が食い違う**状況（表示は `補助`、履歴は `台帳` の編集）。
+///
+/// 履歴はドキュメント単位であるため（要件 9.5）、別のシートの操作を取り消す経路が現実に
+/// ある。編集そのものは**本番と同じ経路**（`GridSession::apply`）で作る — 履歴へ積まれる
+/// 逆命令が本物であることが、この検査の要点である。
+struct OtherSheetStep {
+    /// 標本の文書。
+    document: Document,
+    /// 履歴の 1 歩が落ちるシート（`台帳`）。
+    ledger: SheetId,
+    /// 編集した行（`台帳` の先頭の行）。
+    row: RowId,
+    /// **表示している**シートの操作口（`補助`）。
+    session: GridSession,
+    /// 呼び出し側が持つ履歴（要件 9.5。セッションは所有しない）。
+    history: UndoStack,
+}
+
+impl OtherSheetStep {
+    fn new(ledger_quantities: [i64; 3], supplement_quantities: [i64; 3]) -> Self {
+        let (mut document, ledger, supplement, row) =
+            two_sheet_sample(ledger_quantities, supplement_quantities);
+        let plan = {
+            let sheet = document
+                .sheet_by_id(supplement)
+                .expect("標本の補助は文書にある");
+            SchemaEngine::new()
+                .compile(sheet, &TypeRegistry::new())
+                .expect("標本の宣言は計画へ落ちる")
+        };
+        // 台帳を編集し、その逆命令を履歴へ積む（本番と同じ経路である）。
+        let mut ledger_session =
+            GridSession::open(ledger, plan.clone()).expect("セッションを開ける");
+        let mut history = UndoStack::new(DEFAULT_UNDO_LIMIT);
+        ledger_session
+            .apply(
+                &mut document,
+                &mut history,
+                EditCommand::SetCells {
+                    cells: vec![(CellAddress::new(row, ColumnIndex::new(1)), "9".to_owned())],
+                },
+            )
+            .expect("台帳の編集は適用できる");
+        // 表示は補助のまま（索引を組み立てる）。
+        let mut session = GridSession::open(supplement, plan).expect("セッションを開ける");
+        session
+            .set_view(&document, no_view())
+            .expect("表示を指定できる");
+        Self {
+            document,
+            ledger,
+            row,
+            session,
+            history,
+        }
+    }
+
+    /// 取り消しを 1 つ進める（**履歴の 1 歩が台帳へ落ちる**）。
+    fn undo(&mut self) -> EditOutcome {
+        let Self {
+            document,
+            session,
+            history,
+            ..
+        } = self;
+        session
+            .undo(document, history)
+            .expect("取り消しは適用できる")
+            .expect("取り消せる操作が 1 つある")
+    }
+
+    /// 台帳の編集したセルのいまの値。
+    fn ledger_value(&self) -> CellValue {
+        self.document
+            .sheet_by_id(self.ledger)
+            .expect("台帳は文書にある")
+            .rows()
+            .iter()
+            .find(|found| found.id() == self.row)
+            .expect("編集した行は台帳にある")
+            .values()[1]
+            .clone()
+    }
+}
+
+/// **履歴の 1 歩が別のシートへ落ちても、表示中のシートの索引は動かない**（要件 4.3、9.5）。
+///
+/// 適用先が表示中のシートと違うとき、その適用が運ぶ違反は**別のシートのもの**である
+/// （`EditOutcome::sheet` が適用先を名乗る）。表示中のシートの中身は 1 つも変わっていないため、
+/// その索引（総数・据え付け・鍵）はそのままで正しく、触れば**表示中のシートの違反が黙って
+/// 消える**（10.2 のレビューが実測した欠陥）。
+#[test]
+fn a_history_step_naming_another_sheet_leaves_the_displayed_index_alone() {
+    // 前提: 台帳（編集するシート）は違反 0 件、補助（表示するシート）は違反 1 件。
+    let mut step = OtherSheetStep::new([1, 2, 3], [999, 2, 3]);
+    let total_before = step.session.violation_total();
+    let found_before = step
+        .session
+        .find_violation(RowOrdinal::new(0), SearchDirection::Forward);
+    assert_eq!(1, total_before, "前提: 表示中のシートは違反を 1 件持つ");
+    assert!(found_before.is_some(), "前提: その違反は探索で見つかる");
+
+    let outcome = step.undo();
+
+    assert_eq!(
+        step.ledger, outcome.sheet,
+        "結果は適用先（履歴が名乗ったシート）を名乗る"
+    );
+    assert_eq!(
+        CellValue::Int(1),
+        step.ledger_value(),
+        "取り消しは台帳の編集を戻す"
+    );
+    assert_eq!(
+        total_before,
+        step.session.violation_total(),
+        "表示中のシートの違反の総数は動かない"
+    );
+    assert_eq!(
+        found_before,
+        step.session
+            .find_violation(RowOrdinal::new(0), SearchDirection::Forward),
+        "表示中のシートの違反の探索も動かない"
+    );
+}
+
+/// **逆向きでも数の幽霊を作らない**（表示は違反 0 件、履歴の 1 歩は違反 1 件のシートへ落ちる）。
+///
+/// 台帳の復元は**全列を再検証**するため、その報告（違反 1 件）を表示中のシートの索引へ
+/// 据えれば、表示には 1 件の違反があることになる（探索は 1 件も返さない）。数の源は
+/// **索引が載せているシートの違反**でなければならない。
+#[test]
+fn a_history_step_naming_another_sheet_does_not_add_violations_to_the_displayed_sheet() {
+    // 前提: 台帳（編集するシート）は違反 1 件、補助（表示するシート）は違反 0 件。
+    let mut step = OtherSheetStep::new([999, 2, 3], [1, 2, 3]);
+    assert_eq!(
+        0,
+        step.session.violation_total(),
+        "前提: 表示中のシートは違反を 1 件も持たない"
+    );
+    assert_eq!(
+        CellValue::Int(9),
+        step.ledger_value(),
+        "前提: 編集は台帳の値を変えている"
+    );
+
+    let outcome = step.undo();
+
+    assert_eq!(
+        step.ledger, outcome.sheet,
+        "結果は適用先（履歴が名乗ったシート）を名乗る"
+    );
+    assert_eq!(
+        1, outcome.violation_total,
+        "前提: 台帳の復元は違反 1 件を報告する"
+    );
+    assert_eq!(
+        0,
+        step.session.violation_total(),
+        "別のシートの違反が表示中のシートの総数へ混ざらない"
+    );
+    assert!(
+        step.session
+            .find_violation(RowOrdinal::new(0), SearchDirection::Forward)
+            .is_none(),
+        "探索も幽霊の違反を返さない"
+    );
+    assert_eq!(
+        CellValue::Int(999),
+        step.ledger_value(),
+        "取り消しは台帳の編集を戻す"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// **合成**された履歴の 1 歩（行の補充を伴う貼り付け）を別のシートで適用する
+// （10.2 の 2 度目の差し戻し。要件 7.4、9.2）
+// ---------------------------------------------------------------------------
+
+/// 貼り付ける表形式テキスト（**5 行**。台帳の 3 行では足りないため行が補充される。要件 7.4）。
+const REPLENISHING_PASTE: &str = "7\n8\n9\n10\n11";
+
+/// **表示しているシートと、合成された履歴の 1 歩が食い違う**状況を作る。
+///
+/// 台帳へ 5 行の矩形を貼り付けると、3 行しか無いため**2 行が補充される**（要件 7.4）。その
+/// 逆命令は「覆ったセルの値を戻す（`RestoreValues`。材料が**台帳**を名乗る）」と「補充した行を
+/// 取り除く（`Edit(RemoveRows)`。シートを運ばず、**適用の対象シート**＝渡されたセッションの
+/// シートを見る）」の**合成**である（`edit` 層の `paste_pair`）。
+///
+/// 貼り付けは**本番と同じ経路**（[`GridSession::apply`]）で適用する — 履歴へ積まれる合成が
+/// 本物であることが、この検査の要点である。
+struct CompositeOtherSheetStep {
+    /// 標本の文書。
+    document: Document,
+    /// 履歴の 1 歩が落ちるシート（`台帳`）。
+    ledger: SheetId,
+    /// 台帳を表示したセッション（貼り付けと、向きを確かめるための取り消しに使う）。
+    ledger_session: GridSession,
+    /// **表示している**シート（`補助`）のセッション。
+    supplement_session: GridSession,
+    /// 呼び出し側が持つ履歴（要件 9.5。セッションは所有しない）。
+    history: UndoStack,
+}
+
+impl CompositeOtherSheetStep {
+    fn new() -> Self {
+        let (mut document, ledger, supplement, _) = two_sheet_sample([1, 2, 3], [1, 2, 3]);
+        let plan = {
+            let sheet = document
+                .sheet_by_id(supplement)
+                .expect("標本の補助は文書にある");
+            SchemaEngine::new()
+                .compile(sheet, &TypeRegistry::new())
+                .expect("標本の宣言は計画へ落ちる")
+        };
+        let mut history = UndoStack::new(DEFAULT_UNDO_LIMIT);
+        let mut ledger_session =
+            GridSession::open(ledger, plan.clone()).expect("セッションを開ける");
+        ledger_session
+            .set_view(&document, no_view())
+            .expect("表示を指定できる");
+        // 表示の並び（台帳の 3 行）を識別子で取り、**5 行**の矩形を数量の列へ貼る（2 行が補充される）。
+        let displayed: Vec<RowId> = document
+            .sheet_by_id(ledger)
+            .expect("台帳は文書にある")
+            .rows()
+            .iter()
+            .map(|row| row.id())
+            .collect();
+        ledger_session
+            .apply(
+                &mut document,
+                &mut history,
+                EditCommand::PasteRange {
+                    anchor: CellAddress::new(displayed[0], ColumnIndex::new(1)),
+                    rows: displayed,
+                    text: REPLENISHING_PASTE.to_owned(),
+                },
+            )
+            .expect("貼り付けは適用できる");
+        let mut supplement_session =
+            GridSession::open(supplement, plan).expect("セッションを開ける");
+        supplement_session
+            .set_view(&document, no_view())
+            .expect("表示を指定できる");
+        Self {
+            document,
+            ledger,
+            ledger_session,
+            supplement_session,
+            history,
+        }
+    }
+
+    /// 台帳の数量の並び（表示ではなく**文書**を見る）。
+    fn ledger_quantities(&self) -> Vec<CellValue> {
+        self.document
+            .sheet_by_id(self.ledger)
+            .expect("台帳は文書にある")
+            .rows()
+            .iter()
+            .map(|row| row.values()[1].clone())
+            .collect()
+    }
+
+    /// 台帳の行数。
+    fn ledger_row_count(&self) -> usize {
+        self.document
+            .sheet_by_id(self.ledger)
+            .expect("台帳は文書にある")
+            .rows()
+            .len()
+    }
+
+    /// **補助を見たまま**取り消す（履歴の 1 歩は台帳の合成を指す）。
+    fn undo_on_supplement(&mut self) -> Result<Option<EditOutcome>, GridError> {
+        self.supplement_session
+            .undo(&mut self.document, &mut self.history)
+    }
+
+    /// 台帳を表示したまま取り消す（**同じ 1 歩**が成立する向き）。
+    fn undo_on_ledger(&mut self) -> Result<Option<EditOutcome>, GridError> {
+        self.ledger_session
+            .undo(&mut self.document, &mut self.history)
+    }
+
+    /// **補助を見たまま**やり直す。
+    fn redo_on_supplement(&mut self) -> Result<Option<EditOutcome>, GridError> {
+        self.supplement_session
+            .redo(&mut self.document, &mut self.history)
+    }
+
+    /// 台帳を表示したままやり直す。
+    fn redo_on_ledger(&mut self) -> Result<Option<EditOutcome>, GridError> {
+        self.ledger_session
+            .redo(&mut self.document, &mut self.history)
+    }
+}
+
+/// **合成の 1 歩は、表示中のシートを名乗らない部品を含むとき、何も書かずに拒まれる**（取り消し。
+/// 要件 7.4、9.2。design.md「UndoStack」の限界 (2)）。
+///
+/// 合成の部品はどれも**組まれた時点の対象シート**（台帳）を指す。表示が補助のまま適用すると、
+/// 前半（値の復元。材料が台帳を名乗る）は台帳へ届いて成功し、後半（`Edit(RemoveRows)`。シートを
+/// 運ばず表示中のシート＝補助を見る）が補充した行を知らずに `UnknownRow` で止まる — **台帳は
+/// 5 行のまま値だけが戻る**（10.2 のレビューが実測した欠陥）。編集層は「失敗したら 1 つのセルも
+/// 書かない」を契約するため（design.md「EditApply」）、合成でもこれが保たれなければならない。
+#[test]
+fn undoing_a_composite_step_that_names_another_sheet_writes_nothing() {
+    let mut step = CompositeOtherSheetStep::new();
+    let quantities_before = step.ledger_quantities();
+    assert_eq!(
+        vec![
+            CellValue::Int(7),
+            CellValue::Int(8),
+            CellValue::Int(9),
+            CellValue::Int(10),
+            CellValue::Int(11)
+        ],
+        quantities_before,
+        "前提: 貼り付けは 5 行の数量を書く（台帳の 3 行では足りないため 2 行が補充される）"
+    );
+    assert_eq!(5, step.ledger_row_count(), "前提: 台帳は 5 行である");
+
+    // **補助を見たまま取り消す。**先に「何も書かなかった」を確かめる — 部分適用の欠陥は、
+    // 返る誤りの種類ではなく**文書の値**に現れる。
+    let failure = step.undo_on_supplement();
+    assert_eq!(
+        quantities_before,
+        step.ledger_quantities(),
+        "台帳の値は 1 つも変わらない（前半の復元だけが届いてはならない）"
+    );
+    assert_eq!(5, step.ledger_row_count(), "台帳の行数も変わらない");
+    assert_eq!(
+        GridError::SchemaUnusable { sheet: step.ledger },
+        failure.expect_err("表示中のシートを名乗らない部品を含む合成は拒まれる"),
+        "拒む理由は、部品が名乗ったシートをこの適用先にできないことである"
+    );
+
+    // 2 度目も同じ誤りであり、**履歴の位置は動かない**。
+    let again = step.undo_on_supplement();
+    assert_eq!(
+        quantities_before,
+        step.ledger_quantities(),
+        "2 度目も 1 つも書かない"
+    );
+    assert_eq!(
+        GridError::SchemaUnusable { sheet: step.ledger },
+        again.expect_err("2 度目も同じ誤りで拒まれる"),
+        "2 度目も同じ理由である"
+    );
+
+    // 位置が動いていないことの観測: 台帳を表示したセッションからは、**同じ 1 歩**が取り消せる
+    // （動いていれば、次に取り消せるものは無い）。**深さの比較は表明に値しない** —
+    // `UndoStack::depth()` は積まれた対の総数であり、位置に依らない。
+    step.undo_on_ledger()
+        .expect("台帳からは同じ 1 歩を取り消せる")
+        .expect("取り消せる操作がある");
+    assert_eq!(
+        vec![CellValue::Int(1), CellValue::Int(2), CellValue::Int(3)],
+        step.ledger_quantities(),
+        "取り消しは台帳の貼り付けを戻す"
+    );
+    assert_eq!(3, step.ledger_row_count(), "補充した行も取り除かれる");
+}
+
+/// **やり直しの向きでも同じである**（要件 7.4、9.3）。
+///
+/// やり直しの合成も「補充した行を差し戻す（`RestoreRows`。材料が台帳を名乗る）」と「貼り付けを
+/// もう一度適用する（`Edit(PasteRange)`。シートを運ばない）」から成る。表示が補助のまま適用
+/// すると、**前半だけが台帳へ届いて**取り消しで取り除いた 2 行が戻り、後半が補助の行を
+/// 知らずに止まる。
+#[test]
+fn redoing_a_composite_step_that_names_another_sheet_writes_nothing() {
+    let mut step = CompositeOtherSheetStep::new();
+    // 台帳を表示したまま取り消し、**やり直しの対象を作る**（合成は表示中のシートに対しては
+    // 成立する）。
+    step.undo_on_ledger()
+        .expect("取り消しは適用できる")
+        .expect("取り消せる操作がある");
+    let quantities_before = step.ledger_quantities();
+    assert_eq!(
+        vec![CellValue::Int(1), CellValue::Int(2), CellValue::Int(3)],
+        quantities_before,
+        "前提: 取り消しは台帳を 3 行へ戻す"
+    );
+    assert_eq!(3, step.ledger_row_count(), "前提: 補充した行は取り除かれる");
+
+    // **補助を見たままやり直す。**
+    let failure = step.redo_on_supplement();
+    assert_eq!(
+        quantities_before,
+        step.ledger_quantities(),
+        "台帳の値は 1 つも変わらない"
+    );
+    assert_eq!(
+        3,
+        step.ledger_row_count(),
+        "差し戻した行も届かない（前半だけが適用されてはならない）"
+    );
+    assert_eq!(
+        GridError::SchemaUnusable { sheet: step.ledger },
+        failure.expect_err("表示中のシートを名乗らない部品を含む合成は拒まれる"),
+        "拒む理由は、部品が名乗ったシートをこの適用先にできないことである"
+    );
+
+    // 2 度目も同じ誤りであり、履歴の位置は動かない。
+    let again = step.redo_on_supplement();
+    assert_eq!(
+        quantities_before,
+        step.ledger_quantities(),
+        "2 度目も 1 つも書かない"
+    );
+    assert_eq!(
+        GridError::SchemaUnusable { sheet: step.ledger },
+        again.expect_err("2 度目も拒まれる"),
+        "2 度目も同じ理由である"
+    );
+
+    // 位置が動いていないことの観測: 台帳を表示したセッションからは、**同じ 1 歩**がやり直せる。
+    step.redo_on_ledger()
+        .expect("台帳からは同じ 1 歩をやり直せる")
+        .expect("やり直せる操作がある");
+    assert_eq!(
+        vec![
+            CellValue::Int(7),
+            CellValue::Int(8),
+            CellValue::Int(9),
+            CellValue::Int(10),
+            CellValue::Int(11)
+        ],
+        step.ledger_quantities(),
+        "やり直しは台帳の貼り付けを再び適用する"
+    );
+    assert_eq!(5, step.ledger_row_count(), "補充した行も戻る");
 }

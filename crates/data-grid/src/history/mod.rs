@@ -39,9 +39,13 @@
 //! シートを名乗るのは、取り消しを**どのシートへ適用するか**を材料自身が知るためである
 //! （`edit` 層の `EditApply::apply_history` の docs「復元の材料が名乗るシート」）。
 //!
-//! **所有者は誰か。** 履歴はドキュメントを保持する側が持つ — design.md の
-//! `GridSession`（タスク 5.2）が `{ view, order, history, schema }` を持つ。本層は
-//! 履歴の**入れ物**だけを定め、ドキュメントを持たない（適用は `edit` 層の仕事である）。
+//! **所有者は誰か。** 履歴はドキュメントを保持する側が持つ — **適応層のウィンドウの保持**
+//! である（`src-tauri/src/commands/grid.rs` の `SheetEntry`。要件 9.5 は履歴が
+//! **ドキュメント単位**であることを求め、操作口 [`GridSession`](crate::GridSession) は
+//! シートごとに作り直されるため、履歴はその持ち物にできない。10.2 が所有者をここへ移した）。
+//! [`GridSession`](crate::GridSession) は履歴を所有せず、文書を触る 3 つの経路
+//! （`apply` / `undo` / `redo`）が `&mut UndoStack` を受け取る。本層は履歴の**入れ物**だけを
+//! 定め、ドキュメントを持たない（適用は `edit` 層の仕事である）。
 //!
 //! # 登録口は `push` ただ 1 つ（要件 9.1 の拡張点）
 //!
@@ -324,14 +328,16 @@ impl UndoStack {
 /// 逆向き（`edit` が `history` を名指す）は起きない。
 ///
 /// 束ねるのは**借用**である（`&mut UndoStack` と `&mut EditApply`）。所有しないので、
-/// 履歴の所有者（design.md の `GridSession`。タスク 5.2）は自分の欄をそのまま渡せる。
+/// 履歴の所有者は自分の欄をそのまま渡せる — 所有者は**適応層のウィンドウの保持**である
+/// （`src-tauri/src/commands/grid.rs` の `SheetEntry`。[`GridSession`](crate::GridSession) は
+/// 履歴を所有せず、`apply` / `undo` / `redo` が `&mut UndoStack` を受け取る。10.2）。
 /// `UndoStack` が `Document` を持たずに済む性質（モジュール docs）も保たれる — ドキュメントは
 /// 呼び出しごとに受け取る。
 ///
 /// 呼び出しの形:
 ///
 /// ```text
-/// let mut undo_redo = UndoRedo::new(&mut session.history, &mut apply);
+/// let mut undo_redo = UndoRedo::new(history, &mut session.apply);  // history は保持の欄
 /// if let Some(outcome) = undo_redo.undo(&mut document)? { /* 影響を受けた行は outcome.affected */ }
 /// ```
 ///

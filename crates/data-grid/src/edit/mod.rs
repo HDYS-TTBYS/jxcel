@@ -89,6 +89,12 @@
 //! 判定が返した値のうちドキュメントへ書くのは**編集した列の値**だけであり、行の他の列の値は
 //! 判定が返したもの（＝入力そのもの）と一致するため触れない。
 //!
+//! **唯一の例外は履歴の合成（[`HistoryCommand::Composite`]）である** — 1 つの操作が複数の
+//! 書き込みを連ねる（貼り付けの逆命令は「値を戻す」→「補充した行を取り除く」）。ここでも
+//! **別のシートを名乗る部分が混ざったまま部分適用になる経路**は残さない: 適用の**前**に
+//! すべての部分が名乗るシートを照合し、1 つでも適用先と食い違えば**何も書かずに**
+//! [`GridError::SchemaUnusable`] で拒む（`EditApply::apply_parts` の docs）。
+//!
 //! ## 同じセルを 2 度書く命令
 //!
 //! 同じセルが複数回現れた命令は、**後ろのものを残す 1 回の書き込み**として扱う
@@ -668,6 +674,21 @@ pub enum EditCommand {
 /// `Eq` を実装しない。`schema-engine` の `Violation` も同じ理由で `PartialEq` までしか持たない）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditOutcome {
+    /// **この結果が記述するシート**（適用先）。
+    ///
+    /// 編集（`EditCommand`）は開いたときに固定した対象シートへ書くため、この欄はそのシートで
+    /// ある。一方、**履歴の命令はシートを名乗りうる** — 履歴はドキュメント単位であり
+    /// （要件 9.5）、表示しているシートとは別のシートの操作を指す 1 歩が現れるためである
+    /// （[`HistoryCommand::RestoreValues`] / [`HistoryCommand::RestoreRows`] は材料が名乗る
+    /// シートへ書く。`EditApply::apply_history` の docs「復元の材料が名乗るシート」）。
+    ///
+    /// したがって**この欄の違反・行数・影響を受けた行は、この欄のシートのものである**。
+    /// 別のシートの索引（違反の総数・据え付け・鍵）をこの結果で更新してはならない
+    /// （`crate::api` の `GridSession::settle` の docs「履歴の 1 歩が別のシートへ落ちたとき」。
+    /// 適応層も同じ判断をする — `src-tauri/src/commands/grid.rs` の `outcome_to_boundary`）。
+    ///
+    /// `EditCommand` の経路（[`EditApply::apply`]）では**つねに対象シート**である。
+    pub sheet: SheetId,
     /// 影響を受けた行の識別子（重複を畳み、命令に現れた順）。
     ///
     /// `SetCells` では**編集したセルの行**である（行の増減は無い）。行の構造を変える命令では
@@ -1021,6 +1042,21 @@ impl EditApply {
     /// シートへ行い、**計画の列数と食い違えば [`GridError::SchemaUnusable`] で止まる**
     /// （列の添字が食い違ったまま書くより、止まるほうが回復可能である。編集経路と同じ規律）。
     ///
+    /// **合成（[`HistoryCommand::Composite`]）は、すべての部分がこの対象シートを名乗るとき
+    /// だけ適用される**。1 つの部分でも別のシートを名乗れば、**何も書かずに**
+    /// [`GridError::SchemaUnusable`]（その部分が名乗るシート）で止まる — 部分を順に適用すれば
+    /// 前半だけが文書へ届きうるためである（規則と実測した欠陥は
+    /// `EditApply::apply_parts` の docs「別のシートを名乗る部分が 1 つでもあれば、何も書かずに
+    /// 拒む」）。
+    ///
+    /// # 結果は適用先のシートを名乗る
+    ///
+    /// 返る [`EditOutcome::sheet`] は**適用先のシート**である（`Edit` は対象シート、復元の
+    /// 2 つは材料が名乗るシート）。呼び出し側はこれを使って「この結果が記述するのはどの
+    /// シートか」を判断する — 表示しているシートと違うとき、その結果を表示中のシートの索引へ
+    /// 据えてはならない（`crate::api` の `GridSession::settle` の docs
+    /// 「履歴の 1 歩が別のシートへ落ちたとき」）。
+    ///
     /// # 判定を呼ばない
     ///
     /// 復元の材料はドキュメントに**既にあった値**そのものであり、判定（打たれた文字を型へ
@@ -1073,6 +1109,7 @@ impl EditApply {
     /// ならない」と読む（`crate::api` のモジュール docs「違反の総数をどう閉じるか」）。
     fn unchanged(&self, doc: &Document) -> Result<EditOutcome, GridError> {
         Ok(EditOutcome {
+            sheet: self.sheet,
             affected: Vec::new(),
             coercions: Vec::new(),
             violation_total: 0,
@@ -1089,6 +1126,7 @@ impl EditApply {
     fn changed_rows(&self, doc: &Document, affected: Vec<RowId>) -> Result<EditOutcome, GridError> {
         let revalidated = self.revalidate_every_column(doc);
         Ok(EditOutcome {
+            sheet: self.sheet,
             affected,
             coercions: Vec::new(),
             violation_total: revalidated.total,
@@ -1551,6 +1589,7 @@ impl EditApply {
         let revalidated = Revalidated::from_report(revalidated, &report);
 
         let outcome = EditOutcome {
+            sheet: self.sheet,
             affected,
             coercions,
             violation_total: revalidated.total,
@@ -1916,6 +1955,7 @@ impl EditApply {
         let revalidated = Revalidated::from_report(revalidated, &report);
 
         Ok(EditOutcome {
+            sheet: self.sheet,
             affected,
             coercions,
             violation_total: revalidated.total,
@@ -1959,6 +1999,7 @@ impl EditApply {
         Self::write_material_rows(doc, sheet, rows)?;
         let revalidated = self.revalidate_every_column_of(doc, sheet);
         Ok(EditOutcome {
+            sheet,
             affected: rows.iter().map(|row| row.id).collect(),
             coercions: Vec::new(),
             violation_total: revalidated.total,
@@ -2040,6 +2081,7 @@ impl EditApply {
         Self::write_material_rows(doc, sheet, rows)?;
         let revalidated = self.revalidate_every_column_of(doc, sheet);
         Ok(EditOutcome {
+            sheet,
             affected: rows.iter().map(|row| row.id).collect(),
             coercions: Vec::new(),
             violation_total: revalidated.total,
@@ -2154,11 +2196,35 @@ impl EditApply {
     /// 受けた行は部分の和、違反の総数は**最後に 1 回**全列を再検証したもの
     /// （部分が触れた列は重なりうるため、部分の総数を足すと同じ違反を二重に数える）、
     /// 行数は適用の後の実数である。
+    ///
+    /// **結果が名乗るシートは対象シート（`self.sheet`）である。** 合成は 1 つの操作
+    /// （貼り付けの逆命令）であり、その部分はどれも**組まれた時点の対象シート**を指す —
+    /// [`HistoryCommand::RestoreValues`] は材料がそのシートを名乗り、
+    /// [`HistoryCommand::Edit`] はシートを運ばないため適用の対象シートへ書く。
+    ///
+    /// # 別のシートを名乗る部分が 1 つでもあれば、何も書かずに拒む
+    ///
+    /// 履歴はドキュメント単位であるため（要件 9.5）、**別のシートを見たまま**この合成を
+    /// 適用する経路が現実にある（`GridSession::undo` / `redo` は表示中のシートとは別の
+    /// シートの 1 歩を指しうる）。そのとき部分を順に適用すると、**材料が名乗るシートへ書ける
+    /// 前半は成功し、シートを運ばない後半が表示中のシートで止まる** — 貼り付けの逆命令
+    /// （`RestoreValues{台帳}` → `Edit(RemoveRows)`）がまさにその形であり、台帳の値だけが
+    /// 戻って行が残る（10.2 のレビューが実測した欠陥）。本層の契約「失敗したときは 1 つの
+    /// セルも書かず、1 行も増減しない」は合成でも保たれなければならない。
+    ///
+    /// したがって**どの部分も適用する前に**、各部分が名乗るシートを
+    /// [`EditApply::ensure_parts_share_target`] で照合する。合わない部分が 1 つでもあれば
+    /// [`GridError::SchemaUnusable`]（その部分が名乗るシートを載せる）を返し、
+    /// **ドキュメントには 1 つも触れない**。部分が名乗るシートは
+    /// [`EditApply::apply_history`] の適用先の決定と同じ規則で読む（入れ子の合成は再帰する）。
     fn apply_parts(
         &mut self,
         doc: &mut Document,
         parts: &[HistoryCommand],
     ) -> Result<EditOutcome, GridError> {
+        // 事前検査は**部分の適用より先**である（1 つでも適用してから拒むと、その分が
+        // 文書に残る — 成功した部分は巻き戻せない）。
+        self.ensure_parts_share_target(parts)?;
         let sheet = self.sheet;
         let mut affected: Vec<RowId> = Vec::new();
         for part in parts {
@@ -2171,6 +2237,7 @@ impl EditApply {
         affected.retain(|row| seen.insert(*row));
         let revalidated = self.revalidate_every_column_of(doc, sheet);
         Ok(EditOutcome {
+            sheet,
             affected,
             coercions: Vec::new(),
             violation_total: revalidated.total,
@@ -2178,6 +2245,35 @@ impl EditApply {
             revalidated_columns: revalidated.columns,
             row_count: self.sheet_of(doc, sheet)?.rows().len(),
         })
+    }
+
+    /// 合成の**すべての部分**が対象シート（`self.sheet`）へ書くことを確かめる
+    /// （[`EditApply::apply_parts`] の事前検査）。
+    ///
+    /// 部分が名乗るシートは [`EditApply::apply_history`] の適用先の決定と**同じ規則**で読む:
+    /// [`HistoryCommand::RestoreValues`] / [`HistoryCommand::RestoreRows`] は材料が名乗り、
+    /// [`HistoryCommand::Edit`] はシートを運ばないため適用の対象シート（`self.sheet`）である。
+    /// 入れ子の合成（[`HistoryCommand::Composite`]）は再帰する。
+    ///
+    /// **対象シートを名乗らない部分が 1 つでもあれば、その部分のシートを載せた
+    /// [`GridError::SchemaUnusable`] を返す。** 拒む理由は「その部分の材料はそのシートに
+    /// 属するが、この適用先は `self.sheet` である」であり、部分を適用してからでは**先に
+    /// 成功した部分が文書に残る**（合成は複数の書き込みを連ねる唯一の経路である）。
+    fn ensure_parts_share_target(&self, parts: &[HistoryCommand]) -> Result<(), GridError> {
+        for part in parts {
+            match part {
+                // シートを運ばない命令は適用の対象シートへ書く（`self.sheet` と一致する）。
+                HistoryCommand::Edit(_) => {}
+                HistoryCommand::RestoreValues { sheet, .. }
+                | HistoryCommand::RestoreRows { sheet, .. } => {
+                    if *sheet != self.sheet {
+                        return Err(GridError::SchemaUnusable { sheet: *sheet });
+                    }
+                }
+                HistoryCommand::Composite(nested) => self.ensure_parts_share_target(nested)?,
+            }
+        }
+        Ok(())
     }
 
     /// 名指されたシートの前提を検査し、**この適用で使える列数**を返す
@@ -2206,6 +2302,7 @@ impl EditApply {
     /// （[`EditApply::unchanged`] のシート指定版）。
     fn unchanged_of(&self, doc: &Document, sheet: SheetId) -> Result<EditOutcome, GridError> {
         Ok(EditOutcome {
+            sheet,
             affected: Vec::new(),
             coercions: Vec::new(),
             violation_total: 0,

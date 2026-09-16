@@ -174,6 +174,12 @@
 //! ウィンドウを待たせない。`document-session` の表と同じ規律）— ウィンドウごとの実体は
 //! [`Arc`] で持ち、そこに 1 つずつロックを置く。
 //!
+//! **保持が持つのはセッション（表示状態）と、そのウィンドウのドキュメントの取り消し履歴
+//! である**（要件 9.5）。履歴をセッションに持たせない理由と、シートの切り替えを越えて
+//! 引き継ぐ規則は [`SheetEntry`] と [`answer_open`] の docs にある — **要点は、シートを
+//! 切り替えても文書の履歴が消えないこと**である（[`grid_open_sheet`] は保持ごと置き換える
+//! ため、履歴を持ち出して次の保持へ渡す）。
+//!
 //! **破棄の購読は [`WindowDestroyEvents`] の縫い目を通す**（セッションの層が確立した形を
 //! そのまま使う。テストは二重（`session/watch.rs` の `testing::AlwaysPresent`）を駆動する）。購読は登録済みの
 //! ラベルの集合で 1 回に抑え、破棄の通知と、登録できなかったときの掃除が同じ後始末を通る。
@@ -267,8 +273,8 @@ use app_shell::ipc::{
 use data_grid::{
     display_text, CellAddress, CoercionNotice, ColumnIndex, EditCommand, EditOutcome, ElementCount,
     Expandability, ExpansionState, FilterSpec, Generation, GridError, GridSession, LayoutColumn,
-    NestedPathSegment, RowOrdinal, RowSpan, SearchDirection, SortKey, ViewSpec, WindowCodec,
-    WindowRequest, EMPTY_WINDOW,
+    NestedPathSegment, RowOrdinal, RowSpan, SearchDirection, SortKey, UndoStack, ViewSpec,
+    WindowCodec, WindowRequest, DEFAULT_UNDO_LIMIT, EMPTY_WINDOW,
 };
 use document_session::{DocumentSessions, DocumentSessionsApi, SessionError};
 use schema_engine::{
@@ -289,14 +295,39 @@ use crate::session::watch::{TauriWindowEvents, WindowDestroyEvents};
 /// 1 つのウィンドウが表示しているシートのセッション（design.md「GridCommands」の
 /// 「ウィンドウごとに 1 つ保持する」）。
 ///
-/// セッションのほかに**計画**（[`CompiledSchema`]）と、**表示中のシートの識別子**
-/// （要求と突き合わせるための文字列）を持つ。計画を持つのは違反の理由（要件 4.2）を
-/// 組み立てるときに列をもう一度判定するためであり、識別子を持つのは理由を組み立てる
-/// 時点で「どのシートか」を要求からではなく保持から取るためである（要求は開いたときの
-/// ものであり、以後のコマンドは持ち回らない）。
+/// セッションのほかに**計画**（[`CompiledSchema`]）、**取り消し履歴**（[`UndoStack`]）、
+/// **表示中のシートの識別子**（要求と突き合わせるための文字列）を持つ。計画を持つのは違反の
+/// 理由（要件 4.2）を組み立てるときに列をもう一度判定するためであり、識別子を持つのは理由を
+/// 組み立てる時点で「どのシートか」を要求からではなく保持から取るためである（要求は開いた
+/// ときのものであり、以後のコマンドは持ち回らない）。
+///
+/// # 履歴の所有者はこの保持である（要件 9.5）
+///
+/// 履歴は**ドキュメント単位**であり、シートごとではない（要件 9.5）— `macro-runtime` の
+/// 実行が複数シートに跨るためである（design.md「UndoStack（拡張点の所有者）」）。したがって
+/// 履歴は**セッションの持ち物にできない**: [`GridSession`] は開いたシートの計画
+/// （`CompiledSchema`）を固定して持つため、シートを切り替えるたびに作り直される
+/// （`grid_open_sheet` がこの保持ごと置き換える）。セッションが持つと、**シートを 1 度
+/// 切り替えただけで文書の取り消しが効かなくなる**。
+///
+/// 置き換えを越えて履歴を保つ規則は [`answer_open`] が持つ:
+///
+/// - **保つ**: 置き換えの前に保持していたシートが、差し替え後の文書にも在るとき
+///   （＝同じ 1 つの文書の中のシートの切り替えである）
+/// - **捨てる**: そのシートが文書に無いとき（新規・開く・破棄で**文書が差し替わった**）。
+///   この判定は既存の経路（[`answer_find_violation`] が「保持しているシートが文書に無い」を
+///   見るのと同じ照合）に揃えてある
+///
+/// **差し替えの後に古い履歴を適用する経路は残らない**: 文書を触る 3 つの経路
+/// （`apply` / `undo` / `redo`）はどれもセッションの側が「保持しているシートが文書に無い」を
+/// [`GridError::SchemaUnusable`] として拒む（[`GridSession`] の `sheet_of`）。
 struct SheetEntry {
-    /// 表示しているシートのセッション（表示状態・履歴・違反の索引を所有する）。
+    /// 表示しているシートのセッション（表示状態と違反の索引を所有する）。
     session: GridSession,
+    /// **このウィンドウのドキュメントの取り消し履歴**（上限 [`DEFAULT_UNDO_LIMIT`]。
+    /// 要件 9.5, 9.6）。セッションは所有しないため、文書を触る経路へは呼び出しごとに貸す
+    /// （[`GridSession::apply`] / [`GridSession::undo`] / [`GridSession::redo`]）。
+    history: UndoStack,
     /// 開いた時点の計画。**同じシートから**落としたものである
     /// （[`SchemaEngineApi::compile`] の事前条件）。
     schema: CompiledSchema,
@@ -855,6 +886,8 @@ fn violation_location(violation: &Violation) -> GridViolationLocation {
 /// 再検証した列に閉じた総数であり（6.1 の同型の欄の doc）、シート全体へ閉じるのは本モジュール
 /// の仕事である — 差分で最新に保たれている数を [`GridSession::violation_total`] から読む。
 /// **そのために検証を呼び直すことは無い**（要件 11.4）。
+///
+/// **適用先が表示中のシートでないときは、この関数を使わない**（[`untouched_sheet_outcome`]）。
 fn outcome_to_boundary(session: &GridSession, outcome: &EditOutcome) -> GridEditOutcome {
     GridEditOutcome {
         affected: outcome.affected.iter().map(|row| row.to_string()).collect(),
@@ -867,6 +900,35 @@ fn outcome_to_boundary(session: &GridSession, outcome: &EditOutcome) -> GridEdit
             .map(|column| count_to_u32(column.index()))
             .collect(),
         row_count: count_to_u32(outcome.row_count),
+    }
+}
+
+/// **表示中のシートを記述する**応答を組み立てる（履歴の 1 歩が別のシートへ落ちたとき。要件 4.3、9.5）。
+///
+/// 履歴はドキュメント単位であるため（要件 9.5）、`grid_history` が進める 1 歩は**表示して
+/// いるシートとは別のシート**を指しうる（`answer_open` が履歴を持ち出し、以後の取り消しは
+/// 切り替える前のシートの操作を指すためである）。適用先はドメインが名乗る
+/// （`EditOutcome::sheet`）ので、本層はそれを見分けられる。
+///
+/// そのとき**表示中のシートの中身は 1 つも変わっていない**。したがって応答が運ぶ材料は
+/// 表示中のシートのものでなければならない（画面はこの 6 つの欄をそのまま採用する —
+/// `./GridScreen` の `appliedRowOperation` と `./history` の `applyHistory`）:
+///
+/// | 欄 | なにを載せるか | 理由 |
+/// |---|---|---|
+/// | `violation_total` | 表示中のシートの総数（`session.violation_total()`） | ドメインが索引に触れていないため、この数は表示中のシートのままである（`GridSession::settle` の docs） |
+/// | `violations` / `revalidated_columns` | **空** | 別のシートの位置である。画面は印と巡回の材料に使うため、載せれば**別のシートの違反を表示中のセルの印にする** |
+/// | `affected` | **空** | 別のシートの行識別子である。画面はこれを現在位置の移動と窓の作り直し（`WindowCache.clear(row_count)`）に使う |
+/// | `coercions` | **空** | 同じく別のシートの位置である（復元の経路は強制を行わないため、実際にはつねに空である） |
+/// | `row_count` | 表示中のシートの行数（`displayed_rows`） | 画面はこれを**表示している表の行数**として採用する（`ready.summary.row_count`）。別のシートの数を載せると、表示中のシートの行数が別のシートの数になる |
+fn untouched_sheet_outcome(session: &GridSession, displayed_rows: usize) -> GridEditOutcome {
+    GridEditOutcome {
+        affected: Vec::new(),
+        coercions: Vec::new(),
+        violation_total: count_to_u32(session.violation_total()),
+        violations: Vec::new(),
+        revalidated_columns: Vec::new(),
+        row_count: count_to_u32(displayed_rows),
     }
 }
 
@@ -1107,15 +1169,35 @@ fn decode_window_argument(bytes: &[u8]) -> Result<WindowArgument, String> {
 
 /// シートを開く本体（[`grid_open_sheet`] の中身。要件 1.1、1.5、1.6）。
 ///
-/// 手順は 3 つである:
+/// 手順は 4 つである:
 ///
-/// 1. **文書を読む**（[`DocumentSessionsApi::read`]）。保持していなければ経路の失敗である
-/// 2. 閉包の内側で**シートを識別子で引き**、ルートスキーマを計画へ落とし（
-///    [`SchemaEngineApi::compile`]）、[`GridSession::open`] でセッションを作る
-/// 3. 表へ置く（破棄の購読が登録できなければ**置かずに**失敗を返す）
+/// 1. **前の保持**（同じウィンドウ）が表示していたシートの識別子を読む（履歴を引き継ぐかの
+///    判定の材料である。後述）
+/// 2. **文書を読む**（[`DocumentSessionsApi::read`]）。保持していなければ経路の失敗である
+/// 3. 閉包の内側で**シートを識別子で引き**、ルートスキーマを計画へ落とし
+///    （[`SchemaEngineApi::compile`]）、[`GridSession::open`] でセッションを作る。あわせて
+///    **前のシートが差し替え後の文書に在るか**を写す（履歴の引き継ぎの判定）
+/// 4. **履歴を決めて**表へ置く（破棄の購読が登録できなければ**置かずに**失敗を返す）
 ///
 /// **同じウィンドウで 2 度呼ぶと前の保持を置き換える**（別のシートへ切り替える経路である）。
 /// 置き換えでも購読は増えない（登録済みの集合が 1 回に抑える）。
+///
+/// # 履歴は置き換えを越えて引き継ぐ（要件 9.5）
+///
+/// 履歴は**ドキュメント単位**であり（要件 9.5）、[`GridSession`] はシートごとに作り直される
+/// （計画をそのシートの宣言から落とすため）。したがって履歴の所有者は本保持であり、
+/// 置き換えのときに**持ち出して**次の保持へ渡す（[`SheetEntry`] の docs）。
+///
+/// | 状態 | 履歴 | 判定 |
+/// |---|---|---|
+/// | 同じ文書の別のシートへ切り替えた | **引き継ぐ** | 前の保持のシートが差し替え後の文書にも在る |
+/// | 文書が差し替わった（新規・開く・破棄） | **捨てる**（空の履歴を作る） | 前の保持のシートが差し替え後の文書に無い |
+///
+/// 判定を「保持しているシートが文書に無い」に揃えてあるのは、[`answer_find_violation`] と
+/// 同じ 1 つの照合で「表示しているシートがもう無い」を表すためである（シートの識別子は
+/// 発行のたびに変わるため、新しい文書が同じ識別子を持つことは無い）。**引き継いだ履歴を
+/// 差し替え後の文書へ適用する経路は残らない** — 3 つの経路（`apply` / `undo` / `redo`）は
+/// どれも保持しているシートを [`GridSession`] の側で照合する。
 pub(crate) fn answer_open(
     documents: &Arc<DocumentSessions>,
     grids: &GridSessions,
@@ -1123,6 +1205,23 @@ pub(crate) fn answer_open(
     request: &GridOpenRequest,
 ) -> IpcResult<GridOpenResponse, IpcError> {
     let command = command_names::GRID_OPEN_SHEET;
+    // 前の保持（同じウィンドウ）と、それが表示していたシートの識別子。**保持のロックは
+    // 文書のロックより先に取り、据え付け（`store`）まで握る**（他の 5 つのコマンドと同じ
+    // 順序に保つ — 順序を混ぜると、同じウィンドウの並行したコマンドが互いを待ち合う）。
+    //
+    // **握り続ける理由**: 履歴の持ち出しと据え付けの間に同じウィンドウの `grid_open_sheet`
+    // が割り込むと、その経路も「前の保持」から履歴を持ち出し、**先に据え付けた側の履歴が
+    // 表から消える**（持ち出しの跡は空の履歴で埋めるためである。要件 9.5 の履歴が失われる）。
+    // ロックを握れば、2 つ目は表の項目が入れ替わるまで待ち、**引き継いだ履歴の側**
+    // （いま表にある保持）から持ち出す。
+    //
+    // この 2 つ目の経路は**同じウィンドウの `grid_open_sheet` が並行した場合**にだけ現れる。
+    // 画面は開く要求を 1 つずつ待って送るため（`./GridClient` の `openSheet` を待ってから
+    // 表示の指定を送る）、いまは起きない — 起きない前提は design.md「履歴の持ち出し」に
+    // 記録してある（前提が破れたときに失われうるのは、この 1 点だけである）。
+    let previous = grids.entry(label);
+    let mut held = previous.as_ref().map(|entry| lock(entry));
+    let previous_sheet = held.as_ref().map(|entry| entry.sheet.clone());
     let opened = documents.read(label, &mut |document| {
         let Some(sheet) = document
             .sheets()
@@ -1131,24 +1230,41 @@ pub(crate) fn answer_open(
         else {
             return Err(unknown_sheet(&request.sheet));
         };
+        // **履歴を引き継ぐか**（差し替え後の文書に前の保持のシートが在るか）。文書の内側で
+        // 決めるのは、判定が「差し替え後の文書の中身」に依るためである。
+        let carry_history = previous_sheet.as_deref().is_some_and(|previous| {
+            document
+                .sheets()
+                .iter()
+                .any(|sheet| sheet.id().to_string() == previous)
+        });
         let schema = SchemaEngine::new()
             .compile(sheet, &TypeRegistry::new())
             .map_err(|error| format!("シート {} の宣言を解釈できない: {error}", request.sheet))?;
         let session = GridSession::open(sheet.id(), schema.clone())
             .map_err(|error| format!("シート {} のグリッドを開けない: {error}", request.sheet))?;
         let summary = sheet_summary(&session, sheet.rows().len());
-        Ok((
-            SheetEntry {
-                session,
-                schema,
-                sheet: request.sheet.clone(),
-            },
-            summary,
-        ))
+        Ok((session, schema, carry_history, summary))
     });
 
     match opened {
-        Ok(Ok((entry, sheet))) => {
+        Ok(Ok((session, schema, carry_history, sheet))) => {
+            // **履歴を持ち出す**（引き継ぐときだけ）。前の保持はこの直後に表から外れるため、
+            // 持ち出した跡は空の履歴で埋める（取り出しと後始末を 1 つの操作にする）。
+            // **前の保持のロックはここでも握っている**（この関数の冒頭で取り、`store` まで
+            // 離さない — 持ち出しと据え付けの間に割り込む経路を作らない）。
+            let history = match (held.as_mut(), carry_history) {
+                (Some(previous), true) => {
+                    core::mem::replace(&mut previous.history, UndoStack::new(DEFAULT_UNDO_LIMIT))
+                }
+                _ => UndoStack::new(DEFAULT_UNDO_LIMIT),
+            };
+            let entry = SheetEntry {
+                session,
+                history,
+                schema,
+                sheet: request.sheet.clone(),
+            };
             // **開いた時点の世代**（`Generation::FIRST`。`GridSession::open` は進めない）。表へ
             // 置く前に読む — `store` は保持を受け取る（`entry` は move される）。
             let generation = generation_text(entry.session.generation());
@@ -1309,7 +1425,8 @@ pub(crate) fn answer_rows_window(
     };
 
     let Some(entry) = grids.entry(label) else {
-        // 表示状態・履歴・違反の索引は `grid_open_sheet` が作る（他の 5 つと同じ順序）。
+        // 表示状態と違反の索引は `grid_open_sheet` が作り、履歴はその保持が持ち回る
+        // （他の 5 つと同じ順序）。
         log::warn!(
             "{command}: 呼び出し元ウィンドウ = {} のグリッドがまだ開かれていない\
              （受信バイト数 = {}）",
@@ -1438,7 +1555,12 @@ pub(crate) fn answer_apply_edit(
         // `FnMut` の閉包は持ち物を move できないため、命令は 1 度だけ取り出す。
         // **`edit` の閉包は高々 1 回しか呼ばれない**（`DocumentSessionsApi::edit` の契約）。
         let command = converted.take().expect("適用の閉包は 1 回だけ呼ばれる");
-        entry.session.apply(document, command)
+        // 履歴は**このウィンドウの保持が所有する**（要件 9.5）。呼び出しの間だけ貸す —
+        // セッションと履歴を同時に可変で借りるため、保持を分解する。
+        let SheetEntry {
+            session, history, ..
+        } = &mut *entry;
+        session.apply(document, history, command)
     });
 
     match applied {
@@ -1486,21 +1608,54 @@ pub(crate) fn answer_history(
     let mut entry = lock(&entry);
 
     let direction = request.direction;
-    let advanced = documents.edit(label, &mut |document| match direction {
-        GridHistoryDirection::Undo => entry.session.undo(document),
-        GridHistoryDirection::Redo => entry.session.redo(document),
+    // **表示中のシートの行数**（別のシートへ落ちた 1 歩の応答の材料である。下の
+    // [`untouched_sheet_outcome`]）。文書の内側で読む — 応答を組み立てる時点では文書の借用が
+    // 切れているためである。**適用の前後で変わらない**（表示中のシートは動かないため、
+    // どちらの時点で読んでも同じ数である）。
+    let mut displayed_rows = 0usize;
+    let advanced = documents.edit(label, &mut |document| {
+        // 履歴は**このウィンドウの保持が所有する**（要件 9.5。ドキュメント単位であり、
+        // セッションの持ち物ではない）。呼び出しの間だけ貸す — セッションと履歴を同時に
+        // 可変で借りるため、保持を分解する。
+        let SheetEntry {
+            session,
+            history,
+            sheet,
+            ..
+        } = &mut *entry;
+        // 表示中のシートを識別子で引いて行数を読む（[`answer_find_violation`] と同じ照合で
+        // ある）。引けなければ 0 — その状態は経路の失敗として他のコマンドが答える。
+        displayed_rows = document
+            .sheets()
+            .iter()
+            .find(|found| found.id().to_string() == sheet.as_str())
+            .map_or(0, |found| found.rows().len());
+        match direction {
+            GridHistoryDirection::Undo => session.undo(document, history),
+            GridHistoryDirection::Redo => session.redo(document, history),
+        }
     });
 
     match advanced {
         Ok(edited) => match edited.value {
-            Ok(Some(outcome)) => IpcResult::Ok {
-                data: GridEditResponse {
-                    context,
-                    // **履歴を進めた後**の世代（影響を受けた行があるときだけ進む）。
-                    generation: generation_text(entry.session.generation()),
-                    outcome: Some(outcome_to_boundary(&entry.session, &outcome)),
-                },
-            },
+            Ok(Some(outcome)) => {
+                // **適用先が表示中のシートか**で材料の意味が変わる（要件 9.5）。履歴は
+                // ドキュメント単位であるため、切り替える前のシートの 1 歩がここへ来る —
+                // そのときの応答は表示中のシートを記述する（`untouched_sheet_outcome` の docs）。
+                let boundary = if outcome.sheet.to_string() == entry.sheet {
+                    outcome_to_boundary(&entry.session, &outcome)
+                } else {
+                    untouched_sheet_outcome(&entry.session, displayed_rows)
+                };
+                IpcResult::Ok {
+                    data: GridEditResponse {
+                        context,
+                        // **履歴を進めた後**の世代（影響を受けた行があるときだけ進む）。
+                        generation: generation_text(entry.session.generation()),
+                        outcome: Some(boundary),
+                    },
+                }
+            }
             Ok(None) => IpcResult::Ok {
                 data: GridEditResponse {
                     context,
@@ -1666,10 +1821,11 @@ pub(crate) fn answer_find_violation(
 /// 呼び出し元ウィンドウに表示するシートを開く（要件 1.1、1.5、1.6、4.6）。
 ///
 /// 呼び出し元は注入された [`WebviewWindow`] から取る（要件 4.6）。**`grid_open_sheet` が
-/// 通らなければ他の 5 つは失敗する** — 表示状態・履歴・違反の索引はこの経路が作る。
+/// 通らなければ他の 5 つは失敗する** — 表示状態と違反の索引はこの経路が作る。取り消し履歴も
+/// ここで決まる（引き継ぐか捨てるか。要件 9.5。規則は [`answer_open`]）。
 ///
 /// 開いたセッションは**ウィンドウごとに 1 つ**保持され、ウィンドウが閉じたら破棄される
-/// （[`GridSessions`]）。
+/// （[`GridSessions`]）。**同じ文書のシートを切り替えても履歴は保たれる**（保持が持ち回る）。
 #[tauri::command(async)]
 pub fn grid_open_sheet(
     app: AppHandle,
@@ -2271,6 +2427,59 @@ mod tests {
             .expect("標本を保存できる");
     }
 
+    /// **2 つのシート**を持つ標本を書く（要件 9.5 の検査の材料）。
+    ///
+    /// どちらのシートも [`declaration`] の 3 列を持ち、行は `A` / `B` / `C` の 3 行である。
+    /// **数量の並びをシートごとに指定できる**（`[1, 2, 3]` は違反を 1 件も作らず、`999` のような
+    /// 範囲外の値を置くと**そのシートだけが違反を持つ**。`write_document_with` と同じ口である）。
+    /// 返るのは先頭のシート（`台帳`）と 2 番目のシート（`補助`）の**識別子の文字列**（境界を
+    /// 通るのはこの文字列である）。
+    ///
+    /// **履歴がドキュメント単位であることを観測する唯一の材料である** — シートの切り替えは
+    /// 同じウィンドウで `grid_open_sheet` を呼び直すことだから、1 つの文書に 2 つのシートが
+    /// 要る（要件 9.5）。
+    fn write_two_sheet_document(
+        path: &Path,
+        ledger_quantities: [i64; 3],
+        supplement_quantities: [i64; 3],
+    ) -> (String, String) {
+        let mut document = Document::new();
+        let ledger = document.add_sheet("台帳");
+        let supplement = document.add_sheet("補助");
+        for (sheet, quantities) in [
+            (ledger, ledger_quantities),
+            (supplement, supplement_quantities),
+        ] {
+            document
+                .set_sheet_columns(
+                    sheet,
+                    vec!["品番".to_owned(), "数量".to_owned(), "単価".to_owned()],
+                )
+                .expect("標本のシートは実在する");
+            document
+                .set_root_schema(sheet, declaration())
+                .expect("標本のシートは実在する");
+            for (index, label) in ["A", "B", "C"].into_iter().enumerate() {
+                let row = document.add_row(sheet).expect("標本のシートは実在する");
+                document
+                    .set_row_values(
+                        sheet,
+                        row,
+                        vec![
+                            CellValue::Text(label.to_owned()),
+                            CellValue::Int(quantities[index]),
+                            CellValue::Int(index as i64 * 10 + 10),
+                        ],
+                    )
+                    .expect("標本の行は実在する");
+            }
+        }
+        DocumentFormat::new()
+            .save(&document, path)
+            .expect("標本を保存できる");
+        (ledger.to_string(), supplement.to_string())
+    }
+
     /// 入れ子を持つ標本の宣言: 品番（`text`・一意・必須）、提供元（`object`。内側に `name` と
     /// `code`）、数量（`int`・0〜100）。
     ///
@@ -2463,6 +2672,45 @@ mod tests {
                     .collect()
             })
             .expect("保持している文書を読める")
+    }
+
+    /// 保持している文書の**先頭のシート**の、行識別子 `row` の列 `column` の値。
+    ///
+    /// シートの切り替えはグリッドの保持（`SheetEntry`）を動かすが、**文書は動かない** —
+    /// 検査は「取り消しが文書のどの値を戻したか」をここで確かめる（表示ではなく文書を見る）。
+    fn stored_value(
+        sessions: &Arc<DocumentSessions>,
+        label: &WindowLabel,
+        row: &str,
+        column: usize,
+    ) -> CellValue {
+        sessions
+            .read(label, &mut |document| {
+                let sheet = document.sheets().first().expect("標本にはシートがある");
+                let found = sheet
+                    .rows()
+                    .iter()
+                    .find(|found| found.id().to_string() == row)
+                    .expect("行は標本の文書にある");
+                found.values()[column].clone()
+            })
+            .expect("保持している文書を読める")
+    }
+
+    /// 保持している文書の**先頭のシート**の、指定した行たちの列 `column` の値を並びで返す
+    /// （[`stored_value`] の複数行版）。
+    ///
+    /// **適用の前後で姿を控えて比べる**ために使う — 同じ時点の値を 2 度読んで比べると、
+    /// 比べる相手がどちらも「いまの値」になり、何も検出しない。
+    fn values_in_column(
+        sessions: &Arc<DocumentSessions>,
+        label: &WindowLabel,
+        rows: &[String],
+        column: usize,
+    ) -> Vec<CellValue> {
+        rows.iter()
+            .map(|row| stored_value(sessions, label, row, column))
+            .collect()
     }
 
     /// グリッドの表（破棄の購読は常に成功し、どのラベルも引ける二重）。
@@ -3294,6 +3542,512 @@ mod tests {
         ));
         let redone = redone.outcome.expect("やり直しは要約を返す");
         assert_eq!(vec![rows[1].clone()], redone.affected, "やり直した行が返る");
+    }
+
+    /// **同じウィンドウでシートを切り替えても、履歴はドキュメント単位で保たれる**（要件 9.5）。
+    ///
+    /// グリッドの保持（`SheetEntry`）は `grid_open_sheet` ごとに置き換わるが、**履歴は置き換えを
+    /// 越えて引き継がれる** — 引き継がないと、シートを 1 度切り替えただけで文書の取り消しが
+    /// 効かなくなる（要件 9.5 は履歴をシートごとではなくドキュメントごとに保つことを求める）。
+    #[test]
+    fn switching_sheets_keeps_the_history_of_the_document() {
+        let scratch = Scratch::new("history-sheets");
+        let path = scratch.file("台帳.jxcel");
+        let (ledger, supplement) = write_two_sheet_document(&path, [1, 2, 3], [1, 2, 3]);
+        let (sessions, label) = documents(&path);
+        let grids = grids();
+
+        // 1. シート A（台帳）を開き、数量のセルを 1 つ編集する（履歴の 1 件目）。
+        data(answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest {
+                sheet: ledger.clone(),
+            },
+        ));
+        let row = stored_rows_at(&sessions, &label, &[0])[0].clone();
+        data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest {
+                command: set_one(&row, 1, "9"),
+            },
+        ));
+        assert_eq!(
+            CellValue::Int(9),
+            stored_value(&sessions, &label, &row, 1),
+            "前提: 編集はシート A の値を変える"
+        );
+
+        // 2. シート B（補助）を開く（同じウィンドウ。**文書は差し替わっていない**）。
+        data(answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest {
+                sheet: supplement.clone(),
+            },
+        ));
+
+        // 3. シート A を開き直す。
+        data(answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest { sheet: ledger },
+        ));
+
+        // 4. **取り消しは A の編集を戻す**（要件 9.2、9.5）。
+        let undone = data(answer_history(
+            &sessions,
+            &grids,
+            &label,
+            &GridHistoryRequest {
+                direction: GridHistoryDirection::Undo,
+            },
+        ))
+        .outcome
+        .expect("シートを切り替えても取り消せる操作は残っている");
+        assert_eq!(vec![row.clone()], undone.affected, "A で編集した行が返る");
+        assert_eq!(
+            CellValue::Int(1),
+            stored_value(&sessions, &label, &row, 1),
+            "取り消しはシート A の編集を戻す"
+        );
+    }
+
+    /// **別のシートを見たまま取り消しても、表示中のシートの違反は動かない**（要件 4.3、9.5）。
+    ///
+    /// 履歴はドキュメント単位であるため（要件 9.5）、表示しているシートとは**別のシート**を
+    /// 名乗る 1 歩を取り消す経路がある（`answer_open` が履歴を持ち出すので、シートを切り替えて
+    /// も取り消しは前のシートの操作を指す）。そのときの応答は**表示中のシートを記述する** —
+    /// 表示中のシートの中身は 1 つも変わっていないためである:
+    ///
+    /// - `violation_total` は索引が載せているシート（表示中）の数である
+    /// - 位置を持つ材料（`violations` / `revalidated_columns` / `affected`）は**別のシートの
+    ///   もの**であり、表示中のシートの印・行数の材料に使ってはならない（画面はこれらを
+    ///   そのまま採用するため、**空で答える**）
+    ///
+    /// 10.2 のレビューが実測した欠陥は、この 1 つ目である — 別のシートの報告（違反 0 件）を
+    /// 表示中のシートの索引へ据えると、**表示中のシートの違反が黙って消える**。
+    #[test]
+    fn undoing_while_looking_at_another_sheet_keeps_the_displayed_violations() {
+        let scratch = Scratch::new("history-other-sheet");
+        let path = scratch.file("台帳.jxcel");
+        // 台帳（編集するシート）は違反 0 件、補助（表示するシート）は違反 1 件（数量 999）。
+        let (ledger, supplement) = write_two_sheet_document(&path, [1, 2, 3], [999, 2, 3]);
+        let (sessions, label) = documents(&path);
+        let grids = grids();
+
+        // 1. 台帳を開き、数量のセルを 1 つ編集する（履歴の 1 件目）。
+        data(answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest {
+                sheet: ledger.clone(),
+            },
+        ));
+        let row = stored_rows_at(&sessions, &label, &[0])[0].clone();
+        data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest {
+                command: set_one(&row, 1, "9"),
+            },
+        ));
+        assert_eq!(
+            CellValue::Int(9),
+            stored_value(&sessions, &label, &row, 1),
+            "前提: 編集は台帳の値を変える"
+        );
+
+        // 2. 補助を開き、索引を組み立てる（**表示は補助のまま**にする）。
+        data(answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest {
+                sheet: supplement.clone(),
+            },
+        ));
+        let opened = data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+        assert_eq!(1, opened.violation_total, "前提: 補助は違反を 1 件持つ");
+        let found = data(answer_find_violation(
+            &sessions,
+            &grids,
+            &label,
+            &GridViolationRequest {
+                from: 0,
+                direction: GridSearchDirection::Forward,
+            },
+        ));
+        let violation = found.violation.expect("前提: その違反は探索で見つかる");
+
+        // 3. **補助を見たまま取り消す**（履歴の 1 歩は台帳へ落ちる）。
+        let undone = data(answer_history(
+            &sessions,
+            &grids,
+            &label,
+            &GridHistoryRequest {
+                direction: GridHistoryDirection::Undo,
+            },
+        ))
+        .outcome
+        .expect("シートを切り替えても取り消せる操作は残っている");
+
+        // 4. 台帳の値は戻り、**表示中のシートの材料は 1 つも動かない**。
+        assert_eq!(
+            CellValue::Int(1),
+            stored_value(&sessions, &label, &row, 1),
+            "取り消しは台帳の編集を戻す"
+        );
+        assert_eq!(
+            1, undone.violation_total,
+            "違反の総数は表示中のシート（補助）の数のままである"
+        );
+        assert!(
+            undone.violations.is_empty(),
+            "別のシートの違反の位置を表示中のシートのものとして載せない"
+        );
+        assert!(
+            undone.revalidated_columns.is_empty(),
+            "再検証した列も別のシートのものである"
+        );
+        assert!(
+            undone.affected.is_empty(),
+            "影響を受けた行も別のシートのものである（画面はこれを現在位置の移動と窓の作り直しに使う）"
+        );
+        let after = data(answer_find_violation(
+            &sessions,
+            &grids,
+            &label,
+            &GridViolationRequest {
+                from: 0,
+                direction: GridSearchDirection::Forward,
+            },
+        ));
+        assert_eq!(
+            Some(violation),
+            after.violation,
+            "表示中のシートの違反の探索も変わらない"
+        );
+    }
+
+    /// **逆向きでも数の幽霊を作らない**（要件 4.3、9.5）。
+    ///
+    /// 表示中のシート（補助）は違反 0 件であり、取り消す 1 歩は違反 1 件の台帳へ落ちる。
+    /// 台帳の復元は全列を再検証するため、その報告（1 件）を表示中のシートの索引へ据えれば、
+    /// **総数だけが 1 になる**（探索は 1 件も返さない幽霊である）。
+    #[test]
+    fn undoing_another_sheet_does_not_add_its_violations_to_the_displayed_sheet() {
+        let scratch = Scratch::new("history-other-sheet-ghost");
+        let path = scratch.file("台帳.jxcel");
+        // 台帳（編集するシート）は違反 1 件、補助（表示するシート）は違反 0 件。
+        let (ledger, supplement) = write_two_sheet_document(&path, [999, 2, 3], [1, 2, 3]);
+        let (sessions, label) = documents(&path);
+        let grids = grids();
+
+        // 1. 台帳を開き、違反している数量を範囲内の値へ直す（履歴の 1 件目）。
+        data(answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest {
+                sheet: ledger.clone(),
+            },
+        ));
+        let row = stored_rows_at(&sessions, &label, &[0])[0].clone();
+        data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest {
+                command: set_one(&row, 1, "9"),
+            },
+        ));
+
+        // 2. 補助を開き、索引を組み立てる（違反 0 件）。
+        data(answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest {
+                sheet: supplement.clone(),
+            },
+        ));
+        let opened = data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+        assert_eq!(
+            0, opened.violation_total,
+            "前提: 補助は違反を 1 件も持たない"
+        );
+
+        // 3. **補助を見たまま取り消す**（台帳の違反が戻る）。
+        let undone = data(answer_history(
+            &sessions,
+            &grids,
+            &label,
+            &GridHistoryRequest {
+                direction: GridHistoryDirection::Undo,
+            },
+        ))
+        .outcome
+        .expect("取り消せる操作は残っている");
+
+        assert_eq!(
+            CellValue::Int(999),
+            stored_value(&sessions, &label, &row, 1),
+            "取り消しは台帳の違反を戻す"
+        );
+        assert_eq!(
+            0, undone.violation_total,
+            "別のシートの違反が表示中のシートの総数へ混ざらない"
+        );
+        assert!(undone.violations.is_empty(), "位置も別のシートのものである");
+        let after = data(answer_find_violation(
+            &sessions,
+            &grids,
+            &label,
+            &GridViolationRequest {
+                from: 0,
+                direction: GridSearchDirection::Forward,
+            },
+        ));
+        assert!(
+            after.violation.is_none(),
+            "探索も幽霊の違反を返さない（数の幽霊を作らない）"
+        );
+    }
+
+    /// **合成された履歴の 1 歩（行の補充を伴う貼り付けの逆命令）は、表示中のシートを名乗らない
+    /// 部品を含むとき、失敗の封筒で拒まれ、保持している文書を 1 つも変えない**（要件 7.4、9.2。
+    /// design.md「UndoStack」の限界 (2)）。
+    ///
+    /// 貼り付けの逆命令は「覆ったセルの値を戻す（材料が**台帳**を名乗る）」と「補充した行を
+    /// 取り除く（シートを運ばず、表示中のシートを見る）」の合成である。台帳を見ていないまま
+    /// 適用すると、前半が台帳へ届いてから後半が補助の行を知らずに止まり、**台帳の値だけが戻る**
+    /// （10.2 の 2 度目の差し戻しが実測した欠陥）。画面はこの失敗を封筒の失敗腕で受け取り、
+    /// 表は**変わっていない** — 変わっていれば、利用者には「取り消せなかったのに半分だけ
+    /// 戻った」表が見える。
+    #[test]
+    fn undoing_a_composite_step_while_looking_at_another_sheet_changes_nothing() {
+        let scratch = Scratch::new("history-other-sheet-paste");
+        let path = scratch.file("台帳.jxcel");
+        let (ledger, supplement) = write_two_sheet_document(&path, [1, 2, 3], [1, 2, 3]);
+        let (sessions, label) = documents(&path);
+        let grids = grids();
+
+        // 1. 台帳を開き、表示を指定したうえで、**行の補充が起きる**貼り付けを適用する
+        //    （履歴の 1 件目）。
+        data(answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest {
+                sheet: ledger.clone(),
+            },
+        ));
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+        let rows = stored_rows_at(&sessions, &label, &[0, 1, 2]);
+        data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest {
+                command: GridEditCommand::PasteRange {
+                    anchor: GridCellAddress {
+                        row: rows[0].clone(),
+                        column: 1,
+                    },
+                    rows: rows.clone(),
+                    text: "7\n8\n9\n10\n11".to_owned(),
+                },
+            },
+        ));
+        // **貼り付けの後の姿を控える**（行の集合と、行ごとの数量）。控えずに「いまの値」を
+        // 2 度読んで比べると、比べる相手がどちらも同じ時点の値になり、常に一致してしまう。
+        let after_edit = stored_rows_at(&sessions, &label, &[0, 1, 2, 3, 4]);
+        let pasted_quantities = values_in_column(&sessions, &label, &after_edit, 1);
+        assert_eq!(
+            5,
+            after_edit.len(),
+            "前提: 貼り付けは行を補充する（要件 7.4）"
+        );
+        assert_eq!(
+            vec![
+                CellValue::Int(7),
+                CellValue::Int(8),
+                CellValue::Int(9),
+                CellValue::Int(10),
+                CellValue::Int(11)
+            ],
+            pasted_quantities,
+            "前提: 貼り付けは台帳の数量を書く"
+        );
+
+        // 2. 補助を開く（同じウィンドウ。**表示は補助のまま**にする）。
+        data(answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest {
+                sheet: supplement.clone(),
+            },
+        ));
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+
+        // 3. **補助を見たまま取り消す** — 合成の 1 歩は表示中のシートを名乗らない部品を持つ。
+        let failure = answer_history(
+            &sessions,
+            &grids,
+            &label,
+            &GridHistoryRequest {
+                direction: GridHistoryDirection::Undo,
+            },
+        );
+
+        // 4. 保持している文書は 1 つも変わっていない（**すべての値**を見る。行の識別子だけを
+        //    比べても、前半が届いていれば 3 行の値が入れ替わってしまう）。
+        let unchanged = stored_rows_at(&sessions, &label, &[0, 1, 2, 3, 4]);
+        assert_eq!(after_edit, unchanged, "台帳の行の集合は変わらない");
+        assert_eq!(
+            pasted_quantities,
+            values_in_column(&sessions, &label, &unchanged, 1),
+            "台帳の値は 1 つも変わらない（前半の復元だけが届いてはならない）"
+        );
+        let failure = error(failure);
+        assert!(
+            matches!(failure, IpcError::Document { .. }),
+            "拒みは封筒の失敗腕で返る: {failure:?}"
+        );
+
+        // 5. 2 度目も同じ失敗であり、文書はやはり変わらない。
+        let again = error(answer_history(
+            &sessions,
+            &grids,
+            &label,
+            &GridHistoryRequest {
+                direction: GridHistoryDirection::Undo,
+            },
+        ));
+        let still = stored_rows_at(&sessions, &label, &[0, 1, 2, 3, 4]);
+        assert_eq!(after_edit, still, "2 度目も行の集合は変わらない");
+        assert_eq!(
+            pasted_quantities,
+            values_in_column(&sessions, &label, &still, 1),
+            "2 度目も値は変わらない"
+        );
+        assert!(
+            matches!(again, IpcError::Document { .. }),
+            "2 度目も封筒の失敗腕で返る: {again:?}"
+        );
+    }
+
+    /// **文書が差し替わったら履歴を捨てる**（要件 9.5）。
+    ///
+    /// 判定は既存の経路と同じ「**保持しているシートが文書に無い**」であり、その状態では
+    /// 古い命令を**新しい文書へ決して適用しない**（取り消しは何も変えない）。引き継ぎを
+    /// 無条件にすると、前の文書の行識別子を名乗る命令が新しい文書へ届きうる。
+    #[test]
+    fn replacing_the_document_discards_the_history() {
+        let scratch = Scratch::new("history-replaced");
+        let before = scratch.file("前.jxcel");
+        let after = scratch.file("後.jxcel");
+        write_document_with(&before, [1, 2, 3]);
+        write_document_with(&after, [4, 5, 6]);
+        let (sessions, label) = documents(&before);
+        let grids = grids();
+
+        // 1. 前の文書を開き、履歴を 1 件作る（数量が `9` になる）。
+        data(answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest {
+                sheet: sheet_id(&before),
+            },
+        ));
+        let edited = stored_rows_at(&sessions, &label, &[0])[0].clone();
+        data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest {
+                command: set_one(&edited, 1, "9"),
+            },
+        ));
+        assert_eq!(
+            CellValue::Int(9),
+            stored_value(&sessions, &label, &edited, 1),
+            "前提: 編集は前の文書の値を変える"
+        );
+
+        // 2. 文書を差し替える（利用者の「開く…」と同じ順序: 未保存の印を落としてから引き渡す）。
+        sessions.discard(&label).expect("未保存の印を落とせる");
+        sessions.attach(&label, &after).expect("文書を引き渡せる");
+        let fresh = stored_rows_at(&sessions, &label, &[0])[0].clone();
+
+        // 3. **差し替えた文書へ古い命令を適用しない** — 保持しているシートがもう無いので、
+        //    取り消しは経路の失敗であり（`outcome: None` ではない）、新しい文書も動かない。
+        let stale = error(answer_history(
+            &sessions,
+            &grids,
+            &label,
+            &GridHistoryRequest {
+                direction: GridHistoryDirection::Undo,
+            },
+        ));
+        assert!(
+            matches!(stale, IpcError::Document { .. }),
+            "古い履歴は差し替え後の文書では経路が成立しない"
+        );
+        assert_eq!(
+            CellValue::Int(4),
+            stored_value(&sessions, &label, &fresh, 1),
+            "古い命令は新しい文書を変えない"
+        );
+
+        // 4. 差し替え後のシートを開くと、履歴は空である（要件 9.5 の「捨てる」）。
+        data(answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest {
+                sheet: sheet_id(&after),
+            },
+        ));
+        let empty = data(answer_history(
+            &sessions,
+            &grids,
+            &label,
+            &GridHistoryRequest {
+                direction: GridHistoryDirection::Undo,
+            },
+        ));
+        assert_eq!(None, empty.outcome, "差し替えの後に引き継ぐ履歴は無い");
     }
 
     // -----------------------------------------------------------------------

@@ -76,7 +76,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use common::sample::{sample, SampleOptions};
 use data_grid::{
     decode_window, display_text, CellAddress, ColumnIndex, EditCommand, ExpansionState, FilterSpec,
-    GridSession, RowOrdinal, RowOrder, RowSpan, SortKey, ViewSpec, ViewSummary,
+    GridSession, RowOrder, RowOrdinal, RowSpan, SortKey, UndoStack, ViewSpec, ViewSummary,
+    DEFAULT_UNDO_LIMIT,
 };
 use document_format::container::ContainerCodec;
 use document_format::parts::{to_parts, RowsCodec};
@@ -330,6 +331,8 @@ struct Fixture {
     document: Document,
     sheet: SheetId,
     session: GridSession,
+    /// 取り消し履歴（**所有者は呼び出し側である** — 要件 9.5。セッションは所有しない）。
+    history: UndoStack,
     /// 標本の行数（文書を借りたまま読めるように控える）。
     rows: usize,
 }
@@ -346,6 +349,7 @@ impl Fixture {
             document: parts.document,
             sheet: parts.sheet,
             session,
+            history: UndoStack::new(DEFAULT_UNDO_LIMIT),
             rows,
         }
     }
@@ -363,9 +367,16 @@ impl Fixture {
 
     /// 行 `row` の列 `column` へ、打たれた文字を書く（要件 3.3 の編集経路そのもの）。
     fn write(&mut self, row: RowId, column: usize, text: &str) {
-        self.session
+        let Self {
+            session,
+            document,
+            history,
+            ..
+        } = self;
+        session
             .apply(
-                &mut self.document,
+                document,
+                history,
                 EditCommand::SetCells {
                     cells: vec![(
                         CellAddress::new(row, ColumnIndex::new(column)),
