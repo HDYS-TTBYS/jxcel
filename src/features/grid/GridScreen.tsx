@@ -215,13 +215,15 @@
  * |---|---|---|
  * | 展開の操作（要件 5.1、5.2） | **押された 1 件を、いまの指定へ足した完全な記述として送る**（`withExpansion`）。送っている途中の押下は `pendingViewRef` へ積む | `GridScreen` の `expand` と `./nestedInspector` |
  * | 展開の状態の保持（要件 5.3） | `ready.view` が持つ。**走査はここへ触れない**ので失われない | `GridScreenState` の `view` |
+ * | **展開の結果の列の構成**（要件 5.1、5.2。申し送り 2 の修復） | `grid_set_view` の応答が運ぶ**導出後**の構成を `ready.summary.columns` へ採用し、表の面を同じ 1 つの経路（`summary` を依存に持つ効果）で組み直す | `gridScreenViewSettled` と `GridSurface` |
  * | 段数の上限の誘導（要件 5.4） | 記述の印（`expandability` が `capped`）から「詳細表示へ」を出し、押すと**現在位置の行のその列**の詳細表示を開く | `./nestedInspector` の `nestedColumnControls` と `gridScreenDetailOpened` |
  * | 詳細表示（要件 4.5、5.5、5.6） | 値を読むのは**表**（窓の記憶を持つ側）であり、開いている位置は状態が持つ。**同じ遷移でセルの編集と同一の規律**（`gridScreenDetailEditSettled` が `gridScreenEditSettled` を呼ぶ） | `GridSurface` の中の `NestedInspector` |
- * | 世代（8.5 が足した是正） | `grid_set_view` の成功と、影響を伴う適用で進める。**組み直さずに**記憶へ下ろす | `ready.generation` と `GridSurface` の効果 |
+ * | 世代（8.5 が足した是正） | `grid_set_view` の成功と、影響を伴う適用で進める。**組み直さずに**記憶へ下ろす（構成が変わったときだけ、構成を依存に持つ効果が組み直す） | `ready.generation` と `GridSurface` の効果 |
  *
- * **要件 5.5 の「構造の全体」と、要件 5.1 / 5.2 の見える結果は、境界に読む口が無いため届かない**
- * （`design.md`「8.5 が確定させたもの」の申し送り 1・2）。本 module はその事実を利用者にも示す
- * （詳細表示は「宣言が読めません」と書き、展開は指定を送るが**描かれる列は変わらない**）。
+ * **要件 5.1 / 5.2 の見える結果は、申し送り 2 の修復で届くようになった。** 境界が返す導出後の
+ * 構成を状態が採用し、表の面がそれを描く（展開すると内側の位置が列として並び、折りたたむと
+ * 元の 1 本に戻る）。**要件 5.5 の「構造の全体」は依然として届かない**（申し送り 1）ので、
+ * 詳細表示は「宣言が読めません」と書く。
  *
  * # 8.3〜8.9 への申し送り（本 module が足す予定の場所）
  *
@@ -289,6 +291,7 @@ import {
 import { WINDOW_ROWS, createWindowCache, type WindowCache } from "./windowCache";
 import { createGlideAdapter } from "./renderer/glideAdapter";
 import {
+  clampSelection,
   followTarget,
   initialSelection,
   selectionAt,
@@ -682,12 +685,21 @@ function stateAfterEdit(state: GridScreenState, outcome: GridEditOutcome | null)
  * 表示の指定を送った結果（**画面が状態を決めるのに要るものだけ**）。
  *
  * 成功の腕は**送った指定をそのまま持ち帰る** — 状態へ入れるのは「境界が受け取った指定」で
- * なければならない（組み立て直すと、送ったものと入れたものが食い違いうる）。
+ * なければならない（組み立て直すと、送ったものと入れたものが食い違いうる）。**導出後の列の
+ * 構成も持ち帰る**（境界が唯一の源である。組み立て直すと、ドメインが導出した構成と画面が
+ * 描く列が食い違いうる）。
  */
 export type GridViewSettlement =
   | {
       readonly status: "applied";
       readonly view: GridViewSpec;
+      /**
+       * **導出後**の列の構成（左から右への表示順。入れ子の展開を含む。要件 5.1、5.2）。
+       *
+       * `grid_set_view` の応答が運ぶものであり、**展開・折りたたみが見える唯一の源**である
+       * （据え置くと、展開を指定しても描かれる列が変わらない）。
+       */
+      readonly columns: readonly ColumnDescriptor[];
       /** 可視行数（絞り込みが効けばシートの行数と違う）。窓が覆う行数である。 */
       readonly visibleRows: number;
       /** **シート全体**の違反の総数（要件 4.3）。 */
@@ -715,9 +727,37 @@ export async function applyGridView(
   return {
     status: "applied",
     view,
+    columns: answer.data.columns,
     visibleRows: answer.data.visible_rows,
     violationTotal: answer.data.violation_total,
   };
+}
+
+/**
+ * 2 つの構成が**同じ並び**を表すか（表示の位置ごとに同じ列が並んでいるか）。
+ *
+ * 同一性の綴りは [`columnKey`]（`ColumnDescriptor` の doc が定める（`column`, `path`）の対）で
+ * ある。**名前や札まで見ない**のは、それらが位置の対から決まる導出物だからである
+ * （同じ位置の対なら表示名も葉の型も同じである）。
+ *
+ * 状態へ構成を入れるときに使い、同じ並びなら**前の値（参照）を据え置く** — 表の面
+ * （`GridSurface`）は `summary` を依存に持つ 1 つの効果で器と窓の記憶を組むので、同一性が
+ * 落ちると**組み直し**、走査の位置（表示範囲）と取得済みの窓を捨てることになる。
+ * 並べ替え・絞り込みは列の構成を変えない（`derive_layout` は展開だけを読む）ため、この据え置きが
+ * 効くのはそれらの指定である。
+ */
+function sameLayout(
+  left: readonly ColumnDescriptor[],
+  right: readonly ColumnDescriptor[],
+): boolean {
+  return (
+    left === right ||
+    (left.length === right.length &&
+      left.every((column, display) => {
+        const other = right[display];
+        return other !== undefined && columnKey(column) === columnKey(other);
+      }))
+  );
 }
 
 /**
@@ -725,13 +765,22 @@ export async function applyGridView(
  *
  * | 結果 | 何が起きるか |
  * |---|---|
- * | 適用された | **送った指定をそのまま状態へ入れる**（展開の状態がここに住むので、走査では失われない）。可視行数・違反の総数を置き換え、**世代を 1 つ進める** |
+ * | 適用された | **送った指定をそのまま状態へ入れる**（展開の状態がここに住むので、走査では失われない）。**導出後の列の構成を採用し**、可視行数・違反の総数を置き換え、**世代を 1 つ進める** |
  * | 適用できなかった | **状態を 1 つも動かさず**、理由を告知として出す（世代も進めない — 進めると、窓の要求が存在しない世代を名乗る） |
  *
- * 窓の記憶は捨てない（**組み直しもしない**）。表示の指定のうち展開は**窓が運ぶ列を変えない**
- * ので、記憶している窓の内容はそのまま正しい（変わったのは世代だけである — `GridSurface` が
- * 世代を記憶へ下ろす）。並べ替え・絞り込みのように**行の並びを変える**指定は、8.8 が
- * `WindowCache.clear` を伴って足す。
+ * # 列の構成を採用することが要件 5.1 / 5.2 の見える結果である
+ *
+ * 境界は**導出後**の構成（`GridViewResponse.columns`）を返すので、状態の `summary` をその
+ * 並びで置き換える。**これが無いと、展開を指定しても描かれる列は変わらない** — 画面は開いた
+ * ときの構成を描き続ける（8.5 の申し送り 2 が実測した欠陥であり、本遷移がその修復である）。
+ *
+ * 表の面（`GridSurface`）は `summary` を依存に持つ 1 つの効果で器・窓の記憶・移植口を組むので、
+ * 構成が変われば**同じ 1 つの経路**で組み直る（移植口に列を後から差し替える口が無いため、
+ * 組み直しが唯一の道である）。組み直しは**表示範囲と取得済みの窓を捨てる**（列の数が変わる
+ * 以上、走査の位置は元の意味を保たない）。構成が**同じ並び**であるときは据え置く（[`sameLayout`]）
+ * — 窓が運ぶ列は変わらないので、記憶している窓の内容はそのまま正しい（変わったのは世代だけ
+ * である — `GridSurface` が世代を記憶へ下ろす）。並べ替え・絞り込みのように**行の並びを変える**
+ * 指定は、8.8 が `WindowCache.clear` を伴って足す。
  */
 export function gridScreenViewSettled(
   model: GridScreenModel,
@@ -747,11 +796,24 @@ export function gridScreenViewSettled(
         state: {
           ...model.state,
           view: settlement.view,
+          // **導出後の構成を採用する**（要件 5.1、5.2）。同じ並びなら前の値を据え置く
+          // （器と窓の記憶を無駄に組み直さない）。境界の型は可変の並び（`Array`）なので写す。
+          summary: sameLayout(model.state.summary.columns, settlement.columns)
+            ? model.state.summary
+            : { ...model.state.summary, columns: [...settlement.columns] },
           visibleRows: settlement.visibleRows,
           violationTotal: settlement.violationTotal,
+          // **縮んだ構成へ現在位置を寄せる**（要件 2.1、5.2）。入れ子を折りたたむと列数が減り、
+          // 最後の列にあった現在位置が**描かれる表の外**へ残る — そのまま移植口へ渡すと、
+          // 数え上げの行の文言と描かれている列が食い違う（境界の修復のレビューが実測）。
+          selection: clampSelection(model.state.selection, {
+            rowCount: settlement.visibleRows,
+            columnCount: settlement.columns.length,
+          }),
           // 世代は**進めることだけが契約である**（`api.rs` の `set_view` はつねに +1 する）。
           generation: model.state.generation + 1,
-          // 詳細表示は**開いたままにする**（構成が変わったことを理由に閉じる理由が無い）。
+          // 詳細表示は**開いたままにする**（構成が変わったことを理由に閉じる理由が無い。位置は
+          // 表示の位置であり、いまの構成の同じ位置の列を詳しく見せる — design.md の 8.5 の表）。
         },
         notice: model.notice,
         editReport: model.editReport,
@@ -1022,6 +1084,12 @@ export async function loadGridScreenState(client: GridClient): Promise<GridScree
   // を行う）。**これを呼ばないと窓はつねに行 0 件で返り、表は読み込み中のままになる**
   // （8.1 の起動観測で実測した）。渡すのは「絞り込み無し・並べ替え無し・展開無し」であり、
   // 操作ではない（並べ替え・絞り込みの操作は 8.8 の担当である）。
+  //
+  // **この呼び出しの応答も導出後の構成を運ぶ**（`GridViewResponse.columns`）が、状態へ入れる
+  // 構成は `grid_open_sheet` の要約のままである — 空の指定では両者が一致する（展開が 1 つも
+  // 無いので、ドメインの `derive_layout` は宣言の列をそのまま返す）ため、**同じものを 2 度
+  // 受け取って片方を捨てる**経路を作らない。採用は**構成が変わりうる呼び出し**（利用者の操作）
+  // にだけ要る（[`gridScreenViewSettled`]）。
   const derived = await client.setView(EMPTY_GRID_VIEW);
   if (derived.status === "error") {
     return { status: "failed", message: describeIpcError(derived.error), canRetry: true };
@@ -1300,14 +1368,18 @@ export function createGridSurfaceCache(options: {
  * 現在位置と選択（8.2）を結線する。**
  *
  * 組み立てはマウントの効果 1 つで行い、後始末で移植口を片付けて記憶を手放す（`dispose`。以後の
- * 応答は捨てられる）。**列の並びは表示状態（7.5）から組む**ので、8.8 が列幅・列順を変えたときは
- * 新しい仕様でマウントし直すことになる（`RendererHandle` に幅や順を押し込む口が無い）。
+ * 応答は捨てられる）。**列の並びは表示状態（7.5）から組む**ので、列の構成が変わったとき
+ * （入れ子の展開・折りたたみ。要件 5.1、5.2）と 8.8 が列幅・列順を変えたときは、**新しい仕様で
+ * マウントし直す**（`RendererHandle` に幅や順を押し込む口が無い。移植口に列を差し替える口が
+ * 無いことは 7.2 の申し送りである）。効果の依存に `summary` があることが、その 1 つの経路で
+ * ある — **導出後の構成を採用した状態が渡ってくれば、器・窓の記憶・移植口が揃って組み直る**
+ * （列の写像も `createGridSurfaceCache` が新しい構成から組み直すので、写像は 1 つのままである）。
  *
  * 効果は 4 つである: ① 器の組み立て（依存はシートと列の構成と可視行数だけ — **選択を依存に
  * 入れない**。入れると打鍵のたびに器を組み直し、React の根と Glide の部品を作り直して走査の
  * 位置を失う）、② 選択を移植口へ下ろし、必要なら追随させる（依存は選択だけ）、③ **世代を
- * 記憶へ下ろす**（8.5。組み直さない — 適用も表示の指定の変更も世代を進めるので、組み直すと
- * 走査の位置まで失われる）、④ 現在位置の違反の理由を引く（要件 4.2）。
+ * 記憶へ下ろす**（8.5。**組み直さない** — 適用は世代だけを進めて列の構成を変えないので、
+ * 組み直すと走査の位置まで失われる）、④ 現在位置の違反の理由を引く（要件 4.2）。
  *
  * **詳細表示（8.5）もここが描く。**値を読むには窓の記憶が要り、記憶を持つのは表だからである
  * （8.4 が違反の理由を読むのと同じ理由）。開いている位置そのものは画面の状態（`detail`）が持つ
@@ -1506,8 +1578,10 @@ function GridSurface({
   }, [sheet, summary, visibleRows, onUnavailable]);
 
   /**
-   * **世代を記憶へ下ろす**（8.5）。**組み直さない** — `grid_set_view` も適用も世代を進めるので、
-   * 組み直すと移植口を作り直すことになり、走査の位置（表示範囲）と Glide の部品まで失われる。
+   * **世代を記憶へ下ろす**（8.5）。**組み直さない** — 適用は世代だけを進め、列の構成を変えない
+   * （構成が変わったときは、`summary` を依存に持つ組み立ての効果が別に走って器ごと組み直る）。
+   * ここで組み直すと、**列の構成が変わらない出来事**（編集の適用）でも移植口を作り直すことになり、
+   * 走査の位置（表示範囲）と Glide の部品まで失われる。
    * 下ろすだけで足りるのは、進んだ世代が変えるのが**窓の要求が名乗る数**だけだからである
    * （記憶している窓の中身は、行の並びを変えない指定では正しいままである）。
    *

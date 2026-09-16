@@ -22,12 +22,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  clampSelection,
   extendSelection,
   followTarget,
   initialSelection,
   moveCurrent,
   selectWholeColumn,
   selectWholeRow,
+  selectionAt,
   selectionCounts,
   selectionForKey,
   type KeyStroke,
@@ -431,5 +433,44 @@ describe("現在位置はつねに選択の範囲の中にある（要件 2.1）
     // **空の走査で緑になっていないこと**（この数が 0 なら上の主張は何も見ていない）。
     expect(checked).toBe(starts.length * operations.length);
     expect(checked).toBe(4 * 3 * 7);
+  });
+});
+
+describe("構成が縮んだときの寄せ（要件 2.1、5.2）", () => {
+  it("列が消えたら、現在位置と範囲は表の中へ寄る", () => {
+    // 境界の修復のレビューが実測した欠陥: 入れ子を折りたたむと列数が減り、最後の列にあった
+    // 現在位置が**描かれる表の外**へ残る（数え上げの行は「5 列」と名乗るのに描かれるのは 4 本）。
+    const clamped = clampSelection(selectionAt({ row: 2, column: 4 }), {
+      rowCount: 10,
+      columnCount: 4,
+    });
+
+    expect(clamped.current).toEqual({ row: 2, column: 3 });
+    expect(clamped.range.end).toEqual({ row: 2, column: 3 });
+  });
+
+  it("行が減ったときも同じく寄る", () => {
+    const clamped = clampSelection(selectionAt({ row: 9, column: 1 }), {
+      rowCount: 3,
+      columnCount: 4,
+    });
+
+    expect(clamped.current).toEqual({ row: 2, column: 1 });
+  });
+
+  it("範囲の中にあるときは、同じ値を返す（据え置きを参照で決められる）", () => {
+    const before = selectionAt({ row: 1, column: 1 });
+    const after = clampSelection(before, { rowCount: 10, columnCount: 10 });
+
+    expect(after).toBe(before);
+  });
+
+  it("表が空（列 0 本）でも、範囲の外の選択を作らない", () => {
+    const clamped = clampSelection(selectionAt({ row: 3, column: 3 }), {
+      rowCount: 0,
+      columnCount: 0,
+    });
+
+    expect(clamped.current).toEqual({ row: 0, column: 0 });
   });
 });

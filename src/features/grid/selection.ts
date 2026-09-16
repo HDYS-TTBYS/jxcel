@@ -170,6 +170,49 @@ export function selectionAt(position: CellPosition): RendererSelection {
 }
 
 /**
+ * 選択を**いまの表の範囲へ寄せる**（要件 2.1、5.2）。
+ *
+ * **構成が縮むときに要る。**入れ子を折りたたむと列数が減るため、表示の位置が最後の列にあった
+ * 現在位置は**描かれる表の外**へ残る — そのまま渡すと、移植口は表の外の制御選択を受け取り、
+ * 数え上げの行は「現在位置 1 行 5 列」と名乗るのに描かれている列は 4 本、という**利用者に見える
+ * 食い違い**になる（境界の修復のレビューが実測: 展開 → 最後の列へ移動 → 折りたたみの 2 操作で
+ * 到達する）。打鍵の側（`step` / `grow`）はつねに寄せるが、**構成の側から縮む経路は寄せ手が
+ * 無かった**ため、ここで 1 つ足す。
+ *
+ * 範囲の中にあるときは**同じ値**を返す（据え置きの判定が参照で効くように、新しい入れ物を
+ * 無駄に作らない…のではなく、呼び出し側が同一性で据え置きを決めるため、値が変わらないときは
+ * 引数をそのまま返すのが読みやすい）。
+ */
+export function clampSelection(
+  selection: RendererSelection,
+  bounds: SelectionBounds,
+): RendererSelection {
+  const current: CellPosition = {
+    row: within(selection.current.row, bounds.rowCount),
+    column: within(selection.current.column, bounds.columnCount),
+  };
+  const start: CellPosition = {
+    row: within(selection.range.start.row, bounds.rowCount),
+    column: within(selection.range.start.column, bounds.columnCount),
+  };
+  const end: CellPosition = {
+    row: within(selection.range.end.row, bounds.rowCount),
+    column: within(selection.range.end.column, bounds.columnCount),
+  };
+  if (
+    current.row === selection.current.row &&
+    current.column === selection.current.column &&
+    start.row === selection.range.start.row &&
+    start.column === selection.range.start.column &&
+    end.row === selection.range.end.row &&
+    end.column === selection.range.end.column
+  ) {
+    return selection;
+  }
+  return { current, range: { start, end } };
+}
+
+/**
  * 表を描き始めるときの選択: 先頭のセル 1 つ。**要件 2.1 の「現在位置となるセルを 1 つ持つ」の
  * 初期値である**（表を描く間、現在位置が 1 つも無い瞬間を作らない）。
  */

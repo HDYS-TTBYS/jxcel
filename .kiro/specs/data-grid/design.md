@@ -325,7 +325,7 @@ stateDiagram-v2
 | 4.1, 4.2, 4.6 | 違反の区別・理由・解消 | WindowCodec, GridScreen, ViolationBar | 窓の違反札, `GridViolationResponse.reason` | 編集の適用と判定 |
 | 4.3, 4.4, 4.6 | 違反の総数と次の違反への移動、解消の反映 | ViolationIndex, GridSession, ViolationBar | `violation_total`, `find_violation` | 編集の適用と判定 |
 | 4.5 | 入れ子の内側の違反位置 | WindowCodec, NestedInspector | `Violation.path` の写し | — |
-| 5.1, 5.2, 5.3, 5.4, 5.6 | 入れ子の展開・折りたたみ・深さの上限・要素数 | ViewState, GridSession | `ViewState.expansion`, `MAX_EXPANSION_DEPTH` | — |
+| 5.1, 5.2, 5.3, 5.4, 5.6 | 入れ子の展開・折りたたみ・深さの上限・要素数 | ViewState, GridSession, GridCommands, GridScreen | `ViewState.expansion`, `MAX_EXPANSION_DEPTH`, `GridViewResponse.columns`（導出後の構成）, `ColumnSpace`（表示の位置 → 文書の列） | — |
 | 5.5, 5.7 | 入れ子の詳細表示とその中の編集 | NestedInspector, EditApply | `EditCommand::SetNested` | 編集の適用と判定 |
 | 6.1, 6.2, 6.3, 6.4 | 行の追加・削除・複製と一意違反 | EditApply, document-format の 3 メソッド | `EditCommand::InsertRows/RemoveRows/DuplicateRows` | 編集の適用と判定 |
 | 6.5 | 大量削除の確認 | GridScreen | — | — |
@@ -679,7 +679,7 @@ impl<'a> UndoRedo<'a> {
 | コマンド | 要求の中身 | 応答の中身 |
 |---|---|---|
 | `grid_open_sheet` | `sheet`（**シートの識別子の文字列**。`DocumentSheet.id` をそのまま渡す） | `context` と `GridSheetSummary` |
-| `grid_set_view` | `view: GridViewSpec`（並べ替え・絞り込み・展開の**完全な記述**） | `context`、可視行数、隠された行数、違反の総数 |
+| `grid_set_view` | `view: GridViewSpec`（並べ替え・絞り込み・展開の**完全な記述**） | `context`、**導出後の列の構成**（`ColumnDescriptor` の並び。左から右への表示順）、可視行数、隠された行数、違反の総数 |
 | `grid_apply_edit` | `command: GridEditCommand` | `context` と `GridEditOutcome`（`null` は取り得ない） |
 | `grid_history` | `direction`（`undo` / `redo` の閉じた列挙） | `context` と `GridEditOutcome \| null`（`null` は「進める履歴が無い」） |
 | `grid_find_violation` | `from`（可視行の序数）と `direction`（`forward` / `backward`） | `context` と、見つかった違反（位置と理由）または `null` |
@@ -700,6 +700,24 @@ impl<'a> UndoRedo<'a> {
 - **`GridViolationResponse` 以外は空の結果を持たない。** 「これ以上違反が無い」だけが
   `null` であり、`grid_open_sheet` の 2 つの空の状態（列が無い・行が無い）は
   `GridSheetSummary` の形が表す（要件 1.5、1.6）
+- **`grid_set_view` の応答が導出後の列の構成を運ぶ**（`GridViewResponse.columns`。8.5 の
+  申し送り 2 の修復。下の「申し送り 2 の修復」節）。**構成を導出するのは `grid_set_view`
+  そのもの**（`GridSession::set_view` と展開の適用）であるため、その結果を運ぶのは同じ
+  コマンドの応答でなければならない — 別のコマンドの応答に載せると、**どの指定に対する
+  構成なのかが要求と応答の対応から読めなくなる**。とくに `grid_open_sheet` の応答に載せる
+  経路は成立しない: **開く時点では展開の指定がまだ存在しない**（画面は開いたあとに
+  `grid_open_sheet` → 空の指定の `grid_set_view` → 利用者の操作による展開、の順に進む）ため、
+  開き直しても展開後の構成は得られず、`grid_open_sheet` が前のセッションの表示の指定を
+  保ったとしても**構成が変わる瞬間に画面へ届く経路が 1 つも無い**。導出は既にドメインが
+  正しく行っている（`GridSession::columns()` が `set_view` と `set_expansion` のあとの
+  `ColumnLayout` を返す）ので、適応層がするのは**それを写して載せること**だけである
+- **載せるのは列の並びであって、「表示の指定」ではない。** 窓（`grid_rows_window`）が運ぶ
+  セルは**文書の列**であり、表示の位置ではない（`WindowCodec::encode`）。画面が要るのは
+  「どの表示の位置にどの列が描かれるか」そのものであり、それは `ColumnDescriptor` の並びが
+  表す（`GridSheetSummary.columns` と同じ形・同じ意味である）。画面はこの並びから
+  **表示の位置 → 文書の列**の写像（`ColumnSpace`）を組み直す — 8.5 が確定させた「写像は
+  1 つ」の規律はそのままである（写像の源が 2 つになるのではなく、**同じ 1 つの写像を
+  新しい構成から組み直す**）
 
 ##### 適応層が担う 5 つの仕事（6.2）
 
@@ -1120,9 +1138,12 @@ export interface GridRendererPort {
 **`RenderCell.variant`（移植口の「葉の型の札」）は列の宣言から取る**: 窓が運ぶのは**値の変種**
 （`CellValue` の変種 = wire の札。`Int` / `Text` / `Nested` など 8 種）であり、`Date` / `Enum` /
 `Ref` / `Object` / `Array` / `Any` のような**宣言の葉の型**ではない。したがって記憶は
-`GridOpenResponse.columns[i].kind`（生成物の `ColumnDescriptor.kind`。`null` は `Any` へ落とす）を
-列の添字で受け取り、`variant` へ載せる。窓の札は `DecodedCell.variant` としてそのまま取れる
-（7.4 が値の変種を要る場合の材料である — 8.1 が `columns` から `variants` を組み立てる）。
+**いまの構成**の `[i].kind`（生成物の `ColumnDescriptor.kind`。`null` は `Any` へ落とす）を
+列の添字で受け取り、`variant` へ載せる。構成が届く経路は 2 つである — 開いたときは
+`GridOpenResponse.columns`、展開・折りたたみのあとは `GridViewResponse.columns`（同じ形・同じ
+意味であり、画面は後者を採用して写像を組み直す。下の「申し送り 2 の修復」）。窓の札は
+`DecodedCell.variant` としてそのまま取れる（7.4 が値の変種を要る場合の材料である — 8.1 が
+いまの構成から `variants` を組み立てる）。
 
 **先読みの幅**（設計は「幅は計測で決める」とし、7.6 がフレーム時間の標本を `RenderProbe` と
 共用して監視する）: 窓を 256 行、先読みを**向きの先に 1 窓**、反対側に 1 窓とする。根拠は
@@ -1371,6 +1392,7 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 | **展開の状態の置き場**（要件 5.3） | **`ready` の腕が `view: GridViewSpec` を持つ**（並べ替え・絞り込み・展開の完全な記述）。押された 1 件は `./nestedInspector` の `withExpansion` が**いまの指定へ足す** | ドメインは**要求に現れない展開を折りたたみへ戻す**（`answer_set_view` の規約）ので、押された 1 件だけを送ると前に展開した列が黙って折りたたまれる。走査（現在位置の移動・窓の取り直し）は `view` に触れないので、要件 5.3 はこの構造で満たされる |
 | **列ごとの操作の源**（要件 5.1、5.2、5.4、5.6） | `./nestedInspector` の `nestedColumnControls` が記述の印（`expandability` / `element_count`）**だけ**から導く。`available` は展開（内側の位置では段数を 1 つ深くする）、`capped` は**「詳細表示へ」**、`element_count` は要素数の宣言 | **型の札（`kind`）を見ない** — ユーザー定義型の列も同じ扱いになる（要件 10.3）。移植口に見出しの操作を受け取る口が無いので、表の上の 1 行に並べる |
 | **世代の数え方**（8.5 が足した是正） | `ready` の腕が `generation` を持ち、`grid_set_view` の成功（つねに +1）と適用（`affected` が空でないときだけ +1。`./cellEdit` の `generationAfterEdit`）で進める。`GridSurface` が**組み直さずに**記憶へ下ろす（`setGeneration`） | 進まないと、以後の窓の要求が古い世代を名乗り、Rust 側が `WindowCodec::is_stale` で**空の窓を返す** — 取り直した窓は永久に読み込み中のままになる。**8.3 の経路（適用）でも同じずれが起きていた**（単体テストの偽の移送は世代を強制しないので見えない。実起動の観測は 8.3 も 8.5 も未実施である） |
+| **構成が変わったときの詳細表示**（申し送り 2 の修復が露わにした論点） | **開いたままにする。**位置（`CellDetail.position`）は**表示の位置**であり、構成の変化で指す列が変わりうる。閉じる規則は足さない | 8.5 の時点では構成が変わらなかったため、この帰結は現れなかった。展開のあとの詳細表示は**そのとき表示の位置にある列**（画面は新しい構成から名前と面を引く）を詳しく見せるので、**描かれている値と食い違わない**。閉じる側に倒すと、利用者が開いた面を構成の変化だけで奪うことになる（閉じるのは利用者の操作である） |
 | 詳細表示の中の編集の規律（要件 5.7） | **`gridScreenDetailEditSettled` が `gridScreenEditSettled` をそのまま呼ぶ**（報告・告知・世代・取消の扱いを 2 度書かない）。違いは、面を初期状態へ戻す鍵（`CellDetail.edit`）を進めることだけである | 確定では報告が出て面が戻り、取消では何も送られず面が戻り、失敗では**面が開いたまま**である（セルの編集と同じ規律） |
 
 **申し送り（境界に足りないもの。8.5 が実測した）**
@@ -1378,7 +1400,7 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 | # | 何が足りないか | どの要件か | どこへ足すか |
 |---|---|---|---|
 | 1 | **値の構造そのもの**（本設計は「構造そのものは詳細表示の要求時に JSON として別途取得する」と定めているが、6.1 の 6 本のコマンドに読む口が無い） | 5.5 | 境界に読み口を 1 本足す（`grid_nested_json` など。`crates/app-shell/src/ipc/grid.rs` の型と `src-tauri/src/commands/grid.rs` の適応）。**それまでは詳細表示の編集の初期値も空であり、確定は構造表現の打ち込みに限る**（値を捨てないための制限である） |
-| 2 | **展開の結果の列の構成**（`grid_set_view` の応答は可視行数・隠れた行数・違反の総数だけで、導出後の構成を運ばない。`grid_open_sheet` はセッションを作り直す（`answer_open` が `GridSession::open` で新しいセッションを置く）ので、開き直しても展開後の構成は得られない） | 5.1、5.2、5.4 | `GridViewResponse` に導出後の列の構成を足す（または `grid_open_sheet` が既存のセッションの表示の指定を保つ）。**それまでは、展開を指定しても描かれる列は変わらない**（ドメインは展開を保持するが、画面はその結果を読めない）。**深さの上限の印（`Capped`）も同じ理由で届かない** — 展開した構成にしか現れないためである（画面側の扱いは実装済みで、検査は `Capped` の記述を直接与えて固定している） |
+| 2 | **展開の結果の列の構成**（8.5 の時点では、`grid_set_view` の応答は可視行数・隠れた行数・違反の総数だけで、導出後の構成を運ばなかった。`grid_open_sheet` はセッションを作り直す（`answer_open` が `GridSession::open` で新しいセッションを置く）ので、開き直しても展開後の構成は得られない） | 5.1、5.2、5.4 | **閉じた**（下の「申し送り 2 の修復」。`GridViewResponse.columns` に導出後の列の構成を足し、画面が `grid_set_view` の成功ごとに採用する） |
 | 3 | **内側の位置ごとの宣言**（7.4 の申し送り 6。`members`） | 5.1、5.5 | 境界用の型、または位置の一覧を返す経路。**それまでは入れ子の面が既定の文字の面へ落ちる**（位置ごとの面を出さない） |
 
 **単体テストが観測しないもの（実物の起動で観測する。8.1〜8.4 と同じ規律）**: ① **展開・折りたたみ
@@ -1386,7 +1408,29 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 現れ、打鍵がその面へ届くこと**、③ **`SetNested` の往復が実物の Rust を相手に成立すること**。
 観測の場所は 9.2 の台本（`scripts/ci/`）と、8.1 が使った段（検証用のビルドを
 `JXCEL_VERIFICATION_INITIAL_SCREEN=grid` で起動し、a11y の木と `jxcel.log` を読む）である。
-**本タスクは起動の観測を行っていない**（申し送り 2 により、展開の結果は実物でも観測できない）。
+**本タスクは起動の観測を行っていない。**（申し送り 2 は後の修復で閉じたので、展開の結果そのものは
+境界の応答として観測できるようになったが、**押せること・打鍵が届くことは依然として起動の観測の
+領分である**。）
+
+##### 申し送り 2 の修復（境界が導出後の列の構成を運ぶ。要件 5.1、5.2、5.4）
+
+8.5 の申し送り 2 を、**境界（6.1 の型・6.2 の適応）と画面の側で閉じた**。ドメインは
+`GridSession::columns()` が `set_view` と展開の適用のあとの `ColumnLayout` を返しており
+（`crates/data-grid/src/view/mod.rs` の `derive_layout`）、**導出そのものは最初から正しい** —
+欠けていたのは**それを画面まで運ぶ経路**である。
+
+| 論点 | 決定 | 根拠 |
+|---|---|---|
+| 運ぶ型 | `GridViewResponse.columns: ColumnDescriptor[]`（左から右への表示順。展開を含む） | 構成を導出するのは `grid_set_view` であるため、結果は同じコマンドの応答に載る（「封筒の形」節の同じ論点）。`GridSheetSummary` を丸ごと載せないのは、`row_count` が**シートの行数**であり表示の指定で変わらないためである（可視行数・隠された行数は既に別の欄が運ぶ）。荷は 6.1 の既存の型を再利用する（境界の規約 — 文字列と 32 ビット以下の整数 — は `ColumnDescriptor` が既に満たす） |
+| 描く列への反映 | `ready` の腕の `summary.columns` を、応答が運んだ構成で置き換える（`gridScreenViewSettled` の「適用された」の腕） | 表の面（`GridSurface`）は `summary` を依存に持つ 1 つの効果で器・窓の記憶・移植口を組む。**構成が変われば同じ 1 つの経路で組み直る**ので、列の並びを別経路（移植口へ押し込む口）で更新する第 2 の道を作らない（`RendererSpec.columns` はマウント時にしか渡せない） |
+| 写像の一貫性 | 窓の記憶は `createColumnSpace(新しい構成)` から組み直す。**写像は 1 つのままである** | `ColumnSpace` の源は「いまの構成」1 つであり、組み直しは写像を増やすことではない。写像を据え置くと、**展開後の表示の位置が文書の列と食い違い、描かれている値と編集の宛先が別の列を指す**（要件 8.6） |
+| 構成が変わらない指定 | 応答の構成が**いまの構成と同じ並び**なら `summary` の同一性を保つ（組み直さない） | 並べ替え・絞り込みは列の構成を変えない（`derive_layout` は展開だけを読む）。同一性を落とすと、**指定のたびに器と窓の記憶を作り直し、走査の位置（表示範囲）と取得済みの窓を捨てる** |
+| 展開の深さの上限の印（`Capped`） | 同じ経路で届く | `Capped` は**展開した構成にしか現れない**（`view` 層の `expandability`）ため、構成が届けば印も届く（5.4 の誘導が実物でも成立する） |
+
+**残る限界**: 画面は構成の**並び**を採用するだけであり、`detail`（開いている詳細表示）の
+表示の位置は**そのまま**である。展開すると表示の位置が指す列が変わるため、開いたままの詳細表示は
+**そのとき表示の位置にある列**を詳しく見せる（上の 8.5 の表の「構成が変わったときの詳細表示」の
+行が、この帰結を閉じている）。
 
 ## Data Models
 

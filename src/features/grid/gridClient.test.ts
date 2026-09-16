@@ -56,7 +56,13 @@ describe("境界の口の引数の形", () => {
   it("表示の指定も `request` という名前の引数で包む", async () => {
     invoke.mockResolvedValue({
       status: "ok",
-      data: { context: { window: "main" }, visible_rows: 0, hidden_rows: 0, violation_total: 0 },
+      data: {
+        context: { window: "main" },
+        visible_rows: 0,
+        hidden_rows: 0,
+        violation_total: 0,
+        columns: [],
+      },
     });
     const client = createGridClient();
 

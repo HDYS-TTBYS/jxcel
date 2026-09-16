@@ -127,15 +127,23 @@ function openedSheet(summary: GridSheetSummary): GridOpenResponse {
 }
 
 /**
- * 表示の指定を適用した応答。**可視行数と、シート全体の違反の総数**が検査に効く
- * （総数は要件 4.3 の提示の唯一の源である）。
+ * 表示の指定を適用した応答。**導出後の列の構成・可視行数・シート全体の違反の総数**が検査に効く
+ * （構成は要件 5.1 / 5.2 の見える結果の唯一の源であり、総数は要件 4.3 の提示の唯一の源である）。
+ *
+ * `columns` の既定は空である — **構成を渡さない検査は、展開を 1 つも含まない指定**（開いた直後の
+ * 呼び出しなど、構成が変わらない場合）だけである。
  */
-function derivedView(visibleRows: number, violationTotal = 0): GridViewResponse {
+function derivedView(
+  visibleRows: number,
+  violationTotal = 0,
+  columns: readonly ColumnDescriptor[] = [],
+): GridViewResponse {
   return {
     context: CONTEXT,
     visible_rows: visibleRows,
     hidden_rows: 0,
     violation_total: violationTotal,
+    columns: [...columns],
   };
 }
 
@@ -1553,6 +1561,33 @@ const NESTED_COLUMNS: readonly ColumnDescriptor[] = [
   listDescriptor(3, "明細"),
 ];
 
+/** 入れ子の**内側の位置**の列（親と同じ文書の列を指す。要件 5.1）。 */
+function innerDescriptor(column: number, field: string, name: string): ColumnDescriptor {
+  return {
+    column,
+    path: [{ segment: "Field", name: field }],
+    name,
+    kind: "Text",
+    element_count: null,
+    expandability: "leaf",
+  };
+}
+
+/**
+ * [`NESTED_COLUMNS`] の列 1（提供元）を 1 段展開したときの**導出後の構成**（境界が返すもの）。
+ *
+ * 親の列そのものは残らず（`view` 層の `push_column` は内側のフィールドへ置き換える）、内側の
+ * 位置は**親と同じ文書の列**を指す — したがって表示の位置 1・2 はどちらも文書の列 1 であり、
+ * **恒等ではない**（要件 8.6 の写像が要る理由）。
+ */
+const EXPANDED_NESTED_COLUMNS: readonly ColumnDescriptor[] = [
+  descriptor(0, "名前"),
+  innerDescriptor(1, "name", "提供元.name"),
+  innerDescriptor(1, "code", "提供元.code"),
+  nestedDescriptor(2, "深い入れ子", "capped"),
+  listDescriptor(3, "明細"),
+];
+
 /** 入れ子を持つ標本を開いた応答。 */
 function nestedOpened(): GridOpenResponse {
   return openedSheet({ columns: [...NESTED_COLUMNS], row_count: SAMPLE_ROWS });
@@ -1583,7 +1618,8 @@ describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
     const client = fakeClient({
       state: ok(openDocument([sheetOf("s1", "標本シート", 4, SAMPLE_ROWS)])),
       open: ok(nestedOpened()),
-      view: ok(derivedView(SAMPLE_ROWS)),
+      // **境界は導出後の構成を返す**（提供元を展開した並び。要件 5.1）。
+      view: ok(derivedView(SAMPLE_ROWS, 0, EXPANDED_NESTED_COLUMNS)),
     });
 
     const state = await loadGridScreenState(client);
@@ -1612,18 +1648,22 @@ describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
     expect(settlement).toEqual({
       status: "applied",
       view: withExpansion(EMPTY_GRID_VIEW, { column: 1, expanded: true, depth: 1 }),
+      // **境界が運んだ導出後の構成をそのまま持ち帰る**（要件 5.1）。
+      columns: EXPANDED_NESTED_COLUMNS,
       visibleRows: SAMPLE_ROWS,
       violationTotal: 0,
     });
   });
 
-  it("表示の指定を適用した結果を状態へ反映する（世代が進む）", async () => {
+  it("表示の指定を適用した結果を状態へ反映する（構成と世代が変わる）", async () => {
     const before = readyModel(initialSelection(), { generation: 1 });
     const view = withExpansion(EMPTY_GRID_VIEW, { column: 1, expanded: true, depth: 1 });
 
     const after = gridScreenViewSettled(before, {
       status: "applied",
       view,
+      // 導出前の 3 列（`SAMPLE_COLUMNS`）を受け取った場合。
+      columns: SAMPLE_COLUMNS,
       visibleRows: SAMPLE_ROWS,
       violationTotal: 3,
     });
@@ -1638,6 +1678,8 @@ describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
     // 応答が運ぶ可視行数と違反の総数も反映する（絞り込みが効けば可視行数は変わる）。
     expect(after.state.visibleRows).toBe(SAMPLE_ROWS);
     expect(after.state.violationTotal).toBe(3);
+    // 構成は**応答が運んだもの**になる（同じ並びなので値は変わらない）。
+    expect(after.state.summary.columns).toEqual(SAMPLE_COLUMNS);
   });
 
   it("表示の指定を適用できなかったときは、告知を出して前の指定と世代を残す", async () => {
@@ -1646,6 +1688,7 @@ describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
     const pending = gridScreenViewSettled(before, {
       status: "applied",
       view,
+      columns: SAMPLE_COLUMNS,
       visibleRows: SAMPLE_ROWS,
       violationTotal: 0,
     });
@@ -1677,6 +1720,8 @@ describe("列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）", () => {
     const opened = gridScreenViewSettled(nestedModel(), {
       status: "applied",
       view,
+      // 構成そのものはこの検査の対象ではない（見るのは展開の状態の保持である）。
+      columns: EXPANDED_NESTED_COLUMNS,
       visibleRows: SAMPLE_ROWS,
       violationTotal: 0,
     });
@@ -1823,6 +1868,106 @@ describe("表の窓と列の空間（8.5。要件 5.1、8.6）", () => {
     expect(cache.documentColumn({ row: 0, column: 2 })).toBe(1);
     // 恒等を仮定していないことは、同じ構成から作った写像そのもので確かめる（`./columnSpace`）。
     expect(createColumnSpace(summary.columns).documentColumn(2)).toBe(1);
+  });
+
+  /**
+   * 列ごとの操作の並びに出た列の名前（**表示の順**。要件 5.1、5.2 の見える結果）。
+   *
+   * 表そのもの（移植口）は `node` の環境では走らない（効果が無い）ので、**描かれる列の並び**は
+   * 状態から描かれるこの 1 行で読む（`./nestedInspector` が構成の列ごとに 1 件を出す）。
+   */
+  function controlNamesIn(markup: string): readonly string[] {
+    return [...markup.matchAll(/data-column-control="\d+"[^>]*><span>([^<]*)<\/span>/g)].map(
+      (match) => match[1] ?? "",
+    );
+  }
+
+  it("展開を指定すると描かれる列が入れ子の内側へ広がり、折りたたむと元へ戻る（要件 5.1、5.2）", async () => {
+    // **境界の写し**: `view` の展開に応じて**導出後**の構成を返す（列 1 = 提供元 が展開されて
+    // いれば内側の位置が現れ、展開が無ければ宣言の列がそのまま並ぶ。`view` 層の `derive_layout`
+    // と同じ 2 通りである）。
+    const scripted: GridClient = {
+      ...fakeClient({
+        state: ok(openDocument([sheetOf("s1", "標本シート", 4, SAMPLE_ROWS)])),
+        open: ok(nestedOpened()),
+      }),
+      setView: async (view) =>
+        ok(
+          derivedView(
+            SAMPLE_ROWS,
+            0,
+            view.expansion.some((state) => state.column === 1 && state.expanded)
+              ? EXPANDED_NESTED_COLUMNS
+              : NESTED_COLUMNS,
+          ),
+        ),
+    };
+
+    const state = await loadGridScreenState(scripted);
+    if (state.status !== "ready") {
+      throw new Error("表を描く状態にならなかった");
+    }
+    const before = gridScreenLoaded(initialGridScreenModel(), state);
+    // 導出前: 描かれる列は宣言の 4 本であり、内側の位置は 1 つも現れない。
+    expect(controlNamesIn(markOf(before))).toEqual(["名前", "提供元", "深い入れ子", "明細"]);
+
+    const view = withExpansion(EMPTY_GRID_VIEW, { column: 1, expanded: true, depth: 1 });
+    const after = gridScreenViewSettled(before, await applyGridView(scripted, view));
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+
+    // **展開した列の内側の位置が、描かれる列として現れる**（要件 5.1）。親の列そのものは残らない
+    // （`view` 層の `push_column` が内側のフィールドへ置き換える）。
+    expect(controlNamesIn(markOf(after))).toEqual([
+      "名前",
+      "提供元.name",
+      "提供元.code",
+      "深い入れ子",
+      "明細",
+    ]);
+
+    // **写像も新しい構成で組まれる**（窓の読みと編集の宛先の唯一の源。要件 8.6）。表示の位置 1・2
+    // はどちらも文書の列 1 を指す（恒等なら 2 になる）。
+    const cache = createGridSurfaceCache({
+      sheet: "s1",
+      summary: after.state.summary,
+      visibleRows: after.state.visibleRows,
+      generation: after.state.generation,
+      client: scripted,
+    });
+    expect(cache.documentColumn({ row: 0, column: 1 })).toBe(1);
+    expect(cache.documentColumn({ row: 0, column: 2 })).toBe(1);
+    expect(cache.documentColumn({ row: 0, column: 3 })).toBe(2);
+    expect(createColumnSpace(after.state.summary.columns).documentColumn(2)).toBe(1);
+
+    // 折りたたみ: 境界が導出前の並びを返せば、**描かれる列も元の 1 本へ戻る**（要件 5.2）。
+    const collapsed = gridScreenViewSettled(
+      after,
+      await applyGridView(scripted, EMPTY_GRID_VIEW),
+    );
+    if (collapsed.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    expect(controlNamesIn(markOf(collapsed))).toEqual(["名前", "提供元", "深い入れ子", "明細"]);
+    // 写像も元へ戻る（表示の位置 2 は文書の列 2 である）。
+    expect(createColumnSpace(collapsed.state.summary.columns).documentColumn(2)).toBe(2);
+
+    // **縮んだ構成へ現在位置が寄る**（要件 2.1、5.2）。展開して**最後の列**へ移ってから
+    // 折りたたむと、列は 5 → 4 へ減るので、寄せが無ければ現在位置は**描かれる表の外**に残り、
+    // 数え上げの行の文言と描かれている列が食い違う（境界の修復のレビューが実測）。
+    const moved = gridScreenSelectionChanged(after, selectionAt({ row: 0, column: 4 }));
+    const shrunk = gridScreenViewSettled(
+      moved,
+      await applyGridView(scripted, EMPTY_GRID_VIEW),
+    );
+    if (shrunk.state.status !== "ready") {
+      throw new Error("表を描く状態でなくなった");
+    }
+    // 最後の列（表示の位置 3）へ寄っている。
+    expect(shrunk.state.selection.current.column).toBe(3);
+    // 文言の側も実際の列数と一致する（食い違わない）。
+    expect(markOf(shrunk)).toContain("現在位置 1 行 4 列");
   });
 });
 

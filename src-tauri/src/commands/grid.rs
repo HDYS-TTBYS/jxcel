@@ -756,6 +756,16 @@ fn column_to_boundary(column: &LayoutColumn) -> ColumnDescriptor {
     }
 }
 
+/// **いまの**列の構成を写す（左から右への表示順。要件 1.1、1.2、5.1、5.2、5.4）。
+///
+/// `GridSession::columns()` が返すのは**導出後**の `ColumnLayout` であり、`set_view` と
+/// `set_expansion` を適用したあとの状態を映す（導出そのものはドメインの仕事であり、本モジュールは
+/// 写すだけである）。開く経路と表示の指定を変える経路が**同じ 1 つの写し**を使うのは、2 つの
+/// 経路で列の構成の意味が食い違わないようにするためである。
+fn layout_columns(session: &GridSession) -> Vec<ColumnDescriptor> {
+    session.columns().iter().map(column_to_boundary).collect()
+}
+
 /// シートの要約を組み立てる（要件 1.1、1.5、1.6）。
 ///
 /// **列の構成と行数を同じ型に載せる**（2 つの空の状態を列の数で区別する。6.1 の
@@ -763,7 +773,7 @@ fn column_to_boundary(column: &LayoutColumn) -> ColumnDescriptor {
 /// （絞り込みの結果は [`GridViewResponse`] が運ぶ）。
 fn sheet_summary(session: &GridSession, rows: usize) -> GridSheetSummary {
     GridSheetSummary {
-        columns: session.columns().iter().map(column_to_boundary).collect(),
+        columns: layout_columns(session),
         row_count: count_to_u32(rows),
     }
 }
@@ -1194,6 +1204,11 @@ pub(crate) fn answer_set_view(
             visible_rows: count_to_u32(summary.visible),
             hidden_rows: count_to_u32(summary.hidden),
             violation_total: count_to_u32(entry.session.violation_total()),
+            // **導出後の構成を載せる**（要件 5.1、5.2、5.4）。ここが「構成が画面へ届く唯一の
+            // 瞬間」である — 展開の適用（手順 3）のあとの `GridSession::columns()` を写すので、
+            // 展開した列の内側の位置が並びに現れ、折りたたんだ列は元の 1 本だけに戻る。載せないと、
+            // 画面は開いたときの構成を描き続け、**展開を指定しても描かれる列が変わらない**。
+            columns: layout_columns(&entry.session),
         },
     }
 }
@@ -1820,11 +1835,12 @@ mod tests {
     };
     use data_grid::{decode_window, VariantTag, HEADER_LEN, ROW_KEY_LEN, WINDOW_FORMAT_VERSION};
     use document_format::{
-        CellValue, Document, DocumentFormat, DocumentFormatApi, RowId, SchemaPart,
+        CellValue, Document, DocumentFormat, DocumentFormatApi, NestedValue, RowId, SchemaPart,
     };
     use document_session::{DocumentSessions, DocumentSessionsApi, SessionState};
     use schema_engine::{
-        schema_to_text, ColumnDecl, Constraints, DeclaredKind, Schema, TypeDecl, TypeKind,
+        schema_to_text, ColumnDecl, Constraints, DeclaredKind, FieldDecl, Schema, TypeDecl,
+        TypeKind,
     };
     use tauri::ipc::{InvokeResponseBody, IpcResponse};
 
@@ -1958,6 +1974,129 @@ mod tests {
         DocumentFormat::new()
             .save(&document, path)
             .expect("標本を保存できる");
+    }
+
+    /// 入れ子を持つ標本の宣言: 品番（`text`・一意・必須）、提供元（`object`。内側に `name` と
+    /// `code`）、数量（`int`・0〜100）。
+    ///
+    /// **内側のフィールドを持つ列**を作る唯一の口である — 要件 5.1 の展開は、この列の内側の
+    /// 位置が**列として**構成へ現れることを求める（`view` 層の `derive_layout` が
+    /// `Object` の位置をフィールドへ降ろす）。
+    fn nested_declaration() -> SchemaPart {
+        /// 内側のフィールド 1 件（型と制約だけを指定する）。
+        fn field(name: &str) -> FieldDecl {
+            FieldDecl {
+                name: name.into(),
+                ty: TypeDecl::Kind {
+                    kind: DeclaredKind::Known(TypeKind::Text),
+                    constraints: Constraints::default(),
+                },
+                required: false,
+                default: None,
+                description: None,
+            }
+        }
+
+        let schema = Schema {
+            columns: vec![
+                ColumnDecl {
+                    name: "品番".into(),
+                    ty: TypeDecl::Kind {
+                        kind: DeclaredKind::Known(TypeKind::Text),
+                        constraints: Constraints::default(),
+                    },
+                    required: true,
+                    unique: true,
+                    default: None,
+                    description: None,
+                },
+                ColumnDecl {
+                    name: "提供元".into(),
+                    ty: TypeDecl::Kind {
+                        kind: DeclaredKind::Known(TypeKind::Object),
+                        constraints: Constraints {
+                            fields: vec![field("name"), field("code")],
+                            ..Constraints::default()
+                        },
+                    },
+                    required: false,
+                    unique: false,
+                    default: None,
+                    description: None,
+                },
+                ColumnDecl {
+                    name: "数量".into(),
+                    ty: TypeDecl::Kind {
+                        kind: DeclaredKind::Known(TypeKind::Int),
+                        constraints: Constraints {
+                            min: Some(CellValue::Int(0)),
+                            max: Some(CellValue::Int(100)),
+                            ..Constraints::default()
+                        },
+                    },
+                    required: false,
+                    unique: false,
+                    default: None,
+                    description: None,
+                },
+            ],
+        };
+        let root = schema_to_text(&schema).expect("宣言は正準出力できる");
+        SchemaPart::parse(&format!(r#"{{"root":{root},"types":[]}}"#)).expect("宣言は解析できる")
+    }
+
+    /// 入れ子を持つ標本（3 行）を書く。提供元のセルは**オブジェクトの値**である。
+    fn write_nested_document(path: &Path) {
+        let mut document = Document::new();
+        let sheet = document.add_sheet("台帳");
+        document
+            .set_sheet_columns(
+                sheet,
+                vec!["品番".to_owned(), "提供元".to_owned(), "数量".to_owned()],
+            )
+            .expect("標本のシートは実在する");
+        document
+            .set_root_schema(sheet, nested_declaration())
+            .expect("標本のシートは実在する");
+        for (index, label) in ["A", "B", "C"].into_iter().enumerate() {
+            let row = document.add_row(sheet).expect("標本のシートは実在する");
+            document
+                .set_row_values(
+                    sheet,
+                    row,
+                    vec![
+                        CellValue::Text(label.to_owned()),
+                        CellValue::Nested(NestedValue::Object(vec![
+                            ("name".to_owned(), CellValue::Text(format!("提供元{label}"))),
+                            ("code".to_owned(), CellValue::Text(format!("C-{index}"))),
+                        ])),
+                        CellValue::Int(index as i64 + 1),
+                    ],
+                )
+                .expect("標本の行は実在する");
+        }
+        DocumentFormat::new()
+            .save(&document, path)
+            .expect("標本を保存できる");
+    }
+
+    /// **入れ子を持つ標本**を開いた状態を作る（内側の位置が構成へ現れることを観測する材料）。
+    fn opened_nested(tag: &str) -> (Scratch, Arc<DocumentSessions>, GridSessions, WindowLabel) {
+        let scratch = Scratch::new(tag);
+        let path = scratch.file("台帳.jxcel");
+        write_nested_document(&path);
+        let (sessions, label) = documents(&path);
+        let grids = grids();
+        let opened = answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest {
+                sheet: sheet_id(&path),
+            },
+        );
+        assert!(matches!(opened, IpcResult::Ok { .. }), "標本は開ける");
+        (scratch, sessions, grids, label)
     }
 
     /// 保存された標本の行の識別子を、文書の順に返す（順序に依拠しない観測の材料）。
@@ -2332,6 +2471,90 @@ mod tests {
         ));
         assert_eq!(3, cleared.visible_rows, "絞り込みが外れる");
         assert_eq!(0, cleared.hidden_rows);
+    }
+
+    /// **表示の指定を変えると、導出後の列の構成が応答に載る**（要件 5.1、5.2。8.5 の申し送り 2）。
+    ///
+    /// 構成を導出するのは `grid_set_view` そのものであり、これが**画面が描く列を差し替える
+    /// 唯一の源**である。載らなければ、展開を指定しても画面は開いたときの構成を描き続ける
+    /// （＝展開・折りたたみが見た目に何も変えない）。
+    ///
+    /// **表示の位置と文書の列が離れること**まで見る — 内側の位置は親と同じ文書の列を指すので、
+    /// 画面の写像（`ColumnSpace`）はこの並びから組まなければならない（要件 8.6）。
+    #[test]
+    fn a_view_change_answers_the_derived_column_layout() {
+        let (_scratch, sessions, grids, label) = opened_nested("derived-layout");
+
+        // 導出前: 最上位の 3 列だけであり、内側の位置は 1 つも現れない。
+        let flat = data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+        assert_eq!(names_of(&flat.columns), ["品番", "提供元", "数量"]);
+        assert!(
+            flat.columns.iter().all(|column| column.path.is_empty()),
+            "展開を指定していない構成に内側の位置は現れない"
+        );
+
+        // 展開（提供元 = 文書の列 1 を 1 段）: 内側のフィールドが**列として**並ぶ。
+        let expanded = data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest {
+                view: GridViewSpec {
+                    expansion: vec![GridExpansionState {
+                        column: 1,
+                        expanded: true,
+                        depth: 1,
+                    }],
+                    ..GridViewSpec::default()
+                },
+            },
+        ));
+        assert_eq!(
+            names_of(&expanded.columns),
+            ["品番", "提供元.name", "提供元.code", "数量"],
+            "展開した列の内側の位置が列として現れる"
+        );
+        // 内側の位置は**親と同じ文書の列**を指す（表示の位置 1・2 が文書の列 1 である — 恒等では
+        // ない）。画面の写像はこの対から組まれる。
+        assert_eq!(expanded.columns[0].column, 0);
+        assert_eq!(expanded.columns[1].column, 1);
+        assert_eq!(expanded.columns[2].column, 1);
+        assert_eq!(expanded.columns[3].column, 2);
+        assert_eq!(
+            expanded.columns[2].path,
+            vec![GridPathSegment::Field {
+                name: "code".to_owned()
+            }],
+            "内側の位置は段の並びで運ぶ（フィールド名を潰さない）"
+        );
+        assert_eq!(
+            expanded.columns[1].kind,
+            Some(TypeKindTag::Text),
+            "内側の位置は葉の型の札を持つ（入力手段がそこで選ばれる）"
+        );
+
+        // 折りたたみ: 内側の位置は消え、**元の 1 本**だけに戻る（要件 5.2）。
+        let collapsed = data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+        assert_eq!(names_of(&collapsed.columns), ["品番", "提供元", "数量"]);
+        assert!(
+            collapsed.columns.iter().all(|column| column.path.is_empty()),
+            "折りたたむと内側の列は隠れる"
+        );
+    }
+
+    /// 構成の表示名の並び（**表示の順**。検査の読み口）。
+    fn names_of(columns: &[ColumnDescriptor]) -> Vec<&str> {
+        columns.iter().map(|column| column.name.as_str()).collect()
     }
 
     /// **要求に現れない展開は折りたたみへ戻る**（要求は完全な記述である。6.1 の規約）。

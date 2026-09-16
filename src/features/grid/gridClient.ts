@@ -107,10 +107,12 @@ export interface GridClient {
    */
   readonly openSheet: (sheet: string) => Promise<IpcClientResult<GridOpenResponse>>;
   /**
-   * 表示の指定を適用し、**可視行の順序を導出させる**（要件 8.3、8.4、8.7）。
+   * 表示の指定を適用し、**可視行の順序と列の構成を導出させる**（要件 5.1、5.2、8.3、8.4、8.7）。
    *
    * 応答の `visible_rows` が**窓が覆う行数**である（窓の区間は可視行の序数で表される。
-   * `RowSpan` の doc）。8.1 は [`EMPTY_GRID_VIEW`] だけを渡す。
+   * `RowSpan` の doc）。応答の `columns` が**導出後**の列の構成であり（要件 5.1、5.2）、
+   * **入れ子の展開・折りたたみが見える唯一の源**である（`GridViewResponse` の doc）。8.1 は
+   * [`EMPTY_GRID_VIEW`] だけを渡す（展開が無いので、開いたときの構成と同じ並びが返る）。
    */
   readonly setView: (view: GridViewSpec) => Promise<IpcClientResult<GridViewResponse>>;
   /**
