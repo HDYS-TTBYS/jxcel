@@ -170,6 +170,7 @@ function fakeClient(answer: IpcResult<GridEditResponse, IpcClientError>): FakeCl
       return answer;
     },
     findViolation: async () => unused("grid_find_violation")(),
+    readReferenceRows: unused("readReferenceRows"),
     readHistory: async () => unused("grid_history")(),
   };
 }

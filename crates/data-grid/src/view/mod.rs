@@ -454,6 +454,14 @@ mod violations;
 
 pub use violations::{CellViolations, ColumnViolations, RowViolations, ViolationIndex};
 
+// 参照先のシートの行を頁ごとに読む（タスク 10.3。要件 3.8）。**本モジュールの隣に置く理由**:
+// 表示の名（`label`）は表示文字列の規則（[`DisplayText`]）を使う側であり、規則の源は本層の
+// 1 箇所である（`reference` のモジュール docs「表示の名」）。依存の向きは
+// `reference → mod` の一方向である。
+mod reference;
+
+pub use reference::{ReferencePage, ReferenceRow, reference_page};
+
 use core::cmp::Ordering;
 use core::fmt::Write as _;
 use std::borrow::Cow;
@@ -781,6 +789,70 @@ impl ElementCount {
     }
 }
 
+/// 入れ子の内側の位置 1 つの**宣言**（タスク 10.3。要件 3.2、5.5、10.1）。
+///
+/// 構成の要素（[`LayoutColumn`]）は**展開の状態**に依る — 展開していない列の内側の位置は
+/// 構成に現れない。ところが詳細表示（要件 5.5）と入れ子の入力の面（要件 5.5、5.7）は、
+/// **展開していない列でも**内側に何が宣言されているかを要る。本型がその 1 件である。
+///
+/// 位置（[`LayoutMember::path`]）は**セル直下からの絶対の位置**である（親からの相対では
+/// ない）。列そのものの位置（[`LayoutColumn::path`]）と同じ空間に属し、違反の位置
+/// （要件 4.5）と直接突き合わせられる。
+///
+/// 深さは [`MAX_EXPANSION_DEPTH`] で切る（[`ColumnDeclaration::members`] を参照）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutMember {
+    /// セル直下からの内側の位置（1 段以上）。
+    pub path: NestedPath,
+    /// 表示名（位置に沿ったフィールド名を `.` で連結したもの）。
+    pub name: Box<str>,
+    /// 葉の型の札（フィールドの型そのものである）。
+    pub kind: TypeKind,
+    /// その位置が値なしを許すか（フィールドの `required` から写す。要件 3.7）。
+    pub nullable: bool,
+    /// 選択肢（`Enum` のフィールドのみ。空なら材料なし。要件 3.2）。
+    pub choices: Box<[Box<str>]>,
+    /// ユーザー定義型の識別子（`Custom` のフィールドのみ。要件 10.1、10.4）。
+    pub custom_type_id: Option<Box<str>>,
+}
+
+/// 列の**宣言**から導ける材料（タスク 10.3。要件 3.2、3.7、3.8、5.5、10.1、10.4）。
+///
+/// 7.4 の申し送り 1〜3・5・6 が「境界に材料が無い」と記録したものを、**宣言から写して**
+/// ここに集める。構成の要素（[`LayoutColumn`]）が運ぶのは「その列がどこを指すか」であり、
+/// 本型が運ぶのは「その列が何を許すか」である — 入力手段の登録簿（要件 3.1、10.4）と
+/// 詳細表示（要件 5.5）は、後者を読んで面を組み立てる。
+///
+/// **材料が無いことは誤りではない。**選択肢を持たない列の [`ColumnDeclaration::choices`] は
+/// 空であり、参照しない列の [`ColumnDeclaration::reference_sheet`] は `None` である。面は
+/// そのとき値をそのまま扱う既定へ落ちる（要件 10.4）— 材料が無いことは値を打てないことでは
+/// ない（`crates/app-shell/src/ipc/grid.rs` の `ColumnDescriptor` の doc と同じ規約）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnDeclaration {
+    /// 値なしを許すか（列の `required` の否定。要件 3.7）。
+    ///
+    /// **宣言から写す。**定数にしない（値なしを許さない列で「値なしへ戻す」道を出すと、
+    /// 判定が違反を返す値を作れてしまう）。
+    pub nullable: bool,
+    /// 選択肢（`Enum` のみ。宣言順。空なら材料なし。要件 3.2）。
+    pub choices: Box<[Box<str>]>,
+    /// 参照先のシートの識別子（`Ref` のみ。`None` なら参照しない列。要件 3.8）。
+    ///
+    /// **宣言が持つのは識別子である**（`schema-engine` の `ColumnValidator::Ref`）。人が読む
+    /// シートの名は文書が持つため、名への写しは文書を見られる側（`src-tauri` の適応層）が行う。
+    pub reference_sheet: Option<Box<str>>,
+    /// ユーザー定義型の識別子（`Custom` のみ。登録簿を引く鍵。要件 10.1、10.4）。
+    pub custom_type_id: Option<Box<str>>,
+    /// 入れ子の内側の宣言（**展開していない列でも読める**。要件 5.5）。
+    ///
+    /// 降りるのは**宣言が許す範囲**（オブジェクトのフィールド）だけであり、**深さは
+    /// [`MAX_EXPANSION_DEPTH`] で切る** — 列として展開する深さの上限（要件 5.4）と同じ規律で
+    /// あり、宣言がどれだけ深くても材料は有限である（位置の段数は上限を越えない）。
+    /// 配列の内側は**降りない**（要素の位置は宣言に無い — 要素数は
+    /// [`LayoutColumn::element_count`] が運ぶ。要件 5.6）。
+    pub members: Box<[LayoutMember]>,
+}
+
 /// 構成の 1 列: 窓が運ぶ列そのものであり、どの値が載るかを指す。
 ///
 /// 構成は入れ子の木ではなく**平坦な並び**である（モジュール docs「構成の要素」）。
@@ -809,6 +881,11 @@ pub struct LayoutColumn {
     pub element_count: Option<ElementCount>,
     /// 展開の可否と、上限に達したことの印（要件 5.4）。
     pub expandability: Expandability,
+    /// **宣言から導ける材料**（タスク 10.3。要件 3.2、3.7、3.8、5.5、10.1、10.4）。
+    ///
+    /// 入力手段の登録簿（7.4）と詳細表示（8.5）が読む。**展開していない列でも内側の宣言が
+    /// 読める**ことが要点である（[`ColumnDeclaration::members`]）。
+    pub declaration: ColumnDeclaration,
 }
 
 impl LayoutColumn {
@@ -1277,6 +1354,8 @@ pub fn derive_layout(schema: &CompiledSchema, expansion: &[ExpansionState]) -> C
             column,
             name,
             schema.validator(column),
+            // **値なしを許すかは宣言から写す**（列の `required` の否定。要件 3.7）。
+            !schema.required(column),
             &mut path,
             remaining,
         );
@@ -1294,11 +1373,15 @@ pub fn derive_layout(schema: &CompiledSchema, expansion: &[ExpansionState]) -> C
 ///
 /// `name` は既に組み上がった表示名である（降りるたびに `.` とフィールド名を足す。区切りの
 /// 規則と理由はモジュール docs「構成の要素」）。
+///
+/// `nullable` は**その位置が値なしを許すか**である（最上位の列は `CompiledSchema::required`
+/// の否定、内側の位置はフィールドの `required` の否定。要件 3.7）。
 fn push_column(
     out: &mut Vec<LayoutColumn>,
     column: ColumnIndex,
     name: &str,
     validator: Option<&ColumnValidator>,
+    nullable: bool,
     path: &mut ValuePath,
     remaining: u8,
 ) {
@@ -1321,6 +1404,9 @@ fn push_column(
                     column,
                     &inner,
                     Some(field.validator()),
+                    // **内側の位置の「値なしを許すか」はそのフィールドの `required` である**
+                    // （列の `required` ではない。要件 3.7）。
+                    !field.required(),
                     path,
                     remaining - 1,
                 );
@@ -1339,7 +1425,104 @@ fn push_column(
         kind: kind_of(validator),
         element_count: element_count(validator),
         expandability: expandability(validator, path.len()),
+        declaration: declaration_of(validator, name, path, nullable),
     });
+}
+
+/// その位置の宣言から導ける材料を組む（タスク 10.3。要件 3.2、3.7、3.8、5.5、10.1、10.4）。
+///
+/// **写すのは宣言そのものであり、推測しない。**選択肢・参照先・ユーザー定義型の識別子・
+/// 値なしを許すかは、いずれも検証器（＝宣言を落としたもの）から読み、無い欄は「材料が無い」
+/// として空／`None` のまま運ぶ（面はそのとき既定へ落ちる。要件 10.4）。
+///
+/// 内側の宣言（[`ColumnDeclaration::members`]）は**この位置から降りられる範囲**であり、
+/// 展開の指定とは関係しない（展開していない列でも読めることが要件 5.5 である）。
+fn declaration_of(
+    validator: Option<&ColumnValidator>,
+    name: &str,
+    path: &mut ValuePath,
+    nullable: bool,
+) -> ColumnDeclaration {
+    let mut members = Vec::new();
+    collect_members(&mut members, validator, name, path, path.len());
+    ColumnDeclaration {
+        nullable,
+        choices: choices_of(validator),
+        reference_sheet: reference_sheet_of(validator),
+        custom_type_id: custom_type_id_of(validator),
+        members: members.into_boxed_slice(),
+    }
+}
+
+/// 内側の宣言を、**列として展開する深さの上限**まで集める（要件 5.4、5.5）。
+///
+/// 規則は [`push_column`] の降下と同じ形である（オブジェクトのフィールドだけを降り、
+/// 配列は降りない）が、**止まる条件が違う**: ここでの `depth` は位置そのものの段数であり、
+/// 上限に達したら**それ以上は足さない**（上限の位置までは足す）。したがって材料の深さは
+/// つねに [`MAX_EXPANSION_DEPTH`] 以下であり、どれだけ深い宣言でも有限である。
+///
+/// `ValuePath` は呼び出し側の 1 本を使い回す（降りて戻るたびに組み直さない。
+/// [`push_column`] と同じ規律）。
+fn collect_members(
+    out: &mut Vec<LayoutMember>,
+    validator: Option<&ColumnValidator>,
+    name: &str,
+    path: &mut ValuePath,
+    depth: usize,
+) {
+    if depth >= usize::from(MAX_EXPANSION_DEPTH) {
+        return;
+    }
+    let Some(ColumnValidator::Object { fields }) = validator else {
+        return;
+    };
+    let mut inner = String::with_capacity(name.len() + 16);
+    for field in fields.iter() {
+        inner.clear();
+        inner.push_str(name);
+        inner.push_str(FIELD_SEPARATOR);
+        inner.push_str(field.name());
+        path.push_field(field.name());
+        let field_validator = field.validator();
+        out.push(LayoutMember {
+            path: NestedPath::from(&*path),
+            name: inner.clone().into_boxed_str(),
+            kind: kind_tag(field_validator),
+            nullable: !field.required(),
+            choices: choices_of(Some(field_validator)),
+            custom_type_id: custom_type_id_of(Some(field_validator)),
+        });
+        collect_members(out, Some(field_validator), &inner, path, depth + 1);
+        path.pop();
+    }
+}
+
+/// その位置の選択肢（`Enum` のみ。空なら材料なし。要件 3.2）。
+///
+/// 宣言の並びをそのまま写す（宣言順を保つのは `ColumnValidator::Enum` の doc の規約）。
+fn choices_of(validator: Option<&ColumnValidator>) -> Box<[Box<str>]> {
+    match validator {
+        Some(ColumnValidator::Enum { choices }) => choices.clone(),
+        _ => Box::default(),
+    }
+}
+
+/// その位置の参照先のシートの識別子（`Ref` のみ。要件 3.8）。
+///
+/// **宣言が持つのは識別子である**（人が読む名は文書が持つ。境界へ写すときに適応層が引く）。
+fn reference_sheet_of(validator: Option<&ColumnValidator>) -> Option<Box<str>> {
+    match validator {
+        Some(ColumnValidator::Ref { sheet }) => Some(sheet.to_string().into_boxed_str()),
+        _ => None,
+    }
+}
+
+/// その位置のユーザー定義型の識別子（`Custom` のみ。登録簿を引く鍵。要件 10.1、10.4）。
+fn custom_type_id_of(validator: Option<&ColumnValidator>) -> Option<Box<str>> {
+    match validator {
+        Some(ColumnValidator::Custom { id, .. }) => Some(id.as_str().into()),
+        _ => None,
+    }
 }
 
 /// 表示名の区切り（モジュール docs「構成の要素」が唯一の源）。
@@ -1355,7 +1538,15 @@ const FIELD_SEPARATOR: &str = ".";
 /// 入れ子の内側の位置もここを通るため、**8.5 は内側のフィールドの型で入力手段を選べる**
 /// （`届け先.郵便番号` は `Text` であり、テキストの入力手段が開く）。
 fn kind_of(validator: Option<&ColumnValidator>) -> Option<TypeKind> {
-    validator.map(|validator| match validator {
+    validator.map(kind_tag)
+}
+
+/// その型の札（使用不能な列は呼び出し側が [`kind_of`] で `None` にする）。
+///
+/// **宣言が持つ型は必ず札へ写せる**（[`ColumnValidator`] の変種は [`TypeKind`] と 1 対 1 で
+/// ある）。したがって内側のフィールドの札（[`LayoutMember::kind`]）は `Option` を持たない。
+fn kind_tag(validator: &ColumnValidator) -> TypeKind {
+    match validator {
         ColumnValidator::Int { .. } => TypeKind::Int,
         ColumnValidator::Float { .. } => TypeKind::Float,
         ColumnValidator::Decimal { .. } => TypeKind::Decimal,
@@ -1370,7 +1561,7 @@ fn kind_of(validator: Option<&ColumnValidator>) -> Option<TypeKind> {
         ColumnValidator::Array { .. } => TypeKind::Array,
         ColumnValidator::Any => TypeKind::Any,
         ColumnValidator::Custom { .. } => TypeKind::Custom,
-    })
+    }
 }
 
 /// その位置の型が同一の並び（配列）なら、要素数の能力を導出する（要件 5.6）。
@@ -1631,11 +1822,7 @@ const fn variant_rank(value: &CellValue) -> VariantRank {
 fn compare_floats(left: f64, right: f64) -> Ordering {
     /// `-0.0` を `0.0` へ畳む（`PartialEq` が `-0.0 == 0.0` であることに合わせる）。
     fn fold_zero(value: f64) -> f64 {
-        if value == 0.0 {
-            0.0
-        } else {
-            value
-        }
+        if value == 0.0 { 0.0 } else { value }
     }
     fold_zero(left).total_cmp(&fold_zero(right))
 }

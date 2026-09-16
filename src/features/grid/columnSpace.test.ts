@@ -45,7 +45,19 @@ function descriptor(
   kind: TypeKindTag | null,
   expandability: ColumnDescriptor["expandability"] = "leaf",
 ): ColumnDescriptor {
-  return { column, path: [...path], name, kind, element_count: null, expandability };
+  return {
+    column,
+    path: [...path],
+    name,
+    kind,
+    element_count: null,
+    expandability,
+    nullable: true,
+    choices: [],
+    reference_sheet: null,
+    custom_type_id: null,
+    members: [],
+  };
 }
 
 // ===========================================================================

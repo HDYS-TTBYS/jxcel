@@ -137,6 +137,17 @@ pub const GRID_FIND_VIOLATION: &str = "grid_find_violation";
 /// 失敗と世代違いは**空の窓**で表す（この経路は封筒を運べないため）。
 pub const GRID_ROWS_WINDOW: &str = "grid_rows_window";
 
+/// 参照先のシートの行を頁ごとに読む（タスク 10.3。要件 3.8）。
+///
+/// **参照先は別のシートであり、その行数は表示中のシートと無関係である**（1 万行の参照先は
+/// 普通にありうる）ため、応答は頁に閉じる — 要求が件数を運び、境界が上限
+/// （`app_shell::ipc::GRID_REFERENCE_PAGE_LIMIT`）へ切り詰める。
+///
+/// 参照先のシートは要求ではなく**列の宣言**から決まる（要求は文書の列の添字だけを運ぶ）。
+/// 参照しない列を指定した場合と、参照先のシートが文書に無い場合は**経路の失敗**である
+/// （「行が無い」と混同しない — 6 本の写像の規律と同じ）。
+pub const GRID_REFERENCE_ROWS: &str = "grid_reference_rows";
+
 /// フロントエンドから呼び出せるコマンド名の一覧（要件 4.1、4.2）。
 ///
 /// `src-tauri` のハンドラ登録（タスク 7.1）と TypeScript の生成物（タスク 2.2）の**両方**が
@@ -163,4 +174,5 @@ pub const COMMAND_NAMES: &[&str] = &[
     GRID_HISTORY,
     GRID_FIND_VIOLATION,
     GRID_ROWS_WINDOW,
+    GRID_REFERENCE_ROWS,
 ];

@@ -40,6 +40,8 @@ import type {
   GridEditResponse,
   GridHistoryDirection,
   GridOpenResponse,
+  GridReferenceRequest,
+  GridReferenceResponse,
   GridViewResponse,
   GridViewSpec,
   GridViolationRequest,
@@ -94,6 +96,15 @@ const GRID_APPLY_EDIT_COMMAND: CommandName = "grid_apply_edit";
  * `grid_apply_edit` と `grid_history` の応答を同じ型と定めている）。
  */
 const GRID_HISTORY_COMMAND: CommandName = "grid_history";
+
+/**
+ * 参照先のシートの行を頁ごとに読むコマンド（タスク 10.3。要件 3.8）。
+ *
+ * **参照先は要求ではなく列の宣言から決まる**（要求は文書の列の添字を運ぶ）。応答は頁に閉じ、
+ * 件数は境界の上限（`GRID_REFERENCE_PAGE_LIMIT`）を超えない — 参照先が 1 万行でも一度に
+ * 全部を読まない（`./referenceRows` が頁を送る）。
+ */
+const GRID_REFERENCE_ROWS_COMMAND: CommandName = "grid_reference_rows";
 
 /**
  * 表示の指定を変えない指定（**空の指定＝絞り込み無し・並べ替え無し・展開無し**）。
@@ -171,6 +182,16 @@ export interface GridClient {
   readonly readHistory: (
     direction: GridHistoryDirection,
   ) => Promise<IpcClientResult<GridEditResponse>>;
+  /**
+   * 参照先のシートの行を 1 頁読む（タスク 10.3。要件 3.8）。
+   *
+   * 要求は**文書の列の添字**（参照の列）・開始位置・件数である。参照先のシートは宣言から
+   * 決まるため、画面はシートの識別子を持ち回らない。**件数は境界が上限で切る**ので、
+   * 応答の行数は要求より少なくなりうる（そのとき `has_more` が真である）。
+   */
+  readonly readReferenceRows: (
+    request: GridReferenceRequest,
+  ) => Promise<IpcClientResult<GridReferenceResponse>>;
 }
 
 /**
@@ -203,5 +224,9 @@ export function createGridClient(): GridClient {
     // `fn grid_history(app, window, request: GridHistoryRequest)`）。
     readHistory: (direction) =>
       invokeCommand<GridEditResponse>(GRID_HISTORY_COMMAND, { request: { direction } }),
+    // 参照先の行も**`request` という名前の引数で包む**（実体は
+    // `fn grid_reference_rows(app, window, request: GridReferenceRequest)`）。
+    readReferenceRows: (request) =>
+      invokeCommand<GridReferenceResponse>(GRID_REFERENCE_ROWS_COMMAND, { request }),
   };
 }

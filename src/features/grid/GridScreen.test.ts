@@ -46,6 +46,8 @@ import type {
   GridEditResponse,
   GridHistoryDirection,
   GridOpenResponse,
+  GridReferenceRequest,
+  GridReferenceResponse,
   GridSheetSummary,
   GridViolationResponse,
   GridViewResponse,
@@ -60,6 +62,7 @@ import { EMPTY_WINDOW_SCREEN_ID } from "../empty/EmptyWindowScreen";
 import { DIAGNOSTICS_SCREEN_ID } from "../diagnostics/requests";
 import {
   GRID_SCREEN_ID,
+  CellEditorPanelView,
   GridScreen,
   GridScreenView,
   applyGridView,
@@ -89,12 +92,14 @@ import {
   gridScreenSelectionChanged,
   gridScreenViewSettled,
   initialGridScreenModel,
+  loadEditorReference,
   loadGridScreenState,
   type CellDetail,
   type GridScreenModel,
   type GridScreenState,
 } from "./GridScreen";
 import { EMPTY_GRID_VIEW } from "./gridClient";
+import { REFERENCE_PAGE_SIZE, type ReferenceRows } from "./referenceRows";
 import { createColumnSpace } from "./columnSpace";
 import { DEFAULT_COLUMN_WIDTH, createDisplayState } from "./displayState";
 import { applyViewOperation, drawnColumns, layoutKeyOf, rowOrderKeyOf } from "./viewOps";
@@ -125,7 +130,7 @@ const FAILURE: IpcClientError = { kind: "Document", detail: { message: "経路�
 
 /** 列 1 本ぶんの記述（`ColumnDescriptor` の必須の欄をすべて埋める）。 */
 function descriptor(column: number, name: string): ColumnDescriptor {
-  return { column, path: [], name, kind: "Text", element_count: null, expandability: "leaf" };
+  return { column, path: [], name, kind: "Text", element_count: null, expandability: "leaf", nullable: true, choices: [], reference_sheet: null, custom_type_id: null, members: [] };
 }
 
 /** `document_state` が運ぶシートの 1 件。 */
@@ -195,6 +200,8 @@ interface FakeClient extends GridClient {
   readonly searches: readonly number[];
   /** 履歴へ渡した向き（8.9。`grid_history` の引数である）。 */
   readonly directions: readonly GridHistoryDirection[];
+  /** 参照先の行へ渡した要求（タスク 10.3。**頁の大きさと開始位置の観測**）。 */
+  readonly references: readonly GridReferenceRequest[];
 }
 
 function fakeClient(answers: {
@@ -206,16 +213,20 @@ function fakeClient(answers: {
   readonly search?: (from: number) => IpcResult<GridViolationResponse, IpcClientError>;
   /** 履歴の答え（既定は封筒の失敗である。**8.9 の検査だけが与える**）。 */
   readonly history?: (direction: GridHistoryDirection) => IpcResult<GridEditResponse, IpcClientError>;
+  /** 参照先の行の答え（**タスク 10.3 の検査だけが与える**。与えなければ投げる）。 */
+  readonly reference?: (request: GridReferenceRequest) => IpcResult<GridReferenceResponse, IpcClientError>;
 }): FakeClient {
   const calls: string[] = [];
   const edits: GridEditCommand[] = [];
   const searches: number[] = [];
   const directions: GridHistoryDirection[] = [];
+  const references: GridReferenceRequest[] = [];
   return {
     calls,
     edits,
     searches,
     directions,
+    references,
     readDocumentState: async () => {
       calls.push("document_state");
       return answers.state;
@@ -243,6 +254,16 @@ function fakeClient(answers: {
       calls.push(`grid_find_violation:${request.direction}`);
       searches.push(request.from);
       return answers.search?.(request.from) ?? ok({ context: CONTEXT, violation: null });
+    },
+    // 参照先の行は**要求を控えてから**答える（タスク 10.3）。答えが与えられていなければ投げる —
+    // ページを読まない標本が読んでいたら、それに気づけるようにするためである。
+    readReferenceRows: (request) => {
+      calls.push(`grid_reference_rows:${String(request.column)}`);
+      references.push({ ...request });
+      if (answers.reference === undefined) {
+        return Promise.reject(new Error("参照先の行は本標本では読まない"));
+      }
+      return Promise.resolve(answers.reference(request));
     },
     readHistory: async (direction) => {
       calls.push(`grid_history:${direction}`);
@@ -989,7 +1010,7 @@ const OTHER_ROW = "01ARZ3NDEKTSV4RRFFQ69G5FB1";
 
 /** 札を選べる列の記述（既存の `descriptor` は `Text` 固定である）。 */
 function descriptorOfKind(column: number, name: string, kind: TypeKindTag | null): ColumnDescriptor {
-  return { column, path: [], name, kind, element_count: null, expandability: "leaf" };
+  return { column, path: [], name, kind, element_count: null, expandability: "leaf", nullable: true, choices: [], reference_sheet: null, custom_type_id: null, members: [] };
 }
 
 /** 適用の結果（指定した欄だけを変えて組む）。 */
@@ -1112,16 +1133,32 @@ describe("編集の起動と入力手段の解決（8.3。要件 3.1、10.3、10
     expect(markup).toContain("<textarea");
   });
 
-  it("値なしへ戻す道が出る（要件 3.7。**境界に nullable の欄が無いので、つねに出す**）", () => {
-    // キーだけで取り消せない面（二値）は、値なしを許す列でだけ `値なし` を出す。**境界の
-    // `ColumnDescriptor` に nullable の欄が無い**ため、いまはつねに出す（材料が来たら写す。
-    // 下の「申し送り」）。道を閉じると、値なしを許す列で値なしへ戻せない。
-    const markup = markOf(
+  it("値なしへ戻す道は、宣言の `nullable` どおりに出る（要件 3.7。タスク 10.3）", () => {
+    // キーだけで取り消せない面（二値）は、値なしを許す列でだけ「値なしへ戻す道」を出す。**この
+    // 欄は宣言から写る**（`ColumnDescriptor.nullable`。`./columnConstraints`）ので、値なしを
+    // 許さない列では道が出ない（10.3 が閉じた 8.3 の申し送り 5 — 以前はつねに真を渡していた）。
+    //
+    // 道そのものの綴りで読む — **絞り込みの選択肢にも `値なし` がある**ので、素の文字列で読むと
+    // 面が出ていなくても緑になる（`./viewBar` の「空」の印）。
+    const NO_VALUE = 'value="">値なし</button>';
+    const allowed = markOf(
       editingModel([descriptorOfKind(0, "在庫", "Bool")], { row: 0, column: 0 }, "true"),
     );
 
-    expect(markup).toContain("値なし");
-    expect(markup).toContain("取消");
+    expect(allowed).toContain(NO_VALUE);
+    expect(allowed).toContain("取消");
+
+    const refused = markOf(
+      editingModel(
+        [{ ...descriptorOfKind(0, "在庫", "Bool"), nullable: false }],
+        { row: 0, column: 0 },
+        "true",
+      ),
+    );
+
+    // **値なしを許さない列には道を出さない**（道を出すと、許されていない値へ戻せてしまう）。
+    expect(refused).not.toContain(NO_VALUE);
+    expect(refused).toContain("取消");
   });
 
   it("表を描いていないときは、編集を開かない（描かれていないセルは編集できない）", () => {
@@ -1145,6 +1182,131 @@ describe("編集の起動と入力手段の解決（8.3。要件 3.1、10.3、10
     expect(after.state.selection).toEqual(before.state.selection);
     expect(after.state.summary).toEqual(before.state.summary);
     expect(after.attempt).toBe(before.attempt);
+  });
+});
+
+/** 参照の列（参照先のシートを名乗る。**頁を読むかどうかはこの材料が決める**。要件 3.8）。 */
+function referenceDescriptor(column: number, sheet: string): ColumnDescriptor {
+  return { ...descriptor(column, "仕入先"), kind: "Ref", reference_sheet: sheet };
+}
+
+/** 参照先の行の識別子（境界が運ぶのは不透明な文字列である）。 */
+function referenceId(ordinal: number): string {
+  return `01K4ANRRG004HMASW9NF6YY${String(ordinal).padStart(3, "0")}`;
+}
+
+/** 1 万行の参照先のうち、要求された 1 頁（境界の応答の形そのものである）。 */
+function referencePage(
+  start: number,
+  count: number,
+  total = 10_000,
+): IpcResult<GridReferenceResponse, IpcClientError> {
+  const rows = Array.from({ length: Math.max(0, Math.min(count, total - start)) }, (_, offset) => ({
+    id: referenceId(start + offset),
+    label: `仕入先${String(start + offset)}`,
+  }));
+
+  return ok({ context: CONTEXT, rows, total, has_more: start + rows.length < total });
+}
+
+/**
+ * 編集中の 1 セルの面を描く（**状態を持たない側**。読んだ材料を直に渡す）。
+ *
+ * 読み込みの効果は `node` の環境では走らない（本 file のヘッダ）ので、**材料から面が組み立て
+ * られること**をここで読む。頁を読むこと自体は `loadEditorReference` が担う（下の検査）。
+ */
+function markOfEditor(column: ColumnDescriptor, reference: ReferenceRows | null): string {
+  return renderToStaticMarkup(
+    createElement(CellEditorPanelView, {
+      edit: { position: { row: 4, column: column.column }, initialText: referenceId(0) },
+      column,
+      reference,
+      onMore: () => undefined,
+      onCommit: () => undefined,
+      onCancel: () => undefined,
+    }),
+  );
+}
+
+/**
+ * 参照の列の面（タスク 10.3。要件 3.8、10.3、10.4）。
+ *
+ * **境界へ届く要求と、境界の材料から組み立てた面の両方**を固定する。前の版は後者（記述子を
+ * 手で組んで `ColumnConstraints` を組み立てる段）しか覆っておらず、**画面の結線を潰す変異
+ * （読んだ頁を材料へ載せない）が緑のまま通った**（レビューの実測）。
+ */
+describe("参照の列の面（タスク 10.3。要件 3.8、10.3、10.4）", () => {
+  it("参照先の行を頁ごとに読み、その識別子と見出しを一覧する", async () => {
+    const client = fakeClient({
+      state: err<DocumentStateResponse>(),
+      reference: (request) => referencePage(request.start, request.count),
+    });
+    const column = referenceDescriptor(2, "仕入先");
+
+    const first = await loadEditorReference(client, column, { state: "loading" });
+
+    if (first === null) {
+      throw new Error("参照の列の頁が読まれなかった");
+    }
+
+    // **呼び出しは参照の列そのものである**（参照先のシートは宣言から決まるので要求に載らない）。
+    expect(client.references).toEqual([
+      { column: 2, search: "", start: 0, count: REFERENCE_PAGE_SIZE },
+    ]);
+    // **1 万行を一度に読まない**（要求は頁の大きさに収まる。要件 11 の目的）。
+    expect(client.references.every((request) => request.count <= REFERENCE_PAGE_SIZE)).toBe(true);
+
+    const markup = markOfEditor(column, first);
+    // 面は参照の一覧であり、**人が読む見出し**と、**確定する識別子**が並ぶ（要件 3.8）。
+    expect(markup).toContain("参照先: 仕入先");
+    expect(markup).toContain(">仕入先0</button>");
+    expect(markup).toContain(`value="${referenceId(0)}"`);
+    // 読んだ頁の大きさと総数が読める（続きがあることも分かる）。
+    expect(markup).toContain(`data-reference-rows="${String(REFERENCE_PAGE_SIZE)}"`);
+    expect(markup).toContain('data-reference-total="10000"');
+    expect(markup).toContain(`次の ${String(REFERENCE_PAGE_SIZE)} 行を読む`);
+
+    // 続きは**読んだ行の数だけ**進める（頁が重ならない）。読んだ行は前の頁の後ろへ繋がる。
+    const second = await loadEditorReference(client, column, first);
+
+    expect(client.references[1]).toEqual({
+      column: 2,
+      search: "",
+      start: REFERENCE_PAGE_SIZE,
+      count: REFERENCE_PAGE_SIZE,
+    });
+    const later = markOfEditor(column, second);
+    expect(later).toContain(">仕入先100</button>");
+    expect(later).toContain(`value="${referenceId(100)}"`);
+    expect(later).toContain(`data-reference-rows="${String(REFERENCE_PAGE_SIZE * 2)}"`);
+  });
+
+  it("参照を持たない列は頁を読まない（読むかどうかは型ではなく材料が決める）", async () => {
+    const client = fakeClient({
+      state: err<DocumentStateResponse>(),
+      reference: (request) => referencePage(request.start, request.count),
+    });
+
+    // 札は `Ref` であるが、**参照先のシートを名乗らない**列である（材料が無いことは誤りでは
+    // ない。要件 10.4）。
+    const rows = await loadEditorReference(client, descriptorOfKind(1, "名前", "Ref"), {
+      state: "loading",
+    });
+
+    expect(rows).toBeNull();
+    expect(client.references).toEqual([]);
+    expect(client.calls).toEqual([]);
+  });
+
+  it("まだ読めていない間も、参照の面は出る（読んでいることを名乗る）", () => {
+    const markup = markOfEditor(referenceDescriptor(2, "仕入先"), null);
+
+    expect(markup).toContain('data-reference-state="loading"');
+    expect(markup).toContain("参照先 仕入先 の行を読んでいます");
+    // **空の一覧を出さない**（「参照先に行が無い」と読めてしまう）— 材料が無い列と同じ既定の面に
+    // 落ちる（要件 10.4）。
+    expect(markup).not.toContain("jxcel-grid-reference-more");
+    expect(markup).toContain('type="text"');
   });
 });
 
@@ -1732,7 +1894,19 @@ function nestedDescriptor(
   name: string,
   expandability: ColumnDescriptor["expandability"],
 ): ColumnDescriptor {
-  return { column, path: [], name, kind: "Object", element_count: null, expandability };
+  return {
+    column,
+    path: [],
+    name,
+    kind: "Object",
+    element_count: null,
+    expandability,
+    nullable: true,
+    choices: [],
+    reference_sheet: null,
+    custom_type_id: null,
+    members: [],
+  };
 }
 
 /** 同一の型の並びの列（要素数の宣言つき。要件 5.6）。 */
@@ -1744,6 +1918,11 @@ function listDescriptor(column: number, name: string): ColumnDescriptor {
     kind: "Array",
     element_count: { items: "Int", min: 1, max: 8 },
     expandability: "leaf",
+    nullable: true,
+    choices: [],
+    reference_sheet: null,
+    custom_type_id: null,
+    members: [],
   };
 }
 
@@ -1773,6 +1952,11 @@ function innerDescriptor(column: number, field: string, name: string): ColumnDes
     kind: "Text",
     element_count: null,
     expandability: "leaf",
+    nullable: true,
+    choices: [],
+    reference_sheet: null,
+    custom_type_id: null,
+    members: [],
   };
 }
 
@@ -2066,9 +2250,9 @@ describe("表の窓と列の空間（8.5。要件 5.1、8.6）", () => {
     // 「画面が恒等で組んでいないこと」を検査から観測できない）。
     const summary: GridSheetSummary = {
       columns: [
-        { column: 0, path: [{ segment: "Field", name: "city" }], name: "place.city", kind: "Text", element_count: null, expandability: "leaf" },
-        { column: 0, path: [{ segment: "Field", name: "zip" }], name: "place.zip", kind: "Text", element_count: null, expandability: "leaf" },
-        { column: 1, path: [], name: "name", kind: "Text", element_count: null, expandability: "leaf" },
+        { column: 0, path: [{ segment: "Field", name: "city" }], name: "place.city", kind: "Text", element_count: null, expandability: "leaf", nullable: true, choices: [], reference_sheet: null, custom_type_id: null, members: [] },
+        { column: 0, path: [{ segment: "Field", name: "zip" }], name: "place.zip", kind: "Text", element_count: null, expandability: "leaf", nullable: true, choices: [], reference_sheet: null, custom_type_id: null, members: [] },
+        { column: 1, path: [], name: "name", kind: "Text", element_count: null, expandability: "leaf", nullable: true, choices: [], reference_sheet: null, custom_type_id: null, members: [] },
       ],
       row_count: SAMPLE_ROWS,
     };
@@ -2904,7 +3088,8 @@ describe("3 種の操作が同じ 1 つの履歴に乗っている（8.9 の受�
           // 妥当な値を返す）。
           return { status: "ok", data: { context: CONTEXT, outcome, generation: "2" } };
         },
-        readHistory: async (direction) => {
+        readReferenceRows: unused("readReferenceRows"),
+    readHistory: async (direction) => {
           directions.push(direction);
           const outcome = historyScript[historyAt];
           historyAt += 1;

@@ -148,6 +148,7 @@ function fakeClient(answer: IpcResult<GridEditResponse, IpcClientError>): FakeCl
       return answer;
     },
     findViolation: async () => unused("grid_find_violation")(),
+    readReferenceRows: unused("readReferenceRows"),
     readHistory: async () => unused("grid_history")(),
   };
 }
@@ -287,7 +288,7 @@ async function settle(): Promise<void> {
 
 /** 列 1 本の構成（記憶の検査では列そのものが主題ではない）。 */
 const ONE_COLUMN: readonly ColumnDescriptor[] = [
-  { column: 0, path: [], name: "名前", kind: "Text", element_count: null, expandability: "leaf" },
+  { column: 0, path: [], name: "名前", kind: "Text", element_count: null, expandability: "leaf", nullable: true, choices: [], reference_sheet: null, custom_type_id: null, members: [] },
 ];
 
 // ===========================================================================

@@ -105,6 +105,7 @@ function fakeClient(answer: () => IpcResult<GridEditResponse, IpcClientError>): 
     readWindow: async () => unused("grid_rows_window")(),
     applyEdit: async () => unused("grid_apply_edit")(),
     findViolation: async () => unused("grid_find_violation")(),
+    readReferenceRows: unused("readReferenceRows"),
     readHistory: async (direction) => {
       directions.push(direction);
       return answer();

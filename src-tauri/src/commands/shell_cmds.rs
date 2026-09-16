@@ -38,8 +38,8 @@ use std::sync::Arc;
 
 use app_shell::ipc::command_names;
 use app_shell::ipc::{
-    IpcError, IpcResult, SettingsChangedEvent, SettingsGetRequest, SettingsResponse,
-    SettingsSetRequest, SettingsValue, WindowContext, WindowLabel, SETTINGS_CHANGED_EVENT,
+    IpcError, IpcResult, SETTINGS_CHANGED_EVENT, SettingsChangedEvent, SettingsGetRequest,
+    SettingsResponse, SettingsSetRequest, SettingsValue, WindowContext, WindowLabel,
 };
 use app_shell::settings::{FileSettingsStore, SettingsKey, SettingsStore};
 use tauri::{AppHandle, Emitter, Runtime, State, WebviewWindow};

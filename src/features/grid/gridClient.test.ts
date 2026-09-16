@@ -35,7 +35,7 @@ const OPEN_RESPONSE: { status: "ok"; data: GridOpenResponse } = {
     generation: "0",
     sheet: {
       columns: [
-        { column: 0, path: [], name: "名前", kind: "Text", element_count: null, expandability: "leaf" },
+        { column: 0, path: [], name: "名前", kind: "Text", element_count: null, expandability: "leaf", nullable: true, choices: [], reference_sheet: null, custom_type_id: null, members: [] },
       ],
       row_count: 0,
     },

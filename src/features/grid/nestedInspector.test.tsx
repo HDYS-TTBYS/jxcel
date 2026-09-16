@@ -18,9 +18,11 @@
  *
  * # ここで固定しないもの（**正直に書く**）
  *
- * - **値そのものの構造は境界に読む経路が無い**（`design.md` の「8.5 が記録した申し送り」）。
- *    したがって「構造の全体を各フィールドの型とともに示す」（要件 5.5）は、**構成が晒す範囲の
- *    宣言**までである。詳細表示はその事実を利用者にも示す（値を空として見せない）
+ * - **値そのものの構造は境界に読む経路が無い**（`design.md` の「8.5 が記録した申し送り 1」）。
+ *    したがって「構造の全体を各フィールドの型とともに示す」（要件 5.5）は、**宣言されている
+ *    内側の位置**までである（その宣言そのものは `ColumnDescriptor.members` から来るので、
+ *    展開していない列でも読める。タスク 10.3 が閉じた 7.4 の申し送り 6）。詳細表示は値の構造が
+ *    読めないことを利用者にも示す（値を空として見せない）
  * - `commit` の先（判定・違反の保持・取り直し）は `./cellEdit` の検査である（同じ 1 つの関数を
  *    通る。要件 5.7 の「同じ規律」は経路が 1 つであることで満たす）
  */
@@ -30,6 +32,7 @@ import { describe, expect, it } from "vitest";
 
 import type {
   ColumnDescriptor,
+  ColumnMemberDescriptor,
   GridExpansionState,
   GridPathSegment,
   GridViewSpec,
@@ -66,6 +69,8 @@ function descriptor(
   options: {
     readonly expandability?: ColumnDescriptor["expandability"];
     readonly elementCount?: ColumnDescriptor["element_count"];
+    /** その列に**宣言されている**内側の位置（タスク 10.3 が境界へ足した材料。要件 5.5）。 */
+    readonly members?: readonly ColumnMemberDescriptor[];
   } = {},
 ): ColumnDescriptor {
   return {
@@ -75,6 +80,32 @@ function descriptor(
     kind,
     element_count: options.elementCount ?? null,
     expandability: options.expandability ?? "leaf",
+    nullable: true,
+    choices: [],
+    reference_sheet: null,
+    custom_type_id: null,
+    members: [...(options.members ?? [])],
+  };
+}
+
+/**
+ * 内側の宣言 1 件（名・型の札・セル直下からの位置を持つ。要件 5.5）。
+ *
+ * **展開の状態に依らない材料である** — 折りたたまれた列でもこの並びは読める（タスク 10.3 が
+ * 閉じた 7.4 の申し送り 6）。
+ */
+function member(
+  fields: readonly string[],
+  kind: ColumnMemberDescriptor["kind"],
+  nullable = false,
+): ColumnMemberDescriptor {
+  return {
+    path: fields.map((name) => ({ segment: "Field" as const, name })),
+    name: fields.join("."),
+    kind,
+    nullable,
+    choices: [],
+    custom_type_id: null,
   };
 }
 
@@ -86,7 +117,7 @@ function mark(...segments: readonly NestedSegment[]): readonly NestedSegment[] {
 /** 詳細表示の既定の入力（主題ごとに上書きする）。 */
 function inspectorProps(overrides: {
   readonly column?: ColumnDescriptor | null;
-  readonly declared?: readonly ColumnDescriptor[];
+  readonly declared?: readonly ColumnMemberDescriptor[];
   readonly summary?: string;
   readonly loading?: boolean;
   readonly innerViolations?: readonly (readonly NestedSegment[])[] | null;
@@ -378,44 +409,61 @@ describe("値の要約と、宣言から分かる構造（要件 5.5、5.6）", 
     expect(renderInspector({ summary: "", loading: true })).toContain("読み込み中");
   });
 
-  it("構成が晒している内側の位置を、型とともに示す", () => {
+  it("宣言されている内側の位置を、名と型で示す（折りたたみのままでも。要件 5.5）", () => {
     const markup = renderInspector({
-      declared: [
-        descriptor(1, [field("city")], "place.city", "Text"),
-        descriptor(1, [field("count")], "place.count", "Int"),
-      ],
+      // **展開していない列**の詳細表示である（構成が晒している位置ではない — 宣言そのものである）。
+      declared: [member(["place", "city"], "Text"), member(["place", "count"], "Int", true)],
     });
 
     expect(markup).toContain("jxcel-grid-nested-declared");
     expect(declaredIn(markup)).toEqual(["place.city", "place.count"]);
-    expect(markup).toContain("Text");
-    expect(markup).toContain("Int");
+    expect(markup).toContain("place.city: Text");
+    expect(markup).toContain("place.count: Int");
   });
 
-  it("内側の宣言が構成に無いときは、その事実を示す（黙って空にしない）", () => {
-    // **値そのものの構造は境界に読む経路が無い**（本 module の申し送り）。空の一覧を出すだけだと
-    // 「内側が無い値」と読めてしまうので、読めないことを書く。
+  it("宣言されている内側の位置が 1 つも無いときは、その事実を示す（黙って空にしない）", () => {
+    // **値そのものの構造は境界に読む経路が無い**（本 module の申し送り 1）。空の一覧を出すだけだと
+    // 「内側が無い値」と読めてしまうので、読めないことを書く。**書くのは値の構造のことであり、
+    // 宣言のことではない** — 宣言そのものは境界が運ぶ（タスク 10.3 が閉じた 7.4 の申し送り 6）。
     const markup = renderInspector({ declared: [] });
 
-    expect(markup).toContain("宣言が読めません");
+    expect(markup).toContain("この列に内側のフィールドが宣言されていません");
+    expect(markup).toContain("値そのものの構造を読む経路が境界に無い");
     expect(markup).not.toContain("jxcel-grid-nested-declared");
+
+    // 構成に無い列では、**宣言そのものが引けない**（同じ枝でありながら理由が違う — 書き分ける）。
+    const missing = renderInspector({ column: null, declared: [] });
+
+    expect(missing).toContain("この列の宣言が読めません");
+    expect(missing).not.toContain("この列に内側のフィールドが宣言されていません");
   });
 
-  it("内側の宣言は、その文書の列の位置だけから集める", () => {
-    // 構成の並びには**別の文書の列の位置**も混ざっている（展開した列の隣には、折りたたまれた
-    // 列が並ぶ）。同じ文書の列の位置だけを集める（そうしないと、隣の列のフィールドを自分の
-    // 構造として見せることになる）。
-    const columns = [
-      descriptor(1, [field("city")], "place.city", "Text"),
-      descriptor(2, [], "名前", "Text"),
-      descriptor(1, [field("zip")], "place.zip", "Text"),
-    ];
+  it("折りたたまれた入れ子の列でも、内側の宣言が読める（タスク 10.3）", () => {
+    // **構成の並びからは読めない** — 展開していない列の内側の位置は構成に現れないためである
+    // （以前はここが空になり、詳細表示が内側の宣言を読めないと書いていた。7.4 の申し送り 6）。
+    // いまは境界が宣言そのもの（`members`）を運ぶので、折りたたみのままでも読める。
+    const collapsed = descriptor(1, [], "提供元", "Object", {
+      expandability: "available",
+      members: [
+        member(["name"], "Text", false),
+        member(["code"], "Text", true),
+        member(["住所", "市"], "Text", true),
+      ],
+    });
 
-    const declared = declaredInnerPositions(columns, 1);
+    const declared = declaredInnerPositions(collapsed);
 
-    expect(declared.map((column) => column.name)).toEqual(["place.city", "place.zip"]);
-    // 折りたたまれた列そのもの（位置が空）は内側の位置ではない。
-    expect(declaredInnerPositions(columns, 2)).toEqual([]);
+    expect(declared.map((entry) => [entry.name, entry.kind])).toEqual([
+      ["name", "Text"],
+      ["code", "Text"],
+      ["住所.市", "Text"],
+    ]);
+    expect(declared.map((entry) => entry.nullable)).toEqual([false, true, true]);
+
+    // 記述が引けない（`null`）ときは空である — 面はそのとき位置ごとの面を出さない。
+    expect(declaredInnerPositions(null)).toEqual([]);
+    // 内側を持たない列も空である（材料が無いことは誤りではない。要件 10.4）。
+    expect(declaredInnerPositions(descriptor(0, [], "名前", "Text"))).toEqual([]);
   });
 
   it("同一の型の並びの列では、要素数の宣言を示す（要件 5.6）", () => {
@@ -437,7 +485,8 @@ describe("値の要約と、宣言から分かる構造（要件 5.5、5.6）", 
 describe("詳細表示の中の編集（要件 5.5、5.7、10.3）", () => {
   it("列の札に対応する面を、登録簿から引いて出す", () => {
     // **本 module は面を名指ししない**（要件 10.3）。`Object` の札は登録簿の入れ子の面であり、
-    // 位置ごとの面を持たない（`members` が境界に無い）ので既定の文字の面へ落ちる。
+    // 内側の宣言が 1 つも無い列（材料が無いことは誤りではない。要件 10.4）では位置ごとの面を
+    // 1 つも並べられないので、値をそのまま扱う面へ落ちる（`editors/nested.tsx` の規律）。
     const markup = renderInspector({
       column: descriptor(1, [], "提供元", "Object", { expandability: "available" }),
     });

@@ -481,12 +481,12 @@ use std::collections::{HashMap, HashSet};
 
 use document_format::parts::RowsCodec;
 use document_format::{
-    from_json_bytes, to_json_bytes, CellValue, CellWriteError, Document, EntryName, Row, RowId,
-    RowInsertionError, RowRemovalError, Sheet, SheetId,
+    CellValue, CellWriteError, Document, EntryName, Row, RowId, RowInsertionError, RowRemovalError,
+    Sheet, SheetId, from_json_bytes, to_json_bytes,
 };
 use schema_engine::{
-    validate_columns, validate_sheet, validate_write, Coercion, ColumnIndex, CompiledSchema,
-    EditVerdict, SheetReport, ValidationOptions, Violation, WriteOrigin, WriteVerdict,
+    Coercion, ColumnIndex, CompiledSchema, EditVerdict, SheetReport, ValidationOptions, Violation,
+    WriteOrigin, WriteVerdict, validate_columns, validate_sheet, validate_write,
 };
 // 貼り付けは**判定を呼ばず**、強制の規則表だけをセルごとに引く（モジュール docs「貼り付け」）。
 // `coerce` は縫い目の 3 つの口（判定・再検証・全件検証）のいずれでもない — 縫い目が数えるのは

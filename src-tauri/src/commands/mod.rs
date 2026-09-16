@@ -141,6 +141,7 @@ command_root! {
     command_names::GRID_HISTORY => grid::grid_history,
     command_names::GRID_FIND_VIOLATION => grid::grid_find_violation,
     command_names::GRID_ROWS_WINDOW => grid::grid_rows_window,
+    command_names::GRID_REFERENCE_ROWS => grid::grid_reference_rows,
 }
 
 #[cfg(test)]

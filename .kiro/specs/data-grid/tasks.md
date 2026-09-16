@@ -362,7 +362,7 @@
   - _Requirements: 9.5, 9.6, 9.7_
   - _Boundary: crates/data-grid/src/api.rs, crates/data-grid/src/edit/, crates/data-grid/src/history/mod.rs, crates/data-grid/src/lib.rs, crates/data-grid/tests/, src-tauri/src/commands/grid.rs, .kiro/specs/data-grid/design.md_
 
-- [ ] 10.3 境界に列の材料（選択肢・参照先・入れ子の宣言）を足す
+- [x] 10.3 境界に列の材料（選択肢・参照先・入れ子の宣言）を足す
   - `ColumnDescriptor` に、その列の**宣言**から導ける材料を足す: ①選択肢を持つ型の値と名の一覧（`Enum`）②入れ子の型の内側のフィールドの宣言（名・型の札・内側の位置。**展開していない列でも読めること**）③参照の型の参照先のシートの名
   - **ユーザー定義型の識別子**（`Custom` の列がどの型かを登録簿へ引く鍵）と、**値なしを許すか**（`nullable`）も、宣言から写して境界が運ぶ。**いまは `nullable` をつねに真として渡しており、値なしを許さない列でも「値なしへ戻す」道が出ている**（design.md「7.4 が定めた `ColumnConstraints`」の申し送り 3・5）
   - 参照先の行を**頁ごとに読むコマンドを 1 本足す**（要求: 文書の列の添字・検索の文字・開始位置・件数。応答: 識別子と表示の名の一覧・総数）。**6 本のコマンドと同じ 3 点セットを揃える**（名前の定数を単一の源へ、登録の根へ 1 行、**専用の権限ブロックを定義して与える集合へ所属させる**）
@@ -420,6 +420,11 @@
   - _Boundary: src-tauri/Cargo.toml, src-tauri/src/, src-tauri/permissions/app.toml, src-tauri/capabilities/, crates/app-shell/src/ipc/, src/ipc/bindings.ts, src/features/grid/, scripts/check-menu-shortcut.sh, .kiro/specs/data-grid/design.md_
 
 ## Implementation Notes
+
+- **10.3 が残した限界（親が記録する）**:
+  1. **「次の N 行を読む」の押下そのものは検査で覆われていない**（`onMore` を空関数にする変異は生存する。`jsdom` を足さない方針のため、押下の配線は実起動の観測の領分である）。タスク本文が要求した 3 つの検査（一覧になる・識別子が確定する・一度に全部を読まない）は満たしている。**9.2 の筋書きに「参照の面の続きを読む」を含めるかは、レビューの判断として保留した。**
+  2. **`crates/data-grid/src/view/reference.rs` の `reference_page` は、検索が空でも頁に入らない行の表示の名を組んでから捨てている**（総数の数え上げのため全行走査は避けられないが、`label_of` は頁の内側と検索が非空のときに限れる）。機能・要件の充足には影響しない費用の問題であり、レビューは非阻害とした。**次にこの関数を触るときに直すこと。**
+  3. `qlty fmt` は**境界の外のファイルの `use` の並べ替え**も行う（10.3 の作業で `src-tauri/src/commands/{bulk,diagnostics_cmds,shell_cmds}.rs` と `crates/data-grid/src/edit/mod.rs` に整形だけの差分が出た）。リポジトリの規約（コミット前に `qlty fmt`）に従った結果であり、内容の変更ではない。
 
 - **環境（2026-09-14 に判明）**: このマシンの `~/.local/bin/pkg-config` は `/tmp/tsroot/root` を指す古いシムであり、`/tmp` の掃除でそれが消えたため、**GTK の sys クレート（`src-tauri` 経由）を含むビルドが失敗する**。動く sysroot はリポジトリ直下の `.devsys/root` である。ワークスペース全体を走らせるときは次を前置する（`cargo test -p data-grid` は GTK を要さないため不要なことが多い）:
   ```

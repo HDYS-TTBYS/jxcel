@@ -83,10 +83,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use app_shell::diagnostics::{self, DiagnosticsLevel as CoreLevel};
 use app_shell::ipc::{
-    DiagnosticsExportRecords, DiagnosticsExportResponse, DiagnosticsLevel,
-    DiagnosticsLogLocationResponse, DiagnosticsRequestedEvent, DiagnosticsSection,
-    DiagnosticsVerbosityResponse, DiagnosticsVerbositySetRequest, IpcError, IpcResult,
-    WindowContext, WindowLabel, DIAGNOSTICS_REQUESTED_EVENT,
+    DIAGNOSTICS_REQUESTED_EVENT, DiagnosticsExportRecords, DiagnosticsExportResponse,
+    DiagnosticsLevel, DiagnosticsLogLocationResponse, DiagnosticsRequestedEvent,
+    DiagnosticsSection, DiagnosticsVerbosityResponse, DiagnosticsVerbositySetRequest, IpcError,
+    IpcResult, WindowContext, WindowLabel,
 };
 use app_shell::settings::FileSettingsStore;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
@@ -540,9 +540,9 @@ mod tests {
     use app_shell::ipc::command_names;
 
     use super::{
-        diagnostics_item_spec, diagnostics_items, diagnostics_menu_path, export_file_name,
-        records_of, verbosity_response, DiagnosticsExportRecords, DiagnosticsLevel,
-        DiagnosticsSection, EXPORT_ITEM_ID, LOG_LOCATION_ITEM_ID, OWNER, VERBOSITY_ITEM_ID,
+        DiagnosticsExportRecords, DiagnosticsLevel, DiagnosticsSection, EXPORT_ITEM_ID,
+        LOG_LOCATION_ITEM_ID, OWNER, VERBOSITY_ITEM_ID, diagnostics_item_spec, diagnostics_items,
+        diagnostics_menu_path, export_file_name, records_of, verbosity_response,
     };
     use crate::menu::{MenuNode, MenuPath, MenuRegistry};
 

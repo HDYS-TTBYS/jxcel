@@ -69,18 +69,20 @@ pub mod grid;
 
 pub use command_names::COMMAND_NAMES;
 pub use document::{
-    DocumentDiscardResponse, DocumentNewOutcome, DocumentNewResponse, DocumentOrigin,
-    DocumentSaveOutcome, DocumentSaveResponse, DocumentSessionStatus, DocumentSheet,
-    DocumentStateResponse, DocumentSummary, DOCUMENT_SESSION_CHANGED_EVENT,
+    DOCUMENT_SESSION_CHANGED_EVENT, DocumentDiscardResponse, DocumentNewOutcome,
+    DocumentNewResponse, DocumentOrigin, DocumentSaveOutcome, DocumentSaveResponse,
+    DocumentSessionStatus, DocumentSheet, DocumentStateResponse, DocumentSummary,
 };
 pub use error::IpcError;
 pub use grid::{
-    ColumnDescriptor, ColumnElementCount, ColumnExpandability, GridCellAddress, GridCellEdit,
+    ColumnChoice, ColumnDescriptor, ColumnElementCount, ColumnExpandability,
+    ColumnMemberDescriptor, GRID_REFERENCE_PAGE_LIMIT, GridCellAddress, GridCellEdit,
     GridCoercionNotice, GridEditCommand, GridEditOutcome, GridEditRequest, GridEditResponse,
     GridExpansionState, GridFilterSpec, GridHistoryDirection, GridHistoryRequest, GridOpenRequest,
-    GridOpenResponse, GridPathSegment, GridSearchDirection, GridSheetSummary, GridSortKey,
-    GridViewRequest, GridViewResponse, GridViewSpec, GridViolation, GridViolationLocation,
-    GridViolationRequest, GridViolationResponse, TypeKindTag,
+    GridOpenResponse, GridPathSegment, GridReferenceRequest, GridReferenceResponse,
+    GridReferenceRow, GridSearchDirection, GridSheetSummary, GridSortKey, GridViewRequest,
+    GridViewResponse, GridViewSpec, GridViolation, GridViolationLocation, GridViolationRequest,
+    GridViolationResponse, TypeKindTag,
 };
 
 /// 境界を越えるすべてのコマンドが返す封筒（要件 4.2、4.4）。
@@ -729,10 +731,7 @@ fn event_names_constant() -> String {
             DOCUMENT_SESSION_CHANGED_EVENT,
         ),
         ("GRID_COPY_REQUESTED_EVENT", GRID_COPY_REQUESTED_EVENT),
-        (
-            "GRID_HISTORY_REQUESTED_EVENT",
-            GRID_HISTORY_REQUESTED_EVENT,
-        ),
+        ("GRID_HISTORY_REQUESTED_EVENT", GRID_HISTORY_REQUESTED_EVENT),
     ] {
         out.push_str(&format!("export const {constant} = \"{event}\";\n"));
     }
@@ -1013,6 +1012,21 @@ fn concrete_grid_violation_result(cfg: &ts_rs::Config) -> (String, String) {
     (NAME.to_owned(), text)
 }
 
+/// 参照先の行を読んだ結果の具体形（タスク 10.3）。 [`concrete_window_context_result`] と同じ理由で
+/// 置く。ペイロード型は [`GridReferenceResponse`] である。
+fn concrete_grid_reference_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "GridReferenceResult";
+    let mut text = String::from(
+        "// 参照先の行を読んだ結果の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を\n\
+         // 名指ししないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<GridReferenceResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
 /// 境界を越える型とコマンド名から、追跡対象の TypeScript（`src/ipc/bindings.ts`）を生成する
 /// （tasks.md 2.2、design.md「IpcContract」の Service Interface）。
 ///
@@ -1063,6 +1077,8 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<TypeKindTag>(&cfg),
         declared::<ColumnExpandability>(&cfg),
         declared::<ColumnElementCount>(&cfg),
+        declared::<ColumnChoice>(&cfg),
+        declared::<ColumnMemberDescriptor>(&cfg),
         declared::<ColumnDescriptor>(&cfg),
         declared::<GridPathSegment>(&cfg),
         declared::<GridSheetSummary>(&cfg),
@@ -1089,6 +1105,9 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<GridViolationRequest>(&cfg),
         declared::<GridViolation>(&cfg),
         declared::<GridViolationResponse>(&cfg),
+        declared::<GridReferenceRequest>(&cfg),
+        declared::<GridReferenceRow>(&cfg),
+        declared::<GridReferenceResponse>(&cfg),
         declared::<IpcError>(&cfg),
         declared::<IpcResult<WindowContext, IpcError>>(&cfg),
         concrete_window_context_result(&cfg),
@@ -1108,6 +1127,7 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         concrete_grid_view_result(&cfg),
         concrete_grid_edit_result(&cfg),
         concrete_grid_violation_result(&cfg),
+        concrete_grid_reference_result(&cfg),
     ];
     declarations.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -1769,14 +1789,16 @@ mod tests {
         assert_no_numeric_type(&ts);
         assert_no_any(&ts);
 
-        assert!(serde_json::to_value(&DiagnosticsLogLocationResponse {
-            context: WindowContext {
-                window: WindowLabel::new("doc-1"),
-            },
-            directory: "/home/user/.local/share/com.jxcel.app/logs".to_owned(),
-        })
-        .unwrap()["directory"]
-            .is_string());
+        assert!(
+            serde_json::to_value(&DiagnosticsLogLocationResponse {
+                context: WindowContext {
+                    window: WindowLabel::new("doc-1"),
+                },
+                directory: "/home/user/.local/share/com.jxcel.app/logs".to_owned(),
+            })
+            .unwrap()["directory"]
+                .is_string()
+        );
     }
 
     /// メニューの活性化の通知が**選ばれた導線だけ**を運ぶことを固定する（要件 3.5 の
@@ -2061,6 +2083,8 @@ mod tests {
             generated::<ColumnDescriptor>(),
             generated::<ColumnElementCount>(),
             generated::<ColumnExpandability>(),
+            generated::<ColumnChoice>(),
+            generated::<ColumnMemberDescriptor>(),
             generated::<GridPathSegment>(),
             generated::<GridSheetSummary>(),
             generated::<GridSortKey>(),
@@ -2085,6 +2109,9 @@ mod tests {
             generated::<GridViolationRequest>(),
             generated::<GridViolation>(),
             generated::<GridViolationResponse>(),
+            generated::<GridReferenceRequest>(),
+            generated::<GridReferenceRow>(),
+            generated::<GridReferenceResponse>(),
         ];
         for ts in declarations {
             assert_no_any(&ts);
@@ -2093,7 +2120,9 @@ mod tests {
     }
 
     /// 列の情報が `view` 層の `LayoutColumn` の持つものを全部運ぶことを固定する
-    /// （列の添字・内側の位置・表示名・葉の型の札・要素数の能力・展開の可否）。
+    /// （列の添字・内側の位置・表示名・葉の型の札・要素数の能力・展開の可否、そして
+    /// **宣言から導ける材料** — 値なしを許すか・選択肢・参照先のシート・ユーザー定義型の
+    /// 識別子・入れ子の内側の宣言。タスク 10.3）。
     ///
     /// 内側の位置は**セル直下（空）から入れ子の段まで**を表現でき、`Field` と `Index` を
     /// 区別する（要件 4.5 が入れ子のどの位置かを特定できる形を求めるため）。
@@ -2115,6 +2144,11 @@ mod tests {
                 max: None,
             }),
             expandability: ColumnExpandability::Available,
+            nullable: false,
+            choices: Vec::new(),
+            reference_sheet: None,
+            custom_type_id: None,
+            members: Vec::new(),
         };
         let encoded = serde_json::to_value(&nested).unwrap();
         assert_eq!(
@@ -2129,6 +2163,11 @@ mod tests {
                 "kind": "Array",
                 "element_count": { "items": "Text", "min": 1, "max": null },
                 "expandability": "available",
+                "nullable": false,
+                "choices": [],
+                "reference_sheet": null,
+                "custom_type_id": null,
+                "members": [],
             })
         );
         assert_json_numbers_fit_u32(&encoded, "column");
@@ -2143,12 +2182,23 @@ mod tests {
             kind: None,
             element_count: None,
             expandability: ColumnExpandability::Leaf,
+            nullable: true,
+            choices: Vec::new(),
+            reference_sheet: None,
+            custom_type_id: None,
+            members: Vec::new(),
         };
         let encoded = serde_json::to_value(&flat).unwrap();
         assert_eq!(encoded["path"], serde_json::json!([]));
         assert_eq!(encoded["kind"], serde_json::Value::Null);
         assert_eq!(encoded["element_count"], serde_json::Value::Null);
         assert_eq!(encoded["expandability"], "leaf");
+        // **材料が無い列は空／`null` を運ぶ**（面はそのとき既定へ落ちる。要件 10.4）。
+        assert_eq!(encoded["nullable"], serde_json::json!(true));
+        assert_eq!(encoded["choices"], serde_json::json!([]));
+        assert_eq!(encoded["reference_sheet"], serde_json::Value::Null);
+        assert_eq!(encoded["custom_type_id"], serde_json::Value::Null);
+        assert_eq!(encoded["members"], serde_json::json!([]));
         assert_eq!(
             serde_json::from_value::<ColumnDescriptor>(encoded).unwrap(),
             flat
@@ -2176,6 +2226,162 @@ mod tests {
             })
             .unwrap(),
             serde_json::json!({ "items": "Int", "min": null, "max": 8 })
+        );
+    }
+
+    /// 列の**宣言から導ける材料**が境界を越え、往復すること（タスク 10.3。要件 3.2、3.7、
+    /// 3.8、5.5、10.1、10.4）。
+    ///
+    /// 固定するのは 4 点である: ①選択肢は値と名の対で運ばれる ②参照先のシートは名（文字列）
+    /// ③ユーザー定義型の識別子は文字列 ④入れ子の内側の宣言は位置・名・型の札・値なしを許すか
+    /// を持ち、**展開していない列でも空でない**。
+    #[test]
+    fn column_descriptor_carries_the_declaration_material() {
+        let column = ColumnDescriptor {
+            column: 1,
+            path: Vec::new(),
+            name: "届け先".to_owned(),
+            kind: Some(TypeKindTag::Object),
+            element_count: None,
+            expandability: ColumnExpandability::Available,
+            nullable: false,
+            choices: vec![ColumnChoice {
+                value: "赤".to_owned(),
+                label: "赤".to_owned(),
+            }],
+            reference_sheet: Some("仕入先".to_owned()),
+            custom_type_id: Some("postal-code".to_owned()),
+            members: vec![
+                ColumnMemberDescriptor {
+                    path: vec![GridPathSegment::Field {
+                        name: "郵便番号".to_owned(),
+                    }],
+                    name: "届け先.郵便番号".to_owned(),
+                    kind: TypeKindTag::Text,
+                    nullable: false,
+                    choices: Vec::new(),
+                    custom_type_id: Some("postal-code".to_owned()),
+                },
+                ColumnMemberDescriptor {
+                    path: vec![
+                        GridPathSegment::Field {
+                            name: "住所".to_owned(),
+                        },
+                        GridPathSegment::Field {
+                            name: "市".to_owned(),
+                        },
+                    ],
+                    name: "届け先.住所.市".to_owned(),
+                    kind: TypeKindTag::Enum,
+                    nullable: true,
+                    choices: vec![ColumnChoice {
+                        value: "自宅".to_owned(),
+                        label: "自宅".to_owned(),
+                    }],
+                    custom_type_id: None,
+                },
+            ],
+        };
+        let encoded = serde_json::to_value(&column).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "column": 1,
+                "path": [],
+                "name": "届け先",
+                "kind": "Object",
+                "element_count": null,
+                "expandability": "available",
+                // **値なしを許すかは宣言から写した真偽である**（定数にしない。要件 3.7）。
+                "nullable": false,
+                "choices": [{ "value": "赤", "label": "赤" }],
+                // **参照先は名（文字列）で運ぶ**（識別子の写しは適応層が行う）。
+                "reference_sheet": "仕入先",
+                "custom_type_id": "postal-code",
+                "members": [
+                    {
+                        "path": [{ "segment": "Field", "name": "郵便番号" }],
+                        "name": "届け先.郵便番号",
+                        "kind": "Text",
+                        "nullable": false,
+                        "choices": [],
+                        "custom_type_id": "postal-code",
+                    },
+                    {
+                        "path": [
+                            { "segment": "Field", "name": "住所" },
+                            { "segment": "Field", "name": "市" },
+                        ],
+                        "name": "届け先.住所.市",
+                        "kind": "Enum",
+                        "nullable": true,
+                        "choices": [{ "value": "自宅", "label": "自宅" }],
+                        "custom_type_id": null,
+                    },
+                ],
+            })
+        );
+        // 数の欄は 32 ビットに収まる（64 ビット整数を境界へ出さない規約）。
+        assert_json_numbers_fit_u32(&encoded, "column");
+        assert_json_numbers_fit_u32(&encoded["members"], "members");
+        assert_eq!(
+            serde_json::from_value::<ColumnDescriptor>(encoded).unwrap(),
+            column
+        );
+    }
+
+    /// 参照先の行を読む経路の型が、頁と総数を 32 ビット以下で運び、往復すること
+    /// （タスク 10.3。要件 3.8）。
+    ///
+    /// **要求は件数を運び、応答はその頁と総数を運ぶ。**上限
+    /// （[`GRID_REFERENCE_PAGE_LIMIT`]）は型ではなく**境界の切り詰め**である（要求が上限を
+    /// 超えてもこの型は成立する — 切り詰めるのは適応層である）。
+    #[test]
+    fn the_reference_rows_types_carry_a_page_and_a_total() {
+        let request = GridReferenceRequest {
+            column: 2,
+            search: "仕入".to_owned(),
+            start: 0,
+            count: GRID_REFERENCE_PAGE_LIMIT + 1000,
+        };
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "column": 2,
+                "search": "仕入",
+                "start": 0,
+                "count": GRID_REFERENCE_PAGE_LIMIT + 1000,
+            })
+        );
+        assert_json_numbers_fit_u32(&encoded, "request");
+        assert_eq!(
+            serde_json::from_value::<GridReferenceRequest>(encoded).unwrap(),
+            request
+        );
+
+        let response = GridReferenceResponse {
+            context: WindowContext {
+                window: super::WindowLabel::new("main"),
+            },
+            rows: vec![GridReferenceRow {
+                id: "01K4ANRRG004HMASW9NF6YY091".to_owned(),
+                label: "仕入先A 東京".to_owned(),
+            }],
+            total: 10_000,
+            has_more: true,
+        };
+        let encoded = serde_json::to_value(&response).unwrap();
+        assert_eq!(encoded["total"], serde_json::json!(10_000));
+        assert_eq!(encoded["has_more"], serde_json::json!(true));
+        assert_eq!(
+            encoded["rows"][0],
+            serde_json::json!({ "id": "01K4ANRRG004HMASW9NF6YY091", "label": "仕入先A 東京" })
+        );
+        assert_json_numbers_fit_u32(&encoded, "response");
+        assert_eq!(
+            serde_json::from_value::<GridReferenceResponse>(encoded).unwrap(),
+            response
         );
     }
 
@@ -2559,6 +2765,11 @@ mod tests {
             kind: Some(TypeKindTag::Int),
             element_count: None,
             expandability: ColumnExpandability::Leaf,
+            nullable: true,
+            choices: Vec::new(),
+            reference_sheet: None,
+            custom_type_id: None,
+            members: Vec::new(),
         };
 
         let no_columns = GridSheetSummary {

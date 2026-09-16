@@ -224,8 +224,10 @@
  *
  * **要件 5.1 / 5.2 の見える結果は、申し送り 2 の修復で届くようになった。** 境界が返す導出後の
  * 構成を状態が採用し、表の面がそれを描く（展開すると内側の位置が列として並び、折りたたむと
- * 元の 1 本に戻る）。**要件 5.5 の「構造の全体」は依然として届かない**（申し送り 1）ので、
- * 詳細表示は「宣言が読めません」と書く。
+ * 元の 1 本に戻る）。**届かないのは値の構造そのものである**（申し送り 1）— 内側の宣言は境界が
+ * 材料として運ぶ（`ColumnDescriptor.members`。タスク 10.3 が閉じた 7.4 の申し送り 6）ので、
+ * 詳細表示は**折りたたみのままでも**内側のフィールドを名と型で並べられ、読めないのは値の構造
+ * だけである。
  *
  * # 8.6 が足したもの（行の追加・削除・複製。`./rowOps`）
  *
@@ -367,6 +369,7 @@ import { createDisplayState, type DisplayStateStore } from "./displayState";
 import { columnEditor } from "./editors";
 import type { ColumnConstraints, EditCarrier } from "./editorRegistry";
 import { createColumnSpace } from "./columnSpace";
+import { constraintsOf, withReferenceRows } from "./columnConstraints";
 import {
   NestedColumnControls,
   NestedInspector,
@@ -380,6 +383,11 @@ import {
   rowOrderKeyOf,
   type ViewOperation,
 } from "./viewOps";
+import {
+  REFERENCE_PAGE_SIZE,
+  loadReferenceRows,
+  type ReferenceRows,
+} from "./referenceRows";
 import { ViewBar } from "./viewBar";
 import { WINDOW_ROWS, createWindowCache, type WindowCache } from "./windowCache";
 import {
@@ -2680,8 +2688,12 @@ function GridSurface({
       </p>
       {editing === null ? null : (
         <CellEditorPanel
+          // **編集の対象が変わったら組み直す。**参照先の行の読み込みは面の状態なので、
+          // 別のセルへ移ったときに前のセルの一覧が残らないようにする（`editKey` と同じ規律）。
+          key={`${String(editing.position.row)}:${String(editing.position.column)}`}
           edit={editing}
           column={columns[editing.position.column] ?? null}
+          client={client}
           onCommit={(text, carrier) => {
             settle(editing.position, { kind: "commit", text }, carrier, onEditSettled);
           }}
@@ -2699,9 +2711,7 @@ function GridSurface({
         <NestedInspector
           position={detail.position}
           column={detailColumn}
-          declared={
-            detailColumn === null ? [] : declaredInnerPositions(summary.columns, detailColumn.column)
-          }
+          declared={declaredInnerPositions(detailColumn)}
           summary={detailCell.text}
           loading={detailCell.loading}
           // 未取得は `null` であり、空の並び（違反なし）と区別する（要件 4.5）。
@@ -2728,6 +2738,67 @@ function GridSurface({
 }
 
 /**
+ * 参照先の行を 1 頁読む（タスク 10.3。要件 3.8、10.3、10.4）。
+ *
+ * **読むかどうかは型の札ではなく材料が決める** — 参照先のシートを名乗る列（`reference_sheet`）
+ * だけが頁を読む。画面に型ごとの分岐は 1 つも無い（要件 10.3）。参照しない列の答えは `null`
+ * であり、**「頁を読んでいない」ことを状態として持つ**（空の並びは「参照先に行が無い」、失敗は
+ * 「読めなかった」 — 3 つを混同しない）。
+ *
+ * **頁ごとである**（`./referenceRows`）。参照先が 1 万行でも一度に全部を読まない — 続きは
+ * `previous` が繋ぐ（読んだ行の数だけ `start` が進むので、頁は重ならない）。
+ */
+export async function loadEditorReference(
+  client: GridClient,
+  column: ColumnDescriptor | null,
+  previous: ReferenceRows,
+): Promise<ReferenceRows | null> {
+  if (column === null || column.reference_sheet === null) {
+    return null;
+  }
+  return loadReferenceRows(client, column.column, previous);
+}
+
+/**
+ * その列の入力手段が読む制約（**材料は境界から、参照先の行は読んだ頁から**。要件 3.8、10.3）。
+ *
+ * **結線はここ 1 箇所である**: ① 材料そのものは `./columnConstraints` が `ColumnDescriptor` の
+ * 宣言から写し、② 読んだ頁は**参照の列のときだけ** `reference` へ載る。読めていない間も面は
+ * 出る（材料が欠けた欄は既定へ落ちる。要件 10.4）。
+ */
+function editorConstraints(
+  column: ColumnDescriptor | null,
+  reference: ReferenceRows | null,
+): ColumnConstraints {
+  const material = constraintsOf(column);
+  if (column === null || column.reference_sheet === null) {
+    return material;
+  }
+  if (reference === null || reference.state !== "loaded") {
+    return material;
+  }
+  return withReferenceRows(material, column.reference_sheet, reference.rows);
+}
+
+/** 編集中の 1 セルの面へ渡すもの（**状態を持たない**。`CellEditorPanel` が状態と往復を足す）。 */
+export interface CellEditorPanelViewProps {
+  readonly edit: CellEdit;
+  /** その列の宣言（表示位置の列）。使用不能な列は `null`（札が読めない）。 */
+  readonly column: ColumnDescriptor | null;
+  /**
+   * 読んだ参照先の頁。`null` は**まだ読んでいない**であり、読み込み中・失敗・読了は
+   * [`ReferenceRows`] が区別する（参照しない列は決して読まないので、この欄は使われない）。
+   */
+  readonly reference: ReferenceRows | null;
+  /** 次の頁を読む（**押下の口**。読むのは呼び出し側である — 状態を持つ側）。 */
+  readonly onMore: () => void;
+  /** 確定（**運び手つきで上げる**。`./cellEdit` がそれで命令を選ぶ。要件 5.7）。 */
+  readonly onCommit: (text: string, carrier: EditCarrier) => void;
+  /** 取消（**境界へ何も送らない**。要件 3.6）。 */
+  readonly onCancel: (carrier: EditCarrier) => void;
+}
+
+/**
  * 編集中の 1 セルの面（要件 3.1）。**入力手段を登録簿から引く唯一の場所である。**
  *
  * 型ごとの分岐はここに 1 つも無い — 解決するのは `CellEditorRegistry.resolve` であり、未登録の
@@ -2736,36 +2807,26 @@ function GridSurface({
  *
  * 面は**表の器の外**に出る。移植口に「セルの上へ DOM を重ねる」口は無く（`RendererSpec` に
  * そんな欄は無い）、覆われたセルを探させるより、**どのセルを編集しているかを名乗る**方が読める。
+ *
+ * **材料の組み立てはここが持つ**（`editorConstraints`）ので、読み込みの状態を持つ側
+ * （[`CellEditorPanel`]）は頁を渡すだけでよい — `GridScreenView` と同じ分担である。
  */
-function CellEditorPanel({
+export function CellEditorPanelView({
   edit,
   column,
+  reference,
+  onMore,
   onCommit,
   onCancel,
-}: {
-  readonly edit: CellEdit;
-  /** その列の宣言（表示位置の列）。使用不能な列は `null`（札が読めない）。 */
-  readonly column: ColumnDescriptor | null;
-  /** 確定（**運び手つきで上げる**。`./cellEdit` がそれで命令を選ぶ。要件 5.7）。 */
-  readonly onCommit: (text: string, carrier: EditCarrier) => void;
-  /** 取消（**境界へ何も送らない**。要件 3.6）。 */
-  readonly onCancel: (carrier: EditCarrier) => void;
-}): ReactElement {
+}: CellEditorPanelViewProps): ReactElement {
   // 入力手段と、その面が確定する文字の**運び手**（8.5。要件 5.5、10.3）。`columnEditor` が登録簿を
   // 通して 1 度に引く（成分と運び手が同じ 1 件の登録から来る）。
   const { component: Editor, carrier } = columnEditor(column);
   // 札が読めない列は `Any`（値をそのまま扱う面）として登録簿へ来る（7.4 の module doc）。
   const kind = column?.kind ?? "Any";
-  /**
-   * 入力手段が読む宣言（要件 3.1、3.7）。
-   *
-   * `kind` だけが境界から来る。`nullable` は**境界に欄が無い**（`ColumnDescriptor` は
-   * `column / path / name / kind / element_count / expandability` しか運ばない）ので、
-   * **つねに「値なしの道を出す」**を渡す — 道を閉じると、値なしを許す列で値なしへ戻せなくなる
-   * （要件 3.7）。値なしを許さない列では、判定がそれを違反として返し、**値は保持される**
-   * （要件 3.5）。`choices` / `reference` / `members` も同じく材料が無い（下の申し送り）。
-   */
-  const constraints: ColumnConstraints = { kind, nullable: true };
+  // 参照先のシートは**宣言の材料**である（要件 3.8）。名乗らない列では頁の面を出さない。
+  const sheet = column === null ? null : column.reference_sheet;
+  const constraints = editorConstraints(column, reference);
 
   return (
     <div
@@ -2779,6 +2840,37 @@ function CellEditorPanel({
       <span style={MESSAGE_STYLE}>
         {`${String(edit.position.row + 1)} 行 ${String(edit.position.column + 1)} 列を編集中`}
       </span>
+      {/*
+        参照先の行の頁（要件 3.8）。**面の外に出す** — 面（`editors/ref.tsx`）は
+        `CellEditorProps` の 4 つしか受け取らないため（design.md が逐語で固定している）、
+        続きを読む操作を持てない。材料が無い列では何も出さない（要件 10.4）。
+      */}
+      {sheet === null ? null : (
+        <span
+          data-testid="jxcel-grid-reference"
+          data-reference-sheet={sheet}
+          data-reference-state={reference?.state ?? "loading"}
+          data-reference-rows={reference?.state === "loaded" ? reference.rows.length : 0}
+          data-reference-total={reference?.state === "loaded" ? reference.total : 0}
+          style={MESSAGE_STYLE}
+        >
+          {reference === null || reference.state === "loading"
+            ? `参照先 ${sheet} の行を読んでいます`
+            : reference.state === "failed"
+              ? `参照先 ${sheet} の行を読めませんでした: ${reference.message}`
+              : `参照先 ${sheet}: ${String(reference.rows.length)} 行を表示中（全 ${String(reference.total)} 行）`}
+          {reference !== null && reference.state === "loaded" && reference.hasMore ? (
+            <button
+              type="button"
+              data-testid="jxcel-grid-reference-more"
+              onClick={onMore}
+              style={BUTTON_STYLE}
+            >
+              {`次の ${String(REFERENCE_PAGE_SIZE)} 行を読む`}
+            </button>
+          ) : null}
+        </span>
+      )}
       <Editor
         initialText={edit.initialText}
         constraints={constraints}
@@ -2790,6 +2882,61 @@ function CellEditorPanel({
         }}
       />
     </div>
+  );
+}
+
+/**
+ * 編集中の 1 セルの面の**状態を持つ側**（要件 3.8。タスク 10.3）。**頁を読み、結果を面へ渡す。**
+ *
+ * 持つのは効果（最初の頁）と次の頁の押下だけであり、組み立ては [`CellEditorPanelView`] が
+ * 担う。**読むかどうかは `loadEditorReference` が材料から決める**ので、ここに型の分岐は無い。
+ * 依存は**文書の列と参照先のシート**である — 記述そのものを依存に取ると、列の構成が変わるたびに
+ * 頁を読み直す（記述の同一性は本 module の状態では保証されない）。
+ */
+function CellEditorPanel({
+  edit,
+  column,
+  client,
+  onCommit,
+  onCancel,
+}: {
+  readonly edit: CellEdit;
+  /** その列の宣言（表示位置の列）。使用不能な列は `null`（札が読めない）。 */
+  readonly column: ColumnDescriptor | null;
+  /** 参照先の行を頁ごとに読む口（**参照の列のときだけ使う**。要件 3.8）。 */
+  readonly client: GridClient;
+  /** 確定（**運び手つきで上げる**。`./cellEdit` がそれで命令を選ぶ。要件 5.7）。 */
+  readonly onCommit: (text: string, carrier: EditCarrier) => void;
+  /** 取消（**境界へ何も送らない**。要件 3.6）。 */
+  readonly onCancel: (carrier: EditCarrier) => void;
+}): ReactElement {
+  const [reference, setReference] = useState<ReferenceRows | null>(null);
+  const referenceColumn = column?.column ?? null;
+  const referenceSheet = column?.reference_sheet ?? null;
+  useEffect(() => {
+    let cancelled = false;
+    void loadEditorReference(client, column, { state: "loading" }).then((next) => {
+      if (!cancelled) {
+        setReference(next);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, referenceColumn, referenceSheet]);
+
+  return (
+    <CellEditorPanelView
+      edit={edit}
+      column={column}
+      reference={reference}
+      onMore={() => {
+        // **続きは読んだ行の数だけ進める**（頁は重ならない）。読む口は最初の頁と同じ 1 本である。
+        void loadEditorReference(client, column, reference ?? { state: "loading" }).then(setReference);
+      }}
+      onCommit={onCommit}
+      onCancel={onCancel}
+    />
   );
 }
 

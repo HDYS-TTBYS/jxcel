@@ -145,7 +145,7 @@ function descriptor(
   path: readonly GridPathSegment[],
   name: string,
 ): ColumnDescriptor {
-  return { column, path: [...path], name, kind: "Text", element_count: null, expandability: "leaf" };
+  return { column, path: [...path], name, kind: "Text", element_count: null, expandability: "leaf", nullable: true, choices: [], reference_sheet: null, custom_type_id: null, members: [] };
 }
 
 /**

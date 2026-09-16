@@ -2,7 +2,7 @@
 //! 型の変換を行う唯一の場所**（タスク 6.2、6.3。design.md「GridCommands」の API Contract、
 //! 要件 1.1、3.3、4.4、8.3、8.4、9.2、9.3、11.2）。
 //!
-//! # 6 つの経路
+//! # 7 つの経路
 //!
 //! | コマンド | 経路 | 何を答えるか |
 //! |---|---|---|
@@ -12,8 +12,9 @@
 //! | [`grid_apply_edit`] | [`GridSession::apply`] | 影響範囲・型強制・違反・行数（要件 3.3、3.5） |
 //! | [`grid_history`] | [`GridSession::undo`] / [`GridSession::redo`] | 同じ要約（要件 9.2、9.3） |
 //! | [`grid_find_violation`] | [`GridSession::find_violation`] | 次の違反の位置と理由（要件 4.2、4.4、4.5） |
+//! | [`grid_reference_rows`] | 宣言から参照先のシートを引き、[`reference_page`] で頁を組む | 参照先の行の頁と総数（要件 3.8） |
 //!
-//! **5 つは封筒（[`IpcResult`]）を返し、[`grid_rows_window`] だけが生バイトを返す**
+//! **6 つは封筒（[`IpcResult`]）を返し、[`grid_rows_window`] だけが生バイトを返す**
 //! （要件 4.5 が JSON を経由しない経路を要求するため。根拠と消費者への見え方は
 //! `crate::commands::bulk` のモジュール doc にある）。生バイトの経路は封筒を運べないため、
 //! **失敗は空の窓で表す**（本モジュールの「生バイト経路」節）。
@@ -21,9 +22,13 @@
 //! **呼び出し元ウィンドウは基盤が注入する [`WebviewWindow`] から取る**（ペイロードで
 //! 受け取らない ＝ 偽装できない。要件 4.6、`ipc-contract.md`）。したがって 6 つとも要求の型に
 //! ウィンドウは現れない — 要求が運ぶのは操作の対象（シートの識別子・表示の指定・編集命令・
-//! 進める向き・探索の起点・窓の区間）だけである。
+//! 進める向き・探索の起点・窓の区間・文書の列の添字）だけである。
 //!
-//! # 7 つ目の経路: メニューからの複製（タスク 8.7。要件 7.8）
+//! [`grid_reference_rows`] は**タスク 10.3 が足した 7 本目**である（要件 3.8。7.4 の申し送り 2
+//! 「参照先の行を一覧する経路が 6 本のコマンドに無い」を閉じる）。応答は**頁**に閉じ、
+//! 件数は境界の上限（[`GRID_REFERENCE_PAGE_LIMIT`]）を超えない。
+//!
+//! # メニューからの引き金（タスク 8.7、8.9。要件 7.8、9.9）
 //!
 //! 本モジュールは**コマンド面だけではない** — [`install`] が 7.4 の登録口へ `編集 > 複製`
 //! （`data-grid.copy`。非 macOS `Ctrl+C` / macOS `Cmd+C`）を登録し、活性化を
@@ -261,22 +266,26 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use app_shell::ipc::{
-    command_names, ColumnDescriptor, ColumnElementCount, ColumnExpandability, GridCellAddress,
-    GridCoercionNotice, GridEditCommand, GridEditOutcome, GridEditRequest, GridEditResponse,
-    GridExpansionState, GridFilterSpec, GridHistoryDirection, GridHistoryRequest,
-    GridHistoryRequestedEvent, GridOpenRequest, GridOpenResponse, GridPathSegment,
-    GridSearchDirection, GridSheetSummary, GridViewRequest, GridViewResponse, GridViewSpec,
-    GridViolation, GridViolationLocation, GridViolationRequest, GridViolationResponse, IpcError,
-    IpcResult, TypeKindTag, WindowContext, WindowLabel, GRID_COPY_REQUESTED_EVENT,
-    GRID_HISTORY_REQUESTED_EVENT,
+    ColumnChoice, ColumnDescriptor, ColumnElementCount, ColumnExpandability,
+    ColumnMemberDescriptor, GRID_COPY_REQUESTED_EVENT, GRID_HISTORY_REQUESTED_EVENT,
+    GRID_REFERENCE_PAGE_LIMIT, GridCellAddress, GridCoercionNotice, GridEditCommand,
+    GridEditOutcome, GridEditRequest, GridEditResponse, GridExpansionState, GridFilterSpec,
+    GridHistoryDirection, GridHistoryRequest, GridHistoryRequestedEvent, GridOpenRequest,
+    GridOpenResponse, GridPathSegment, GridReferenceRequest, GridReferenceResponse,
+    GridReferenceRow, GridSearchDirection, GridSheetSummary, GridViewRequest, GridViewResponse,
+    GridViewSpec, GridViolation, GridViolationLocation, GridViolationRequest,
+    GridViolationResponse, IpcError, IpcResult, TypeKindTag, WindowContext, WindowLabel,
+    command_names,
 };
 use data_grid::{
-    display_text, CellAddress, CoercionNotice, ColumnIndex, EditCommand, EditOutcome, ElementCount,
-    Expandability, ExpansionState, FilterSpec, Generation, GridError, GridSession, LayoutColumn,
-    NestedPathSegment, RowOrdinal, RowSpan, SearchDirection, SortKey, UndoStack, ViewSpec,
-    WindowCodec, WindowRequest, DEFAULT_UNDO_LIMIT, EMPTY_WINDOW,
+    CellAddress, CoercionNotice, ColumnIndex, DEFAULT_UNDO_LIMIT, EMPTY_WINDOW, EditCommand,
+    EditOutcome, ElementCount, Expandability, ExpansionState, FilterSpec, Generation, GridError,
+    GridSession, LayoutColumn, NestedPathSegment, ReferencePage, RowOrdinal, RowSpan,
+    SearchDirection, SortKey, UndoStack, ViewSpec, WindowCodec, WindowRequest, display_text,
+    reference_page,
 };
 use document_session::{DocumentSessions, DocumentSessionsApi, SessionError};
+use schema_engine::compile::plan::ColumnValidator;
 use schema_engine::{
     CompiledSchema, Expected, SchemaEngine, SchemaEngineApi, TypeKind, TypeRegistry,
     ValidationOptions, ValuePathSegment, Violation, ViolationReason,
@@ -811,8 +820,19 @@ fn value_path_segment(segment: &ValuePathSegment) -> GridPathSegment {
     }
 }
 
-/// 構成の 1 列を写す（要件 1.1、1.2、3.1、5.1、5.4、5.6）。
-fn column_to_boundary(column: &LayoutColumn) -> ColumnDescriptor {
+/// 構成の 1 列を写す（要件 1.1、1.2、3.1、5.1、5.4、5.6。**タスク 10.3 が宣言の材料を足した**
+/// — 要件 3.2、3.7、3.8、5.5、10.1、10.4）。
+///
+/// **本関数が宣言の材料を境界へ出す唯一の場所である。**写すのは `view` 層の
+/// `ColumnDeclaration` そのものであり、ここで判断を足さない（材料が無い欄は空／`None` のまま
+/// 運び、面が既定へ落ちる道を残す。要件 10.4）。
+///
+/// `names` は**文書が持つシートの名の表**である。宣言が持つのは参照先のシートの**識別子**
+/// であり、人が読む名は文書が持つため、名への写しは文書を見られる本層が行う
+/// （[`sheet_names`]）。表に無い識別子は**識別子のまま**載せる（名が引けないことを
+/// 「参照していない」と混同させない — 参照先のシートが文書に無い場合でも、画面は
+/// 「どこを参照しているか」を名乗れる）。
+fn column_to_boundary(column: &LayoutColumn, names: &SheetNames) -> ColumnDescriptor {
     ColumnDescriptor {
         column: count_to_u32(column.column.index()),
         path: column.path.segments().iter().map(nested_segment).collect(),
@@ -820,7 +840,71 @@ fn column_to_boundary(column: &LayoutColumn) -> ColumnDescriptor {
         kind: column.kind.map(type_kind_tag),
         element_count: column.element_count.as_ref().map(element_count_to_boundary),
         expandability: expandability_to_boundary(column.expandability),
+        nullable: column.declaration.nullable,
+        // **宣言は 1 つの文字列の並びだけを持つ**ため、値と名は同じ文字列になる（欄を 2 つ
+        // 持つのは、面が値と名を別々に描けるようにするためである。`ColumnChoice` の doc）。
+        choices: column
+            .declaration
+            .choices
+            .iter()
+            .map(|choice| ColumnChoice {
+                value: choice.to_string(),
+                label: choice.to_string(),
+            })
+            .collect(),
+        reference_sheet: column
+            .declaration
+            .reference_sheet
+            .as_deref()
+            .map(|sheet| sheet_name(names, sheet)),
+        custom_type_id: column
+            .declaration
+            .custom_type_id
+            .as_deref()
+            .map(str::to_owned),
+        members: column
+            .declaration
+            .members
+            .iter()
+            .map(|member| ColumnMemberDescriptor {
+                path: member.path.segments().iter().map(nested_segment).collect(),
+                name: member.name.to_string(),
+                kind: type_kind_tag(member.kind),
+                nullable: member.nullable,
+                choices: member
+                    .choices
+                    .iter()
+                    .map(|choice| ColumnChoice {
+                        value: choice.to_string(),
+                        label: choice.to_string(),
+                    })
+                    .collect(),
+                custom_type_id: member.custom_type_id.as_deref().map(str::to_owned),
+            })
+            .collect(),
     }
+}
+
+/// 文書が持つシートの（識別子, 名）の表（要件 3.8）。
+///
+/// **宣言が持つのは参照先のシートの識別子であり、人が読む名は文書が持つ。**写しは本層が
+/// 行う（文書を見られるのはここだけである）。1 つのコマンドの内側で 1 度だけ組み立て、
+/// 列の写しの間で使い回す（列ごとに文書を走査しない）。
+/// **`document_format::Document` を名指す関数は置かない** — あれは本クレートの dev-dependency
+/// であり（テストだけが標本を組むのに使う）、出荷する経路からは参照できない。表を組むのは
+/// 文書を読む 2 箇所（開く経路と表示の指定を変える経路）の内側であり、そこで型は推論される。
+type SheetNames = Vec<(String, String)>;
+
+/// シートの識別子から人が読む名を引く（引けなければ**識別子のまま**返す）。
+///
+/// 引けないことは「参照していない」ではない（参照先のシートが文書に無い場合である）ため、
+/// 空文字へ落とさない — 画面は識別子を名乗り、行の一覧は空になる。
+fn sheet_name(names: &SheetNames, id: &str) -> String {
+    names
+        .iter()
+        .find(|(candidate, _)| candidate == id)
+        .map(|(_, name)| name.clone())
+        .unwrap_or_else(|| id.to_owned())
 }
 
 /// **いまの**列の構成を写す（左から右への表示順。要件 1.1、1.2、5.1、5.2、5.4）。
@@ -829,8 +913,15 @@ fn column_to_boundary(column: &LayoutColumn) -> ColumnDescriptor {
 /// `set_expansion` を適用したあとの状態を映す（導出そのものはドメインの仕事であり、本モジュールは
 /// 写すだけである）。開く経路と表示の指定を変える経路が**同じ 1 つの写し**を使うのは、2 つの
 /// 経路で列の構成の意味が食い違わないようにするためである。
-fn layout_columns(session: &GridSession) -> Vec<ColumnDescriptor> {
-    session.columns().iter().map(column_to_boundary).collect()
+///
+/// `names`（文書のシートの名の表）を取るのは、参照の列（`Ref`）が**名**を運ぶためである
+/// （タスク 10.3。宣言は識別子しか持たない）。
+fn layout_columns(session: &GridSession, names: &SheetNames) -> Vec<ColumnDescriptor> {
+    session
+        .columns()
+        .iter()
+        .map(|column| column_to_boundary(column, names))
+        .collect()
 }
 
 /// シートの要約を組み立てる（要件 1.1、1.5、1.6）。
@@ -838,9 +929,9 @@ fn layout_columns(session: &GridSession) -> Vec<ColumnDescriptor> {
 /// **列の構成と行数を同じ型に載せる**（2 つの空の状態を列の数で区別する。6.1 の
 /// `GridSheetSummary` の doc）。行数は**シートの行数**であり、可視行数ではない
 /// （絞り込みの結果は [`GridViewResponse`] が運ぶ）。
-fn sheet_summary(session: &GridSession, rows: usize) -> GridSheetSummary {
+fn sheet_summary(session: &GridSession, rows: usize, names: &SheetNames) -> GridSheetSummary {
     GridSheetSummary {
-        columns: layout_columns(session),
+        columns: layout_columns(session, names),
         row_count: count_to_u32(rows),
     }
 }
@@ -1135,13 +1226,13 @@ fn decode_window_argument(bytes: &[u8]) -> Result<WindowArgument, String> {
             return Err(format!(
                 "要求のシートの識別子が {sheet_len} バイトに足りない（{} バイト在る）",
                 bytes.len() - WINDOW_REQUEST_HEADER_LEN
-            ))
+            ));
         }
         core::cmp::Ordering::Greater => {
             return Err(format!(
                 "要求の後ろに余分なバイトが {} バイト在る",
                 bytes.len() - total
-            ))
+            ));
         }
         core::cmp::Ordering::Equal => {}
     }
@@ -1243,7 +1334,14 @@ pub(crate) fn answer_open(
             .map_err(|error| format!("シート {} の宣言を解釈できない: {error}", request.sheet))?;
         let session = GridSession::open(sheet.id(), schema.clone())
             .map_err(|error| format!("シート {} のグリッドを開けない: {error}", request.sheet))?;
-        let summary = sheet_summary(&session, sheet.rows().len());
+        // **文書のシートの名の表**（タスク 10.3）。参照の列が運ぶのは名であり、宣言は
+        // 識別子しか持たないため、名への写しは文書を読むこの 1 箇所で組む。
+        let names: SheetNames = document
+            .sheets()
+            .iter()
+            .map(|sheet| (sheet.id().to_string(), sheet.name().to_owned()))
+            .collect();
+        let summary = sheet_summary(&session, sheet.rows().len(), &names);
         Ok((session, schema, carry_history, summary))
     });
 
@@ -1331,22 +1429,34 @@ pub(crate) fn answer_set_view(
         }
     }
 
-    // 2. 順序と索引（`set_view` は可視行の並びと違反の索引を導出する）。
+    // 2. 順序と索引（`set_view` は可視行の並びと違反の索引を導出する）。**同じ読みの内側で
+    //    文書のシートの名の表も組む**（タスク 10.3。列の写しが参照の列に名を載せるため。
+    //    読みを 2 度に分けると、その間に文書が差し替わりうる）。
     let spec = view_spec(&request.view);
     let view = documents.read(label, &mut |document| {
-        entry.session.set_view(document, spec.clone())
+        entry
+            .session
+            .set_view(document, spec.clone())
+            .map(|summary| {
+                let names: SheetNames = document
+                    .sheets()
+                    .iter()
+                    .map(|sheet| (sheet.id().to_string(), sheet.name().to_owned()))
+                    .collect();
+                (summary, names)
+            })
     });
-    let summary = match view {
-        Ok(Ok(summary)) => summary,
+    let (summary, names) = match view {
+        Ok(Ok(answer)) => answer,
         Ok(Err(error)) => {
             return IpcResult::Err {
                 error: grid_failure(command, label, &error),
-            }
+            };
         }
         Err(error) => {
             return IpcResult::Err {
                 error: session_failure(command, label, &error),
-            }
+            };
         }
     };
 
@@ -1368,7 +1478,7 @@ pub(crate) fn answer_set_view(
             // 瞬間」である — 展開の適用（手順 3）のあとの `GridSession::columns()` を写すので、
             // 展開した列の内側の位置が並びに現れ、折りたたんだ列は元の 1 本だけに戻る。載せないと、
             // 画面は開いたときの構成を描き続け、**展開を指定しても描かれる列が変わらない**。
-            columns: layout_columns(&entry.session),
+            columns: layout_columns(&entry.session, &names),
         },
     }
 }
@@ -1548,7 +1658,7 @@ pub(crate) fn answer_apply_edit(
         Err(reason) => {
             return IpcResult::Err {
                 error: path_failure(command, label, &reason),
-            }
+            };
         }
     };
     let applied = documents.edit(label, &mut |document| {
@@ -1739,12 +1849,12 @@ pub(crate) fn answer_find_violation(
         Ok(false) => {
             return IpcResult::Err {
                 error: path_failure(command, label, &unknown_sheet(&entry.sheet)),
-            }
+            };
         }
         Err(error) => {
             return IpcResult::Err {
                 error: session_failure(command, label, &error),
-            }
+            };
         }
     }
 
@@ -1801,12 +1911,12 @@ pub(crate) fn answer_find_violation(
         Ok(Err(reason)) => {
             return IpcResult::Err {
                 error: path_failure(command, label, &reason),
-            }
+            };
         }
         Err(error) => {
             return IpcResult::Err {
                 error: session_failure(command, label, &error),
-            }
+            };
         }
     };
     IpcResult::Ok {
@@ -1814,8 +1924,96 @@ pub(crate) fn answer_find_violation(
     }
 }
 
+/// 参照先の行を頁ごとに読む本体（[`grid_reference_rows`] の中身。タスク 10.3。要件 3.8）。
+///
+/// # 手順（他の 6 つと同じ写像の規律である）
+///
+/// 1. **件数を上限へ切り詰める** — [`GRID_REFERENCE_PAGE_LIMIT`] を超える要求は上限で切る。
+///    参照先が 10 万行でも**一度に全部を読まない**（要件 11 の目的。切り詰めは失敗ではない —
+///    `has_more` が真になるので、画面は続きを読める）。
+/// 2. **経路の成立**（保持しているシートが文書に在ること）。探索（[`answer_find_violation`]）と
+///    同じ順序で、頁を組むより先に見る — 「表示しているシートがもう無い」は探す先が無いことで
+///    あり、画面が開き直すべき失敗である。
+/// 3. **要求の列の宣言から参照先のシートを引く**。要求が運ぶのは文書の列の添字だけであり、
+///    参照先は宣言が決める（画面にシートの識別子を持ち回らせない）。**参照の型でない列**と、
+///    宣言に現れない列の添字は経路の失敗である。
+/// 4. **参照先のシートが文書に無い場合も経路の失敗である**（「行が無い」と混同しない。
+///    6 本の写像の規律と同じ — 行が 0 件であることは正常な結果である）。
+/// 5. 頁は [`reference_page`] が組む（絞り込みの規則と表示の名の規則はドメインの 1 箇所である）。
+pub(crate) fn answer_reference_rows(
+    documents: &Arc<DocumentSessions>,
+    grids: &GridSessions,
+    label: &WindowLabel,
+    request: &GridReferenceRequest,
+) -> IpcResult<GridReferenceResponse, IpcError> {
+    let command = command_names::GRID_REFERENCE_ROWS;
+    let context = WindowContext {
+        window: label.clone(),
+    };
+    let Some(entry) = grids.entry(label) else {
+        return IpcResult::Err {
+            error: not_open(command, label),
+        };
+    };
+    let entry = lock(&entry);
+
+    // 1. 境界が上限を強制する（要求の値ではなく応答の件数に効く）。
+    let count = usize::try_from(request.count.min(GRID_REFERENCE_PAGE_LIMIT)).unwrap_or_default();
+    let start = usize::try_from(request.start).unwrap_or(usize::MAX);
+    let column = ColumnIndex::new(usize::try_from(request.column).unwrap_or(usize::MAX));
+
+    let page = documents.read(label, &mut |document| -> Result<ReferencePage, String> {
+        // 2. 経路の成立（保持しているシートが文書に在ること）。
+        if !document
+            .sheets()
+            .iter()
+            .any(|sheet| sheet.id().to_string() == entry.sheet)
+        {
+            return Err(unknown_sheet(&entry.sheet));
+        }
+
+        // 3. 宣言から参照先を引く（要求はシートを知らない）。
+        let Some(ColumnValidator::Ref { sheet }) = entry.schema.validator(column) else {
+            return Err(format!("列 {} は参照の型ではない", request.column));
+        };
+        // 4. 参照先のシートが文書に無い場合は経路の失敗である。
+        let target = document
+            .sheets()
+            .iter()
+            .find(|candidate| candidate.id() == *sheet)
+            .ok_or_else(|| unknown_sheet(&sheet.to_string()))?;
+
+        // 5. 頁を組む（絞り込み・表示の名・開始位置と件数の規則は `data_grid` の 1 箇所）。
+        Ok(reference_page(target, &request.search, start, count))
+    });
+
+    match page {
+        Ok(Ok(page)) => IpcResult::Ok {
+            data: GridReferenceResponse {
+                context,
+                rows: page
+                    .rows
+                    .iter()
+                    .map(|row| GridReferenceRow {
+                        id: row.id.to_string(),
+                        label: row.label.clone(),
+                    })
+                    .collect(),
+                total: count_to_u32(page.total),
+                has_more: page.has_more,
+            },
+        },
+        Ok(Err(reason)) => IpcResult::Err {
+            error: path_failure(command, label, &reason),
+        },
+        Err(error) => IpcResult::Err {
+            error: session_failure(command, label, &error),
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
-// コマンド面（6 つ）
+// コマンド面（7 つ）
 // ---------------------------------------------------------------------------
 
 /// 呼び出し元ウィンドウに表示するシートを開く（要件 1.1、1.5、1.6、4.6）。
@@ -2011,6 +2209,44 @@ pub fn grid_find_violation(
             request.from,
             request.direction,
             data.violation.is_some(),
+        ),
+        IpcResult::Err { error } => log::error!(
+            "{command}: 呼び出し元ウィンドウ = {} / 失敗 = {error}",
+            context.window.as_str(),
+        ),
+    }
+    result
+}
+
+/// 呼び出し元ウィンドウのグリッドで、参照の列が指す**参照先のシートの行**を頁ごとに読む
+/// （タスク 10.3。要件 3.8、4.6）。
+///
+/// **参照先は要求ではなく列の宣言から決まる**（要求は文書の列の添字を運ぶ）。応答は頁に閉じ、
+/// **件数は境界の上限（[`GRID_REFERENCE_PAGE_LIMIT`]）を超えない** — 参照先が 1 万行でも
+/// 一度に全部を読まない。参照の型でない列、参照先のシートが文書に無い場合は経路の失敗である
+/// （「行が無い」は正常な結果である）。
+#[tauri::command(async)]
+pub fn grid_reference_rows(
+    app: AppHandle,
+    window: WebviewWindow,
+    request: GridReferenceRequest,
+) -> IpcResult<GridReferenceResponse, IpcError> {
+    let command = command_names::GRID_REFERENCE_ROWS;
+    let context = caller_context(&window);
+    let documents = documents_of(&app);
+    let grids = grid_state(&app);
+
+    let result = answer_reference_rows(&documents, &grids, &context.window, &request);
+    match &result {
+        IpcResult::Ok { data } => log::info!(
+            "{command}: 呼び出し元ウィンドウ = {} / 列 = {} / 開始 = {} / 件数 = {} / 行 = {} / 総数 = {} / 続き = {}",
+            context.window.as_str(),
+            request.column,
+            request.start,
+            request.count,
+            data.rows.len(),
+            data.total,
+            data.has_more,
         ),
         IpcResult::Err { error } => log::error!(
             "{command}: 呼び出し元ウィンドウ = {} / 失敗 = {error}",
@@ -2281,14 +2517,15 @@ mod tests {
         GridCellEdit, GridEditRequest, GridHistoryRequest, GridOpenRequest, GridSearchDirection,
         GridSortKey, GridViewRequest, GridViolationRequest,
     };
-    use data_grid::{decode_window, VariantTag, HEADER_LEN, ROW_KEY_LEN, WINDOW_FORMAT_VERSION};
+    use data_grid::{HEADER_LEN, ROW_KEY_LEN, VariantTag, WINDOW_FORMAT_VERSION, decode_window};
     use document_format::{
-        CellValue, Document, DocumentFormat, DocumentFormatApi, NestedValue, RowId, SchemaPart,
+        CellValue, Document, DocumentFormat, DocumentFormatApi, IdFactory, NestedValue, RowId,
+        SchemaPart,
     };
     use document_session::{DocumentSessions, DocumentSessionsApi, SessionState};
     use schema_engine::{
-        schema_to_text, ColumnDecl, Constraints, DeclaredKind, FieldDecl, Schema, TypeDecl,
-        TypeKind,
+        ColumnDecl, Constraints, DeclaredKind, FieldDecl, Schema, TypeDecl, TypeKind,
+        schema_to_text,
     };
     use tauri::ipc::{InvokeResponseBody, IpcResponse};
 
@@ -2296,8 +2533,8 @@ mod tests {
 
     use super::*;
     use crate::menu::EDIT_MENU_LABEL;
-    use crate::session::watch::testing::AlwaysPresent;
     use crate::session::watch::DestroyHandler;
+    use crate::session::watch::testing::AlwaysPresent;
 
     /// 一時ディレクトリ（`session/commands.rs` のテストと同じ規律。プロセスごとに一意）。
     struct Scratch {
@@ -2654,6 +2891,259 @@ mod tests {
             .expect("標本を保存できる");
     }
 
+    /// **参照の列を持つ標本**（タスク 10.3 の検査の材料。要件 3.2、3.7、3.8、5.5）。
+    ///
+    /// 台帳（表示するシート）は 4 列である:
+    ///
+    /// | 列 | 型 | 宣言 |
+    /// |---|---|---|
+    /// | 品番 | `text` | 必須 |
+    /// | 区分 | `enum`（赤・青） | 任意 |
+    /// | 仕入先 | `ref`（→ 仕入先シート） | 必須 |
+    /// | 提供元 | `object`（内側に `name` 必須・`code` 任意） | 任意 |
+    ///
+    /// 仕入先シートは `suppliers` 行（`仕入先0` … ）を持つ。返るのは台帳のシートの識別子である。
+    fn write_reference_document(path: &Path, suppliers: usize) -> String {
+        let mut document = Document::new();
+        let ledger = document.add_sheet("台帳");
+        let target = document.add_sheet("仕入先");
+
+        let schema = Schema {
+            columns: vec![
+                ColumnDecl {
+                    name: "品番".into(),
+                    ty: TypeDecl::Kind {
+                        kind: DeclaredKind::Known(TypeKind::Text),
+                        constraints: Constraints::default(),
+                    },
+                    required: true,
+                    unique: true,
+                    default: None,
+                    description: None,
+                },
+                ColumnDecl {
+                    name: "区分".into(),
+                    ty: TypeDecl::Kind {
+                        kind: DeclaredKind::Known(TypeKind::Enum),
+                        constraints: Constraints {
+                            choices: vec!["赤".into(), "青".into()],
+                            ..Constraints::default()
+                        },
+                    },
+                    required: false,
+                    unique: false,
+                    default: None,
+                    description: None,
+                },
+                ColumnDecl {
+                    name: "仕入先".into(),
+                    ty: TypeDecl::Kind {
+                        kind: DeclaredKind::Known(TypeKind::Ref),
+                        constraints: Constraints {
+                            sheet: Some(target),
+                            ..Constraints::default()
+                        },
+                    },
+                    required: true,
+                    unique: false,
+                    default: None,
+                    description: None,
+                },
+                ColumnDecl {
+                    name: "提供元".into(),
+                    ty: TypeDecl::Kind {
+                        kind: DeclaredKind::Known(TypeKind::Object),
+                        constraints: Constraints {
+                            fields: vec![
+                                FieldDecl {
+                                    name: "name".into(),
+                                    ty: TypeDecl::Kind {
+                                        kind: DeclaredKind::Known(TypeKind::Text),
+                                        constraints: Constraints::default(),
+                                    },
+                                    required: true,
+                                    default: None,
+                                    description: None,
+                                },
+                                FieldDecl {
+                                    name: "code".into(),
+                                    ty: TypeDecl::Kind {
+                                        kind: DeclaredKind::Known(TypeKind::Text),
+                                        constraints: Constraints::default(),
+                                    },
+                                    required: false,
+                                    default: None,
+                                    description: None,
+                                },
+                            ],
+                            ..Constraints::default()
+                        },
+                    },
+                    required: false,
+                    unique: false,
+                    default: None,
+                    description: None,
+                },
+            ],
+        };
+        let root = schema_to_text(&schema).expect("宣言は正準出力できる");
+        document
+            .set_sheet_columns(
+                ledger,
+                vec![
+                    "品番".to_owned(),
+                    "区分".to_owned(),
+                    "仕入先".to_owned(),
+                    "提供元".to_owned(),
+                ],
+            )
+            .expect("標本のシートは実在する");
+        document
+            .set_root_schema(
+                ledger,
+                SchemaPart::parse(&format!(r#"{{"root":{root},"types":[]}}"#))
+                    .expect("宣言は解析できる"),
+            )
+            .expect("標本のシートは実在する");
+
+        // 参照先（仕入先シート）。**参照の値は行の識別子であり、表示の名ではない**。
+        document
+            .set_sheet_columns(target, vec!["名".to_owned(), "住所".to_owned()])
+            .expect("標本のシートは実在する");
+        for index in 0..suppliers {
+            let row = document.add_row(target).expect("標本のシートは実在する");
+            document
+                .set_row_values(
+                    target,
+                    row,
+                    vec![
+                        CellValue::Text(format!("仕入先{index}")),
+                        CellValue::Text(format!("住所{index}")),
+                    ],
+                )
+                .expect("標本の行は実在する");
+        }
+
+        // 台帳は 1 行だけ（表示するシートの行数は参照先と無関係である）。
+        let row = document.add_row(ledger).expect("標本のシートは実在する");
+        document
+            .set_row_values(
+                ledger,
+                row,
+                vec![
+                    CellValue::Text("A".to_owned()),
+                    CellValue::Text("赤".to_owned()),
+                    CellValue::Null,
+                    CellValue::Null,
+                ],
+            )
+            .expect("標本の行は実在する");
+
+        DocumentFormat::new()
+            .save(&document, path)
+            .expect("標本を保存できる");
+        ledger.to_string()
+    }
+
+    /// 参照の標本を開いた状態を作る（`opened` と同じ形で、**開く経路そのものを通す**）。
+    ///
+    /// 返るのは標本の置き場、文書の保持、グリッドの保持、ウィンドウのラベル、そして**台帳の
+    /// シートの識別子**である（開いた応答を組み立て直さずに、列の材料を読む検査が要る）。
+    fn opened_reference(
+        tag: &str,
+        suppliers: usize,
+    ) -> (
+        Scratch,
+        Arc<DocumentSessions>,
+        GridSessions,
+        WindowLabel,
+        String,
+    ) {
+        let scratch = Scratch::new(tag);
+        let path = scratch.file("参照.jxcel");
+        let ledger = write_reference_document(&path, suppliers);
+        let (sessions, label) = documents(&path);
+        let grids = grids();
+        let opened = answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest {
+                sheet: ledger.clone(),
+            },
+        );
+        assert!(matches!(opened, IpcResult::Ok { .. }), "標本は開ける");
+        (scratch, sessions, grids, label, ledger)
+    }
+
+    /// 参照の標本の**参照先のシート**の行の識別子（文書の側の文字列表現）。
+    ///
+    /// 頁が運ぶ識別子が**行のものである**こと（表示の名ではない）を固定するために使う。
+    fn supplier_row_ids(path: &Path) -> Vec<String> {
+        let opened = DocumentFormat::new().open(path).expect("標本を読める");
+        opened.document.sheets()[1]
+            .rows()
+            .iter()
+            .map(|row| row.id().to_string())
+            .collect()
+    }
+
+    /// **参照先のシートが文書に無い**標本を書く（要件 3.8 の経路の失敗の材料）。
+    ///
+    /// 宣言は存在しないシートの識別子を指す。**宣言そのものは妥当である**（参照先の実在は
+    /// 判定しない — `schema-engine` の `ColumnValidator::Ref` の doc）。返るのは台帳の
+    /// シートの識別子である。
+    fn write_dangling_reference_document(path: &Path) -> String {
+        let missing = IdFactory::new().new_sheet_id();
+        let mut document = Document::new();
+        let ledger = document.add_sheet("台帳");
+        let schema = Schema {
+            columns: vec![ColumnDecl {
+                name: "仕入先".into(),
+                ty: TypeDecl::Kind {
+                    kind: DeclaredKind::Known(TypeKind::Ref),
+                    constraints: Constraints {
+                        sheet: Some(missing),
+                        ..Constraints::default()
+                    },
+                },
+                required: false,
+                unique: false,
+                default: None,
+                description: None,
+            }],
+        };
+        let root = schema_to_text(&schema).expect("宣言は正準出力できる");
+        document
+            .set_sheet_columns(ledger, vec!["仕入先".to_owned()])
+            .expect("標本のシートは実在する");
+        document
+            .set_root_schema(
+                ledger,
+                SchemaPart::parse(&format!(r#"{{"root":{root},"types":[]}}"#))
+                    .expect("宣言は解析できる"),
+            )
+            .expect("標本のシートは実在する");
+        let row = document.add_row(ledger).expect("標本のシートは実在する");
+        document
+            .set_row_values(ledger, row, vec![CellValue::Null])
+            .expect("標本の行は実在する");
+        DocumentFormat::new()
+            .save(&document, path)
+            .expect("標本を保存できる");
+        ledger.to_string()
+    }
+
+    /// 開いた応答から、名前で列を引く（列の添字を検査に書き写さない）。
+    fn column_named(summary: &GridSheetSummary, name: &str) -> ColumnDescriptor {
+        summary
+            .columns
+            .iter()
+            .find(|column| column.name == name)
+            .unwrap_or_else(|| panic!("列 {name} が構成に無い"))
+            .clone()
+    }
+
     /// 保持している文書の、指定した位置の行の識別子を返す（10 万行を写さないための入口）。
     fn stored_rows_at(
         sessions: &Arc<DocumentSessions>,
@@ -2888,6 +3378,11 @@ mod tests {
             WebviewWindow,
             GridViolationRequest,
         ) -> IpcResult<GridViolationResponse, IpcError> = grid_find_violation;
+        let _: fn(
+            AppHandle,
+            WebviewWindow,
+            GridReferenceRequest,
+        ) -> IpcResult<GridReferenceResponse, IpcError> = grid_reference_rows;
     }
 
     // -----------------------------------------------------------------------
@@ -4197,6 +4692,352 @@ mod tests {
         assert!(matches!(failure, IpcError::Document { .. }));
     }
 
+    // -----------------------------------------------------------------------
+    // 列の宣言の材料と参照先の行（要件 3.2、3.7、3.8、5.5。タスク 10.3）
+    // -----------------------------------------------------------------------
+
+    /// **開いた応答が、列の宣言から導ける材料を運ぶ**（要件 3.2、3.7、3.8、5.5、10.4）。
+    ///
+    /// 固定するのは 4 点である: ①選択肢を持つ列が**値と名**の一覧を運ぶ ②参照の列が
+    /// **参照先のシートの名**（宣言が持つ識別子ではない）を運ぶ ③値なしを許すかが**宣言どおり**
+    /// （必須の列は偽）④入れ子の列が**折りたたみのままでも**内側の宣言を名と型で運ぶ。
+    #[test]
+    fn opening_a_sheet_answers_the_declaration_material_of_each_column() {
+        let (_scratch, sessions, grids, label, sheet) = opened_reference("material", 3);
+        let opened = data(answer_open(
+            &sessions,
+            &grids,
+            &label,
+            &GridOpenRequest { sheet },
+        ));
+        let summary = &opened.sheet;
+        assert_eq!(4, summary.columns.len(), "宣言の 4 列がそのまま並ぶ");
+
+        // ① 選択肢（要件 3.2）。値と名は同じ宣言から来る。
+        let category = column_named(summary, "区分");
+        assert_eq!(Some(TypeKindTag::Enum), category.kind);
+        assert_eq!(
+            vec![
+                ("赤".to_owned(), "赤".to_owned()),
+                ("青".to_owned(), "青".to_owned())
+            ],
+            category
+                .choices
+                .iter()
+                .map(|choice| (choice.value.clone(), choice.label.clone()))
+                .collect::<Vec<_>>(),
+        );
+        assert!(category.nullable, "区分は任意である（宣言どおり）");
+        // 選択肢を持たない列は空である（材料が無いことは誤りではない。要件 10.4）。
+        assert!(column_named(summary, "品番").choices.is_empty());
+
+        // ② 参照先は**名**である（宣言は識別子しか持たない。名への写しは本層が行う）。
+        let supplier = column_named(summary, "仕入先");
+        assert_eq!(Some(TypeKindTag::Ref), supplier.kind);
+        assert_eq!(
+            Some("仕入先".to_owned()),
+            supplier.reference_sheet,
+            "参照先のシートの名が運ばれる（識別子ではない）"
+        );
+        assert!(!supplier.nullable, "仕入先は必須である");
+
+        // ③ 値なしを許すか（要件 3.7）。**必須の列は偽である**（「値なしへ戻す」道を出すと、
+        //    判定が違反を返す値を作れてしまう）。
+        assert!(!column_named(summary, "品番").nullable);
+
+        // ④ 入れ子の内側の宣言（要件 5.5）。**折りたたみのままでも読める**。
+        let origin = column_named(summary, "提供元");
+        assert_eq!(Some(TypeKindTag::Object), origin.kind);
+        assert!(origin.path.is_empty(), "折りたたみでは内側の位置を持たない");
+        assert_eq!(
+            vec![
+                ("提供元.name".to_owned(), TypeKindTag::Text, false),
+                ("提供元.code".to_owned(), TypeKindTag::Text, true),
+            ],
+            origin
+                .members
+                .iter()
+                .map(|member| (member.name.clone(), member.kind, member.nullable))
+                .collect::<Vec<_>>(),
+            "内側のフィールドが名・型・値なしを許すかとともに並ぶ（name は必須である）"
+        );
+        assert_eq!(
+            vec![GridPathSegment::Field {
+                name: "name".to_owned(),
+            }],
+            origin.members[0].path,
+            "内側の位置はセル直下からの絶対の位置である"
+        );
+    }
+
+    /// **参照先の行を頁ごとに読み、総数を返す**（要件 3.8）。
+    ///
+    /// 頁が運ぶのは**行の識別子**（参照の列に書かれる値そのもの）と**人が読む名**である。
+    #[test]
+    fn reference_rows_answer_a_page_and_the_total() {
+        let (scratch, sessions, grids, label, sheet) = opened_reference("reference-page", 10);
+        let ids = supplier_row_ids(&scratch.file("参照.jxcel"));
+        assert_eq!(10, ids.len(), "前提が崩れた: 参照先は 10 行である");
+        let column = open_and_column(&sessions, &grids, &label, sheet, "仕入先");
+
+        let page = data(answer_reference_rows(
+            &sessions,
+            &grids,
+            &label,
+            &GridReferenceRequest {
+                column: column.column,
+                search: String::new(),
+                start: 0,
+                count: 4,
+            },
+        ));
+        assert_eq!(label, page.context.window, "呼び出し元の文脈が返る");
+        assert_eq!(10, page.total, "総数は頁の外も数える");
+        assert!(page.has_more, "後ろにまだ行がある");
+        assert_eq!(
+            vec![
+                "仕入先0 住所0",
+                "仕入先1 住所1",
+                "仕入先2 住所2",
+                "仕入先3 住所3"
+            ],
+            page.rows
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            "表示の名は行の値の表示文字列である（列の順に空白で連結する）"
+        );
+        // **識別子は行のものである**（表示の名ではない。参照の列に書かれる値そのもの）。
+        assert_eq!(
+            ids[0..4].to_vec(),
+            page.rows
+                .iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>(),
+        );
+
+        // 続きを読むと、前の頁の後ろから返る。
+        let next = data(answer_reference_rows(
+            &sessions,
+            &grids,
+            &label,
+            &GridReferenceRequest {
+                column: column.column,
+                search: String::new(),
+                start: 4,
+                count: 4,
+            },
+        ));
+        assert_eq!(10, next.total);
+        assert_eq!(
+            ids[4..8].to_vec(),
+            next.rows
+                .iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>(),
+        );
+        assert!(next.has_more);
+
+        // 末尾に達すると続きが無い。
+        let last = data(answer_reference_rows(
+            &sessions,
+            &grids,
+            &label,
+            &GridReferenceRequest {
+                column: column.column,
+                search: String::new(),
+                start: 8,
+                count: 4,
+            },
+        ));
+        assert_eq!(2, last.rows.len());
+        assert!(!last.has_more, "末尾に達した");
+
+        // 検索の文字で絞られ、総数も絞ったあとの数になる（要件 3.8）。
+        let filtered = data(answer_reference_rows(
+            &sessions,
+            &grids,
+            &label,
+            &GridReferenceRequest {
+                column: column.column,
+                search: "仕入先1".to_owned(),
+                start: 0,
+                count: 10,
+            },
+        ));
+        assert_eq!(1, filtered.total, "「仕入先1」を含む行は 1 件だけである");
+        assert_eq!("仕入先1 住所1", filtered.rows[0].label);
+        assert!(!filtered.has_more);
+    }
+
+    /// **参照先が 1 万行でも、応答は境界の上限で切られる**（要件 3.8、11 の目的）。
+    ///
+    /// 要求が上限を超えても、応答の件数は [`GRID_REFERENCE_PAGE_LIMIT`] を超えない。
+    /// 続きは `has_more` と `start` で読める（**一度に全部を読む経路が無い**）。
+    #[test]
+    fn a_reference_request_beyond_the_limit_is_cut_at_the_boundary() {
+        let (scratch, sessions, grids, label, sheet) = opened_reference("reference-limit", 10_000);
+        let column = open_and_column(&sessions, &grids, &label, sheet, "仕入先");
+        let limit = usize::try_from(GRID_REFERENCE_PAGE_LIMIT).expect("上限は usize に収まる");
+
+        let page = data(answer_reference_rows(
+            &sessions,
+            &grids,
+            &label,
+            &GridReferenceRequest {
+                column: column.column,
+                search: String::new(),
+                start: 0,
+                // **上限をはるかに超える要求**（1 万行を一度に読もうとする）。
+                count: 10_000,
+            },
+        ));
+        assert_eq!(
+            limit,
+            page.rows.len(),
+            "応答の件数は境界の上限で切られる（要求の値ではない）"
+        );
+        assert_eq!(
+            10_000, page.total,
+            "総数は切られない（続きがあるかを決める材料である）"
+        );
+        assert!(page.has_more);
+        assert_eq!(
+            "仕入先0 住所0", page.rows[0].label,
+            "先頭の頁は最初の行から始まる"
+        );
+        assert_eq!(
+            10_000,
+            supplier_row_ids(&scratch.file("参照.jxcel")).len(),
+            "前提が崩れた: 参照先は 1 万行である"
+        );
+
+        // 切られた先は `start` を進めて読める（頁の並びが重ならない）。
+        let next = data(answer_reference_rows(
+            &sessions,
+            &grids,
+            &label,
+            &GridReferenceRequest {
+                column: column.column,
+                search: String::new(),
+                start: GRID_REFERENCE_PAGE_LIMIT,
+                count: GRID_REFERENCE_PAGE_LIMIT,
+            },
+        ));
+        assert_eq!(limit, next.rows.len());
+        assert!(
+            next.rows
+                .iter()
+                .all(|row| !page.rows.iter().any(|first| first.id == row.id)),
+            "2 頁目は 1 頁目と重ならない"
+        );
+        assert_eq!(
+            format!("仕入先{} 住所{}", limit, limit),
+            next.rows[0].label,
+            "2 頁目は上限の位置の行から始まる"
+        );
+    }
+
+    /// **参照の型でない列・宣言に無い列・参照先が文書に無い場合は経路の失敗である**
+    /// （要件 3.8。「行が無い」は正常な結果であり、混同しない）。
+    #[test]
+    fn a_reference_request_that_cannot_be_resolved_fails_at_the_path() {
+        let (scratch, sessions, state, label, sheet) = opened_reference("reference-failure", 2);
+        let text = open_and_column(&sessions, &state, &label, sheet, "品番");
+
+        // 参照の型でない列（品番）。
+        let failure = error(answer_reference_rows(
+            &sessions,
+            &state,
+            &label,
+            &GridReferenceRequest {
+                column: text.column,
+                search: String::new(),
+                start: 0,
+                count: 10,
+            },
+        ));
+        assert!(matches!(failure, IpcError::Document { .. }));
+
+        // 宣言に現れない列の添字。
+        let failure = error(answer_reference_rows(
+            &sessions,
+            &state,
+            &label,
+            &GridReferenceRequest {
+                column: 99,
+                search: String::new(),
+                start: 0,
+                count: 10,
+            },
+        ));
+        assert!(matches!(failure, IpcError::Document { .. }));
+
+        // グリッドを開いていないウィンドウ。
+        let other = WindowLabel::new("no-grid");
+        let failure = error(answer_reference_rows(
+            &sessions,
+            &state,
+            &other,
+            &GridReferenceRequest {
+                column: 0,
+                search: String::new(),
+                start: 0,
+                count: 10,
+            },
+        ));
+        assert!(matches!(failure, IpcError::Document { .. }));
+
+        // **参照先のシートが文書に無い場合**（別の標本で、存在しないシートを指す宣言を作る）。
+        let missing = scratch.file("欠落.jxcel");
+        let dangling = write_dangling_reference_document(&missing);
+        let (dangling_sessions, dangling_label) = documents(&missing);
+        let dangling_grids = grids();
+        let opened = data(answer_open(
+            &dangling_sessions,
+            &dangling_grids,
+            &dangling_label,
+            &GridOpenRequest {
+                sheet: dangling.clone(),
+            },
+        ));
+        assert_eq!(1, opened.sheet.columns.len());
+        let failure = error(answer_reference_rows(
+            &dangling_sessions,
+            &dangling_grids,
+            &dangling_label,
+            &GridReferenceRequest {
+                column: opened.sheet.columns[0].column,
+                search: String::new(),
+                start: 0,
+                count: 10,
+            },
+        ));
+        // **「行が無い」ではなく経路の失敗である**（文言がそのシートを名乗る）。
+        match failure {
+            IpcError::Document { message } => {
+                assert!(message.contains("が文書に無い"), "実際の文言: {message}")
+            }
+            other => panic!("経路の失敗を期待したが {other:?} を返した"),
+        }
+    }
+
+    /// 標本の台帳を開き直して、名前で列を引く（列の添字を検査に書き写さない）。
+    fn open_and_column(
+        sessions: &Arc<DocumentSessions>,
+        grids: &GridSessions,
+        label: &WindowLabel,
+        sheet: String,
+        name: &str,
+    ) -> ColumnDescriptor {
+        let opened = data(answer_open(
+            sessions,
+            grids,
+            label,
+            &GridOpenRequest { sheet },
+        ));
+        column_named(&opened.sheet, name)
+    }
     // -----------------------------------------------------------------------
     // 窓の生バイト経路（要件 1.1、11.2。タスク 6.3）
     // -----------------------------------------------------------------------

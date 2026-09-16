@@ -128,16 +128,18 @@ export const editorRegistry: CellEditorRegistry = createBuiltinEditorRegistry();
  * 登録を指す**経路ができる（面は入れ子の面なのに、文字は `SetCells` へ載る — 必ず違反になる）。
  *
  * 札が読めない列（宣言が壊れている）は `"Any"` として引く（7.4 の事後条件。**面は必ず出る**）。
- * `members`（位置ごとの宣言）は境界に材料が無いので、入れ子の面は位置ごとの面を出さず、値を
- * そのまま扱う面へ落ちる（7.4 の申し送り 6）。
+ * `customTypeId` は境界が運ぶ（**タスク 10.3 が `ColumnDescriptor.custom_type_id` を足した** —
+ * 7.4 の申し送り 3 が「`resolve` の `customTypeId` の出所が無い」と記録した隙間である）。
+ * 拡張型の登録（要件 10.1）はこの鍵で引かれるため、渡さないと**登録した面が現れない**。
  */
 export function columnEditor(column: ColumnDescriptor | null): {
   readonly component: ComponentType<CellEditorProps>;
   readonly carrier: EditCarrier;
 } {
   const kind = column?.kind ?? "Any";
+  const customTypeId = column?.custom_type_id ?? undefined;
   return {
-    component: editorRegistry.resolve(kind),
-    carrier: editorRegistry.resolveCarrier(kind),
+    component: editorRegistry.resolve(kind, customTypeId),
+    carrier: editorRegistry.resolveCarrier(kind, customTypeId),
   };
 }

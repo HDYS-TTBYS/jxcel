@@ -52,7 +52,7 @@ import {
 
 /** 列 1 本ぶんの記述（**宣言の順**に入る。`column` は文書の列である）。 */
 function descriptor(column: number, name: string): ColumnDescriptor {
-  return { column, path: [], name, kind: "Text", element_count: null, expandability: "leaf" };
+  return { column, path: [], name, kind: "Text", element_count: null, expandability: "leaf", nullable: true, choices: [], reference_sheet: null, custom_type_id: null, members: [] };
 }
 
 /** 展開した列の内側の位置の記述（親と同じ文書の列を指す。要件 5.1）。 */
@@ -64,6 +64,11 @@ function inner(column: number, name: string, field: string): ColumnDescriptor {
     kind: "Text",
     element_count: null,
     expandability: "leaf",
+    nullable: true,
+    choices: [],
+    reference_sheet: null,
+    custom_type_id: null,
+    members: [],
   };
 }
 

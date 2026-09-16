@@ -36,7 +36,7 @@ import { ViewBar, type ViewBarProps } from "./viewBar";
 
 /** 列 1 本ぶんの記述（宣言の順。`column` が**文書の列**である）。 */
 function descriptor(column: number, name: string): ColumnDescriptor {
-  return { column, path: [], name, kind: "Text", element_count: null, expandability: "leaf" };
+  return { column, path: [], name, kind: "Text", element_count: null, expandability: "leaf", nullable: true, choices: [], reference_sheet: null, custom_type_id: null, members: [] };
 }
 
 /** 宣言の列 3 本（列 0..2）。 */

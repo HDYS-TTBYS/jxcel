@@ -357,6 +357,11 @@ function identitySpace(kinds: readonly TypeKindTag[]): ColumnSpace {
       kind,
       element_count: null,
       expandability: "leaf",
+      nullable: true,
+      choices: [],
+      reference_sheet: null,
+      custom_type_id: null,
+      members: [],
     })),
   );
 }
@@ -1343,6 +1348,11 @@ const EXPANDED_SPACE: ColumnSpace = createColumnSpace([
     kind: "Text",
     element_count: null,
     expandability: "leaf",
+    nullable: true,
+    choices: [],
+    reference_sheet: null,
+    custom_type_id: null,
+    members: [],
   },
   {
     column: 0,
@@ -1351,8 +1361,13 @@ const EXPANDED_SPACE: ColumnSpace = createColumnSpace([
     kind: "Text",
     element_count: null,
     expandability: "leaf",
+    nullable: true,
+    choices: [],
+    reference_sheet: null,
+    custom_type_id: null,
+    members: [],
   },
-  { column: 1, path: [], name: "name", kind: "Text", element_count: null, expandability: "leaf" },
+  { column: 1, path: [], name: "name", kind: "Text", element_count: null, expandability: "leaf", nullable: true, choices: [], reference_sheet: null, custom_type_id: null, members: [] },
 ]);
 
 /** 文書の列が 2 本の窓を返す移送（`place` のセルと `name` のセル）。 */

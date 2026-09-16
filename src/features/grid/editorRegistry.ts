@@ -48,28 +48,32 @@
  * design.md の `CellEditorProps` は `constraints: ColumnConstraints` を持つが、この型の定義は
  * どこにも無い。**本 module が 7.4 として定める**（下の doc を参照）。
  *
- * ## 境界に足りないもの（**申し送り。ごまかさない**）
+ * ## 境界に足りないもの（**申し送り。2026-09-17 にタスク 10.3 がすべて閉じた**）
  *
- * 宣言が「何を選べるか」を決める 2 つの情報は、**いま境界から来ない**。
+ * かつては 2 つの情報が**境界から来なかった**。いまはどちらも `ColumnDescriptor` が運び、
+ * `./columnConstraints` が面の読む形へ写す。
  *
  * 1. **選択肢**（`choices`）— 要件 3.2 が求める「選択肢を持つ型の一覧」の材料である。
- *    生成物の `ColumnDescriptor`（`src/ipc/bindings.ts`）は `column / path / name / kind /
- *    element_count / expandability` しか運ばない。列の宣言（`schema-engine` の `enum`）の
- *    選択肢は、**境界に 1 つも現れない**
+ *    生成物の `ColumnDescriptor` は `column / path / name / kind / element_count /
+ *    expandability` しか運ばず、列の宣言（`schema-engine` の `enum`）の選択肢は**境界に
+ *    1 つも現れなかった**。いまは `ColumnDescriptor.choices` として来る（値と名の対）
  * 2. **参照先**（`reference`）— 要件 3.8 が求める「参照先のシートに存在する行からの選択」の
- *    材料である。参照先のシートと、そのシートの行を一覧する経路の**どちらも境界に無い**
- *    （6.1 が定めたコマンドは 6 本であり、シートの行を列挙する口はその中に無い）
+ *    材料である。参照先のシートも、そのシートの行を一覧する経路も**境界に無かった**
+ *    （6.1 が定めたコマンドは 6 本である）。いまは参照先のシートの名が
+ *    `ColumnDescriptor.reference_sheet` として来て、その行は**コマンド 1 本**
+ *    （`grid_reference_rows`。10.3 が足した 7 本目）が**頁ごとに**返す
  *
- * **本 module は境界の型を勝手に増やさない**（`src/ipc/bindings.ts` は 6.1 の生成物であり、
+ * 3 つ目は**ユーザー定義型の同一性**である — `kind` は札しか運ばないため、`resolve` の
+ * `customTypeId` に渡す値の出所が境界に無く、`Custom` の列は既定の面へ落ちていた。いまは
+ * `ColumnDescriptor.custom_type_id` として来り、`editors/index.ts` の `columnEditor` が
+ * 登録簿へ渡す（10.3 が閉じた）。
+ *
+ * **本 module は境界の型を勝手に増やさない**（`src/ipc/bindings.ts` は生成物であり、
  * 手で編集しない。`crates/app-shell/tests/bindings_drift.rs` のドリフト検査が固定している）。
- * 代わりに、面は `constraints` を**呼び出し元が渡すもの**として扱い、渡されないときは
- * 値をそのまま扱う既定へ落ちる（要件 10.4）— つまり**今日は一覧にならず、境界が広がった日に
- * 面を書き換えずに一覧になる**。必要な追加は `research.md` の「7.4 が記録した隙間」に、
- * どの欄を・どの要件のために・どこへ足すかまで書いてある。
- *
- * 3 つ目に近いものとして、`kind` は**ユーザー定義型の同一性**を運ばない（生成物は札しか
- * 持たない）。`resolve` の `customTypeId` に渡す値の出所が境界に無いため、`Custom` の列は
- * いまのところ既定の面へ落ちる。これも同じ節に記録してある。
+ * したがって面は `constraints` を**呼び出し元が渡すもの**として扱い、渡されないときは値を
+ * そのまま扱う既定へ落ちる（要件 10.4）— 境界が広がった日に**面を書き換えずに一覧になる**という
+ * 形はそのままである。変わったのは渡す側（`./columnConstraints` と `./GridScreen`）であり、
+ * 材料の無い欄は依然として渡されない。
  *
  * # 既定の登録簿は本 module に無い
  *
@@ -135,13 +139,14 @@ export interface ColumnMember {
  * |---|---|---|
  * | `kind` | 葉の型の札。同じ面が札で振る舞いを変える（数値の面は `Int` を 1 刻みに、`Float` を縛らずに扱い、入れ子の面は位置ごとの面をこの札で登録簿から引く）。`CellEditorProps` は札を別に持たないため、**宣言が運ぶ** | 3.1, 3.2 |
  * | `nullable` | 値なしを許すか。キーだけで取り消せない面（暦・一覧・二値・参照）は、これが真のときだけ `値なし` の道を出す（空の文字列が値なしである。`crates/data-grid/src/edit/mod.rs` の `edited_value`） | 3.7 |
- * | `choices` | 選択肢を持つ型の一覧（`Enum`）。**境界に材料が無い**（上の申し送り） | 3.2 |
- * | `reference` | 参照先のシートとその行（`Ref`）。**境界に材料が無い**（上の申し送り） | 3.8 |
- * | `members` | 入れ子の位置ごとの宣言（`Object` / `Array`）。`nested` の面はこれがあるときだけ位置ごとの面を出す | 5.1, 5.5 |
+ * | `choices` | 選択肢を持つ型の一覧（`Enum`）。`ColumnDescriptor.choices` から写る（10.3 が閉じた申し送り） | 3.2 |
+ * | `reference` | 参照先のシートとその行（`Ref`）。シートの名は `ColumnDescriptor.reference_sheet`、行は `grid_reference_rows` の頁から写る（10.3 が閉じた申し送り） | 3.8 |
+ * | `members` | 入れ子の位置ごとの宣言（`Object` / `Array`）。`ColumnDescriptor.members` から写り、`nested` の面はこれがあるときだけ位置ごとの面を出す | 5.1, 5.5 |
  *
  * **渡されない欄は「その面が提示できない」であって、誤りではない。**面はそのとき、値をそのまま
  * 扱う既定（[`TextEditor`]）へ落ちる（要件 10.4）— 制約の材料が無いことは、値を打てないこと
- * ではない。材料が揃うのは、境界が上の申し送りの欄を得てからである（8.3 の画面が渡す）。
+ * ではない。材料を渡すのは `./columnConstraints`（境界の材料から写す）と `./GridScreen`
+ * （参照先の行は頁ごとに読んでから載せる）である。
  */
 export interface ColumnConstraints {
   readonly kind: TypeKindTag;

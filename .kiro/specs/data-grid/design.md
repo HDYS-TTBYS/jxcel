@@ -321,7 +321,7 @@ stateDiagram-v2
 | 1.5, 1.6 | 行なし・列なしの提示 | GridScreen, GridSession | `GridOpenResponse.row_count`, `columns` | — |
 | 1.7 | 外部経路の変更を表示へ反映 | WindowCache, GridScreen（`cellEdit.ts`） | `WindowCache.invalidate`（`EditOutcome.affected` をそのまま渡す） | 編集の適用と判定 |
 | 2.1, 2.2, 2.3, 2.4, 2.5, 2.6 | 現在位置・選択・追従・範囲の対象化 | GridScreen（`selection.ts`）, RendererPort | `RendererSpec.selection` / `onSelectionChange` / `onVisibleSpanChange` / `rowMarkers`, `RendererHandle.setSelection` / `scrollTo` | — |
-| 3.1, 3.2, 3.8 | 型に応じた入力手段（日時・選択肢・真偽・シート間参照） | EditorRegistry, editors, GridScreen（`CellEditorPanel`） | `CellEditorRegistry.resolve`, `CellEditorProps.constraints`（**8.3 が `kind` を渡す**。`choices` / `reference` / `members` / `nullable` は境界に材料が無い） | — |
+| 3.1, 3.2, 3.8 | 型に応じた入力手段（日時・選択肢・真偽・シート間参照） | EditorRegistry, editors, GridScreen（`CellEditorPanel`）, **ColumnConstraints の組み立て（10.3）** | `CellEditorRegistry.resolve` / `resolveCarrier`（`customTypeId` つき）, `CellEditorProps.constraints`（**10.3 が材料を渡す** — 選択肢・参照先の行・入れ子の宣言・値なしを許すか）, `GridCommands` の `grid_reference_rows` | 3.8 の行の一覧は**頁ごと**に読む（`GRID_REFERENCE_PAGE_LIMIT`） |
 | 3.3, 3.4, 3.5 | 判定への送付、変換の提示、違反値の保持 | EditApply, GridCommands, GridScreen（`cellEdit.ts`） | `EditCommand::SetCells`, `GridClient.applyEdit`, `GridEditResponse.coercions` / `violations` / `violation_total` | 編集の適用と判定 |
 | 3.6, 3.7 | 編集の取消、値なしへ戻す | GridScreen（`cellEdit.ts`。**取消は境界へ何も送らない**）, EditApply | `CellEditorProps.cancel`, `WindowCache.rowId`（宛先の行の識別子）, 空の文字列＝値なし（`edited_value`） | — |
 | 4.1, 4.2, 4.6 | 違反の区別・理由・解消 | WindowCodec, GridScreen, ViolationBar | 窓の違反札, `GridViolationResponse.reason` | 編集の適用と判定 |
@@ -346,7 +346,7 @@ stateDiagram-v2
 | 9.1, 9.2, 9.3, 9.4, 9.5, 9.6 | 取り消しとやり直しの対象・復元・破棄・単位・上限 | UndoStack, UndoRedo, **GridCommands の保持（`SheetEntry`）** | `apply` / `undo` / `redo` が `&mut UndoStack` を受け取る（**10.2 が所有者を `GridSession` から降ろした**）、`push`（上限） | UndoRedo が履歴と `EditApply` を借用で束ねてドキュメントへ適用する。**履歴の所有者はウィンドウの保持であり、シートの切り替えを越えて引き継ぎ、文書が差し替わったら捨てる**（要件 9.5） |
 | 9.7 | 数式とマクロが同じ履歴に加わる | UndoStack | `UndoStack.push` の公開 | — |
 | 9.8 | 取り消し後に対象範囲を見せる | GridScreen（`history.ts`）, WindowCache, RendererPort | `WindowCache.ordinalOf`（**8.9 が足した** — 行の識別子 → 表示の序数の唯一の口）、`RendererHandle.setSelection` / `scrollTo`（既存の追従が打つ） | — |
-| 10.1, 10.2, 10.3, 10.4, 10.5, 10.6 | 入力手段の登録簿と既定・重複検出 | EditorRegistry | `CellEditorRegistry` | — |
+| 10.1, 10.2, 10.3, 10.4, 10.5, 10.6 | 入力手段の登録簿と既定・重複検出 | EditorRegistry | `CellEditorRegistry` | 拡張型の識別子は**境界が運ぶ**（`ColumnDescriptor.custom_type_id`。10.3 が閉じた） |
 | 11.1, 11.2, 11.3, 11.5, 11.6, 11.7 | 応答時間と資源の予算 | WindowCache, WindowCodec, RowOrder | ベンチ `large_grid/*` | 窓の取得と先読み |
 | 11.4 | 1 セルの編集で全件検証しない | EditApply, GridSession | `validate_columns` に限定して呼ぶ（差分の入口は `ViolationIndex::apply_report_delta`） | 編集の適用と判定 |
 | 12.1, 12.4 | 3 OS での走査と編集の成立 | 3 OS 観測の台本 | `scripts/ci/` の段 | — |
@@ -729,9 +729,17 @@ impl<'a> UndoRedo<'a> {
 | `grid_apply_edit` | `GridEditRequest` | `GridEditResponse` | 封筒 |
 | `grid_history` | `GridHistoryRequest` | `GridEditResponse` | 封筒 |
 | `grid_find_violation` | `GridViolationRequest` | `GridViolationResponse` | 封筒 |
+| `grid_reference_rows` | `GridReferenceRequest` | `GridReferenceResponse` | 封筒 |
+
+**`grid_reference_rows` は 10.3 が足した 7 本目である**（要件 3.8。7.4 の申し送り 2）。
+参照先のシートの行を**頁ごとに**読み、**件数の上限を境界が強制する**
+（`GRID_REFERENCE_PAGE_LIMIT` = 200）— 参照先が 1 万行でも一度に全部を読まない。**参照先は要求では
+なく列の宣言から決まる**（要求は文書の列の添字だけを運ぶ）ので、画面はシートの識別子を持ち回らない。
+参照の型でない列・宣言に無い列の添字・**参照先のシートが文書に無い**場合は経路の失敗である
+（「行が無い」は正常な結果であり、混同しない）。
 
 **Implementation Notes**
-- Integration: コマンド名は `command_names.rs` の定数。権限ブロック 6 つと `app-shell` の集合への所属を同時に足す（片方だけでは**ビルド時に静かに削除される**）
+- Integration: コマンド名は `command_names.rs` の定数。権限ブロック 7 つと `app-shell` の集合への所属を同時に足す（片方だけでは**ビルド時に静かに削除される**）
 - Validation: `scripts/check-command-acl.sh` が登録 ⊆ 許可を固定する。`src/ipc/client.ts` の `RawCommandName` に `grid_rows_window` を加える
 - Risks: 境界用の型は `crates/app-shell/src/ipc/grid.rs` に置く（ts-rs の derive が許される唯一の場所）。この型は**他のドメインクレートを参照してはならない**ため、すべて文字列と 32 ビット以下の整数で構成する
 
@@ -751,6 +759,8 @@ impl<'a> UndoRedo<'a> {
 | `GridEditCommand` / `GridCellEdit` / `GridCellAddress` | `EditCommand` / （`SetCells` の 2 つ組） / `CellAddress` |
 | `GridEditOutcome` / `GridCoercionNotice` | `EditOutcome` / `CoercionNotice` |
 | `GridViolationLocation` | `Violation` の位置（行・列・内側の経路） |
+| `ColumnChoice` / `ColumnMemberDescriptor`（**10.3 が足した**） | `ColumnDeclaration.choices` / `LayoutMember`（宣言の材料。要件 3.2、3.7、3.8、5.5、10.1、10.4） |
+| `GridReferenceRequest` / `GridReferenceRow` / `GridReferenceResponse`（**10.3 が足した**） | 参照先の行の頁（`view::reference_page` の結果。要件 3.8） |
 
 - **要件 1.5 と 1.6 は列の数で区別する。** `GridSheetSummary` が列の構成と行数を同じ型に載せる
   ため、「列が 1 本も無い（表を描かない）」と「列はあるが行が無い（列の構成を示す）」が形の上で
@@ -758,6 +768,11 @@ impl<'a> UndoRedo<'a> {
   ため、可視行数と隠された行数は `GridViewResponse` が別に運ぶ（要件 8.7）
 - **展開は `GridViewSpec` が運ぶ。** 並べ替え・絞り込み・展開はどれも窓が運ぶ行と列を変えるため
   （「表示状態」の割り方の根拠）、要求の口は `grid_set_view` の 1 つで足りる
+- **`ColumnDescriptor` は宣言の材料も運ぶ（10.3）。** 選択肢・参照先のシートの**名**・ユーザー定義型の
+  識別子・値なしを許すか・入れ子の内側の宣言であり、いずれも**宣言から写す**（推測しない）。
+  値なしを許すかは**定数ではなく宣言どおり**であり、参照先のシートの名への写しだけは文書を見られる
+  適応層が行う（宣言は識別子しか持たない）。材料が無い欄は空／`null` のまま運び、**面はそのとき既定へ
+  落ちる**（要件 10.4 の道を塞がない）
 - **違反の理由（`ViolationReason`）は 6.1 の荷に無い。** `GridViolationResponse.reason` は
   6.2 / 6.3 が定義する（要件 4.2）
 - **値は打たれた文字として運ぶ。** 境界にセル値の型を置かない（窓の二進形式も「数値としての
@@ -1038,23 +1053,31 @@ export interface ColumnConstraints {
 値なしへ戻る道を持てるようにするためである（空の文字列が値なしである — `data-grid` の `edited_value`）。
 **どの欄も渡されないことは誤りではなく**、面はそのとき値をそのまま扱う既定へ落ちる（要件 10.4）。
 
-**申し送り（境界と設計に足りないもの。7.4 の時点で判明）**
+**申し送り（境界と設計に足りないもの。7.4 の時点で判明。2026-09-17 に 1・2・3・5・6 を閉じた）**
 
-| # | 足りないもの | 要件 | どこへ |
-|---|---|---|---|
-| 1 | 選択肢の一覧（`Enum`）。`ColumnDescriptor` は `kind` しか運ばない | 3.2 | 境界用の型に欄を足す（`crates/app-shell/src/ipc/grid.rs` → 生成物を再生成） |
-| 2 | 参照先のシートと、その行を一覧する経路（`Ref`）。6.1 のコマンド 6 本に無い | 3.8 | 欄 1 つと**コマンド 1 本** |
-| 3 | ユーザー定義型の識別子。`kind` は `"Custom"` しか運ばないため `resolve` の `customTypeId` の出所が無い | 10.1, 10.4 | 境界用の型に `custom_type_id` |
-| 4 | **確定の文字の運び手。**`commit(text)` は経路を 1 本しか持たないのに、入れ子の列は `SetNested`（構造表現）でなければ適合しない（`Text` → `object` / `array` の変換の行が無い）。このままだと画面が**列の札で経路を選ぶ**ことになり、要件 10.3 と衝突する | 5.5, 10.3 | **本設計の改訂**（登録に経路の札を足すなど） |
-| 5 | **値なしを許すか**（`nullable`）。`ColumnDescriptor` に欄が無いため、画面は「値なしの道」を出すかどうかを決められない（**8.3 が実測**） | 3.7 | 境界用の型に欄を 1 つ足す（欄 1〜3 と同じ経路） |
-| 6 | **入れ子の位置ごとの宣言**（`members`）。`ColumnDescriptor.path` は展開された列の位置であり、位置の一覧ではない | 5.1, 5.5 | 境界用の型、または位置の一覧を返す経路 |
+| # | 足りないもの | 要件 | どこへ | 状態 |
+|---|---|---|---|---|
+| 1 | 選択肢の一覧（`Enum`）。`ColumnDescriptor` は `kind` しか運ばない | 3.2 | 境界用の型に欄を足す（`crates/app-shell/src/ipc/grid.rs` → 生成物を再生成） | **閉じた**（10.3 が `ColumnDescriptor.choices` を足した） |
+| 2 | 参照先のシートと、その行を一覧する経路（`Ref`）。6.1 のコマンド 6 本に無い | 3.8 | 欄 1 つと**コマンド 1 本** | **閉じた**（10.3 が `reference_sheet` と `grid_reference_rows` を足した） |
+| 3 | ユーザー定義型の識別子。`kind` は `"Custom"` しか運ばないため `resolve` の `customTypeId` の出所が無い | 10.1, 10.4 | 境界用の型に `custom_type_id` | **閉じた**（10.3。`editors/index.ts` の `columnEditor` が登録簿へ渡す） |
+| 4 | **確定の文字の運び手。**`commit(text)` は経路を 1 本しか持たないのに、入れ子の列は `SetNested`（構造表現）でなければ適合しない（`Text` → `object` / `array` の変換の行が無い）。このままだと画面が**列の札で経路を選ぶ**ことになり、要件 10.3 と衝突する | 5.5, 10.3 | **本設計の改訂**（登録に経路の札を足すなど） | 8.5 が閉じた（`CellEditorRegistration.carrier`） |
+| 5 | **値なしを許すか**（`nullable`）。`ColumnDescriptor` に欄が無いため、画面は「値なしの道」を出すかどうかを決められない（**8.3 が実測**） | 3.7 | 境界用の型に欄を 1 つ足す（欄 1〜3 と同じ経路） | **閉じた**（10.3 が `nullable` を足し、**宣言から写す**） |
+| 6 | **入れ子の位置ごとの宣言**（`members`）。`ColumnDescriptor.path` は展開された列の位置であり、位置の一覧ではない | 5.1, 5.5 | 境界用の型、または位置の一覧を返す経路 | **閉じた**（10.3 が `members` を足し、**展開していない列でも読める**） |
 
-1〜3・5・6 は境界の追加、4 は設計の改訂である。**4 は 8.3 の実装時に必ず突き当たる**（詳細と実測は
-`research.md` の「7.4 が記録した隙間」と「実測と固定: セルの編集と型強制の提示（タスク 8.3）」）。
-**8.3 が渡せたのは `kind` だけである**（列の札は `ColumnDescriptor.kind` が運ぶ）。`constraints` の
-残る欄は渡さず、面は自分の既定へ落ちる（要件 10.4）。`nullable` だけは**つねに真**を渡す —
-道を閉じると値なしを許す列で値なしへ戻せず（要件 3.7）、値なしを許さない列では判定が違反を返して
-**値が保持される**（要件 3.5）からである。
+**10.3 が閉じた 5 件は、境界の欄が 1 つ増えただけではない** — 材料は**宣言から写し**（`data-grid` の
+`ColumnDeclaration`）、境界が運び（`ColumnDescriptor`）、画面が**型の札で分岐せずに**面を組み立てる
+（`src/features/grid/columnConstraints.ts`）。とくに `nullable` は**つねに真ではなく宣言どおり**に
+なったので、値なしを許さない列では「値なしへ戻す」道が出ない（要件 3.7）。
+
+**入れ子の宣言（`members`）は深さの上限で切る** — 列として展開する上限（要件 5.4 の
+`MAX_EXPANSION_DEPTH`）と同じ規律であり、どれだけ深い宣言でも材料は有限である。位置は
+**セル直下からの絶対の位置**であり、`ColumnDescriptor.path` と同じ空間に属する（違反の位置
+（要件 4.5）と直接突き合わせられる）。
+
+**参照先の行は頁ごとに読む**（要件 3.8、11 の目的）。7.4・8.3 の申し送り 2 が「コマンド 1 本」と
+書いたのはこの 1 本であり、**件数の上限を境界が強制する**（`GRID_REFERENCE_PAGE_LIMIT` = 200）ため、
+参照先が 1 万行でも一度に全部を読まない（頁の切り出しは `data-grid` の `view::reference` が唯一の源で
+あり、画面は `src/features/grid/referenceRows.ts` の頁を送る）。
 
 #### RendererPort と GlideAdapter
 
@@ -1489,7 +1512,7 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 | 編集の面の位置 | **表の面の中、数え上げの行と表の器の間**。位置を属性と文言で名乗る | 移植口に「セルの上へ DOM を重ねる」口は無い（`RendererSpec` に欄が無い）。覆われたセルを探させるより、どのセルを編集しているかを名乗る方が読める |
 | 初期値 | **開いた時点の `getCell` の写し**を `ready.editing` に入れる | 窓の到着で表が描き直されても、入力中の値が足元で変わらない（要件 3.5 の「値を捨てない」は、打っている最中に足元が変わることでも壊れる） |
 | 確定（要件 3.3、3.4、3.5） | `{ command: "SetCells", cells: [{ cell, text }] }` を `grid_apply_edit` へ。結果の `coercions` と `violations` / `violation_total` を**表の上の報告 1 つ**として出す（**変換前の値を落とさない**） | 打たれた文字を解釈するのは `schema-engine` であり、適合しない値も破棄されずに返る（`WriteOrigin::Edit` は決して拒否しない）。**型強制は起きた出来事**でありセルの状態ではないので、窓のセルの印にはしない（`RenderCell` に欄が無い） |
-| 値なし（要件 3.7） | **空の文字列をそのまま送る**（`edited_value` が `Null` へ写す）。画面は「値なし」という別の表現を作らない | 境界の宛先は「打たれた文字」である（`GridCellEdit.text`）。**`nullable` は境界に欄が無い**ので、値なしの道はつねに出す（下の「申し送り」） |
+| 値なし（要件 3.7） | **空の文字列をそのまま送る**（`edited_value` が `Null` へ写す）。画面は「値なし」という別の表現を作らない | 境界の宛先は「打ち込まれた文字」である（`GridCellEdit.text`）。**10.3 が `nullable` を境界へ足した**ので、値なしの道は**宣言どおり**に出る（値なしを許さない列では出ない。下の「申し送り」） |
 | 適用のあとの作り直し（要件 1.7） | `EditOutcome.affected` をそのまま `WindowCache.invalidate` へ渡す | 窓が取り直され、到着の通知が `RendererHandle.invalidate` を呼ぶ（8.1 の `onArrival` の結線）。`SetCells` は行数を変えないので `clear` は要らない（行数を変える命令は 8.6 / 8.7 / 8.9 であり、**8.6 が `clear(row_count)` を実装した**。下の「8.6 が確定させたもの」） |
 | 適用できなかったとき | **入力手段を開いたままにする**（適用されていないので、打たれている値を閉じて捨てる理由が無い）。理由は 8.1 の告知として出す | 画面内の失敗の扱いは 8.1 の表のままである（内容の領域を置き換えない） |
 | 要件 3.5 の残り | **バー・巡回・理由の文言は 8.4**。本タスクが出すのは「どこで何件か」まで（理由は `grid_find_violation` が組み立てる） | `GridEditOutcome.violations` は位置だけを運ぶ（理由の写像を持たない）。**`violation_total` はシート全体の数である** — 適応層が `GridSession::violation_total()` から写すためであり、再検証した列に閉じるのは位置の一覧のほうである（8.3 のレビューが実測。以前ここに「総数をシート全体へ広げるのは 8.4」と書いてあったのは誤りで、6.2 の時点で既にシート全体である） |
@@ -1502,16 +1525,16 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 起動し、a11y の木と `jxcel.log` を読む）である。**本タスクは起動の観測を行っていない**ので、
 この 3 つは未確認であり、残るリスクとして `research.md` に明示してある。
 
-**申し送り（境界に足りないもの。8.3 が実測した）**
+**申し送り（境界に足りないもの。8.3 が実測した。**1・2・3・5・6 は 10.3 が閉じた**）**
 
 | # | 何が足りないか | どの要件か | どこへ足すか |
 |---|---|---|---|
-| 1 | 選択肢の一覧（7.4 の申し送り 1） | 3.2 | 境界用の型（`crates/app-shell/src/ipc/grid.rs`）→ 生成物を再生成 |
-| 2 | 参照先のシートと行（7.4 の申し送り 2） | 3.8 | 欄 1 つと**コマンド 1 本** |
-| 3 | ユーザー定義型の識別子（7.4 の申し送り 3） | 10.1、10.4 | 境界用の型に `custom_type_id` |
-| 4 | **確定の文字の運び手**（7.4 の申し送り 4。入れ子は `SetNested` でなければ適合しない） | 5.5、10.3 | **設計の改訂**（登録に「どの命令へ載せるか」の札を足す）。**本タスクでは閉じていない** — 入れ子の列の編集はいま「違反として示される」経路に落ちる（値は保持される）。画面が列の札で経路を選ぶ形にすると 10.3 と衝突するので、そうしていない |
-| 5 | **値なしを許すか**（`ColumnDescriptor` に欄が無い。8.3 が実測） | 3.7 | 境界用の型に欄を 1 つ足し、生成し直す。それまでは `nullable: true` を渡す（道を閉じると、値なしを許す列で値なしへ戻せない） |
-| 6 | 入れ子の位置ごとの宣言（`members`。`ColumnDescriptor.path` は展開された列の位置であり、位置の一覧ではない） | 5.1、5.5 | 境界用の型、または位置の一覧を返す経路 |
+| 1 | 選択肢の一覧（7.4 の申し送り 1） | 3.2 | 境界用の型（`crates/app-shell/src/ipc/grid.rs`）→ 生成物を再生成。**閉じた**（10.3 が `choices` を足した） |
+| 2 | 参照先のシートと行（7.4 の申し送り 2） | 3.8 | 欄 1 つと**コマンド 1 本**。**閉じた**（10.3 が `reference_sheet` と `grid_reference_rows` を足した） |
+| 3 | ユーザー定義型の識別子（7.4 の申し送り 3） | 10.1、10.4 | 境界用の型に `custom_type_id`。**閉じた**（10.3） |
+| 4 | **確定の文字の運び手**（7.4 の申し送り 4。入れ子は `SetNested` でなければ適合しない） | 5.5、10.3 | **設計の改訂**（登録に「どの命令へ載せるか」の札を足す）。**8.5 が閉じた**（`CellEditorRegistration.carrier`。入れ子の面は `structure` を宣言し、画面は列の札で経路を選ばない） |
+| 5 | **値なしを許すか**（`ColumnDescriptor` に欄が無い。8.3 が実測） | 3.7 | 境界用の型に欄を 1 つ足し、生成し直す。**閉じた**（10.3 が `nullable` を足し、**宣言から写す** — つねに真を渡す経路は消えた） |
+| 6 | 入れ子の位置ごとの宣言（`members`。`ColumnDescriptor.path` は展開された列の位置であり、位置の一覧ではない） | 5.1、5.5 | 境界用の型、または位置の一覧を返す経路。**閉じた**（10.3 が `members` を足した。**展開していない列でも読める**） |
 
 ##### 8.4 が確定させたもの（違反の提示と巡回。`src/features/grid/violations.ts` / `violationBar.tsx`）
 
@@ -1572,7 +1595,7 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 |---|---|---|---|
 | 1 | **値の構造そのもの**（本設計は「構造そのものは詳細表示の要求時に JSON として別途取得する」と定めているが、6.1 の 6 本のコマンドに読む口が無い） | 5.5 | 境界に読み口を 1 本足す（`grid_nested_json` など。`crates/app-shell/src/ipc/grid.rs` の型と `src-tauri/src/commands/grid.rs` の適応）。**それまでは詳細表示の編集の初期値も空であり、確定は構造表現の打ち込みに限る**（値を捨てないための制限である） |
 | 2 | **展開の結果の列の構成**（8.5 の時点では、`grid_set_view` の応答は可視行数・隠れた行数・違反の総数だけで、導出後の構成を運ばなかった。`grid_open_sheet` はセッションを作り直す（`answer_open` が `GridSession::open` で新しいセッションを置く）ので、開き直しても展開後の構成は得られない） | 5.1、5.2、5.4 | **閉じた**（下の「申し送り 2 の修復」。`GridViewResponse.columns` に導出後の列の構成を足し、画面が `grid_set_view` の成功ごとに採用する） |
-| 3 | **内側の位置ごとの宣言**（7.4 の申し送り 6。`members`） | 5.1、5.5 | 境界用の型、または位置の一覧を返す経路。**それまでは入れ子の面が既定の文字の面へ落ちる**（位置ごとの面を出さない） |
+| 3 | **内側の位置ごとの宣言**（7.4 の申し送り 6。`members`） | 5.1、5.5 | 境界用の型（`ColumnDescriptor.members`）。**閉じた**（10.3 が `members` を境界へ足した。展開していない列でも読める） |
 
 **単体テストが観測しないもの（実物の起動で観測する。8.1〜8.4 と同じ規律）**: ① **展開・折りたたみ
 の操作が実際に押せること**（移植口の見出しではなく画面の 1 行に出る）、② **詳細表示の面が実際に

@@ -31,16 +31,19 @@
  * # 詳細表示が示せるもの・示せないもの（**ごまかさない**）
  *
  * 窓が運ぶ入れ子のセルは**要約**（「3項目」）と**違反している内側の位置**だけである
- * （design.md「Data Models / 窓の二進形式」。`transport` の `push_cell`）。値の構造そのものを
- * 読む経路は境界に無い（下の「申し送り」）。したがって詳細表示が示すのは:
+ * （design.md「Data Models / 窓の二進形式」。`transport` の `push_cell`）。**届かないのは
+ * 値の構造そのものである** — 宣言そのもの（内側の位置とその型）は境界が運ぶ
+ * （`ColumnDescriptor.members`。タスク 10.3 が閉じた 7.4 の申し送り 6）ので、**展開していない
+ * 列でも読める**。したがって詳細表示が示すのは:
  *
  * 1. **窓が運んだ要約**（要件 5.6 の「そのセルの値」）
  * 2. **違反している内側の位置**（要件 4.5。`WindowCache.nestedMarks`）
  * 3. **同一の型の並びの要素数の宣言**（要件 5.6。`ColumnDescriptor.element_count`）
- * 4. **構成が晒している内側の位置とその型**（要件 5.5 の材料。展開された列がそれである）
+ * 4. **宣言されている内側の位置とその型**（要件 5.5 の材料。`ColumnDescriptor.members` であり、
+ *    展開の状態に依らない）
  *
- * **4 が「構造の全体」に届かない**ことを画面も書く（[`NestedInspector`] の「宣言が読めません」）。
- * 値を空として見せると、利用者は値が空だと読む。
+ * **値の構造そのものは依然として届かない**ことを画面も書く（[`NestedInspector`] の
+ * 「値そのものの構造を読む経路が境界に無い」）。値を空として見せると、利用者は値が空だと読む。
  *
  * ## 申し送り（境界に足りないもの。8.5 が実測した）
  *
@@ -48,16 +51,18 @@
  * |---|---|---|---|
  * | 1 | **値の構造そのもの**（`design.md` は「構造そのものは詳細表示の要求時に JSON として別途取得する」と定めているが、6.1 の 6 本のコマンドに読む口が無い） | 5.5 | 境界に読み口を 1 本足す（`grid_nested_json` など）。**それまでは編集の初期値も空である**（値を捨てないために、確定は構造表現の打ち込みに限る） |
  * | 2 | **展開の結果の列の構成**（8.5 の時点では、`grid_set_view` の応答は可視行数・隠れた行数・違反の総数だけで、導出後の構成を運ばなかった。`grid_open_sheet` はセッションを作り直すので、開き直しても展開後の構成は得られない） | 5.1、5.2、5.4 | **閉じた** — `GridViewResponse` に導出後の列の構成を足し、画面（`./GridScreen` の `gridScreenViewSettled`）が `grid_set_view` の成功ごとに採用する。**展開を指定すると描かれる列が変わる**（内側の位置が列として並び、折りたたむと元の 1 本へ戻る）。本 module は採用された構成を受け取るだけで、変えるところは無い |
- * | 3 | **内側の位置ごとの宣言**（7.4 の申し送り 6。`members`） | 5.1、5.5 | 境界用の型、または位置の一覧を返す経路。**それまでは入れ子の面が既定の文字の面へ落ちる**（位置ごとの面を出さない） |
+ * | 3 | **内側の位置ごとの宣言**（7.4 の申し送り 6。`members`） | 5.1、5.5 | 境界用の型（`ColumnDescriptor.members`）。**閉じた** — 10.3 が `members` を境界へ足したので、入れ子の面は位置ごとの面を出せる（下の [`declaredInnerPositions`]） |
  */
 import type { ReactElement } from "react";
 
 import type {
   ColumnDescriptor,
+  ColumnMemberDescriptor,
   GridExpansionState,
   GridViewSpec,
 } from "../../ipc/bindings";
 import { APPEARANCE_VARS } from "../../shell/theme";
+import { constraintsOf } from "./columnConstraints";
 import { columnEditor } from "./editors";
 import type { EditCarrier } from "./editorRegistry";
 import type { CellPosition } from "./renderer/port";
@@ -232,19 +237,21 @@ export function innerPathText(segments: readonly NestedSegment[]): string {
 }
 
 /**
- * その文書の列の**内側の位置**（構成が晒しているもの）を、構成の順に集める（要件 5.5 の材料）。
+ * その列に**宣言されている内側の位置**を返す（要件 5.5 の材料。タスク 10.3 が材料を足した）。
  *
- * 構成の並びには別の文書の列の位置も混ざる（展開した列の隣には、折りたたまれた列が並ぶ）ので、
- * 同じ文書の列の位置のうち**位置が空でないもの**だけを集める。位置が空の 1 件（その列そのもの）は
- * 内側ではない。
+ * **展開の状態に依らない。** 以前は構成の並びから「同じ文書の列で位置が空でないもの」を集めて
+ * いたが、あれは**展開していない列では空になる**（内側の位置は展開したときだけ構成に現れる）ため、
+ * 折りたたまれた入れ子の詳細表示が内側の宣言を読めないと書いていた（7.4 の申し送り 6）。いまは
+ * 境界が**宣言そのもの**（`ColumnDescriptor.members`）を運ぶので、折りたたみのままでも内側の
+ * フィールドが名と型で読める。
+ *
+ * 位置はセル直下からの絶対の位置であり、深さは列として展開する上限で切られている
+ * （`data-grid` の `ColumnDeclaration::members` の doc）。
  */
 export function declaredInnerPositions(
-  columns: readonly ColumnDescriptor[],
-  documentColumn: number,
-): readonly ColumnDescriptor[] {
-  return columns.filter(
-    (column) => column.column === documentColumn && column.path.length > 0,
-  );
+  column: ColumnDescriptor | null,
+): readonly ColumnMemberDescriptor[] {
+  return column === null ? [] : column.members;
 }
 
 // ===========================================================================
@@ -345,8 +352,13 @@ export interface NestedInspectorProps {
   readonly position: CellPosition;
   /** その位置の列の記述（構成）。 */
   readonly column: ColumnDescriptor | null;
-  /** 同じ文書の列の内側の位置（構成が晒している範囲。要件 5.5 の材料）。 */
-  readonly declared: readonly ColumnDescriptor[];
+  /**
+   * その列に**宣言されている**内側の位置（要件 5.5 の材料）。
+   *
+   * 構成が晒している位置ではない — 折りたたまれた列でも宣言は読める（上の
+   * [`declaredInnerPositions`]）。
+   */
+  readonly declared: readonly ColumnMemberDescriptor[];
   /** 窓が運んだ要約（`WindowCache.getCell` の文字）。 */
   readonly summary: string;
   /** 窓がまだ届いていないか（**空文字と混同しない**。要件 1.4）。 */
@@ -441,23 +453,26 @@ export function NestedInspector({
       )}
 
       {/*
-        3. 構成が晒している内側の位置と、その型（要件 5.5 の材料）。**値の構造そのものでは
-        ない** — 読めないときはその事実を書く（空の一覧を出さない）。
+        3. 宣言されている内側の位置と、その型（要件 5.5 の材料）。**値の構造そのものではない**
+        — 宣言そのものは境界が運ぶ（`ColumnDescriptor.members`）ので、宣言が 1 つも無いときは
+        その事実を書く（空の一覧を出さない）。
       */}
       {declared.length === 0 ? (
         <p data-testid="jxcel-grid-nested-unreadable" style={MESSAGE_STYLE}>
-          内側のフィールドの宣言が読めません。値そのものの構造を読む経路が境界に無いため、ここに
-          示せるのは、展開された列として現れている位置と、下に並ぶ違反の位置だけです。
+          {column === null
+            ? "この列の宣言が読めません（構成に無い列です）。"
+            : "この列に内側のフィールドが宣言されていません。"}
+          {"値そのものの構造を読む経路が境界に無いため、ここに示せるのは、宣言されている内側の位置と、下に並ぶ違反の位置だけです。"}
         </p>
       ) : (
         <ul data-testid="jxcel-grid-nested-declared" style={LIST_STYLE}>
           {declared.map((inner) => (
             <li
-              key={`${String(inner.column)}:${inner.name}`}
+              key={inner.name}
               data-declared-path={inner.name}
-              data-declared-kind={inner.kind ?? "Any"}
+              data-declared-kind={inner.kind}
             >
-              {`${inner.name}: ${inner.kind ?? "Any"}`}
+              {`${inner.name}: ${inner.kind}`}
             </li>
           ))}
         </ul>
@@ -501,7 +516,9 @@ export function NestedInspector({
         <Editor
           key={editKey}
           initialText=""
-          constraints={{ kind: column?.kind ?? "Any", nullable: true }}
+          // **材料から組む**（値なしを許すか・選択肢・内側の宣言。要件 3.2、3.7、5.5、10.4）。
+          // 参照先の行は載らない — あれは頁ごとに列の編集の面が読む（本表示は列を選ばない）。
+          constraints={constraintsOf(column)}
           commit={(text: string) => {
             onCommit(text, resolved.carrier);
           }}
