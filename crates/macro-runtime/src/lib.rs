@@ -47,6 +47,7 @@
 //! 下位の各層の公開項目を根へ**再輸出**する（`document-format` / `schema-engine` と同じ形）。
 
 pub mod engine;
+pub mod host;
 pub mod source;
 pub mod surface;
 
@@ -55,6 +56,7 @@ pub use engine::outcome::{
     ChangeSummary, FailureKind, Frame, LimitKind, Limits, MacroFailure, OutputLevel, OutputLine,
     RunOutcome, RunRequest, WindowLabel,
 };
+pub use host::value::{to_js, JsScalar, JsView, Mapping};
 pub use source::capability::{
     parse as parse_capabilities, Capability, CapabilitySet, DeclarationError,
 };
