@@ -54,14 +54,15 @@ fn window(label: &str) -> WindowLabel {
 }
 
 /// `SessionState::Open` の中身を取り出す（他の腕はテストの失敗である）。
-fn opened(state: SessionState) -> (String, Origin, bool, Vec<SheetSummary>) {
+fn opened(state: SessionState) -> (String, Origin, bool, u64, Vec<SheetSummary>) {
     match state {
         SessionState::Open {
             name,
             origin,
             unsaved,
+            revision,
             sheets,
-        } => (name, origin, unsaved, sheets),
+        } => (name, origin, unsaved, revision, sheets),
         other => panic!("保持している状態を期待したが {other:?} だった"),
     }
 }
@@ -91,7 +92,7 @@ fn resolve_reports_an_open_state_and_read_lends_the_document() {
     let main = window("main");
     sessions.resolve(&main, Some(&path)).expect("読み込める");
 
-    let (name, origin, unsaved, sheets) = opened(sessions.state(&main));
+    let (name, origin, unsaved, _revision, sheets) = opened(sessions.state(&main));
     assert_eq!(name, "book.jxcel", "名前はファイル名だけである");
     assert_eq!(origin, Origin::File(path.clone()));
     assert!(!unsaved, "読み込みの完了で未保存でない状態になる");
@@ -133,7 +134,7 @@ fn edit_records_revision_and_save_writes_the_same_bytes_as_a_direct_write() {
     assert_eq!(edited.revision, 2, "解決の 1 に、適用の 1 が積まれる");
     assert!(edited.unsaved, "適用のあとは未保存である");
 
-    let (_, _, unsaved, _) = opened(sessions.state(&main));
+    let (_, _, unsaved, _, _) = opened(sessions.state(&main));
     assert!(unsaved);
     assert_eq!(sessions.may_close(&main), CloseAnswer::Deny);
 
@@ -159,7 +160,7 @@ fn edit_records_revision_and_save_writes_the_same_bytes_as_a_direct_write() {
     );
 
     // 保存の成功で未保存が落ち、閉じてよいへ変わる。
-    let (_, _, unsaved, _) = opened(sessions.state(&main));
+    let (_, _, unsaved, _, _) = opened(sessions.state(&main));
     assert!(!unsaved);
     assert_eq!(sessions.may_close(&main), CloseAnswer::Allow);
 
@@ -184,7 +185,7 @@ fn attach_replaces_the_document_and_is_refused_while_unsaved() {
 
     // 別の位置を渡すと差し替わる（未保存でないため受け付ける）。
     sessions.attach(&main, &second).expect("引き渡せる");
-    let (name, origin, unsaved, sheets) = opened(sessions.state(&main));
+    let (name, origin, unsaved, _revision, sheets) = opened(sessions.state(&main));
     assert_eq!(name, "second.jxcel");
     assert_eq!(origin, Origin::File(second.clone()));
     assert!(!unsaved);
@@ -200,7 +201,7 @@ fn attach_replaces_the_document_and_is_refused_while_unsaved() {
         sessions.attach(&main, &first),
         Err(SessionError::UnsavedChanges)
     ));
-    let (name, origin, _, _) = opened(sessions.state(&main));
+    let (name, origin, _, _, _) = opened(sessions.state(&main));
     assert_eq!(name, "second.jxcel");
     assert_eq!(origin, Origin::File(second));
 }
@@ -215,7 +216,7 @@ fn create_makes_an_empty_document_and_discard_clears_the_unsaved_mark() {
     let main = window("main");
 
     sessions.create(&main).expect("新規作成できる");
-    let (name, origin, unsaved, sheets) = opened(sessions.state(&main));
+    let (name, origin, unsaved, _revision, sheets) = opened(sessions.state(&main));
     assert_eq!(name, "", "新規の文書は出所を持たない");
     assert_eq!(origin, Origin::New);
     assert!(!unsaved);
@@ -244,7 +245,7 @@ fn create_makes_an_empty_document_and_discard_clears_the_unsaved_mark() {
     // 破棄の印で未保存が落ち、閉じてよいへ変わり、以後の新規作成も受け付ける。
     sessions.discard(&main).expect("破棄の印を落とせる");
     assert_eq!(sessions.may_close(&main), CloseAnswer::Allow);
-    let (_, _, unsaved, _) = opened(sessions.state(&main));
+    let (_, _, unsaved, _, _) = opened(sessions.state(&main));
     assert!(!unsaved);
     sessions.create(&main).expect("再度作れる");
 
@@ -255,7 +256,7 @@ fn create_makes_an_empty_document_and_discard_clears_the_unsaved_mark() {
         panic!("選ばれた位置へ保存に成功するはず");
     };
     assert_eq!(location, chosen);
-    let (_, origin, _, _) = opened(sessions.state(&main));
+    let (_, origin, _, _, _) = opened(sessions.state(&main));
     assert_eq!(origin, Origin::File(chosen.clone()));
     let SaveReport::Saved { location } = sessions.save(&main).expect("保存できる") else {
         panic!("出所があるため保存に成功するはず");
@@ -304,7 +305,7 @@ fn state_may_close_and_forget_leave_an_unresolved_window_absent() {
     let path = write_sample(&scratch, "gone.jxcel", 2, 2);
     let open = window("open");
     sessions.resolve(&open, Some(&path)).expect("読み込める");
-    let (name, _, _, _) = opened(sessions.state(&open));
+    let (name, _, _, _, _) = opened(sessions.state(&open));
     assert_eq!(name, "gone.jxcel");
     sessions.forget(&open);
     assert_eq!(sessions.state(&open), SessionState::Absent);

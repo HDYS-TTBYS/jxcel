@@ -152,7 +152,14 @@ function sheetOf(id: string, name: string, columns: number, rows: number): Docum
 function openDocument(sheets: readonly DocumentSheet[]): DocumentStateResponse {
   return {
     context: CONTEXT,
-    status: { state: "Open", name: "標本", origin: "new", unsaved: false, sheets: [...sheets] },
+    status: {
+      state: "Open",
+      name: "標本",
+      origin: "new",
+      unsaved: false,
+      revision: 1,
+      sheets: [...sheets],
+    },
   };
 }
 

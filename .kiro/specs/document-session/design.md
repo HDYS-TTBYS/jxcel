@@ -33,6 +33,10 @@
 - **ウィンドウとドキュメントの対応（セッションの表）**: 生成・保持・破棄、および「どのウィンドウに何が開いているか」の唯一の真実
 - **保持する `Document` のメモリ上の所有**: 1 実体を保持し、読み取りと変更を閉包で貸す唯一の口
 - **未保存の追跡**と、**変更の版**（下流が外部経路の変更を検出する材料）
+  - **版は状態の写しからも読める**（境界の `DocumentSummary.revision: u32`。適用と差し替えのたびに
+    1 進む）。適用の戻り値（`Edited::revision`）は呼び出した側しか読めないため、**問い合わせの
+    経路しか持たない下流**（`data-grid`。要件 1.7 の残り）のために写しへ載せてある（2026-09-18 に
+    実装。境界は 64 ビット整数を運ばないため `u32` へ飽和させて写す）
 - **保存の実行**: 時機・出所・保存先の選択の要求。形式とバイト列は委譲する
 - **閉じてよいかの答え**と、未保存のときの**選択肢の提示**
 - **新規ドキュメントの用意**（行も列も無いシート 1 つ、出所なし）
@@ -70,6 +74,7 @@
 | **`window_document_state` の画面からの切り離し**（画面の判定を `document_state` へ移す。app-shell のコマンドは残す） | app-shell 要件 2.1 / 2.6 と、その記述（`src/shell/Layout.tsx` の理由付け・`src/features/empty/EmptyWindowScreen.tsx` の doc・app-shell の tasks 9.6） |
 | **`document-format` の 3 ファイルを共有する実装順**（本スペックが `set_cells` を先に入れ、`data-grid` が後から行の削除と位置指定の挿入を足す） | `data-grid` の群 1（実装の後発側が再輸出と決定性テストを再確認する） |
 | **保存の時機と経路** | `version-control`（保存に相乗りする） |
+| **境界の `document_state` が変更の版を運ぶ**（`DocumentSummary.revision`。2026-09-18 に追加） | `data-grid`（要件 1.7 の残り「同じシートのまま内容だけが外の経路で変わった」を検出する材料。`data-grid/design.md` の申し送り。**相手側の追随は未実施** — 版は運ばれるが、下流の検出はまだ実装されていない） |
 | **コマンド名・権限・生成物** | `scripts/check-command-acl.sh`、`src/ipc/bindings.ts`、`src-tauri/permissions/app.toml`、既存コマンドの利用側 |
 | **境界の数の門を `number` 全面禁止から `bigint` 禁止へ弱めた**（シートの件数を `u32` で運ぶため。`tasks.md` 3.1 の「境界の数の門の変更」） | `ipc-contract.md` の 64 ビット整数禁止の規約（**文言は不変だが、門が止める範囲が狭くなった**）と、境界へ数値を出す下流スペック（`data-grid` / `version-control` 等。**64 ビットを出さない規約を自分で守る必要がある**） |
 | **アプリ全体の終了の扱い** | `app-shell`（終了の拒否可能性を設計する場合。本スペックは関与しない） |
@@ -169,6 +174,8 @@ crates/document-session/            # 新設。Tauri 非依存のドメインコ
 ├── Cargo.toml                      # 依存は document-format と app-shell のみ。[lib] bench = false
 ├── benches/large_session.rs        # 開く・一括の適用・保存の計測（予算のゲート対象）
 ├── tests/common/mod.rs             # テストとベンチが共有する標本の生成器（10 万行 × 30 列）
+├── tests/sample.rs                 # 標本の生成器そのものの検査（タスク 1.4）
+├── tests/public_api.rs             # 根の名前だけを使う結線テスト（タスク 2.5）
 └── src/
     ├── lib.rs                      # 鎖の最右。再輸出と DocumentSessionsApi / DocumentSessions
     ├── error.rs                    # SessionError / SaveReport（判別可能・文言なし）

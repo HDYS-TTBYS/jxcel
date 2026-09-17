@@ -488,6 +488,7 @@ impl Slot {
                 name: document_name(origin),
                 origin: origin.clone(),
                 unsaved: self.unsaved.load(Ordering::SeqCst),
+                revision: self.revision.load(Ordering::SeqCst),
                 sheets: document.sheets().iter().map(sheet_summary).collect(),
             },
         }
@@ -771,11 +772,14 @@ mod tests {
             name,
             origin,
             unsaved,
+            revision,
             sheets,
         } = slot.state()
         else {
             panic!("引き渡しの後に保持していない");
         };
+        // **文書が入れ替わる操作でも版は 1 進む**（design.md「Slot」の不変条件）。
+        assert_eq!(2, revision, "差し替えで版が進んでいない");
         assert_eq!("chosen.jxcel", name, "出所の位置が更新されていない");
         assert_eq!(
             Origin::File(chosen.clone()),
@@ -1031,11 +1035,13 @@ mod tests {
             name,
             origin,
             unsaved,
+            revision,
             sheets,
         } = slot.state()
         else {
             panic!("新規作成でドキュメントを保持していない");
         };
+        assert_eq!(1, revision, "新規作成で版が進んでいない");
         assert_eq!("", name, "新規の名前はファイル名を持たない");
         assert_eq!(Origin::New, origin, "出所が新規でない");
         assert!(!unsaved, "新規作成は未保存でない状態から始まる");

@@ -143,7 +143,10 @@ pub(crate) fn emit_session_changed(window: &WebviewWindow) {
         "セッションの状態変化を通知した: ウィンドウ = {} / イベント = {DOCUMENT_SESSION_CHANGED_EVENT}",
         window.label(),
     );
-    if let Err(error) = window.emit(DOCUMENT_SESSION_CHANGED_EVENT, ()) {
+    // **対象のウィンドウへだけ送る。**`emit` は全 webview へ配るため、無関係のウィンドウでも
+    // 購読が発火して `document_state` を余分に問い合わせてしまう（design.md「セッション状態の
+    // 通知」は「対象ウィンドウへ 1 回」と定める。他のイベントも `emit_to` を使う）。
+    if let Err(error) = window.emit_to(window.label(), DOCUMENT_SESSION_CHANGED_EVENT, ()) {
         log::warn!(
             "セッションの状態変化を送れなかった（ウィンドウ = {}）: {error}",
             window.label(),
@@ -175,6 +178,15 @@ fn count_to_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+/// 版（コアは `u64`）を境界の `u32` へ写す。**飽和して止まる。**
+///
+/// 境界は 64 ビット整数を運ばない（`ipc-contract.md`）。**飽和しても等価性の判定は壊れない** —
+/// 下流が使うのは「値が変わるたびに増える」という性質だけであり、`u32::MAX` に達するのは
+/// 1 つの文書へ 40 億回の変更を加えた場合である。
+fn revision_to_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 /// シートの要約 1 枚を境界の形へ写す。**識別子は文字列、件数は [`u32`]。**
 ///
 /// `document-format` の `SheetId` / `usize` をそのまま出さない — 境界の型はドメインの型に
@@ -201,11 +213,13 @@ fn to_boundary(state: SessionState, label: &WindowLabel) -> DocumentSessionStatu
             name,
             origin,
             unsaved,
+            revision,
             sheets,
         } => DocumentSessionStatus::Open(DocumentSummary {
             name,
             origin: origin_to_boundary(origin),
             unsaved,
+            revision: revision_to_u32(revision),
             sheets: sheets.into_iter().map(sheet_to_boundary).collect(),
         }),
         SessionState::Unavailable { reason } => DocumentSessionStatus::Unavailable {
@@ -1410,6 +1424,7 @@ mod tests {
             name: "名前.jxcel".to_owned(),
             origin: DocumentOrigin::File,
             unsaved: false,
+            revision: 7,
             sheets: Vec::new(),
         }
     }
@@ -1437,5 +1452,9 @@ mod tests {
         assert_eq!("シート1", summary.sheets[0].name);
         assert_eq!(0, summary.sheets[0].rows);
         assert_eq!(0, summary.sheets[0].columns);
+        // **版も境界へ写る。**下流（`data-grid`）は「同じシートのまま内容だけが外の経路で
+        // 変わった」ことをこの値の変化で見る（`data-grid` の要件 1.7 の残りを閉じる口）。
+        // 新規作成は文書が入れ替わる操作なので版は 1 である。
+        assert_eq!(1, summary.revision, "境界へ版が写っていない");
     }
 }

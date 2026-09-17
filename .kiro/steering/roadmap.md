@@ -85,6 +85,14 @@ JSON をファイル実体とする、データベースとして運用可能な
 
 **2026-09-17 の更新（`data-grid` の実装完了と `macro-runtime` の仕様化を受けて）**: `data-grid` が完了したことで**依存が満たされているスペックは 5 本**になった（`schema-editor` / `macro-runtime` / `version-control` / `export-templates` / `form-builder`）。**`macro-runtime` はその 5 本のうち唯一「仕様化済み」であり、実装を開始できる**（`custom-types` / `macro-stdlib` / `macro-editor-lsp` / `formula-engine` の 4 本はここを待っている）。**Prototype-First Risks の未着手は #4（docx テンプレート差し込み = `export-templates`）だけ**であり、次に着手するスペックを選ぶときは #4 を抱える `export-templates` を、着手の前にプロトタイプで確かめる対象として扱うこと。
 
+**2026-09-18 の更新（`data-grid` の CI 緑と `document-session` の検証）**: `data-grid` の 3 OS の
+CI が緑になった（段と検査器の側の直しのみ。製品の経路は不変）。あわせて `document-session` の
+フィーチャー横断の検証を行い、**2 件を修復**した — (1) 状態変化の通知が全ウィンドウへ
+ブロードキャストされていた（設計は「対象ウィンドウへ 1 回」。`emit_to` へ直した）、(2) 設計が
+所有を宣言していた**変更の版が境界から読めなかった**（`DocumentSummary.revision: u32` を足し、
+`data-grid` の要件 1.7 の残りを閉じる口にした）。**`data-grid` 側の追随（版で「内容だけの
+変化」を検出する）と、列幅・列の移動の実機観測は残件である。**
+
 **MVP**: Wave 1 + Wave 2 + document-session + data-grid + schema-editor。**2026-09-17 時点で残るのは `schema-editor` の 1 本**である（Wave 1・2 は実装完了済み、`document-session` は 2026-09-14、`data-grid` は 2026-09-17 に完了）。（当初は 2 本としていたが、MVP の文言にある「**開いて**…**保存できる**」を担う持ち主が存在しないことが `data-grid` の設計中に判明したため 1 本増え、いま `document-session` の完了で元へ戻った。）この時点で「開いて・型を定義して・編集して・保存できる型付きスプレッドシート」が成立する。
 
 ## Prototype-First Risks

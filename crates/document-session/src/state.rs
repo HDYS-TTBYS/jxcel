@@ -74,6 +74,12 @@ pub enum SessionState {
         origin: Origin,
         /// 未保存の変更があるか。
         unsaved: bool,
+        /// **変更の版**（適用と差し替えのたびに 1 進む）。
+        ///
+        /// **適用の戻り値だけでなく、状態の写しからも読める**ようにしてある — 問い合わせの
+        /// 経路しか持たない下流（`data-grid`）が「同じシートのまま内容だけが外の経路で
+        /// 変わった」ことを検出する材料である（design.md「Boundary Commitments」）。
+        revision: u64,
         /// シートの要約。
         sheets: Vec<SheetSummary>,
     },
@@ -136,6 +142,7 @@ mod tests {
                 name: "doc.jxcel".into(),
                 origin: Origin::File(PathBuf::from("/tmp/doc.jxcel")),
                 unsaved: true,
+                revision: 3,
                 sheets: vec![sheet()],
             },
             SessionState::Unavailable {
@@ -169,9 +176,11 @@ mod tests {
                 name,
                 origin,
                 unsaved,
+                revision,
                 sheets,
             } => {
                 assert_eq!(name, "doc.jxcel");
+                assert_eq!(*revision, 3);
                 assert_eq!(origin, &Origin::File(PathBuf::from("/tmp/doc.jxcel")));
                 assert!(unsaved);
                 assert_eq!(sheets.len(), 1);

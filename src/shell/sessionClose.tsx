@@ -3,7 +3,7 @@
  * 閉じるのをやめる）を、シェルのクロームに提示する。
  *
  * 所有: `SessionClosePrompt`（design.md「Components and Interfaces → Frontend Layer」の
- * `src/shell/SessionClosePrompt.tsx`、「System Flows → 終了前の問い」のシーケンス図）。
+ * `src/shell/sessionClose.tsx`、「System Flows → 終了前の問い」のシーケンス図）。
  * 要件: 6.1（拒否と理由）, 6.2（3 択の提示）, 6.3（保存の成功でのみ閉じ直す）, 6.4（失敗・
  * 取り消しでは閉じずに理由を示す）, 6.5（破棄の印）, 6.6（やめる）, 6.7（答え直す）。タスク 4.2。
  *

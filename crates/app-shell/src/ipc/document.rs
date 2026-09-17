@@ -71,6 +71,14 @@ pub struct DocumentSummary {
     pub origin: DocumentOrigin,
     /// 未保存の変更があるかどうか（要件 4.3）。
     pub unsaved: bool,
+    /// **変更の版**（適用と差し替えのたびに 1 進む。**飽和して `u32::MAX` で止まる**）。
+    ///
+    /// 下流（`data-grid`）が「同じシートのまま内容だけが外の経路で変わった」ことを検出する
+    /// 材料である（`data-grid` の要件 1.7 の残りを閉じるための口。`data-grid/design.md` の
+    /// 「申し送り（境界に足りないもの）」がこれを求めていた）。境界は 64 ビット整数を運ばない
+    /// （`ipc-contract.md`）ため `u32` で写す — **飽和しても等価性の判定は壊れない**
+    /// （値が変わるたびに増えるという性質だけを使う）。
+    pub revision: u32,
     /// 保持しているシートの一覧（要件 1.7）。
     pub sheets: Vec<DocumentSheet>,
 }
