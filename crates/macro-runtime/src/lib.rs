@@ -48,6 +48,7 @@
 
 pub mod engine;
 pub mod source;
+pub mod surface;
 
 pub use engine::actor::{ActorError, MacroActor};
 pub use engine::outcome::{
@@ -58,3 +59,7 @@ pub use source::capability::{
     parse as parse_capabilities, Capability, CapabilitySet, DeclarationError,
 };
 pub use source::record::{MacroKind, MacroName, MacroRecord};
+pub use surface::declaration::{
+    ApiCapability, ApiDecl, ParamDecl, RegistrationMismatch, HOST_APIS, HOST_NAMESPACE,
+};
+pub use surface::gate::{check_call, CallRefusal};
