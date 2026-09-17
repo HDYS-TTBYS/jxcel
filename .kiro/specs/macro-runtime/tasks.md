@@ -40,7 +40,7 @@
   - _Depends: 1.3_
   - _Requirements: 2.1, 2.2_
 
-- [ ] 1.5 時間とメモリの上限・打ち切り・復帰
+- [x] 1.5 時間とメモリの上限・打ち切り・復帰
   - 上限の**型**は 1.3 が持つ。ここが持つのは適用と打ち切りと復帰である
   - 時間の上限はタイマースレッドが `thread_safe_handle().terminate_execution()` を呼ぶ。メモリの上限は `create_params` の `heap_limits` + `add_near_heap_limit_callback` の中で同じ終了経路へ合流させる（**callback を付け忘れると V8 がプロセスを abort させる**）
   - **種類（時間 / メモリ）を記録**し、1.3 の `Aborted` に載せる。次の実行の前に `cancel_terminate_execution()` を呼ぶ

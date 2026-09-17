@@ -1,11 +1,12 @@
-//! 実行基盤の actor（専用スレッド・直列化・実行ごとの isolate。tasks.md 1.4。要件 2.1, 2.2）。
+//! 実行基盤の actor（専用スレッド・直列化・実行ごとの isolate・上限。tasks.md 1.4 / 1.5。
+//! 要件 2.1, 2.2, 6.1–6.4）。
 //!
 //! V8 の isolate は `Send` ではなく、**current-thread のランタイムを要求する**。したがって
 //! isolate は**専用の OS スレッドが所有**し、多スレッド側からは **mpsc + oneshot** 越しに
 //! 要求を送る（`tech.md`「Known Risks」1 の 2026-09-17 のスパイクで確定した形。動く実例が
 //! `target/spike-macro-runtime/` にある）。**isolate はこのスレッドを離れない**。
 //!
-//! # この層が持つもの（tasks.md 1.4）
+//! # この層が持つもの（tasks.md 1.4 / 1.5）
 //!
 //! - 専用スレッドが current-thread の tokio ランタイムを 1 つ回し、その上で
 //!   **実行ごとに `JsRuntime` を作って所有スレッドの上で落とす**（design.md 決定 1）。
@@ -18,6 +19,10 @@
 //!   イベントループが回り切った後でも返らなかった）
 //! - 戻り値と 3 値（[`RunOutcome::Ran`] / [`RunOutcome::Failed`] /
 //!   [`RunOutcome::Aborted`]）への写像を 1.3 の型で返す
+//! - **時間とメモリの上限で打ち切り**、どちらの上限だったかを [`RunOutcome::Aborted`] の
+//!   `limit` に載せる（タスク 1.5。適用・種類の記録・復帰は [`super::limits`] が持つ）。
+//!   実行の前後に `cancel_terminate_execution()` を呼び、打ち切りの後も**同じ actor で次の
+//!   実行ができる**
 //! - 後始末（[`MacroActor::shutdown`]）。実行ごとに isolate を作り直すため、**連続する
 //!   2 回の実行の間でグローバルは共有されない**（下の「観測」）
 //!
@@ -32,9 +37,6 @@
 //!   op の panic を捕捉して次の実行へ復帰するのも、op が入る 3.2 の範囲である（いま panic
 //!   すればスレッドが畳まれ、以後の要求は [`ActorError::Stopped`] として断られる）
 //! - **変更の集約**（タスク 2.3）: いまは常に 0 件（`ChangeSummary::default()`）
-//! - **上限の適用と打ち切り**（タスク 1.5）: `Limits` は要求に載っているが、タイマーと
-//!   `heap_limits` は 1.5 が入れる。したがって **[`RunOutcome::Aborted`] を作る腕は無い**
-//!   （値は 1.3 の型にあり、1.5 がそこへ合流する）
 //!
 //! # 呼び出しの形（同期である理由と、その代償）
 //!
@@ -44,7 +46,7 @@
 //! 中から直接呼んではならない** — tokio はその場で panic する。アダプタは `spawn_blocking`
 //! の上で呼ぶ（design.md「Implementation Notes」の「`run` を非同期の腕で呼ぶ」）。
 //!
-//! # 観測（tasks.md 1.4 の受け入れ。テストとして固定してある）
+//! # 観測（tasks.md 1.4 / 1.5 の受け入れ。テストとして固定してある）
 //!
 //! | 観測 | テスト |
 //! |------|--------|
@@ -53,6 +55,9 @@
 //! | 実行中の 2 つ目の要求が「実行中である」として断られる | `tests::実行中の二つ目の要求は実行中として断られる` |
 //! | 連続 2 回の実行でグローバルが共有されない | `tests::連続する二回の実行でグローバルは共有されない` |
 //! | 停止した actor がスレッドを畳み、以後の要求を断る | `tests::停止したactorはスレッドを畳み以降の要求を断る` |
+//! | 終わらない繰り返しが**時間の上限**で打ち切られ、次の実行が成功する | `tests::時間の上限で打ち切られ次の実行が成功する` |
+//! | 大量確保が**メモリの上限**で打ち切られ、次の実行が成功する | `tests::メモリの上限で打ち切られ次の実行が成功する` |
+//! | メモリの上限が 0 のときは V8 の既定で走る | `tests::メモリの上限が零のときはv8の既定で走る` |
 
 use std::fmt;
 use std::io;
@@ -65,6 +70,7 @@ use deno_core::error::{CoreError, CoreErrorKind, JsError};
 use deno_core::{v8, JsRuntime, RuntimeOptions};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::engine::limits;
 use crate::engine::outcome::{
     ChangeSummary, FailureKind, Frame, MacroFailure, RunOutcome, RunRequest,
 };
@@ -302,8 +308,13 @@ fn serve(mut inbox: mpsc::Receiver<Request>, running: Arc<AtomicBool>) {
 /// （利用者から見た 1 回の実行の所要。要件 11.3）。
 async fn run_once(request: &RunRequest) -> RunOutcome {
     let started = Instant::now();
+    // メモリの上限は isolate を作るときに V8 へ渡す（タスク 1.5。`limits`）。
     // `JsRuntime::new` ではなく `try_new` を使う（isolate を作れないときに panic しない）。
-    let mut js = match JsRuntime::try_new(RuntimeOptions::default()) {
+    let options = RuntimeOptions {
+        create_params: Some(limits::create_params(request.limits)),
+        ..Default::default()
+    };
+    let mut js = match JsRuntime::try_new(options) {
         Ok(js) => js,
         Err(error) => {
             return RunOutcome::Failed {
@@ -315,19 +326,49 @@ async fn run_once(request: &RunRequest) -> RunOutcome {
             }
         }
     };
+    // 実行の前に打ち切りの印を下ろす（前の実行の打ち切りを持ち越さない。タスク 1.5）。
+    limits::cancel_terminate(&mut js);
+    // 時間のタイマーとメモリの callback を張る。**どちらの打ち切りも同じ終了経路**を通る。
+    let watch = match limits::AbortWatch::arm(&mut js, request.limits) {
+        Ok(watch) => watch,
+        Err(error) => {
+            return RunOutcome::Failed {
+                failure: MacroFailure::new(
+                    FailureKind::Execution,
+                    format!("時間の上限のタイマーを起こせない: {error}"),
+                    Vec::new(),
+                ),
+            }
+        }
+    };
     let evaluated = evaluate(&mut js, request).await;
+    // 実行の終わりをタイマーへ伝えて畳む（期限まで待たない）。打ち切りの種類をここで読む。
+    let limit = watch.disarm();
+    // **打ち切りの印を下ろしてから** isolate を落とす（打ち切りの状態のまま片付けない）。
+    limits::cancel_terminate(&mut js);
     // **isolate は所有スレッドの上で落とす**（V8 の片付けが境界を越えない）。
     drop(js);
     let elapsed_ms = elapsed_ms(started);
-    match evaluated {
-        Ok(value) => RunOutcome::Ran {
+    match (limit, evaluated) {
+        // 打ち切りが実行を止めた（時間 / メモリ。要件 6.1, 6.2）。理由とフレームは V8 が
+        // 打ち切りの例外として返したものをそのまま運ぶ。**実測**: どちらの上限でも
+        // `Error: execution terminated` であり、フレームは無い（V8 の打ち切りは位置を
+        // 持たない）。種類は `limit` が運ぶので、提示（4.4）はそれを使う。
+        (Some(limit), Err(failure)) => RunOutcome::Aborted {
+            limit,
+            elapsed_ms,
+            failure,
+        },
+        // 上限に間に合わなかった（実行は戻り値を返した）。**成功を上書きしない** —
+        // 上限と実行の終わりが競合しただけで、打ち切られたものは無い。
+        (_, Ok(value)) => RunOutcome::Ran {
             value,
             // `console` の取り込みはタスク 3.2、変更の集約はタスク 2.3 である。
             output: Vec::new(),
             changes: ChangeSummary::default(),
             elapsed_ms,
         },
-        Err(failure) => RunOutcome::Failed { failure },
+        (None, Err(failure)) => RunOutcome::Failed { failure },
     }
 }
 
@@ -463,16 +504,22 @@ fn elapsed_ms(started: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::outcome::Limits;
+    use crate::engine::outcome::{LimitKind, Limits};
     use crate::source::record::{MacroKind, MacroRecord};
     use crate::WindowLabel;
     use std::time::Duration;
 
-    /// JavaScript のマクロ 1 件の実行の要求。
+    /// JavaScript のマクロ 1 件の実行の要求（上限は既定）。
     fn request(name: &str, source: &str) -> RunRequest {
+        with_limits(name, source, Limits::default())
+    }
+
+    /// 上限を指定した実行の要求（打ち切りの検査は**既定の 30 秒を待たない**ために上限を
+    /// 短くする。既定値そのものは 1.3 の型のテストが固定している）。
+    fn with_limits(name: &str, source: &str, limits: Limits) -> RunRequest {
         RunRequest::new(
             MacroRecord::new(MacroName::from(name), MacroKind::JavaScript, source),
-            Limits::default(),
+            limits,
             WindowLabel::from("main"),
         )
     }
@@ -648,6 +695,103 @@ mod tests {
             }
             other => panic!("失敗として返るはずである: {other:?}"),
         }
+
+        actor.shutdown().expect("スレッドを畳める");
+    }
+
+    /// 時間の上限で打ち切られ、**その後に同じ actor で次の実行が成功する**（要件 6.1, 6.4。
+    /// tasks.md 1.5 の観測）。
+    #[test]
+    fn 時間の上限で打ち切られ次の実行が成功する() {
+        let actor = MacroActor::spawn().expect("actor を起こせる");
+        // 終わらない繰り返しを短い上限（150 ms）で走らせる。
+        let outcome = actor
+            .run(with_limits(
+                "終わらない繰り返し",
+                "for (;;) {}",
+                Limits::new(Duration::from_millis(150), Limits::DEFAULT_MEMORY_BYTES),
+            ))
+            .expect("actor は要求を断らない");
+
+        match outcome {
+            RunOutcome::Aborted {
+                limit, elapsed_ms, ..
+            } => {
+                assert_eq!(limit, LimitKind::Time, "時間の上限として種類が載る");
+                assert!(
+                    elapsed_ms >= 100,
+                    "期限まで走ってから打ち切られる（即座の失敗ではない）: {elapsed_ms} ms"
+                );
+            }
+            other => panic!("時間の上限で打ち切られるはずである: {other:?}"),
+        }
+
+        // 復帰: 打ち切りの後始末（isolate の破棄と印の復帰）が済んでおり、**前の実行の
+        // タイマーが次の実行を撃たない**（撃てば、これも打ち切りとして返る）。
+        let again = actor
+            .run(request("生き返る", "'生き返った'"))
+            .expect("実行できる");
+        match &again {
+            RunOutcome::Ran {
+                value, elapsed_ms, ..
+            } => {
+                assert_eq!(value, r#""生き返った""#);
+                // 実行が先に終わったらタイマーを待たない（既定 30 秒の上限で待たされない）。
+                assert!(
+                    *elapsed_ms < 5_000,
+                    "打ち切りの後もタイマーを待たない: {elapsed_ms} ms"
+                );
+            }
+            other => panic!("次の実行は成功するはずである: {other:?}"),
+        }
+
+        actor.shutdown().expect("スレッドを畳める");
+    }
+
+    /// メモリの上限で打ち切られ、**その後に同じ actor で次の実行が成功する**（要件 6.2, 6.4）。
+    #[test]
+    fn メモリの上限で打ち切られ次の実行が成功する() {
+        let actor = MacroActor::spawn().expect("actor を起こせる");
+        // 大量に確保する（`deno_core` の `test_heap_limits` と同じ形のソース）。時間の上限は
+        // 余裕を持たせる — メモリが先に来ることを見るためであり、既定の 30 秒は待たない。
+        let outcome = actor
+            .run(with_limits(
+                "大量に確保する",
+                r#"let s = ""; while (true) { s += "Hello"; }"#,
+                Limits::new(Duration::from_secs(10), 8 * 1024 * 1024),
+            ))
+            .expect("actor は要求を断らない");
+
+        match outcome {
+            RunOutcome::Aborted { limit, .. } => {
+                assert_eq!(limit, LimitKind::Memory, "メモリの上限として種類が載る");
+            }
+            other => panic!("メモリの上限で打ち切られるはずである: {other:?}"),
+        }
+
+        // 復帰: メモリを大量に使った実行の後でも、次の実行が通る。
+        let again = actor
+            .run(request("生き返る", "'生き返った'"))
+            .expect("実行できる");
+        assert_eq!(ran_value(&again), r#""生き返った""#);
+
+        actor.shutdown().expect("スレッドを畳める");
+    }
+
+    /// メモリの上限が 0 のときは V8 の既定として扱う（`heap_limits(0, 0)`）。**0 を硬い
+    /// 上限として渡すと isolate が即座に落ちる**ため、そこを踏まないことを固定する。
+    /// 0 を受け付けるかどうかは設定の検証（タスク 4.3）の仕事である。
+    #[test]
+    fn メモリの上限が零のときはv8の既定で走る() {
+        let actor = MacroActor::spawn().expect("actor を起こせる");
+        let outcome = actor
+            .run(with_limits(
+                "既定のヒープ",
+                "'走った'",
+                Limits::new(Duration::from_secs(5), 0),
+            ))
+            .expect("実行できる");
+        assert_eq!(ran_value(&outcome), r#""走った""#);
 
         actor.shutdown().expect("スレッドを畳める");
     }
