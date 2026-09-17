@@ -96,7 +96,7 @@
   - _Boundary: host/read, host/overlay_
 
 - [ ] 3. Core: 実行（変換・結線・型定義）
-- [ ] 3.1 (P) TypeScript の変換経路（型注釈の除去とソースマップ）
+- [x] 3.1 (P) TypeScript の変換経路（型注釈の除去とソースマップ）
   - 変換を**モジュールの解決の段**（`ModuleLoader::load`）の中で行い、変換結果に `sourceMappingURL` を付ける（`extension_transpiler` は拡張専用であり使わない）
   - 種別が JavaScript のソースは変換しない。解決できない取り込みは**名前を挙げて**失敗させる
   - 構文誤りは位置（行・列）つきの失敗（1.3 の型）として返す

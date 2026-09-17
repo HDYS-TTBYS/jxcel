@@ -56,6 +56,7 @@ pub use engine::outcome::{
     ChangeSummary, FailureKind, Frame, LimitKind, Limits, MacroFailure, OutputLevel, OutputLine,
     RunOutcome, RunRequest, WindowLabel,
 };
+pub use engine::transpile::{module_name, Transpiled, Transpiler, MODULE_SCHEME};
 pub use host::changes::{
     CellWrite, Change, ChangeError, ChangeSet, RowDuplicate, RowInsert, RowRemove, StagedChange,
 };
