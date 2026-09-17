@@ -56,6 +56,10 @@ pub use engine::outcome::{
     ChangeSummary, FailureKind, Frame, LimitKind, Limits, MacroFailure, OutputLevel, OutputLine,
     RunOutcome, RunRequest, WindowLabel,
 };
+pub use host::changes::{
+    CellWrite, Change, ChangeError, ChangeSet, RowDuplicate, RowInsert, RowRemove, StagedChange,
+};
+pub use host::overlay::{ColumnTypeInfo, Overlay, ReadRow, RowPage, RowSpan, SheetInfo};
 pub use host::value::{to_js, JsScalar, JsView, Mapping};
 pub use source::capability::{
     parse as parse_capabilities, Capability, CapabilitySet, DeclarationError,
