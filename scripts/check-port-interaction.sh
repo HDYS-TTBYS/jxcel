@@ -140,6 +140,16 @@ before=$(record_lines)
 JXCEL_VERIFICATION_INITIAL_SCREEN=smoke-port-probe
 export JXCEL_VERIFICATION_INITIAL_SCREEN
 
+# **アクセシビリティのバスを先に起こす。**WebKitGTK は**起動の時点で**支援技術が居るかを見て、
+# **頁（web プロセス）のアクセシビリティを有効にするかを決める**。バスが後から起動すると、
+# 木に載るのは GTK の側の節（メニュー・窓・ボタン）だけで、**頁の中の節（観測の行の
+# `aria-label`）は現れない**（CI の Linux ランナーの実測: メニューの検査は通るのに、この段だけが
+# 「観測の行を読めませんでした」で落ちる。開発機はログイン時にバスが居るので起きない）。
+# ここで 1 度呼ぶと `org.a11y.Bus` が起動し、**アプリの起動より前に**居ることになる。
+if command -v busctl >/dev/null 2>&1; then
+  busctl --user call org.a11y.Bus /org/a11y/bus org.a11y.Bus GetAddress >/dev/null 2>&1 || true
+fi
+
 # 起動。標準出力・標準誤差は記録とは**別のファイル**へ（同じファイルへ書くと、アプリ
 # (`TargetKind::Stdout`) と診断記録 (`TargetKind::Folder`) が独立の書き手として同じファイルを
 # 先頭と末尾から触り、記録の行を壊しうる）。
