@@ -302,6 +302,38 @@
  * も同じ環境では観測できない（7.2 の `glideAdapter.test.ts` が固定するのは捕獲の段の配線であり、
  * 実機の打鍵ではない）。
  *
+ * # 9.3 が結線したもの（描画成立の検査と、走査の劣化の記録。`./renderHealth`）
+ *
+ * 7.6 は**判定の論理**（塗って読み戻す・色数を数える・フレーム時間の標本と中央値）だけを持ち、
+ * 画面から 1 度も呼ばれていなかった。9.3 がそれを**表の組み立てと走査へ結線した**:
+ *
+ * | 要件 | 何が起きるか | どこが担うか |
+ * |---|---|---|
+ * | 12.2（描画の不成立） | 表を組み立てた**後**に面（canvas）を検査する（**成立するまで 1 フレームずつ** — 面も中身も `mount` の時点には無い。`./renderHealth` の `PAINT_PROBE_MS`）。成立しなければ**既存の告知 1 行の腕**（`onPaintFailed` → `gridScreenFailed`）へ「表の描画が成立しませんでした: 理由の種別」を出し、**器の診断の記録へも 1 件残す** | 組み立ての効果と `./renderHealth` の `checkPaint` |
+ * | 12.3（走査の劣化） | 可視範囲が変わる（走査）たびにフレーム時間の標本を取り、**中央値が記録の閾値（要件値 16.67 ms + 計測の刻みの許容 1.00 ms）を跨いだときに 1 回だけ**記録する | `RendererSpec.onVisibleSpanChange` と `./renderHealth` の `scanned` |
+ *
+ * **内容の領域を置き換えない。**告知は `notice` の 1 行であり、表（`ready.state`）は残る —
+ * 1 つの失敗で利用者が見ていたものを失わない（8.1 の告知の規律である）。
+ *
+ * **記録の口は器にある。**フロントエンドから記録機構へ直接書く経路が無い（`tauri-plugin-log` の
+ * 宛先に `Webview` が無い。`research.md` の実測）ため、9.3 が境界へ
+ * `diagnostics_record_render` を 1 本足し、`./renderHealth` の既定の口がそれを呼ぶ。運ぶのは
+ * **閉じた札と数値だけ**であり、任意の文字列は記録へ流れない。
+ *
+ * **単体テストが観測しないもの（9.3）。**① **実物の WebKitGTK のグリッドの面が塗れること**は
+ * `node` の環境では観測できない（1.6 の一時的な段と同じ分界であり、`./renderHealth` が示すのは
+ * 「成立しない面で告知と記録が出る」という結線の論理である）。② **記録が実際に診断のファイルへ
+ * 載ること**も同じく起動して初めて確かめられる。どちらも 9.2 の実起動の台本が受け取る。③
+ * 組み立ての効果が `./renderHealth` の `installGridRenderHealth` を引く 1 行そのものは、
+ * **他の効果と同じ理由で**単体テストの外にある（効果は `node` の環境で走らず、
+ * `renderToStaticMarkup` も効果を実行しない）。**結線の中身（可視区間の知らせと、組み立て後の
+ * 検査）は同関数へ切り出してあり、画面が渡す 3 つの口（告知・可視区間の知らせ・記録）を検査が
+ * 観測する** — 9.3 のレビューが実測した「2 行を削る変異が生存する」は**この本体の 2 行**
+ * （`ports.onVisibleSpanChange(span)` と `ports.onPaintFailed(notice)`）で閉じた（削ると 2 件落ちる）。
+ * **効果の側の 3 行**（`installGridRenderHealth` を作る・移植口の 2 つの位置へ渡す・捨てる）は
+ * **削っても生存する**（`createGridCopyEntry` や 10.7 の `installDocumentChangeRequests` と同じ
+ * 切り出しの規約の残余であり、実起動の観測が受け取る）。
+ *
  * # 8.3〜8.9 への申し送り（本 module が足す予定の場所）
  *
  * - **8.8〜8.9**: 移植口の残る 2 つの**操作**（`onColumnResize` / `onColumnMove`）。
@@ -406,6 +438,7 @@ import {
   type RowOperationTarget,
   type RowSendIntent,
 } from "./rowOps";
+import { installGridRenderHealth } from "./renderHealth";
 import { createGlideAdapter } from "./renderer/glideAdapter";
 import {
   applyHistory,
@@ -2206,6 +2239,14 @@ interface GridSurfaceProps {
   readonly onDeleteCancelled: () => void;
   /** 返さずに理由を告げる（複製と貼り付けの拒否。8.6 の行の操作はここへ来ない）。 */
   readonly onRefused: (message: string) => void;
+  /**
+   * **表の描画が成立しなかった**ことを画面へ上げる口（要件 12.2。tasks.md 9.3）。
+   *
+   * 告知 1 行へ出るが、**内容の領域は置き換えない** — 1 つの失敗で表示中の表を失わない。
+   * [`GridSurfaceProps.onRefused`] と別の口にしてあるのは、**「送らなかった」ことが理由では
+   * ない**ためである: 利用者の操作は何も起こっておらず、表そのものが描けていない。
+   */
+  readonly onPaintFailed: (message: string) => void;
 }
 
 /**
@@ -2302,6 +2343,7 @@ function GridSurface({
   onDeleteRequested,
   onDeleteCancelled,
   onRefused,
+  onPaintFailed,
 }: GridSurfaceProps): ReactElement {
   const containerRef = useRef<HTMLDivElement | null>(null);
   // 移植口の取っ手。**窓の到着（非同期）と選択の効果が使う**ので、効果の外に置く。
@@ -2480,6 +2522,32 @@ function GridSurface({
       },
     });
 
+    // **描画の健全性の結線**（要件 12.2、12.3。tasks.md 9.3）。面を組み立てる**前**に作るのは、
+    // 移植口の仕様（下の `onVisibleSpanChange`）が走査のたびにこの口を引くためである
+    // （マウントの最中に知らせが来ても、捨てる先が既にある）。
+    //
+    // **判断と結線は `./renderHealth` が持ち、ここは 3 つの口を渡すだけである** — 効果は
+    // 走らせないと観測できず、この module の関数本体に結線を書くと**丸ごと削る変異がどの検査にも
+    // 掛からない**（9.3 のレビューが実測した。`createGridCopyEntry` / `./documentRequests` と
+    // 同じ切り出し方である）。
+    //
+    // 表を組み立て直す（列の構成や行の集合が変わる）たびに**新しい 1 つ**を作る。劣化の記録の
+    // 状態（閾値を満たしているか）も新しくなるが、**捨てた面の状態を持ち越さない**方が正しい —
+    // 組み直しの直後は「はじめて測った 1 本」から判定が始まる（`./renderHealth` の doc）。
+    const health = installGridRenderHealth({
+      // 表の描画が成立しなかったことを告知 1 行へ出す（要件 12.2）。
+      onPaintFailed,
+      // **可視区間の知らせは画面の既存の処理が先である**（窓の先読みと、追随の判断の材料。
+      // 8.2）。結線はこれを包んで、そのあとに走査の標本を始める（要件 12.3）。
+      onVisibleSpanChange: (span) => {
+        visibleRef.current = span;
+        // **1 画面に見えている行数**（8.6 の閾値。要件 6.5）。移植口が報せた区間だけが源で
+        // ある — 開いた直後の見当（上の `openingSpan`）は先読みの幅であり、画面の高さではない。
+        viewportRowsRef.current = span.rows.count;
+        cache.setVisibleSpan(span.rows);
+      },
+    });
+
     const handle = GRID_RENDERER_PORT.mount(
       container,
       createGridRendererSpec({
@@ -2495,13 +2563,8 @@ function GridSurface({
         onSelectionChange,
         // 見えている区間の知らせ（8.2 が移植口へ足した口である）。**追随の判断の材料**であり、
         // 同時に窓の先読みの材料でもある（この行が 8.1 の申し送りの答えである）。
-        onVisibleSpanChange: (span) => {
-          visibleRef.current = span;
-          // **1 画面に見えている行数**（8.6 の閾値。要件 6.5）。移植口が報せた区間だけが源で
-          // ある — 開いた直後の見当（上の `openingSpan`）は先読みの幅であり、画面の高さではない。
-          viewportRowsRef.current = span.rows.count;
-          cache.setVisibleSpan(span.rows);
-        },
+        // **走査のフレーム時間の標本もここから始まる**（要件 12.3。開始は上の結線が持つ）。
+        onVisibleSpanChange: health.onVisibleSpanChange,
         // 列幅と列の移動（8.8。要件 8.1、8.2）。**知らせは表示位置で来る**ので、そのまま
         // 画面の遷移へ渡す（写し直さない）。
         onColumnResize,
@@ -2517,12 +2580,19 @@ function GridSurface({
     );
     handleRef.current = handle;
     cacheRef.current = cache;
+    // **表を組み立てた後に 1 回だけ**、実際に塗れているかを検査する（要件 12.2、tasks.md 9.3）。
+    // 成立しなければ**告知 1 行**へ出し（上の結線が `onPaintFailed` を引く）、**器の診断の記録へ
+    // も残す**（12.3 と同じ記録の口。`./renderHealth` の module doc）。検査は**成立するまで
+    // 1 フレームずつ観測する**（面は React の描画の後に現れる）ので、結果は約束で返る —
+    // 捨てた後（下の後始末）は告知を引かない。
+    void health.checkPaint(container);
     // 開いた直後の先読み（要件 1.4）。**上の見当を渡す** — 本物の区間は実装が知らせてくる。
     cache.setVisibleSpan(openingSpan.rows);
 
     return () => {
       handle.destroy();
       cache.dispose();
+      health.dispose();
       handleRef.current = null;
       cacheRef.current = null;
     };
@@ -3373,6 +3443,7 @@ function GridScreenBody({
   onDeleteRequested,
   onDeleteCancelled,
   onRefused,
+  onPaintFailed,
 }: {
   readonly model: GridScreenModel;
   /** 境界の口（表を描く腕が、編集の 1 往復に使う）。 */
@@ -3411,6 +3482,8 @@ function GridScreenBody({
   readonly onDeleteCancelled: () => void;
   /** 送らずに理由を告げる（8.6。挿入の位置を写せない・識別子が届いていない）。 */
   readonly onRefused: (message: string) => void;
+  /** 表の描画が成立しなかった（9.3。要件 12.2。**内容の領域は置き換えない**）。 */
+  readonly onPaintFailed: (message: string) => void;
 }): ReactElement {
   const state = model.state;
   /**
@@ -3545,6 +3618,7 @@ function GridScreenBody({
             onDeleteRequested={onDeleteRequested}
             onDeleteCancelled={onDeleteCancelled}
             onRefused={onRefused}
+            onPaintFailed={onPaintFailed}
           />
         </>
       );
@@ -3620,6 +3694,8 @@ export interface GridScreenViewProps {
   readonly onDeleteCancelled: () => void;
   /** 送らずに理由を告げる（8.6）。 */
   readonly onRefused: (message: string) => void;
+  /** 表の描画が成立しなかった（9.3。要件 12.2。**内容の領域は置き換えない**）。 */
+  readonly onPaintFailed: (message: string) => void;
 }
 
 /**
@@ -3627,6 +3703,7 @@ export interface GridScreenViewProps {
  * 「何が DOM へ出るか」を読める（`GridScreen.test.ts`）。
  */
 export function GridScreenView({
+  onPaintFailed,
   model,
   client,
   onRetry,
@@ -3745,6 +3822,7 @@ export function GridScreenView({
         onDeleteRequested={onDeleteRequested}
         onDeleteCancelled={onDeleteCancelled}
         onRefused={onRefused}
+        onPaintFailed={onPaintFailed}
       />
     </section>
   );
@@ -4001,6 +4079,15 @@ export function GridScreen(): ReactElement {
     setModel((current) => gridScreenFailed(current, message));
   }, []);
   /**
+   * **表の描画が成立しなかった**ことを告知へ出す（9.3。要件 12.2）。
+   *
+   * 既存の告知の腕（[`gridScreenFailed`]）へ出すだけである — **状態を置き換えない**ので、
+   * 表はそのまま残る。記録（12.3 と同じ記録の口）は表の面が行う（`./renderHealth`）。
+   */
+  const refusePaintFailure = useCallback((message: string) => {
+    setModel((current) => gridScreenFailed(current, message));
+  }, []);
+  /**
    * 貼り付けの 1 往復の結果（8.7。要件 7.3、7.4、1.7）。
    *
    * **非同期の結果である**（`ScreenBoundary` は効果の同期の例外しか捕まえない）。遷移は全域で
@@ -4079,6 +4166,7 @@ export function GridScreen(): ReactElement {
       onDeleteRequested={requestDelete}
       onDeleteCancelled={cancelDelete}
       onRefused={refuseRowOperation}
+      onPaintFailed={refusePaintFailure}
     />
   );
 }

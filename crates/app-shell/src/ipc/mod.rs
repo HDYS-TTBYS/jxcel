@@ -64,6 +64,11 @@
 //!   （[`GRID_PASTE_REQUESTED_EVENT`] / [`GridPasteRequestedEvent`]）。**荷はクリップボードから
 //!   読んだ文字**であり、読めなかったときはこのイベントを送らない（8.7 の複製が荷を持たない
 //!   のと対照的である — 貼り付けは器だけが読める値を運ぶ必要がある）
+//! - 9.3: 描画の健全性の記録（要求 [`RenderHealthRecordRequest`] / 応答
+//!   [`RenderHealthRecordResponse`] と、報告の合併型 [`RenderHealthReport`] / 理由の種別
+//!   [`RenderPaintFailure`]）。**運ぶのは閉じた札と数値だけであり、任意の文字列を記録へ流す口は
+//!   作らない** — 記録の 1 行を組み立てるのは適応層である（10.8 がクリップボードの文字を記録へ
+//!   出さなかったのと同じ規律）。要求はウィンドウを運ばない（要件 4.6）
 
 use serde::{Deserialize, Serialize};
 
@@ -700,6 +705,93 @@ pub struct GridHistoryRequestedEvent {
     pub direction: GridHistoryDirection,
 }
 
+/// 描画の健全性の報告（タスク 9.3。要件 12.2、12.3）。**札と数値だけを運ぶ閉じた合併型である。**
+///
+/// 2 つの腕は**互いに素**であり、それぞれが要る数値だけを持つ。同じ事実を平たい欄の集まりで
+/// 表すと「走査の劣化なのに理由の種別が載っている」ような状態が型の上で作れてしまうため、
+/// ここでは**作れない形**にしてある（6.1 の [`GridEditCommand`] と同じ規律）。
+///
+/// **任意の文字列は運べない。**記録へ流せるのはこの 2 つの事実と数値だけであり、記録の 1 行を
+/// 組み立てるのは器の側である — 記録の注入面を広げないためである（10.8 がクリップボードから
+/// 読んだ文字を記録へ出さず文字数だけを写したのと同じ規律）。
+///
+/// **時間はマイクロ秒の整数で運ぶ。**要件 11.1 の予算は 16.67 ms であり、境界は文字列と
+/// 32 ビット以下の整数だけで構成する（`ipc-contract.md`）ため、浮動小数をそのまま出せない。
+/// したがって予算も [`RenderHealthReport::ScanBelowBudget::budget_us`]（16670）として送り、
+/// **記録の 1 行を組み立てる側がミリ秒へ戻す**（丸めの経路を境界へ持ち込まない）。
+///
+/// 直列化の札は小文字の綴りであり、画面側の記録の口
+/// （`src/features/grid/renderHealth.ts` の `RenderHealthReport.fact`）と同じ綴りである。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(tag = "fact", rename_all = "snake_case")]
+pub enum RenderHealthReport {
+    /// 表の描画が成立しなかった（要件 12.2）。
+    PaintFailed {
+        /// 成立しなかった理由の種別。
+        failure: RenderPaintFailure,
+        /// 数えた色数（面が読めなかったときは `null`）。
+        colors: Option<u32>,
+    },
+    /// 走査の滑らかさが予算を満たさなくなった（要件 12.3）。
+    ///
+    /// **記録の有無を決める閾値は画面側にあり、要件値に計測の刻みの許容を足したものである**
+    /// （`src/features/grid/renderHealth.ts` の `FRAME_BUDGET_TOLERANCE_MS`）。したがって
+    /// **要件値をわずかに超えただけの中央値は記録されない**ことがある — 1.6 の実画面の実測では
+    /// 健全な走査が 17.00 ms（要件値 16.67 ms。時計の刻みが 1 ms）であり、要件値で記録を決めると
+    /// 健全な走査が劣化として載る。ここが運ぶ `budget_us` は**要件値そのもの**であり、
+    /// 要件 11.1 の合否は 9.2 の実画面の観測が要件値で判定する。
+    ScanBelowBudget {
+        /// 測定したフレーム時間の中央値（**マイクロ秒**）。
+        median_us: u32,
+        /// 要件 11.1 の予算（**マイクロ秒**。16670）。
+        budget_us: u32,
+    },
+}
+
+/// 表の描画が成立しなかった理由の種別（タスク 9.3。要件 12.2）。**閉じた列挙である。**
+///
+/// 3 つは排他である: 面が無い（`NoCanvas`）／面はあるが塗って読み戻せない（`Unpaintable`）／
+/// 面は塗れるが何も描かれていない（`Blank`）。**12.2 の「識別できる情報」の芯はこの札であり**、
+/// 利用者へ見せる文言（「表の描画が成立しませんでした: …」）は画面が組み立てる。
+///
+/// 3 つ目が要るのは、塗って読み戻す検査（7.6 の `probePaint`）だけでは**「DOM はあるが何も
+/// 塗られない」症状を捕まえられない**ためである — あの検査は自分が塗った画素を読む。7.6 が
+/// 「面の内容を数える」口（`countDistinctColors`）を併せて公開した理由であり、1.6 の実測でも
+/// 塗られた面は 52〜59 色、一様な面は 1 色だった。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderPaintFailure {
+    /// 表の面（canvas）が見つからない（移植口がまだ描き始めていない）。
+    NoCanvas,
+    /// 面に塗って読み戻せない（2D の文脈が取れない・読み戻しが失敗する・既知の色と違う・
+    /// 塗ったのに alpha が 0 である）。
+    Unpaintable,
+    /// 面が一様である（何も描かれていない）。`colors` が数えた色数（1）である。
+    Blank,
+}
+
+/// 描画の健全性の記録の要求（タスク 9.3。要件 12.2、12.3）。
+///
+/// 運ぶのは [`RenderHealthReport`] 1 つである。ウィンドウは要求の型に現れない — 呼び出し元は
+/// 基盤が注入する `WebviewWindow` から取るため、フロントエンドが偽装する経路は存在しない
+/// （要件 4.6、`ipc-contract.md`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct RenderHealthRecordRequest {
+    /// 記録する事実。
+    pub report: RenderHealthReport,
+}
+
+/// 描画の健全性の記録の応答（タスク 9.3。要件 12.3、4.6）。
+///
+/// **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。記録は必ず行われる（記録できない場合は
+/// 封筒の失敗腕になる）ので、結果を表す欄を別に持たない — 画面の提示（12.2 の告知）はこの
+/// 往復の結果に依存しない（記録が失敗しても、描画が成立しなかったことは利用者に見えている）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct RenderHealthRecordResponse {
+    /// 呼び出し元ウィンドウの文脈（要件 4.6）。
+    pub context: WindowContext,
+}
+
 /// TypeScript の生成物を再生成する、唯一の文書化されたコマンド（タスク 2.2）。
 ///
 /// 生成物のヘッダにもこの文字列を埋め込むため、定数として一箇所に持つ。実行ファイルは
@@ -1056,6 +1148,21 @@ fn concrete_grid_violation_result(cfg: &ts_rs::Config) -> (String, String) {
     (NAME.to_owned(), text)
 }
 
+/// 描画の健全性の記録の応答の具体形（タスク 9.3）。 [`concrete_window_context_result`] と
+/// 同じ理由で置く。ペイロード型は [`RenderHealthRecordResponse`] である。
+fn concrete_render_health_record_result(cfg: &ts_rs::Config) -> (String, String) {
+    const NAME: &str = "RenderHealthRecordResult";
+    let mut text = String::from(
+        "// 描画の健全性の記録の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を\n\
+         // 名指ししないため、境界が名指しできる具体形を明示的に置く。\n",
+    );
+    text.push_str(&format!(
+        "export type {NAME} = {};\n",
+        <IpcResult<RenderHealthRecordResponse, IpcError> as ts_rs::TS>::name(cfg)
+    ));
+    (NAME.to_owned(), text)
+}
+
 /// 参照先の行を読んだ結果の具体形（タスク 10.3）。 [`concrete_window_context_result`] と同じ理由で
 /// 置く。ペイロード型は [`GridReferenceResponse`] である。
 fn concrete_grid_reference_result(cfg: &ts_rs::Config) -> (String, String) {
@@ -1155,6 +1262,10 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<GridReferenceRequest>(&cfg),
         declared::<GridReferenceRow>(&cfg),
         declared::<GridReferenceResponse>(&cfg),
+        declared::<RenderPaintFailure>(&cfg),
+        declared::<RenderHealthReport>(&cfg),
+        declared::<RenderHealthRecordRequest>(&cfg),
+        declared::<RenderHealthRecordResponse>(&cfg),
         declared::<IpcError>(&cfg),
         declared::<IpcResult<WindowContext, IpcError>>(&cfg),
         concrete_window_context_result(&cfg),
@@ -1175,6 +1286,7 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         concrete_grid_edit_result(&cfg),
         concrete_grid_violation_result(&cfg),
         concrete_grid_reference_result(&cfg),
+        concrete_render_health_record_result(&cfg),
     ];
     declarations.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -2957,5 +3069,79 @@ mod tests {
         ] {
             assert!(ts.contains(tag), "生成物に `{tag}` が無い:\n{ts}");
         }
+    }
+
+    /// 生成物が 9.3 の境界（描画の健全性の報告と、その要求・応答）を宣言していることを固定する。
+    ///
+    /// **ドリフト検査だけでは足りない**（宣言そのものを消して再生成すれば一致したまま通る）。
+    /// [`bindings_declare_the_diagnostics_surface`] と同じ形で、面の存在と**札の綴り**を
+    /// 名指しで固定する。
+    #[test]
+    fn bindings_declare_the_render_health_surface() {
+        let ts = render_bindings().unwrap();
+        for declaration in [
+            "export type RenderPaintFailure = \"no_canvas\" | \"unpaintable\" | \"blank\";",
+            "export type RenderHealthReport =",
+            "{ \"fact\": \"paint_failed\"",
+            "{ \"fact\": \"scan_below_budget\"",
+            "export type RenderHealthRecordRequest = {",
+            "export type RenderHealthRecordResponse = {",
+            "export type RenderHealthRecordResult = IpcResult<RenderHealthRecordResponse, IpcError>;",
+        ] {
+            assert!(
+                ts.contains(declaration),
+                "生成物に `{declaration}` が無い:\n{ts}"
+            );
+        }
+    }
+
+    /// 描画の健全性の報告が、**画面が書く札の綴り**で直列化される（タスク 9.3。要件 12.2、12.3）。
+    ///
+    /// 境界を越える値はこの綴りであり、画面（`src/features/grid/renderHealth.ts`）は同じ綴りを
+    /// 自分の型に持つ。**どちらか片方だけを改名しても、他のどの検査も落ちない** — 落ちるのは
+    /// 実行時の記録だけであり、記録を読む 9.2 の台本が「知らない札」を見ることになる。ここで
+    /// 事実と理由の種別の両方の綴りを固定する。
+    #[test]
+    fn render_health_report_serializes_with_the_spellings_the_screen_writes() {
+        let paint = serde_json::to_value(RenderHealthReport::PaintFailed {
+            failure: RenderPaintFailure::Blank,
+            colors: Some(1),
+        })
+        .unwrap();
+        assert_eq!(paint["fact"], "paint_failed");
+        assert_eq!(paint["failure"], "blank");
+        assert_eq!(paint["colors"], 1);
+
+        let scan = serde_json::to_value(RenderHealthReport::ScanBelowBudget {
+            median_us: 20_000,
+            budget_us: 16_670,
+        })
+        .unwrap();
+        assert_eq!(scan["fact"], "scan_below_budget");
+        assert_eq!(scan["median_us"], 20_000);
+        assert_eq!(scan["budget_us"], 16_670);
+        // **走査の腕に理由の種別は載らない**（2 つの腕は互いに素である）。
+        assert!(scan.get("failure").is_none());
+
+        for (failure, spelling) in [
+            (RenderPaintFailure::NoCanvas, "no_canvas"),
+            (RenderPaintFailure::Unpaintable, "unpaintable"),
+            (RenderPaintFailure::Blank, "blank"),
+        ] {
+            assert_eq!(serde_json::to_value(failure).unwrap(), spelling);
+        }
+
+        // 復元も同じ綴りで通る（画面が送った要求が境界で解釈できる）。
+        let request: RenderHealthRecordRequest = serde_json::from_value(serde_json::json!({
+            "report": { "fact": "scan_below_budget", "median_us": 17_000, "budget_us": 16_670 }
+        }))
+        .expect("画面が送る形の要求を解釈できる");
+        assert_eq!(
+            request.report,
+            RenderHealthReport::ScanBelowBudget {
+                median_us: 17_000,
+                budget_us: 16_670,
+            }
+        );
     }
 }

@@ -115,6 +115,14 @@ import { applyHistory } from "./history";
 import { settleCellEdit } from "./cellEdit";
 import type { CellPosition, RendererSelection, VisibleSpan } from "./renderer/port";
 import { nextViolation, reasonInRow, type ViolationPresentation } from "./violations";
+import {
+  FRAME_BUDGET_MS,
+  FRAME_BUDGET_TOLERANCE_MS,
+  FRAME_BUDGET_US,
+  createGridRenderHealth,
+  installGridRenderHealth,
+  type RenderHealthReport,
+} from "./renderHealth";
 
 // 窓の二進形式の言語をまたぐ固定（7.3）。**生のテキストとして**取り込む（`windowCache.test.ts`
 // と同じ経路。ファイルを実行時に開く口は使わない — 検査の環境を node の API へ結び付けない）。
@@ -343,6 +351,7 @@ function markOf(model: GridScreenModel): string {
       onPasteSettled: () => undefined,
       onHistorySettled: () => undefined,
       onRefused: () => undefined,
+      onPaintFailed: () => undefined,
     }),
   );
 }
@@ -4121,3 +4130,444 @@ const SOURCES = import.meta.glob("/src/features/grid/{GridScreen,violationBar,ne
 
 /** グリッド画面の源（本 file の主役と、その表示の一部）。 */
 const SCREEN_SOURCE = SOURCE_PATHS.map((path) => SOURCES[path] ?? "").join("\n");
+
+// ===========================================================================
+// 描画成立の検査と走査の劣化の記録の結線（9.3。要件 12.2、12.3）
+// ===========================================================================
+
+/**
+ * 面（canvas）の代役（7.6 の `renderProbe.test.ts` と同じ形の最小のもの）。
+ *
+ * 面は**自分の内容**を持つ（`uniform` なら 1 色、そうでなければ 2 色）。塗るように求められると
+ * 左上の 2×2 画素へ既知の色を書き、**それ以外の画素はそのまま**である — 1.6 が実測した
+ * 「塗られた面は 52〜59 色／一様な面は 1 色」を、色数を数える側の判定（1 か 2 以上か）が
+ * 見分けられる最小の形である。
+ *
+ * **不成立の 3 つの条件を別々に作れるようにしてある**（`context: false` で「塗って
+ * 読み戻せない」、`paints: false` で「塗っても残らない」、`uniform: true` で「何も描かれて
+ * いない」）。要件 12.2 の症状はこの 3 つであり、1 つでも作れないと検査の網が届かない。
+ */
+interface SurfaceOptions {
+  /** 面が塗りに従うか。`false` は「塗っても何も残らない」面である（既定は `true`）。 */
+  readonly paints?: boolean;
+  /** 2D の文脈を作れるか（既定は `true`）。`false` は**面を読み戻す手段が無い**面である。 */
+  readonly context?: boolean;
+  /** 面が一様か（＝何も描かれていない。既定は `false`）。 */
+  readonly uniform?: boolean;
+}
+
+/** 面の代役を作る。 */
+function standInSurface(options: SurfaceOptions = {}): HTMLCanvasElement {
+  /** 面が元から持つ内容（位置ごと。1 色なら一様である）。 */
+  const content = (x: number, y: number): Uint8ClampedArray =>
+    Uint8ClampedArray.from(
+      options.uniform === true
+        ? [7, 7, 7, 255]
+        : (x + y) % 32 === 0
+          ? [1, 2, 3, 255]
+          : [200, 200, 200, 255],
+    );
+  /** 面が塗って書いた左上の画素。**塗りに従わない面では最後まで `null` のままである。** */
+  let tile: Uint8ClampedArray | null = null;
+  const context = {
+    fillStyle: "#000000",
+    fillRect: (): void => {
+      const match = /^rgba?\(\s*(\d+)\s*[, ]\s*(\d+)\s*[, ]\s*(\d+)\s*\)$/i.exec(
+        context.fillStyle,
+      );
+      if (options.paints === false || match === null) {
+        return;
+      }
+      tile = Uint8ClampedArray.from([
+        Number(match[1]),
+        Number(match[2]),
+        Number(match[3]),
+        255,
+      ]);
+    },
+    getImageData: (x: number, y: number): { data: Uint8ClampedArray } => ({
+      data: x === 0 && y === 0 && tile !== null ? tile : content(x, y),
+    }),
+  };
+  return {
+    width: 32,
+    height: 32,
+    getContext: (): unknown => (options.context === false ? null : context),
+  } as unknown as HTMLCanvasElement;
+}
+
+/**
+ * 器の代役。**偽の移植口は器に何も描かない**（`interactionDriver.ts` の `standInContainer` と
+ * 同じ前提である）ため、`null` は「面が 1 つも無い器」になる — これが要件 12.2 の不成立の
+ * 条件そのものである。
+ */
+function standInSurfaceContainer(canvas: HTMLCanvasElement | null): {
+  readonly querySelector: (selectors: string) => Element | null;
+} {
+  return {
+    querySelector: (selectors: string): Element | null =>
+      selectors === "canvas" ? canvas : null,
+  };
+}
+
+describe("表の描画成立の検査を画面の振る舞いへ結線する（9.3。要件 12.2）", () => {
+  it("表を組み立てた後に走り、成立しなければ識別できる情報を告知へ出し、診断へ記録する", async () => {
+    const recorded: RenderHealthReport[] = [];
+    const health = createGridRenderHealth({
+      record: (report) => recorded.push(report),
+      sample: () => Promise.resolve(Number.NaN),
+    });
+
+    // **面が 1 つも無い器**（偽の移植口は描かない）。これが「無内容の領域のまま留まる」症状である。
+    const notice = await health.checkPaint(standInSurfaceContainer(null));
+
+    expect(notice).toBe("表の描画が成立しませんでした: 表の面が見つかりません");
+    expect(recorded).toEqual([
+      { fact: "paint_failed", failure: "no_canvas", colors: null },
+    ]);
+
+    // 提示は**既存の告知 1 行の腕**へ出る。**内容の領域は置き換えない**（1 つの失敗で表を
+    // 失わない） — 告知を積んでも状態の対象はそのままである。
+    const ready = readyModel(initialSelection());
+    const withNotice = gridScreenFailed(ready, notice ?? "");
+    expect(withNotice.notice).toBe(notice);
+    expect(withNotice.state).toBe(ready.state);
+    health.dispose();
+  });
+
+  it("面はあるが塗れないときは、その理由を種別として提示する", async () => {
+    const recorded: RenderHealthReport[] = [];
+    const health = createGridRenderHealth({
+      record: (report) => recorded.push(report),
+      sample: () => Promise.resolve(Number.NaN),
+    });
+
+    const notice = await health.checkPaint(
+      standInSurfaceContainer(standInSurface({ paints: false })),
+    );
+
+    expect(notice).toBe("表の描画が成立しませんでした: 面に塗って読み戻せません");
+    // 面は 2 色（一様でない）のまま読み戻せないので、色数も記録に載る。
+    expect(recorded).toEqual([
+      { fact: "paint_failed", failure: "unpaintable", colors: 2 },
+    ]);
+    health.dispose();
+  });
+
+  it("面に何も塗られていないときは（一様である）、色数を添えて提示する", async () => {
+    const recorded: RenderHealthReport[] = [];
+    const health = createGridRenderHealth({
+      record: (report) => recorded.push(report),
+      sample: () => Promise.resolve(Number.NaN),
+    });
+
+    // 面は塗れる（自分の塗りは読み戻せる）が、**面そのものが一様である**（1.6 の実測では
+    // 一様な面は 1 色）。
+    const notice = await health.checkPaint(
+      standInSurfaceContainer(standInSurface({ uniform: true })),
+    );
+
+    expect(notice).toBe("表の描画が成立しませんでした: 面に何も塗られていません（色数=1）");
+    expect(recorded).toEqual([{ fact: "paint_failed", failure: "blank", colors: 1 }]);
+    health.dispose();
+  });
+
+  it("成立したときは何も出さない（告知を増やさない）", async () => {
+    const recorded: RenderHealthReport[] = [];
+    const health = createGridRenderHealth({
+      record: (report) => recorded.push(report),
+      sample: () => Promise.resolve(Number.NaN),
+    });
+
+    const notice = await health.checkPaint(standInSurfaceContainer(standInSurface()));
+
+    expect(notice).toBeNull();
+    expect(recorded).toEqual([]);
+    health.dispose();
+  });
+
+  it("面は非同期に現れるので、1 フレーム目で結論しない（健全な表を不成立と読まない）", async () => {
+    const recorded: RenderHealthReport[] = [];
+    const surface = standInSurface();
+    /** 面が現れたか。**1 フレーム目の観測の時点では偽である**（実物の順序である）。 */
+    let present = false;
+    let frames = 0;
+    const health = createGridRenderHealth({
+      record: (report) => recorded.push(report),
+      sample: () => Promise.resolve(Number.NaN),
+      nextFrame: () => {
+        frames += 1;
+        // 2 フレーム目に面が現れる（移植口の `mount` は React の描画を始めるだけである）。
+        present = true;
+        return Promise.resolve();
+      },
+    });
+
+    const pending = health.checkPaint({
+      querySelector: (selectors: string): Element | null =>
+        selectors === "canvas" && present ? surface : null,
+    });
+    expect(await pending).toBeNull();
+    // **取り直した**（1 フレーム目で「面が無い」と結論していない）。
+    expect(frames).toBe(1);
+    expect(recorded).toEqual([]);
+    health.dispose();
+  });
+
+  it("空の面に塗らない（待って観測しても、自分の画素を内容と読まない）", async () => {
+    const recorded: RenderHealthReport[] = [];
+    // 一様な（何も描かれていない）面。**塗って読み戻す検査は自分の画素を読む**ので、空の面へ
+    // 塗る実装だと、2 フレーム目の色数が 2 になり「成立」と読めてしまう。
+    const health = createGridRenderHealth({
+      record: (report) => recorded.push(report),
+      sample: () => Promise.resolve(Number.NaN),
+      nextFrame: () => Promise.resolve(),
+    });
+
+    const notice = await health.checkPaint(
+      standInSurfaceContainer(standInSurface({ uniform: true })),
+    );
+
+    expect(notice).toBe("表の描画が成立しませんでした: 面に何も塗られていません（色数=1）");
+    expect(recorded).toEqual([{ fact: "paint_failed", failure: "blank", colors: 1 }]);
+    health.dispose();
+  });
+
+  it("面を待つ上限はフレーム数ではなく経過時間である（時計が止まっていても回り続けない）", async () => {
+    // **時計が上限を超えた**: 面が現れないまま 500 ms 経った状況である。**待たずに結論する**
+    // （1 回目の読みは期限を決めるものであり、2 回目以降が上限を超えている）。
+    let expiredFrames = 0;
+    let expiredReads = 0;
+    const expired = createGridRenderHealth({
+      record: () => {},
+      sample: () => Promise.resolve(Number.NaN),
+      nextFrame: () => {
+        expiredFrames += 1;
+        return Promise.resolve();
+      },
+      // 1 回目（期限を決める読み）は 0、以降は上限を大きく超える値である。
+      now: () => {
+        expiredReads += 1;
+        return expiredReads === 1 ? 0 : 10_000;
+      },
+    });
+
+    await expired.checkPaint(standInSurfaceContainer(null));
+
+    expect(expiredFrames).toBe(0);
+    expired.dispose();
+
+    // **時計が進まない**（検査の代役の `nextFrame` が即座に返る並び）: フレーム数の歯止めで
+    // 止まる — 経過時間だけを条件にすると回り続ける。
+    let frozenFrames = 0;
+    const frozen = createGridRenderHealth({
+      record: () => {},
+      sample: () => Promise.resolve(Number.NaN),
+      nextFrame: () => {
+        frozenFrames += 1;
+        return Promise.resolve();
+      },
+      now: () => 0,
+    });
+
+    await frozen.checkPaint(standInSurfaceContainer(null));
+
+    expect(frozenFrames).toBeGreaterThan(0);
+    frozen.dispose();
+  });
+
+  it("捨てた後は告知を返さない（もう無い表について告知も記録もしない）", async () => {
+    const recorded: RenderHealthReport[] = [];
+    let releases = 0;
+    const health = createGridRenderHealth({
+      record: (report) => recorded.push(report),
+      sample: () => Promise.resolve(Number.NaN),
+      nextFrame: () => {
+        releases += 1;
+        return Promise.resolve();
+      },
+    });
+
+    const pending = health.checkPaint(standInSurfaceContainer(null));
+    health.dispose();
+
+    expect(await pending).toBeNull();
+    expect(releases).toBe(1);
+    expect(recorded).toEqual([]);
+  });
+});
+
+describe("走査の劣化を診断へ記録する（9.3。要件 12.3）", () => {
+  it("予算を跨いだときだけ 1 回記録する（同じ状態が続いても増やさず、測定不能をどちらの状態とも読まない）", async () => {
+    const recorded: RenderHealthReport[] = [];
+    // **測定不能（`NaN`）を先頭に置く。**標本が無いことを `null` へ写す 7.6 の 1 箇所
+    // （`toRenderProbeResult`）を通さない実装は、`NaN <= 予算` が偽であるため**超過**と読んで
+    // 記録を出す（「予算内の状態で届いた `NaN` が状態を動かさない」ことを、この並びが固定する）。
+    const samples = [Number.NaN, Number.NaN, 20, 20, 12, Number.NaN, 20, 12];
+    let taken = 0;
+    const health = createGridRenderHealth({
+      record: (report) => recorded.push(report),
+      sample: () => Promise.resolve(samples[taken++] ?? Number.NaN),
+    });
+
+    // **測定不能は状態を動かさない**（予算を満たしてもいなければ、満たさなくもない）。記録も 0 回。
+    await health.scanned();
+    await health.scanned();
+    expect(recorded).toHaveLength(0);
+
+    // 跨いだ。**ここで 1 回だけ記録する。**
+    await health.scanned();
+    expect(recorded).toEqual([
+      { fact: "scan_below_budget", medianUs: 20000, budgetUs: FRAME_BUDGET_US },
+    ]);
+
+    // 同じ状態が続いている（20 が続く）。**記録は増えない。**
+    await health.scanned();
+    expect(recorded).toHaveLength(1);
+
+    // 予算内へ戻った（記録しない）。
+    await health.scanned();
+    expect(recorded).toHaveLength(1);
+
+    // **予算内の状態で届いた測定不能も、状態を動かさない。**ここで「超過」と読む実装は記録を
+    // 増やし、「予算内へ戻す」実装は次の 20 を 3 回目の記録にする（同じ劣化が走査のたびに
+    // 記録され続ける）。
+    await health.scanned();
+    expect(recorded).toHaveLength(1);
+
+    // 再び跨いだ（**向きが変わったので 2 回目を記録する**）。
+    await health.scanned();
+    expect(recorded).toHaveLength(2);
+
+    // 予算内へ戻る（記録しない）。
+    await health.scanned();
+    expect(recorded).toHaveLength(2);
+    health.dispose();
+  });
+
+  it("健全な 17.00 ms では記録せず、劣化した 24.00 ms では記録する（要件の合否は 9.2 が要件値で判定する）", async () => {
+    const healthy: RenderHealthReport[] = [];
+    const requirement = createGridRenderHealth({
+      record: (report) => healthy.push(report),
+      sample: () => Promise.resolve(17.0),
+    });
+    // **1.6 の実画面の実測（健全な走査の中央値は 17.00 ms）**（`research.md`）。要件値の
+    // 16.67 ms を 0.33 ms 超えるが、1 ms 刻みの時計では 60 Hz の周期がその値として現れる。
+    // **ここで記録を出すと、健全な走査が劣化として診断へ載る。**
+    await requirement.scanned();
+    await requirement.scanned();
+    expect(healthy).toEqual([]);
+    requirement.dispose();
+
+    const degraded: RenderHealthReport[] = [];
+    const fallback = createGridRenderHealth({
+      record: (report) => degraded.push(report),
+      sample: () => Promise.resolve(24.0),
+    });
+    // **DMA-BUF レンダラを切った実画面の実測（24.00 ms。陽性の対照）。**ここは出なければならない
+    // — 出ない実装は、劣化を診断へ残せていない。
+    await fallback.scanned();
+    expect(degraded).toEqual([
+      { fact: "scan_below_budget", medianUs: 24000, budgetUs: FRAME_BUDGET_US },
+    ]);
+    fallback.dispose();
+
+    // **要件値そのものは動かしていない。**緩めたのは記録の閾値だけであり、1.6 の健全な実測は
+    // その許容の内側、劣化の実測は外側にある。
+    expect(FRAME_BUDGET_MS).toBe(16.67);
+    const threshold = FRAME_BUDGET_MS + FRAME_BUDGET_TOLERANCE_MS;
+    expect(threshold).toBeGreaterThanOrEqual(17.0);
+    expect(threshold).toBeLessThan(24.0);
+  });
+
+  it("標本は 1 本ずつしか走らせない（走査が続いても標本が重ならない）", async () => {
+    const recorded: RenderHealthReport[] = [];
+    const durations: number[] = [];
+    /** 標本の 1 本ごとの「終わらせる口」（**本物の `requestAnimationFrame` の代役である**）。 */
+    const resolvers: ((median: number) => void)[] = [];
+    const health = createGridRenderHealth({
+      record: (report) => recorded.push(report),
+      sample: (durationMs) => {
+        durations.push(durationMs);
+        return new Promise<number>((resolve) => {
+          resolvers.push(resolve);
+        });
+      },
+    });
+
+    const first = health.scanned();
+    const second = health.scanned();
+    // **飛行中の 2 つ目の走査は新しい標本を始めない**（始めると、走査のたびに標本が積み上がる）。
+    expect(durations).toHaveLength(1);
+    expect(health.scanned()).toBe(first);
+
+    resolvers[0]?.(12);
+    await Promise.resolve();
+    await Promise.resolve();
+    // 溜まっていた走査は**1 本にまとめて**取り直す（走査が続いている間、標本が途切れない）。
+    expect(durations).toHaveLength(2);
+
+    resolvers[1]?.(12);
+    await first;
+    await second;
+    expect(durations).toHaveLength(2);
+    // 予算内（12 ms）である。**記録は 0 回である。**
+    expect(recorded).toEqual([]);
+
+    health.dispose();
+  });
+});
+
+describe("表の組み立てと可視区間の知らせを、画面が渡す 3 つの口へ結線する（9.3。要件 12.2、12.3）", () => {
+  it("可視区間の知らせは画面の処理を通したうえで走査として標本を取り、予算を跨げば記録する", async () => {
+    const recorded: RenderHealthReport[] = [];
+    const spans: VisibleSpan[] = [];
+    const connection = installGridRenderHealth({
+      // この検査では描画の不成立は起きない（**呼ばれたら失敗である**）。
+      onPaintFailed: () => {
+        throw new Error("描画が成立しているのに告知の口が呼ばれた");
+      },
+      // **画面自身の可視区間の知らせ**（窓の先読みの材料。`GridSurface` の効果が渡すもの）。
+      onVisibleSpanChange: (span) => spans.push(span),
+      record: (report) => recorded.push(report),
+      sample: () => Promise.resolve(24.0),
+    });
+
+    const span: VisibleSpan = {
+      rows: { start: 40, count: 30 },
+      columns: { start: 0, count: 3 },
+    };
+    await connection.onVisibleSpanChange(span);
+
+    // **画面の処理が先に走る**（結線がこれを飲み込んではならない — 飲み込むと先読みが止まる）。
+    expect(spans).toEqual([span]);
+    // **走査としてフレーム時間の標本を取り、予算を跨いだので 1 回記録する**（要件 12.3）。
+    expect(recorded).toEqual([
+      { fact: "scan_below_budget", medianUs: 24000, budgetUs: FRAME_BUDGET_US },
+    ]);
+    connection.dispose();
+  });
+
+  it("表を組み立てた後の検査は、成立しなければ告知の口へ文言を渡し、診断へ記録する", async () => {
+    const notices: string[] = [];
+    const recorded: RenderHealthReport[] = [];
+    const connection = installGridRenderHealth({
+      // **画面が告知 1 行へ出す口**（`GridSurface.onPaintFailed`）。
+      onPaintFailed: (notice) => notices.push(notice),
+      onVisibleSpanChange: () => {},
+      record: (report) => recorded.push(report),
+      sample: () => Promise.resolve(Number.NaN),
+      nextFrame: () => Promise.resolve(),
+    });
+
+    // **面が 1 つも無い器**（偽の移植口は器に何も描かない）。これが「無内容の領域のまま留まる」
+    // 症状であり、組み立ての効果が検査を引く位置の再現である。
+    await connection.checkPaint(standInSurfaceContainer(null));
+
+    expect(notices).toEqual(["表の描画が成立しませんでした: 表の面が見つかりません"]);
+    expect(recorded).toEqual([
+      { fact: "paint_failed", failure: "no_canvas", colors: null },
+    ]);
+    connection.dispose();
+  });
+});

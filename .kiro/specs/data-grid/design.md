@@ -234,18 +234,20 @@ src/features/grid/
 ├── renderer/interactionDriver.ts  # 操作の並びを注ぎ、外へ出た呼び出しを記録する駆動器（テスト専用。7.1）
 ├── renderer/port.test.ts   # 移植口の契約（vitest。7.1）
 ├── renderer/glideAdapter.tsx  # 移植口の Glide Data Grid 実装
-└── renderProbe.ts          # 塗って読み戻す検査とフレーム時間の標本
+├── renderProbe.ts          # 塗って読み戻す検査とフレーム時間の標本（判定の論理。7.6）
+└── renderHealth.ts         # その 2 つを表の組み立てと走査へ結線する（提示と記録。**9.3 が足した**）
 ```
 
 ### Modified Files
 - `Cargo.toml` — `members` に `crates/data-grid` を追加
 - `crates/document-format/src/model/mod.rs` — `remove_rows` / `insert_row_at` / `insert_rows_at` を追加（本機能が上流へ加える唯一の変更）
-- `crates/app-shell/src/ipc/command_names.rs` — コマンド名の定数 6 本と `COMMAND_NAMES` への追加
+- `crates/app-shell/src/ipc/command_names.rs` — コマンド名の定数（6.2 / 6.3 の 6 本、10.3 の 1 本、**9.3 の 1 本**）と `COMMAND_NAMES` への追加
 - `crates/app-shell/src/ipc/mod.rs` — `render_bindings()` の `declarations` に境界用の型を追加
-- `src-tauri/src/commands/mod.rs` — `command_root!` に 6 行追加
-- `src-tauri/permissions/app.toml` — 権限ブロック 6 つと、`app-shell` の集合への所属
+- `src-tauri/src/commands/mod.rs` — `command_root!` に 8 行追加（6.2 / 6.3 の 6 本、10.3 の 1 本、**9.3 の 1 本**）
+- `src-tauri/permissions/app.toml` — 権限ブロック（6.2 / 6.3 の 6 つ、10.3 の 1 つ、**9.3 の 1 つ**）と、`app-shell` の集合への所属。**足し忘れると `removeUnusedCommands` がそのコマンドを配布物から静かに削る**（`scripts/check-command-acl.sh` が固定する）
 - `src/ipc/bindings.ts` — 生成物。`cargo run -p app-shell --bin generate-bindings` で再生成（手で編集しない）
 - `src/shell/Layout.tsx` — `SHELL_SCREEN_REGISTRY` にグリッド画面を 1 件追加
+- `src-tauri/src/commands/diagnostics_cmds.rs` — **9.3** が `diagnostics_record_render`（描画の健全性を診断の記録へ 1 件残す適応層の実体）を足した。記録の 1 行を組み立てるのは本層であり、要求は札と数値しか運ばない
 - `package.json` — `@glideapps/glide-data-grid` を追加
 - `package.json` / `package-lock.json` / `vitest.config.ts` / `.github/workflows/ci.yml` — フロントエンドのテストの走らせ手（`vitest`）と、その段（タスク 7.1）。群 7・群 8 のフロントエンドのタスクは「テストで示す」ことを要求するため、走らせ手ごと導入した。**ジョブもワークフローも新設しない** — 既存の `test` ジョブへ段を 1 つ足す（要件 6.2、タスク 1.4 の申し送り）。走らせる環境は `node` であり、追加の依存も表示先も要らない
 - `scripts/ci/` — `check-core-deps.sh data-grid` の段、ベンチ予算への `large_grid/*` の追加、および 3 OS で 10 万行の走査と編集を観測する台本（要件 12.1, 12.4）。**既存の 3 OS 検証マトリクスを拡張し、独立した系統を新設しない**
@@ -310,11 +312,17 @@ stateDiagram-v2
     不成立 --> 識別できる情報を提示
     成立 --> フレーム時間の標本
     フレーム時間の標本 --> 正常
-    フレーム時間の標本 --> 劣化: 中央値が予算を超える
+    フレーム時間の標本 --> 劣化: 中央値が記録の閾値を超える
     劣化 --> 診断へ記録
 ```
 
 `app-shell` の要件 10.3 が既に**起動時の描画経路の切り替えと環境変数の判定**を所有する。本機能はその下流で、**グリッド自身が実際に塗れたか**だけを確かめる。WebKit は WebGL のレンダラ文字列を伏せるため、素性を問う手段は使えない（`research.md`）。
+
+**9.3 がこの流れを画面の振る舞いへ結線した**（`src/features/grid/renderHealth.ts`。下の「RenderProbe」の「9.3 が確定させたもの」）:
+
+- 「塗って読み戻す」と「面に何も塗られていない」の 2 つを組にして判定し（不成立の理由は 3 つに分かれる）、**成立しなかったときは告知 1 行へ識別できる情報を出し、器の診断の記録へ 1 件残す**（要件 12.2。内容の領域は置き換えない）。面が現れるのを待つ上限は**経過時間**である（`PAINT_PROBE_MS` = 500 ms。フレーム数にすると面の速さで待つ長さが変わる）。
+- 「フレーム時間の標本」は**可視範囲が変わったとき（走査）**に取り、**中央値が記録の閾値（要件値 16.67 ms + 計測の刻みの許容 1.00 ms = 17.67 ms）を跨いだときに 1 回だけ**記録する（要件 12.3。同じ状態が続いても記録は増えず、測定不能はどちらの状態でもない）。**要件 11.1 の合否は 9.2 の実画面の観測が要件値で判定する** — 閾値を緩めているのは記録の側だけである。
+- 記録の 1 行（`diagnostics_cmds.rs`）は**測った事実**（中央値と要件値の予算）だけを述べ、**結論を名乗らない**。
 
 ## Requirements Traceability
 
@@ -350,10 +358,10 @@ stateDiagram-v2
 | 9.7 | 数式とマクロが同じ履歴に加わる | UndoStack | `UndoStack.push` の公開 | — |
 | 9.8 | 取り消し後に対象範囲を見せる | GridSession（`visible_ordinals_of`）, GridScreen（`history.ts`）, RendererPort | **`GridEditOutcome.affected_ordinals`**（影響を受けた行の**表示の序数**。**10.5 が足した** — 適応層が `settle` のあとの `RowOrder` から**1 回の走査で**写す）、`RendererHandle.setSelection` / `scrollTo`（既存の追従が打つ） | **10.5 より前は `WindowCache.ordinalOf` で窓の記憶から引いていた** — 保っていない行（行の追加のやり直し）では引けず、現在位置が移らなかった（8.9 のレビューの実測） |
 | 10.1, 10.2, 10.3, 10.4, 10.5, 10.6 | 入力手段の登録簿と既定・重複検出 | EditorRegistry | `CellEditorRegistry` | 拡張型の識別子は**境界が運ぶ**（`ColumnDescriptor.custom_type_id`。10.3 が閉じた） |
-| 11.1, 11.2, 11.3, 11.5, 11.6, 11.7 | 応答時間と資源の予算 | WindowCache, WindowCodec, RowOrder | ベンチ `large_grid/*` | 窓の取得と先読み |
+| 11.1, 11.2, 11.3, 11.5, 11.6, 11.7 | 応答時間と資源の予算 | WindowCache, WindowCodec, RowOrder, **RenderProbe / RenderHealth（11.1 の記録。9.3 が結線）**, **3 OS 観測の台本（11.1 / 11.2 / 11.3 の判定。9.2）** | ベンチ `large_grid/*`、**走査のフレーム時間の中央値（`sampleFrameTimes` → `toRenderProbeResult` → `createGridRenderHealth` の `scanned`。9.3。記録の閾値は要件値 + 許容であり、判定には使わない）** | 窓の取得と先読み。**11.1（毎秒 60 回の更新）・11.2（最初の画面が 1 秒）・11.3（編集の確定から 100 ms）の判定の場は実画面の観測であり、その筋書きは 9.2 が持つ**（8.2 の成立行の `経過=` は 1.6 が予備として記録した値である） |
 | 11.4 | 1 セルの編集で全件検証しない | EditApply, GridSession | `validate_columns` に限定して呼ぶ（差分の入口は `ViolationIndex::apply_report_delta`） | 編集の適用と判定 |
 | 12.1, 12.4 | 3 OS での走査と編集の成立 | 3 OS 観測の台本 | `scripts/ci/` の段 | — |
-| 12.2, 12.3 | 描画不成立の識別と劣化の記録 | RenderProbe | `probePaint`, `sampleFrameTimes` | 描画成立の検査 |
+| 12.2, 12.3 | 描画不成立の識別と劣化の記録 | RenderProbe, **RenderHealth（9.3 が結線）**, GridScreen, GridCommands | `probePaint` / `countDistinctColors` / `sampleFrameTimes`（7.6 の判定）、**`installGridRenderHealth` / `createGridRenderHealth` の `checkPaint` / `scanned`（9.3 の結線。告知は `gridScreenFailed` の腕、記録は `diagnostics_record_render`）** | 描画成立の検査。**12.2 の不成立条件を実起動で作る引き金は 9.3 には無く、9.2 が非既定の feature で足す**（下の「9.3 が確定させたもの」） |
 
 ## Components and Interfaces
 
@@ -372,7 +380,8 @@ stateDiagram-v2
 | EditorRegistry | frontend | 型 → 入力手段。**拡張点の所有者** | 3, 10 | — | Service |
 | RendererPort | frontend | 描画層の移植口 | 1, 2, 7 | — | Service |
 | GlideAdapter | frontend | 移植口の Glide 実装 | 1, 2, 7 | glide-data-grid (P1) | Service |
-| RenderProbe | frontend | 描画成立の検査 | 12 | — | Service |
+| RenderProbe | frontend | 描画成立の検査の**論理**（塗って読み戻す・色数・フレーム時間の標本。7.6） | 12.2, 12.3 | — | Service |
+| RenderHealth | frontend | その論理を**画面の振る舞いへ結線する**（`installGridRenderHealth`。提示と診断への記録。**9.3 が足した**） | 12.2, 12.3 | GridCommands (`diagnostics_record_render`, P1), GridScreen | Service |
 | GridScreen | frontend | 画面本体 | 全体 | 上記すべて (P0) | State |
 | NestedInspector | frontend | 入れ子の詳細表示 | 5 | EditorRegistry (P1) | 要約のみ |
 | ViolationBar | frontend | 違反の総数と移動 | 4 | GridCommands (P1) | 要約のみ |
@@ -778,6 +787,21 @@ impl<'a> UndoRedo<'a> {
 | `grid_history` | `GridHistoryRequest` | `GridEditResponse` | 封筒 |
 | `grid_find_violation` | `GridViolationRequest` | `GridViolationResponse` | 封筒 |
 | `grid_reference_rows` | `GridReferenceRequest` | `GridReferenceResponse` | 封筒 |
+| `diagnostics_record_render` | `RenderHealthRecordRequest` | `RenderHealthRecordResponse` | 封筒 |
+
+**`diagnostics_record_render` は 9.3 が足した 8 本目である**（要件 12.2、12.3）。グリッドの
+**描画の健全性を診断の記録へ 1 件残す**経路であり、これが 12.3 の「診断情報に記録する」の実体で
+ある — フロントエンドから記録機構へ直接書く経路が無い（`tauri-plugin-log` の宛先に `Webview` が
+無い。`research.md` の実測）ため、画面はこの 1 本を通してだけ記録を残せる。
+
+**運ぶのは閉じた札と数値だけである。**荷は [`RenderHealthReport`]（`paint_failed` と
+`scan_below_budget` の 2 つの腕を持つ合併型）であり、**任意の文字列は境界を越えられない** —
+記録の注入面を広げないためである（10.8 がクリップボードから読んだ文字を記録へ出さなかったのと
+同じ規律）。時間は**マイクロ秒の整数**（予算 16670）で運び、記録の 1 行を組み立てるのは適応層で
+ある（境界に浮動小数を出さない）。
+
+**記録の水準は事実で変える**: 描画の不成立は `warn`、走査の劣化は `info` である（どちらも
+「失敗した」わけではない事実の記録であり、詳細度が `Off` / `Error` のときは残らない）。
 
 **`grid_reference_rows` は 10.3 が足した 7 本目である**（要件 3.8。7.4 の申し送り 2）。
 参照先のシートの行を**頁ごとに**読み、**件数の上限を境界が強制する**
@@ -787,7 +811,7 @@ impl<'a> UndoRedo<'a> {
 （「行が無い」は正常な結果であり、混同しない）。
 
 **Implementation Notes**
-- Integration: コマンド名は `command_names.rs` の定数。権限ブロック 7 つと `app-shell` の集合への所属を同時に足す（片方だけでは**ビルド時に静かに削除される**）
+- Integration: コマンド名は `command_names.rs` の定数。権限ブロック **8 つ**（10.3 の 1 つと 9.3 の 1 つを含む）と `app-shell` の集合への所属を同時に足す（片方だけでは**ビルド時に静かに削除される**）
 - Validation: `scripts/check-command-acl.sh` が登録 ⊆ 許可を固定する。`src/ipc/client.ts` の `RawCommandName` に `grid_rows_window` を加える
 - Risks: 境界用の型は `crates/app-shell/src/ipc/grid.rs` に置く（ts-rs の derive が許される唯一の場所）。この型は**他のドメインクレートを参照してはならない**ため、すべて文字列と 32 ビット以下の整数で構成する
 
@@ -1511,6 +1535,56 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 **7.6 が持たないもの（9.3 が担う）**: 中央値と閾値（16.67 ms）の比較、劣化の診断への記録、走査の駆動、
 画面への提示（12.2 の「識別できる情報」）。本 module は**判定と標本だけ**を返す。
 
+##### 9.3 が確定させたもの（12.2 / 12.3 を画面の振る舞いへ結線する。`src/features/grid/renderHealth.ts`）
+
+**7.6 の 3 つの signature を画面へ結線したのが 9.3 である**（要件 12.2、12.3）。判定の論理は
+7.6 のままであり、本節は**結線・提示・記録**だけを決める。
+
+| 論点 | 決定 | 根拠 |
+|---|---|---|
+| 検査の場所 | **`GridSurface` の組み立ての効果**の中で、`GRID_RENDERER_PORT.mount` の**後**に 1 回。面は器（`containerRef`）の `canvas` を引く（`container.querySelector("canvas")`） | 表は 1 度組み立てられてから描かれる。組み立て直し（列の構成・行の集合が変わる）は**新しい表**なので、そのつど 1 回検査する（毎フレーム検査し続ける経路は作らない） |
+| **面が現れるのを待つ**（検査の時点） | **成立するまで 1 フレームずつ観測する**。上限は**経過時間**（`PAINT_PROBE_MS` = 500 ms）であり、フレーム数ではない（時計が進まない環境で回り続けないためのフレーム数の歯止めを添える）。取り直すのは「面が無い」「何も描かれていない」の 2 つの理由だけで、**塗って読み戻せないことは取り直さない**（2D の文脈は待っても現れない） | **移植口の `mount` は面をその場で作らない** — 7.2 の実装は `createRoot(container).render(…)` で React の描画を始めるだけであり、面も中身も `mount` が返った時点には無い。1 フレーム目で結論すると、**健全な環境でも「表の描画が成立しませんでした」を出してしまう**。**フレーム数で上限を決めないのは、1.6 の訂正が示したとおり面の速さが環境で変わるためである**（Xvfb はフレーム間隔 6〜7 ms で走ることがあり、30 フレームは 60 Hz で 0.5 秒・その間隔で 0.2 秒になる）。500 ms は要件 11.2 の 1 秒の内側である |
+| 色数を数える順序と、空の面には塗らないこと | **先に `countDistinctColors`、あとで `probePaint`**。色数が 2 に満たない面には**塗らない**（そのまま `blank` と読む） | 逆にすると、自分が塗った既知の色が色数へ加わり、**一様な面が 2 色に見える**。待つ実装と組にすると、この規律が無い場合**空の面が 2 フレーム目に成立してしまう**（自分の画素が「内容」に見えるため） |
+| 不成立の 3 つの種別 | `no_canvas`（面が無い）／`unpaintable`（塗って読み戻せない）／`blank`（面が一様である） | 3 つは**別の失敗**である（7.6 が `countDistinctColors` を併せて公開した理由。1.6 の実測は塗られた面 52〜59 色、一様な面 1 色）。面が読めなくても塗りが通れば `unpaintable`、両方通って色数が 1 なら `blank` と読む |
+| 提示（12.2 の「識別できる情報」） | **告知 1 行の腕へ出す**（`GridSurface.onPaintFailed` → `gridScreenFailed`）。文言は「表の描画が成立しませんでした」＋理由の種別（色数が読めていれば数を添える）。**内容の領域を置き換えない** | 1 つの失敗で表示中の表を失わない（8.1 の告知の規律）。`ScreenBoundary` は効果の中の失敗を捕まえないため、画面内の状態として扱う必要もある |
+| 記録（12.3） | 記録の口（`RenderHealthSink`）を**注入で受け取り**、既定は `recordGridRenderHealth`（境界の `diagnostics_record_render` を 1 回呼ぶ）。運ぶのは**閉じた札と数値だけ** | 画面から記録機構へ直接書く経路が無い（`research.md` の実測）ので、器へ 1 本のコマンドを足した（GridCommands の 8 本目）。**検査は偽の口を渡して呼び出し回数を数える** |
+| **記録の閾値（12.3）** | **要件値（`FRAME_BUDGET_MS` = 16.67 ms）+ 計測の刻みの許容（`FRAME_BUDGET_TOLERANCE_MS` = 1.00 ms）= 17.67 ms**。**要件値そのものは動かさない** | **1.6 の実画面の実測では健全な走査の中央値が 17.00 ms である**（時計の刻みが 1 ms であり、60 Hz の 16.67 ms は 17 として現れる。時刻の刻みに依らないテレスコープ平均は 16.68 ms、表示面は 59.97 Hz）。要件値で記録を決めると**健全な走査が `scan_below_budget` として診断へ載り**、1.6 が否定した読み方を記録が事実として運ぶ。劣化の実測は 24.00 ms（`WEBKIT_DISABLE_DMABUF_RENDERER=1`）であり、17.00 と 24.00 はこの閾値で分かれる。**検査は両方を対照で固定する**（健全な 17.00 では 0 件・劣化の 24.00 では 1 件） |
+| 予算の跨ぎ（12.3） | 状態は **3 つ**である: 閾値を満たす / 満たさない / **測定不能**。**測定不能（標本が 1 本も無い ＝ `NaN` → `null`）は状態を動かさない**。記録は「満たす → 満たさない」の向きの変化でだけ起きる（**1 回だけ**。同じ状態が続いても増えない） | 測定不能を「予算内」と読むと、その次の 1 本が再び「跨いだ」と読め、**同じ劣化が走査のたびに記録され続ける**。`NaN` を `null` へ移すのは 7.6 の `toRenderProbeResult` 1 か所であり、比べる前に必ず通す。**検査は測定不能の標本を「閾値を満たす」状態（先頭）に置く** — 満たさない状態に置くと、`toRenderProbeResult` を外す変異が生存する（9.3 のレビューが実測） |
+| 記録の 1 行（12.3） | 器（`diagnostics_cmds.rs`）は**測った事実だけ**を書く（「フレーム時間の中央値 n ms が予算 m ms を超えた」）。**結論（予算を満たしたか）を名乗らない** | 記録の閾値は画面側にあり（上の行）、要件 11.1 の合否を判定するのは **9.2 の実画面の観測**である。ここで結論を書くと、記録が**1.6 の否定した結論**（17.00 は要件を外した証拠である）を事実として運ぶ |
+| **起動直後の 1 本** | 標本の引き金は可視区間の知らせ（`RendererSpec.onVisibleSpanChange`）であり、移植口は**取り付けの直後にも 1 回**報せる。したがって最初の標本は**走査ではなく起動直後の読み込み**を測りうる。**文言から「走査の」を落として対象を名乗らない**（記録する事実は「フレーム時間の中央値が予算を超えた」である）。**「走査の標本が 1 本も無い間は記録しない」側は選ばなかった** | 起動直後に描画が劣化している環境は**まさに 12.3 が捕まえたい環境**であり、その記録を落とすと 12.3 が空になる。境界の札（`scan_below_budget`）は既存のままとし、**対象の名乗りだけを落とす**（9.3 のレビュー指摘 4） |
+| 標本の取り方 | 走査（`RendererSpec.onVisibleSpanChange`）のたびに `scanned()` を呼び、**標本は 1 本ずつしか走らせない**。飛行中の走査は**1 本にまとめて**記憶し、いまの標本が終わってから 1 回だけ取り直す | 可視範囲は 1 秒に何十回も変わる。変化のたびに始めると標本が積み上がる。まとめることで、走査が続いている間は標本が途切れず、走査が止まれば取り直しも止まる |
+| 標本の長さ | `SCAN_SAMPLE_MS` = 1000 ms（60 Hz の面で約 60 本） | 1.6 は「中央値を主張するのに 12 本要る」とした。1 秒は走査の滑らかさを語る窓として十分である |
+| 予算の単位 | 画面側は ms（16.67）、境界へは**マイクロ秒の整数**（16670）。境界が運ぶ `budget_us` は**要件値**であり、記録の閾値（17.67）は境界へ出ない | 境界は文字列と 32 ビット以下の整数だけで構成する（`ipc-contract.md`）。丸めの経路を境界へ持ち込まない。**閾値を境界の型へ足さない**のは、記録の 1 行が結論ではなく測った事実（中央値と要件値）を運ぶためである |
+| **結線の形** | **`installGridRenderHealth`**（本 module）が画面の 3 つの口（`onPaintFailed` / `onVisibleSpanChange` / `record`）を取って、**移植口の `onVisibleSpanChange` と、組み立ての後の `checkPaint` を返す**。`GridSurface` の効果に残るのは「作る・2 つの位置へ渡す・捨てる」だけである | **効果は走らせないと観測できず、画面の関数本体に結線を書くと丸ごと削る変異がどの検査にも掛からない**（9.3 のレビューが実測。`createGridCopyEntry` / `installDocumentChangeRequests`（10.7）と同じ切り出し方である）。**結線の中身は検査の領分**であり、実起動の領分ではない |
+| 捨てたあとの記録 | `dispose()` の後は標本の結果を記録しない。組み立て直しのたびに新しい結線を作る | 捨てた面について記録しない。劣化の状態も「はじめて測った 1 本」から始める |
+
+**9.3 が単体で示せること / 実起動に属すること**: 単体（`GridScreen.test.ts` の 9.3 の節と、
+境界の `crates/app-shell/src/ipc/mod.rs`）が固定するのは、① 成立しない面で告知と記録が出ること
+（3 つの種別と、成立する面では何も出ないこと）、② **1 フレーム目で結論しないこと**（面が次の
+フレームに現れる並びで、健全な表を不成立と読まないこと）と、**空の面へ塗らないこと**、**待ちの
+上限が経過時間であること**（時計が上限を超えれば待たず、時計が止まっていても回り続けない）、
+③ 記録の閾値を跨いだときだけ 1 回記録されること（跨がないときは 0 回・同じ状態が続いても 1 回・
+測定不能が状態を動かさないこと）、**健全な 17.00 では 0 件・劣化の 24.00 では 1 件**という対照、
+④ 標本が重ならないこと、⑤ **画面が渡す 3 つの口へ結線が繋がっていること**（切り出した
+`installGridRenderHealth` の本体の 2 行 — `ports.onVisibleSpanChange(span)` と
+`ports.onPaintFailed(notice)` — を削る変異が 2 件を落とす。**効果の側の 3 行**（作る・2 つの位置へ
+渡す・捨てる）は**削っても生存する** — `createClipEntry` / `installDocumentChangeRequests` と同じ
+切り出しの規約の残余であり、実起動の観測が受け取る）、⑥ **札の綴りが画面と境界で一致すること**である。
+
+**実起動に属すること（9.2 が担う）**: **実物の WebKitGTK の面が塗れること**、**記録が実際に
+ファイルへ載ること**、そして **11.1（10 万行の走査で毎秒 60 回の更新）・11.2（最初の画面が 1 秒
+以内）・11.3（編集の反映が 100 ミリ秒以内）・12.2（描画を成立させない条件での起動）の実画面の
+観測**である。**11.1〜11.3 の判定は要件値（16.67 ms / 1 秒 / 100 ミリ秒）で行う** — 本節の記録の
+閾値（17.67 ms）はこの判定には使わない。
+
+**12.2 の不成立条件を作る引き金は現存しない（9.3 が記録して 9.2 へ送る）**: 実起動で「描画が
+成立しない」状態を作るには、グリッドの面（Glide の canvas）を描かせない引き金が要る。
+`scripts/check-no-paint.sh` の `JXCEL_VERIFICATION_SUPPRESS_HEARTBEAT`（8.2）は**器の初回描画**
+（10.2）の引き金であり、グリッドの面には届かない。**9.2 が非既定の feature
+（`verification-triggers` の下）または環境レベルの条件として引き金を足し**、その起動で告知 1 行と
+記録（`paint_failed`）が現れることを観測する。**9.3 はこの引き金を持たない** — 単体の検査は
+偽の面（`standInSurface`）で 3 つの種別を固定しており、実物の起動での不成立は再現していない。
+
 #### GridScreen / NestedInspector / ViolationBar（要約）
 
 - **GridScreen**: `ScreenProps` だけを受け取り、`SHELL_SCREEN_REGISTRY` に 1 件登録される。**`ScreenBoundary` はイベントハンドラと非同期の失敗を捕まえない**ため、IPC の失敗・キーボード操作の失敗は画面内の状態として扱う。配色は `var(--jxcel-*)` の 10 本のみを参照する。要件 6.5 の確認、要件 9.8 の移動を持つ。要件 7.8 のメニュー登録は**器の層**（`src-tauri/src/commands/grid.rs`）が持ち、画面は**その活性化を購読して移植口の入口を呼ぶ**（`clipboardRequests.ts`。9.5 の診断の導線と同じ分担である）。要件 9.9 のメニュー登録は 8.9 が同じ形で足した（`history.ts`。荷は生成物の `GridHistoryDirection`、キーボードの経路はアクセラレータである）。**要件 1.7 の文書の差し替え・破棄への追随は 10.7 が同じ形で足した**（`documentRequests.ts`。荷は `DOCUMENT_SESSION_CHANGED_EVENT` であり、購読側で `document_state` を取り直す — 下の「10.7 が確定させたもの」）
@@ -2186,10 +2260,32 @@ pub enum GridError {
 | 操作の誤り | 範囲外の窓の要求 | `GridError` を封筒の失敗腕で返す。画面は再要求する |
 | 経路の失敗 | IPC の不達、生バイト経路の空の窓 | 画面内の状態として扱い、読み込み中のまま再試行する。**`ScreenBoundary` は捕まえない** |
 | 描画の不成立 | 何も塗られない | 識別できる情報を提示する（要件 12.2） |
-| 描画の劣化 | フレーム時間の中央値が予算超過 | 診断へ記録する（要件 12.3） |
+| 描画の劣化 | フレーム時間の中央値が記録の閾値（要件値 16.67 ms + 計測の刻みの許容 1.00 ms）を超える | 診断へ記録する（要件 12.3）。**要件の合否の判定はここではない**（9.2 の実画面の観測が要件値で行う） |
 
 ### Monitoring
 - 描画の劣化と窓の取得失敗は `app-shell` の診断へ記録する。**新しい記録の仕組みを作らない**
+- **描画の劣化（12.3）の経路は 9.3 が結線した**: 画面（`src/features/grid/renderHealth.ts`）が
+  フレーム時間の中央値を**記録の閾値（要件値 16.67 ms + 計測の刻みの許容 1.00 ms）**と比べ、
+  **跨いだときに 1 回だけ** `diagnostics_record_render` を呼ぶ。器の側は既存の記録機構
+  （`tauri-plugin-log` の `log::warn!` / `log::info!`）へ書く — **新しい記録の機構は作らない**。
+  画面から記録機構へ直接書く経路が無いことが、この 1 本のコマンドを要する理由である
+  （`research.md` の実測）
+- **記録の 1 行は測った事実だけを述べる**（「フレーム時間の中央値 n ms が予算 m ms を超えた」）。
+  **結論（要件を満たしたか）を名乗らない** — 1.6 の実画面の実測では健全な走査の中央値が
+  17.00 ms であり、要件値で記録を決めると健全な走査が劣化として載る。**要件 11.1 の合否は 9.2 の
+  実画面の観測が要件値で判定する**（記録の閾値はその判定に使わない）。**「走査の」とも名乗らない**
+  — 最初の標本は起動直後の読み込みを測りうる（引き金は可視区間の知らせであり、移植口は取り付け
+  の直後にも 1 回報せる）
+- **描画の不成立（12.2）も同じ経路で記録する**（`paint_failed`）。利用者へ見せる情報は
+  告知 1 行（`GridScreenModel.notice`）であり、**内容の領域は置き換えない**
+- **12.2 の不成立条件を実起動で作る引き金は現存しない**: `scripts/check-no-paint.sh` の
+  `JXCEL_VERIFICATION_SUPPRESS_HEARTBEAT`（8.2）は**器の初回描画**（10.2）の引き金であり、
+  グリッドの面には届かない。**9.2 が非既定の feature（`verification-triggers`）または環境レベルの
+  条件として引き金を足し**、その起動で告知 1 行と記録（`paint_failed`）が現れることを観測する。
+  9.3 の単体の検査は**偽の面**で 3 つの種別を固定しており、実物の起動での不成立は再現していない
+- **記録が実際にファイルへ載ることの確認は実起動に属する**（9.2 の台本）。9.3 の単体テストが
+  固定するのは「閾値を跨いだときに 1 回だけ呼ばれる」「成立しない面で告知と記録が出る」
+  「健全な 17.00 では出ず劣化の 24.00 では出る」「画面が渡す 3 つの口へ結線が繋がっている」である
 
 ## Testing Strategy
 

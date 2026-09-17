@@ -86,7 +86,8 @@ use app_shell::ipc::{
     DIAGNOSTICS_REQUESTED_EVENT, DiagnosticsExportRecords, DiagnosticsExportResponse,
     DiagnosticsLevel, DiagnosticsLogLocationResponse, DiagnosticsRequestedEvent,
     DiagnosticsSection, DiagnosticsVerbosityResponse, DiagnosticsVerbositySetRequest, IpcError,
-    IpcResult, WindowContext, WindowLabel,
+    IpcResult, RenderHealthRecordRequest, RenderHealthRecordResponse, RenderHealthReport,
+    RenderPaintFailure, WindowContext, WindowLabel,
 };
 use app_shell::settings::FileSettingsStore;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
@@ -424,6 +425,93 @@ pub fn diagnostics_verbosity_set(
     );
     IpcResult::Ok {
         data: verbosity_response(context, level),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 描画の健全性の記録（要件 12.2、12.3。タスク 9.3）
+// ---------------------------------------------------------------------------
+
+/// 描画の健全性を診断の記録へ 1 件残す（要件 12.2、12.3。タスク 9.3）。
+///
+/// **これが 12.3 の「診断情報に記録する」の実体である。**グリッドの画面は描画の劣化を
+/// **自分では記録できない** — フロントエンドから記録機構へ書く経路が無いためであり
+/// （`tauri-plugin-log` の宛先は `Stdout` と `Folder` だけで、`Webview` ターゲットは 5.2 が
+/// 意図的に有効にしていない。`research.md` の実測）、画面はこの 1 本のコマンドを通してだけ
+/// 記録を残せる。
+///
+/// **記録の 1 行は本層が組み立てる。**要求が運ぶのは札と数値だけであり（[`RenderHealthReport`]）、
+/// 任意の文字列は境界を越えられない — 記録の注入面を広げないためである。ミリ秒への戻し
+/// （マイクロ秒の整数 ÷ 1000）もここで行う。
+///
+/// **1 行は「測った事実」だけを述べ、結論（要件を満たしたか）を名乗らない。**記録の有無を決める
+/// 閾値は画面側にあり（要件値 + 計測の刻みの許容。`src/features/grid/renderHealth.ts`）、
+/// **要件 11.1 の合否を判定するのは 9.2 の実画面の観測である** — ここで「予算を満たしていない」
+/// と書くと、記録が 1.6 の否定した読み方を事実として運ぶ。走査の腕の 1 行が運ぶのは
+/// **フレーム時間の中央値と、要件 11.1 の予算の数**である（対象を「走査」とも名乗らない —
+/// 最初の標本は起動直後の読み込みを測りうる）。
+///
+/// **記録の水準は事実で変える**: 描画の不成立は `warn`、走査の劣化は `info` である。
+/// どちらも「失敗した」わけではない事実の記録であり、詳細度の設定（要件 8.7）が
+/// `Off` / `Error` のときは残らない — 記録の水準は利用者が選ぶ（5.2 の契約）。
+///
+/// 呼び出し元ウィンドウは基盤が注入する引数から取るため、フロントエンドはウィンドウを
+/// 偽装できない（要件 4.6）。**記録は必ず行われ**（失敗は封筒の失敗腕）、応答は呼び出し元の
+/// 文脈だけを返す（画面の提示はこの往復の結果に依存しない）。
+#[tauri::command]
+pub fn diagnostics_record_render(
+    window: WebviewWindow,
+    request: RenderHealthRecordRequest,
+) -> IpcResult<RenderHealthRecordResponse, IpcError> {
+    let command = app_shell::ipc::command_names::DIAGNOSTICS_RECORD_RENDER;
+    let context = caller_context(&window);
+    let label = context.window.as_str();
+    match request.report {
+        RenderHealthReport::PaintFailed { failure, colors } => {
+            log::warn!(
+                "{command}: 表の描画が成立しなかった（ウィンドウ = {label}, 理由 = {}, 色数 = {}）",
+                paint_failure_name(failure),
+                match colors {
+                    Some(count) => count.to_string(),
+                    None => "読めず".to_owned(),
+                },
+            );
+        }
+        RenderHealthReport::ScanBelowBudget {
+            median_us,
+            budget_us,
+        } => {
+            // **測った事実をそのまま運ぶ。**「予算を満たしていない」という結論は書かない —
+            // 記録の閾値は画面側が要件値へ計測の刻みの許容を足して決めており
+            // （`src/features/grid/renderHealth.ts` の `FRAME_BUDGET_TOLERANCE_MS`。1.6 の
+            // 実画面の実測では健全な走査の中央値が 17.00 ms）、**ここで結論を名乗ると記録が
+            // 1.6 の否定した読み方を事実として運ぶ**。要件 11.1 の合否は 9.2 の実画面の観測が
+            // 要件値で判定する。
+            //
+            // **「走査の」とも名乗らない。**標本を始める引き金は可視区間の知らせであり、移植口は
+            // 取り付けの直後にもそれを 1 回報せる（最初の標本は起動直後の読み込みを測りうる）。
+            // 測っている対象は**フレーム時間の中央値**である。
+            log::info!(
+                "{command}: フレーム時間の中央値 {:.2} ms が予算 {:.2} ms を超えた（ウィンドウ = {label}）",
+                f64::from(median_us) / 1000.0,
+                f64::from(budget_us) / 1000.0,
+            );
+        }
+    }
+    IpcResult::Ok {
+        data: RenderHealthRecordResponse { context },
+    }
+}
+
+/// 成立しなかった理由の種別を、記録の 1 行へ載せる短い名前にする。
+///
+/// **利用者へ見せる文言ではない**（12.2 の提示は画面が組み立てる）。診断の記録を読む側
+/// （9.2 の台本と、記録を読む人）が事実を機械的に見分けられるようにするための札である。
+fn paint_failure_name(failure: RenderPaintFailure) -> &'static str {
+    match failure {
+        RenderPaintFailure::NoCanvas => "面が無い",
+        RenderPaintFailure::Unpaintable => "面に塗って読み戻せない",
+        RenderPaintFailure::Blank => "面が一様である",
     }
 }
 

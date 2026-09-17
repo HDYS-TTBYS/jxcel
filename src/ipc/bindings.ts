@@ -33,6 +33,7 @@ export const COMMAND_NAMES = [
   "grid_find_violation",
   "grid_rows_window",
   "grid_reference_rows",
+  "diagnostics_record_render",
 ] as const;
 
 /**
@@ -1435,6 +1436,69 @@ outcome: DocumentPickOutcome, };
 // しないため、境界が名指しできる具体形を明示的に置く。
 export type PickDocumentFileResult = IpcResult<PickDocumentFileResponse, IpcError>;
 /**
+ * 描画の健全性の記録の要求（タスク 9.3。要件 12.2、12.3）。
+ *
+ * 運ぶのは [`RenderHealthReport`] 1 つである。ウィンドウは要求の型に現れない — 呼び出し元は
+ * 基盤が注入する `WebviewWindow` から取るため、フロントエンドが偽装する経路は存在しない
+ * （要件 4.6、`ipc-contract.md`）。
+ */
+export type RenderHealthRecordRequest = { 
+/**
+ * 記録する事実。
+ */
+report: RenderHealthReport, };
+/**
+ * 描画の健全性の記録の応答（タスク 9.3。要件 12.3、4.6）。
+ *
+ * **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。記録は必ず行われる（記録できない場合は
+ * 封筒の失敗腕になる）ので、結果を表す欄を別に持たない — 画面の提示（12.2 の告知）はこの
+ * 往復の結果に依存しない（記録が失敗しても、描画が成立しなかったことは利用者に見えている）。
+ */
+export type RenderHealthRecordResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈（要件 4.6）。
+ */
+context: WindowContext, };
+// 描画の健全性の記録の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を
+// 名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type RenderHealthRecordResult = IpcResult<RenderHealthRecordResponse, IpcError>;
+/**
+ * 描画の健全性の報告（タスク 9.3。要件 12.2、12.3）。**札と数値だけを運ぶ閉じた合併型である。**
+ *
+ * 2 つの腕は**互いに素**であり、それぞれが要る数値だけを持つ。同じ事実を平たい欄の集まりで
+ * 表すと「走査の劣化なのに理由の種別が載っている」ような状態が型の上で作れてしまうため、
+ * ここでは**作れない形**にしてある（6.1 の [`GridEditCommand`] と同じ規律）。
+ *
+ * **任意の文字列は運べない。**記録へ流せるのはこの 2 つの事実と数値だけであり、記録の 1 行を
+ * 組み立てるのは器の側である — 記録の注入面を広げないためである（10.8 がクリップボードから
+ * 読んだ文字を記録へ出さず文字数だけを写したのと同じ規律）。
+ *
+ * **時間はマイクロ秒の整数で運ぶ。**要件 11.1 の予算は 16.67 ms であり、境界は文字列と
+ * 32 ビット以下の整数だけで構成する（`ipc-contract.md`）ため、浮動小数をそのまま出せない。
+ * したがって予算も [`RenderHealthReport::ScanBelowBudget::budget_us`]（16670）として送り、
+ * **記録の 1 行を組み立てる側がミリ秒へ戻す**（丸めの経路を境界へ持ち込まない）。
+ *
+ * 直列化の札は小文字の綴りであり、画面側の記録の口
+ * （`src/features/grid/renderHealth.ts` の `RenderHealthReport.fact`）と同じ綴りである。
+ */
+export type RenderHealthReport = { "fact": "paint_failed", 
+/**
+ * 成立しなかった理由の種別。
+ */
+failure: RenderPaintFailure, 
+/**
+ * 数えた色数（面が読めなかったときは `null`）。
+ */
+colors: number | null, } | { "fact": "scan_below_budget", 
+/**
+ * 測定したフレーム時間の中央値（**マイクロ秒**）。
+ */
+median_us: number, 
+/**
+ * 要件 11.1 の予算（**マイクロ秒**。16670）。
+ */
+budget_us: number, };
+/**
  * 初回描画の通知の要求（タスク 8.2。要件 10.1、10.2）。
  *
  * 運ぶのは**ラスタライザの文字列**と**実際に描画されていた画面の識別子**である。
@@ -1480,6 +1544,19 @@ verdict: RenderVerdict, };
 // 初回描画の通知の応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を
 // 名指ししないため、境界が名指しできる具体形を明示的に置く。
 export type RenderHeartbeatResult = IpcResult<RenderHeartbeatResponse, IpcError>;
+/**
+ * 表の描画が成立しなかった理由の種別（タスク 9.3。要件 12.2）。**閉じた列挙である。**
+ *
+ * 3 つは排他である: 面が無い（`NoCanvas`）／面はあるが塗って読み戻せない（`Unpaintable`）／
+ * 面は塗れるが何も描かれていない（`Blank`）。**12.2 の「識別できる情報」の芯はこの札であり**、
+ * 利用者へ見せる文言（「表の描画が成立しませんでした: …」）は画面が組み立てる。
+ *
+ * 3 つ目が要るのは、塗って読み戻す検査（7.6 の `probePaint`）だけでは**「DOM はあるが何も
+ * 塗られない」症状を捕まえられない**ためである — あの検査は自分が塗った画素を読む。7.6 が
+ * 「面の内容を数える」口（`countDistinctColors`）を併せて公開した理由であり、1.6 の実測でも
+ * 塗られた面は 52〜59 色、一様な面は 1 色だった。
+ */
+export type RenderPaintFailure = "no_canvas" | "unpaintable" | "blank";
 /**
  * 初回描画の判定（タスク 8.2。要件 10.1、10.2）。**三値である。**
  *

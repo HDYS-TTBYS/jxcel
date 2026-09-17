@@ -142,7 +142,12 @@ identifier = "allow-grid-reference-rows"
 description = "参照先のシートの行を頁ごとに読むコマンド（grid_reference_rows）を許可する。参照先は要求ではなく列の宣言（ref の sheet）から決まり、応答は頁に閉じる — 件数は境界の上限（GRID_REFERENCE_PAGE_LIMIT）を超えないため、参照先が 1 万行でも一度に全部を読まない。参照の型でない列と、参照先のシートが文書に無い場合は経路の失敗として返す（要件 3.8、4.6）。"
 commands.allow = ["grid_reference_rows"]
 
+[[permission]]
+identifier = "allow-diagnostics-record-render"
+description = "グリッドの描画の健全性（描画の不成立と、走査の滑らかさの劣化）を診断の記録へ 1 件残すコマンド（diagnostics_record_render）を許可する。運べるのは閉じた札と数値だけで、任意の文字列は境界を越えられない。呼び出し元ウィンドウは基盤が注入する引数から取るため偽装できない（要件 12.2、12.3、4.6）。"
+commands.allow = ["diagnostics_record_render"]
+
 [[set]]
 identifier = "app-shell"
 description = "app-shell が登録する自前コマンドの集合。capability はこの集合名だけを参照する。ファイルシステム系・シェル系の権限はここにも含めない（要件 4.7）。"
-permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file", "allow-render-heartbeat", "allow-diagnostics-log-location", "allow-diagnostics-export", "allow-diagnostics-verbosity-get", "allow-diagnostics-verbosity-set", "allow-window-document-state", "allow-document-state", "allow-document-save", "allow-document-new", "allow-document-discard", "allow-grid-open-sheet", "allow-grid-set-view", "allow-grid-apply-edit", "allow-grid-history", "allow-grid-find-violation", "allow-grid-rows-window", "allow-grid-reference-rows"]
+permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file", "allow-render-heartbeat", "allow-diagnostics-log-location", "allow-diagnostics-export", "allow-diagnostics-verbosity-get", "allow-diagnostics-verbosity-set", "allow-window-document-state", "allow-document-state", "allow-document-save", "allow-document-new", "allow-document-discard", "allow-grid-open-sheet", "allow-grid-set-view", "allow-grid-apply-edit", "allow-grid-history", "allow-grid-find-violation", "allow-grid-rows-window", "allow-grid-reference-rows", "allow-diagnostics-record-render"]

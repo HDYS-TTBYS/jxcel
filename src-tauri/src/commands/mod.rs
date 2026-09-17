@@ -142,6 +142,7 @@ command_root! {
     command_names::GRID_FIND_VIOLATION => grid::grid_find_violation,
     command_names::GRID_ROWS_WINDOW => grid::grid_rows_window,
     command_names::GRID_REFERENCE_ROWS => grid::grid_reference_rows,
+    command_names::DIAGNOSTICS_RECORD_RENDER => diagnostics_cmds::diagnostics_record_render,
 }
 
 #[cfg(test)]

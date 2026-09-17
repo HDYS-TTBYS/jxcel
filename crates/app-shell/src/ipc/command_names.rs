@@ -148,6 +148,16 @@ pub const GRID_ROWS_WINDOW: &str = "grid_rows_window";
 /// （「行が無い」と混同しない — 6 本の写像の規律と同じ）。
 pub const GRID_REFERENCE_ROWS: &str = "grid_reference_rows";
 
+/// 呼び出し元ウィンドウのグリッドの描画の健全性を、診断の記録へ 1 件残す（タスク 9.3。要件 12.2、12.3）。
+///
+/// **運ぶのは閉じた札と数値だけである。**自由な文字列を記録へ流す口を作らないためであり、
+/// 記録の 1 行を組み立てるのは器の側である（記録の注入面を広げない。10.8 がクリップボードの
+/// 読み取った文字を記録へ出さなかったのと同じ規律）。
+///
+/// 呼び出し元ウィンドウは基盤が注入する引数から取るため、フロントエンドはウィンドウを
+/// 偽装できない（要件 4.6）。
+pub const DIAGNOSTICS_RECORD_RENDER: &str = "diagnostics_record_render";
+
 /// フロントエンドから呼び出せるコマンド名の一覧（要件 4.1、4.2）。
 ///
 /// `src-tauri` のハンドラ登録（タスク 7.1）と TypeScript の生成物（タスク 2.2）の**両方**が
@@ -175,4 +185,5 @@ pub const COMMAND_NAMES: &[&str] = &[
     GRID_FIND_VIOLATION,
     GRID_ROWS_WINDOW,
     GRID_REFERENCE_ROWS,
+    DIAGNOSTICS_RECORD_RENDER,
 ];
