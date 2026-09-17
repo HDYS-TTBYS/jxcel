@@ -109,6 +109,12 @@ if [ "$expect_paste" = "成立" ] && ! command -v busctl >/dev/null 2>&1; then
   exit 2
 fi
 
+# **X11 のウィンドウ一覧は共有の置き場から読む**（`scripts/lib/x11-window.sh`。他の検査器と
+# 同じ解析を使う — ウィンドウの一覧を 2 つの書き方で持たない）。
+_script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=scripts/lib/x11-window.sh
+. "$_script_dir/lib/x11-window.sh"
+
 work=$(mktemp -d)
 app_log="$work/app.log"
 app_pid=""
@@ -198,6 +204,55 @@ observation_record() {
 item_record() {
   tail -n "+$(( before + 1 ))" "$record" 2>/dev/null |
     grep -F "グリッドの観測の項目: $1=" | tail -n 1 || true
+}
+
+# **活性化の前に、対象のウィンドウへ入力フォーカスを移す。**
+#
+# メニューの選択は「フォーカス中のウィンドウ」へ振り向けられる（要件 3.5）。**ウィンドウ
+# マネージャの無い環境（CI の Xvfb）では誰もフォーカスを設定しない**ため、フォーカスが無いと
+# **活性化は何も起こさない**（実測: DoAction は成功として返るのに、器は貼り付けの要求を
+# 1 件も記録せず、段は「貼り付けの要求の記録がありません」で落ちた）。技術は
+# `scripts/check-menu-shortcut.sh` の `x11-focus` と同じである（同じ X11 の呼び出し）。
+#
+# **失敗は注記である**（フォーカスを移せない環境もある — そのときは活性化の成否が判定を決める）。
+focus_observation_window() {
+  x11_collect_windows "jxcel" 200 100
+  if [ "$x11_window_count" -eq 0 ]; then
+    echo "注記: フォーカスを移すウィンドウが見つからない（活性化は現在のフォーカスのまま行う）"
+    return 0
+  fi
+  _focus_id=$(printf '%s\n' "$x11_window_ids" | head -n 1)
+  python3 - "$_focus_id" <<'X11FOCUS'
+import ctypes
+import sys
+
+x11 = ctypes.CDLL("libX11.so.6")
+x11.XOpenDisplay.restype = ctypes.c_void_p
+x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+x11.XSetInputFocus.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+x11.XGetInputFocus.argtypes = [
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_ulong),
+    ctypes.POINTER(ctypes.c_int),
+]
+x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+
+window = int(sys.argv[1], 0)
+display = x11.XOpenDisplay(None)
+if not display:
+    print("注記: DISPLAY を開けない（活性化は現在のフォーカスのまま行う）")
+    sys.exit(0)
+# RevertToParent(2) / CurrentTime(0)
+x11.XSetInputFocus(display, window, 2, 0)
+x11.XSync(display, 0)
+focused = ctypes.c_ulong(0)
+revert = ctypes.c_int(0)
+x11.XGetInputFocus(display, ctypes.byref(focused), ctypes.byref(revert))
+if focused.value == window:
+    print(f"OK: X11: 入力フォーカスを 0x{window:x} へ移した（活性化の宛先になる）")
+else:
+    print(f"注記: 入力フォーカスが 0x{focused.value:x} のままである（期待 0x{window:x}）")
+X11FOCUS
 }
 
 # 貼り付けの往復（10.8）は**活性化できる段だけ**が要求する。準備の印をアクセシビリティの木から
@@ -354,6 +409,7 @@ paste_activated=行わない
 if [ "$expect_paste" = "成立" ]; then
   # **観測の行より先に走らせる**（画面は準備の印を出したあと貼り付けを待つ。あとから活性化すると
   # 画面は既に期限切れで ng を書いている）。
+  focus_observation_window
   atspi_activate_paste_when_ready "$timeout_secs" >"$work/paste.log" 2>&1 &
   paste_pid=$!
 fi
