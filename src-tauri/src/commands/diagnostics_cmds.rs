@@ -86,9 +86,9 @@ use app_shell::ipc::{
     DiagnosticsExportRecords, DiagnosticsExportResponse, DiagnosticsLevel,
     DiagnosticsLogLocationResponse, DiagnosticsRequestedEvent, DiagnosticsSection,
     DiagnosticsVerbosityResponse, DiagnosticsVerbositySetRequest, IpcError, IpcResult,
-    ObservationItem, ObservationItemOutcome, ObservationUndo, RenderHealthRecordRequest,
-    RenderHealthRecordResponse, RenderHealthReport, RenderPaintFailure, WindowContext, WindowLabel,
-    DIAGNOSTICS_REQUESTED_EVENT,
+    ObservationItem, ObservationItemOutcome, ObservationItemReason, ObservationUndo,
+    RenderHealthRecordRequest, RenderHealthRecordResponse, RenderHealthReport, RenderPaintFailure,
+    WindowContext, WindowLabel, DIAGNOSTICS_REQUESTED_EVENT,
 };
 use app_shell::settings::FileSettingsStore;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
@@ -517,12 +517,18 @@ pub fn diagnostics_record_render(
             // **筋書きの項目は 1 行ずつ残す**（9.2 の段は「どの項目が成立しなかったか」を読む）。
             // 1 つの行へまとめない — 記録の読み手が grep で項目を引けるようにする。
             for result in items {
+                // **失敗した項目は「どこで止まったか」まで残す**（3 OS の検査器が読む唯一の
+                // 場所であり、人が読む行は Linux のアクセシビリティの木でしか読めない）。
                 log::info!(
-                    "{command}: グリッドの観測の項目: {}={}",
+                    "{command}: グリッドの観測の項目: {}={}{}",
                     observation_item_name(result.item),
                     match result.outcome {
                         ObservationItemOutcome::Ok => "ok",
                         ObservationItemOutcome::Ng => "ng",
+                    },
+                    match result.reason {
+                        Some(reason) => format!(":{}", observation_item_reason_name(reason)),
+                        None => String::new(),
                     },
                 );
             }
@@ -568,6 +574,40 @@ fn observation_item_name(item: ObservationItem) -> &'static str {
         ObservationItem::PasteThroughMenu => "paste_through_menu",
         ObservationItem::SheetSwitchUndo => "sheet_switch_undo",
         ObservationItem::ReplaceDocument => "replace_document",
+    }
+}
+
+/// 失敗した項目の**止まった場所**を、記録の 1 行へ載せる短い名前にする（**閉じた列挙の綴り**）。
+///
+/// 綴りは画面側（`src/features/grid/gridObservation.tsx`）と検査器（`scripts/`）が同じものを見る。
+/// 生成物の綴りは `bindings_declare_the_render_health_surface` が名指しで固定している。
+fn observation_item_reason_name(reason: ObservationItemReason) -> &'static str {
+    match reason {
+        ObservationItemReason::EntryMissing => "entry_missing",
+        ObservationItemReason::RowCountUnreadable => "row_count_unreadable",
+        ObservationItemReason::RowCountUnchanged => "row_count_unchanged",
+        ObservationItemReason::RowCountNotRestored => "row_count_not_restored",
+        ObservationItemReason::PositionUnreadable => "position_unreadable",
+        ObservationItemReason::PositionNotMoved => "position_not_moved",
+        ObservationItemReason::DocumentNotHeld => "document_not_held",
+        ObservationItemReason::SheetMissing => "sheet_missing",
+        ObservationItemReason::ReferenceColumnMissing => "reference_column_missing",
+        ObservationItemReason::SheetOpenFailed => "sheet_open_failed",
+        ObservationItemReason::SheetNotRestored => "sheet_not_restored",
+        ObservationItemReason::SortNotReflected => "sort_not_reflected",
+        ObservationItemReason::SelectionEmpty => "selection_empty",
+        ObservationItemReason::ViolationReasonMissing => "violation_reason_missing",
+        ObservationItemReason::ViolationReasonNotRepeated => "violation_reason_not_repeated",
+        ObservationItemReason::SurfaceUniform => "surface_uniform",
+        ObservationItemReason::SurfaceUnreadable => "surface_unreadable",
+        ObservationItemReason::ArrivalsUnchanged => "arrivals_unchanged",
+        ObservationItemReason::PasteNotDelivered => "paste_not_delivered",
+        ObservationItemReason::TableMissing => "table_missing",
+        ObservationItemReason::DocumentNewFailed => "document_new_failed",
+        ObservationItemReason::DocumentNotFollowed => "document_not_followed",
+        ObservationItemReason::DiscardFailed => "discard_failed",
+        ObservationItemReason::ReferenceNotListed => "reference_not_listed",
+        ObservationItemReason::Exception => "exception",
     }
 }
 

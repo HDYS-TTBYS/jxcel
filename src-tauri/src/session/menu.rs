@@ -141,6 +141,18 @@ const SAVE_ACCELERATOR_SPELLING: &str = "Ctrl+S";
 #[cfg(target_os = "macos")]
 const SAVE_ACCELERATOR_SPELLING: &str = "Cmd+S";
 
+/// 「保存」と同じ組み合わせを**別の綴り**で書いたもの（競合の検査に使う）。
+///
+/// **プラットフォームで変わる。**`Cmd+S` は macOS では `Super+S` へ、`Ctrl+S` は他の OS では
+/// `Ctrl+S` へ正準化される。検査が `control+KeyS` のような**片方の綴りを直書きすると、もう
+/// 片方の OS で競合しない**（CI の実測: macOS の検査が落ちた）。ここで対にして置く。
+#[cfg(not(target_os = "macos"))]
+const SAVE_ACCELERATOR_ALIAS_SPELLING: &str = "control+s";
+
+/// 「保存」と同じ組み合わせを別の綴りで書いたもの（macOS。`command` は `super` の別名）。
+#[cfg(target_os = "macos")]
+const SAVE_ACCELERATOR_ALIAS_SPELLING: &str = "command+s";
+
 /// 2 つの項目を置く部分メニュー。**7.4 が決めたトップレベルの並び**（`ファイル`）に従う。
 ///
 /// 位置の名前をここで書き写さず、`menu` モジュールの定数を参照する（並びと名前の食い違いを
@@ -357,8 +369,8 @@ mod tests {
 
     use super::{
         activate_new, activate_save, document_menu_path, new_item_spec, save_item_spec,
-        NEW_ACCELERATOR_SPELLING, NEW_ITEM_ID, NEW_LABEL, OWNER, SAVE_ACCELERATOR_SPELLING,
-        SAVE_ITEM_ID, SAVE_LABEL,
+        NEW_ACCELERATOR_SPELLING, NEW_ITEM_ID, NEW_LABEL, OWNER, SAVE_ACCELERATOR_ALIAS_SPELLING,
+        SAVE_ACCELERATOR_SPELLING, SAVE_ITEM_ID, SAVE_LABEL,
     };
     use crate::dialog::{self, SaveLocation};
     use crate::menu::{MenuNode, MenuPath, MenuRegistry};
@@ -588,6 +600,11 @@ mod tests {
     ///
     /// 別の登録元が同じ組み合わせを要求したときに、**どちらとどちらが衝突したか**が返り、
     /// **どちらの項目も失われない**（先の登録は残り、後の登録は現れない）。
+    ///
+    /// **綴りはプラットフォームで変わる。**「保存」の組み合わせは macOS では `Cmd+S`（`Super`）、
+    /// 他の OS では `Ctrl+S` である。検査は片方を直書きせず、**同じ組み合わせの別綴り**
+    /// （[`SAVE_ACCELERATOR_ALIAS_SPELLING`]）を使う — 直書きすると、もう片方の OS で
+    /// 「競合しない」という結果になる（CI の実測: macOS の検査が落ちた）。
     #[test]
     fn a_shortcut_conflict_is_reported_to_the_registrant() {
         let registry = MenuRegistry::new();
@@ -606,7 +623,9 @@ mod tests {
                     "マクロを保存",
                     noop,
                 )
-                .with_accelerator("control+KeyS"),
+                // **同じ組み合わせの別綴り**（正準形が一致する。プラットフォームで綴りが
+                // 変わるため、直書きせずに対の定数を使う — 直書きは macOS で競合しなくなる）。
+                .with_accelerator(SAVE_ACCELERATOR_ALIAS_SPELLING),
             )
             .expect_err("競合として返る");
 

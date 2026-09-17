@@ -833,6 +833,67 @@ pub enum ObservationItemOutcome {
     Ng,
 }
 
+/// 筋書きの項目が**どこで止まったか**（[`ObservationItemResult`]）。**閉じた列挙である。**
+///
+/// **失敗の理由を人が読める形でしか残さないと、CI の 3 OS で診断できない** — 人が読む行は
+/// 画面の `aria-label` にあり、それを読めるのは Linux のアクセシビリティの木だけである
+/// （実測: Windows の段で「項目が ng」までしか分からず、原因の切り分けに 1 往復を要した）。
+/// 記録へ**札**として載せ、3 OS の検査器が同じ形で読めるようにする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationItemReason {
+    /// 押す入口（ボタン・項目）が無い。
+    EntryMissing,
+    /// 行数を読めなかった。
+    RowCountUnreadable,
+    /// 行数が期待どおりに変わらなかった。
+    RowCountUnchanged,
+    /// 行数が元に戻らなかった。
+    RowCountNotRestored,
+    /// 現在位置を読めなかった。
+    PositionUnreadable,
+    /// 現在位置が対象の行へ移らなかった。
+    PositionNotMoved,
+    /// 文書が保持されていない。
+    DocumentNotHeld,
+    /// シートが無い。
+    SheetMissing,
+    /// 参照の列が無い。
+    ReferenceColumnMissing,
+    /// 別のシートを開けなかった。
+    SheetOpenFailed,
+    /// 元のシートへ戻れなかった。
+    SheetNotRestored,
+    /// 並べ替えが表示へ反映されなかった。
+    SortNotReflected,
+    /// 範囲を選べなかった。
+    SelectionEmpty,
+    /// 違反の理由が読めなかった。
+    ViolationReasonMissing,
+    /// 同じ行の別の違反セルで理由が読めなかった。
+    ViolationReasonNotRepeated,
+    /// 面の色数が 2 に満たなかった（一様である）。
+    SurfaceUniform,
+    /// 面か窓の到着の数を読めなかった。
+    SurfaceUnreadable,
+    /// 窓の到着が増えなかった。
+    ArrivalsUnchanged,
+    /// 貼り付けが表へ届かなかった。
+    PasteNotDelivered,
+    /// 表が無い。
+    TableMissing,
+    /// 新しい文書を作れなかった。
+    DocumentNewFailed,
+    /// 表が新しい文書へ追随しなかった。
+    DocumentNotFollowed,
+    /// 未保存の変更を破棄できなかった。
+    DiscardFailed,
+    /// 参照の面が行を一覧しなかった。
+    ReferenceNotListed,
+    /// 項目が例外で止まった。
+    Exception,
+}
+
 /// 筋書きの 1 項目の結果（[`RenderHealthReport::Observation`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct ObservationItemResult {
@@ -840,6 +901,8 @@ pub struct ObservationItemResult {
     pub item: ObservationItem,
     /// その結果。
     pub outcome: ObservationItemOutcome,
+    /// 成立しなかったときの**止まった場所**（成立したときは `None`）。
+    pub reason: Option<ObservationItemReason>,
 }
 
 /// 編集の取り消しの成否（[`RenderHealthReport::Observation`]。要件 9.2 の往復）。
@@ -1377,6 +1440,7 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<ObservationItem>(&cfg),
         declared::<ObservationItemOutcome>(&cfg),
         declared::<ObservationItemResult>(&cfg),
+        declared::<ObservationItemReason>(&cfg),
         declared::<RenderHealthReport>(&cfg),
         declared::<RenderHealthRecordRequest>(&cfg),
         declared::<RenderHealthRecordResponse>(&cfg),
@@ -3199,6 +3263,7 @@ mod tests {
             "\"paste_through_menu\" |",
             "export type ObservationItemOutcome = \"ok\" | \"ng\";",
             "export type ObservationItemResult = {",
+            "export type ObservationItemReason =",
             "export type RenderHealthReport =",
             "{ \"fact\": \"paint_failed\"",
             "{ \"fact\": \"scan_below_budget\"",

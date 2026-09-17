@@ -57,22 +57,38 @@ echo "標本を作る: 10 万行 × 30 列（1.4 の生成器）"
 cargo run --release -q -p data-grid --example make-large-sheet --features verification-samples -- \
   100000 30 "$sample"
 
+# **仮想ディスプレイを自分で用意する**（兄弟の段と同じ形）。検査器は Linux で `DISPLAY` を
+# 要求する — 要求しないと、表示サーバの無いランナーで**観測の前に** 2 で落ちる（CI の実測）。
+# 表示サーバが既にある機械（開発機）では重ねない。
+with_display() {
+  # **表示サーバが既にあるなら重ねない**（開発機は実画面で走らせたい。Xvfb を重ねると
+  # ソフトウェアラスタライザになり、所要時間の要件の前提（11.7）から外れてしまう）。
+  if [ -n "${DISPLAY:-}" ]; then
+    "$@"
+  elif command -v xvfb-run >/dev/null 2>&1; then
+    xvfb-run -a --server-args="-screen 0 1280x1024x24" "$@"
+  else
+    "$@"
+  fi
+}
+
 # 検査器を 1 回走らせる。第 1 引数は実行ファイル、第 2 引数は標本、第 3 引数は記録、残りは
-# 検査器の引数である。
+# 検査器の引数である。**`dbus-run-session` はアクセシビリティの木（貼り付けの項目の活性化）の
+# ために要る**ので、仮想ディスプレイの内側で作る。
 run_check() {
   _app=$1
   shift 1
   if command -v dbus-run-session >/dev/null 2>&1; then
-    dbus-run-session -- env GTK_MODULES=gail:atk-bridge \
+    with_display dbus-run-session -- env GTK_MODULES=gail:atk-bridge \
       sh scripts/check-grid-observation.sh "$_app" "$sample" "$record" "$@"
   else
-    env GTK_MODULES=gail:atk-bridge \
+    with_display env GTK_MODULES=gail:atk-bridge \
       sh scripts/check-grid-observation.sh "$_app" "$sample" "$record" "$@"
   fi
 }
 
 echo "観測 1/2: 通常の起動（走査・編集・取り消しの成立）"
-run_check "$verify" --timeout=300 --expect-paint=成立 \
+run_check "$verify" --timeout=360 --expect-paint=成立 \
   --expect-paste=成立 \
   --expect-items=nested_expansion,insert_row,sort_then_delete,violation_reason,reference_rows,sheet_switch_undo,replace_document,paste_through_menu
 

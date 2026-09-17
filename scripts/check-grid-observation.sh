@@ -225,6 +225,9 @@ REGISTRY = "org.a11y.atspi.Registry"
 ROOT_PATH = "/org/a11y/atspi/accessible/root"
 PRUNE_ROLES = {"scroll pane", "document web", "document frame", "table", "grid", "tree table"}
 MAX_DEPTH = 18
+# **印の探索の深さは木の上限に合わせる。**浅く打ち切ると印に届かない（実測: 深さ 8 では
+# 見つからず、18（木の上限）で見つかった — 印は DOM の深い位置にある）。1 巡の費用は
+# 幅優先（`deque`）と印の寿命（観測の画面が 150 秒待つ）で吸収する。
 
 
 class Atspi:
@@ -391,16 +394,41 @@ number_is_finite() {
   esac
 }
 
+# **要件 11.7 の環境の前提を読む**（所要時間の要件は「SSD を搭載した 4 コア以上の一般的な
+# デスクトップ環境」における計測を求める）。アプリ自身が「ソフトウェアラスタライザ経由である」と
+# 記録しているときは、**その環境は所要時間の要件の前提を満たしていない** — 実測値と前提を出力し、
+# **所要時間の要件（11.1 / 11.2 / 11.3）はこの場では判定しない**。**閾値は緩めない**（判定の
+# 対象から外すだけであり、数値はそのまま出す。CI の実測: Windows のランナーが該当し、編集の
+# 反映が 128 ms と出た）。
+software_rasteriser=""
+if tail -n "+$(( before + 1 ))" "$record" 2>/dev/null |
+  grep -qF '初回描画は成立したがソフトウェアラスタライザ経由である'; then
+  software_rasteriser="yes"
+  echo "注記: ランナーはソフトウェアラスタライザ経由である（記録の実測）。要件 11.7 が定める前提" \
+    "（SSD + 4 コア以上の一般的なデスクトップ環境）を満たさないため、所要時間の要件" \
+    "（11.1 の 16.67 ms / 11.2 の 1 秒 / 11.3 の 100 ms）は**この場では判定しない**。" \
+    "実測値は上の観測の行にそのまま出ている。"
+fi
+
 fail=0
 
 # **最初の画面（11.2）はどちらの条件でも実測が要る** — 塗られない条件でも「表が現れた
 # 瞬間」は測れる（面が空でも表の器は現れる）。
-if ! number_is_finite "$first"; then
-  echo "NG: 最初の画面の実測がありません（最初の画面ms=${first}）— 要件 11.2 を判定できない" >&2
-  fail=1
-elif [ "$(awk -v value="$first" 'BEGIN { print (value <= 1000) ? 1 : 0 }')" != "1" ]; then
-  echo "NG: 最初の画面が 1 秒以内に現れていません（${first} ms > 1000 ms）— 要件 11.2" >&2
-  fail=1
+if [ "$software_rasteriser" = "" ]; then
+  if ! number_is_finite "$first"; then
+    echo "NG: 最初の画面の実測がありません（最初の画面ms=${first}）— 要件 11.2 を判定できない" >&2
+    fail=1
+  elif [ "$(awk -v value="$first" 'BEGIN { print (value <= 1000) ? 1 : 0 }')" != "1" ]; then
+    echo "NG: 最初の画面が 1 秒以内に現れていません（${first} ms > 1000 ms）— 要件 11.2" >&2
+    fail=1
+  fi
+else
+  # **実測は出ているが、前提を満たさない環境なので判定しない**（11.7）。数値は必須である
+  # （「判定しない」を「測らなくてよい」と読み替えない）。
+  if ! number_is_finite "$first"; then
+    echo "NG: 最初の画面の実測がありません（最初の画面ms=${first}）— 実測が無ければ判定もできない" >&2
+    fail=1
+  fi
 fi
 
 # **走査（11.1 / 12.1）と編集（11.3 / 9.2 の往復）は「面が塗られる通常の起動」でだけ判定する。**
@@ -410,7 +438,8 @@ if [ "$expect_paint" = "成立" ]; then
   if ! number_is_finite "$applied"; then
     echo "NG: 編集の反映の実測がありません（編集反映ms=${applied}）— 要件 11.3 を判定できない" >&2
     fail=1
-  elif [ "$(awk -v value="$applied" 'BEGIN { print (value <= 100) ? 1 : 0 }')" != "1" ]; then
+  elif [ "$software_rasteriser" = "" ] &&
+    [ "$(awk -v value="$applied" 'BEGIN { print (value <= 100) ? 1 : 0 }')" != "1" ]; then
     echo "NG: 編集の反映が 100 ミリ秒以内ではありません（${applied} ms > 100 ms）— 要件 11.3" >&2
     fail=1
   fi
@@ -423,7 +452,8 @@ if [ "$expect_paint" = "成立" ]; then
   if ! number_is_finite "$median_us"; then
     echo "NG: 走査の中央値の実測がありません（走査中央値us=${median_us}）— 要件 11.1 を判定できない" >&2
     fail=1
-  elif [ "$(awk -v value="$median_us" -v budget=16670 -v tolerance=1000 'BEGIN { print (value <= budget + tolerance) ? 1 : 0 }')" != "1" ]; then
+  elif [ "$software_rasteriser" = "" ] &&
+    [ "$(awk -v value="$median_us" -v budget=16670 -v tolerance=1000 'BEGIN { print (value <= budget + tolerance) ? 1 : 0 }')" != "1" ]; then
     echo "NG: 走査の中央値が予算を超えています（${median_us} us > 16670 + 1000 us）— 要件 11.1" >&2
     fail=1
   fi
@@ -521,6 +551,11 @@ fi
 if [ "$expect_paint" = "不成立" ]; then
   echo "OK: 塗られない条件の起動 — 最初の画面=${first}ms（<=1000）面の色数=${colors} 描画=不成立（告知が出た）走査・編集は観測しない"
 else
-  echo "OK: 最初の画面=${first}ms（<=1000）編集=${applied}ms（<=100）走査中央値=${median_us}us（<=16670+1000）到達行=${reached}/${rows} 取消=ok 描画=${painted} 色数=${colors}"
+  if [ "$software_rasteriser" = "" ]; then
+    echo "OK: 最初の画面=${first}ms（<=1000）編集=${applied}ms（<=100）走査中央値=${median_us}us（<=16670+1000）到達行=${reached}/${rows} 取消=ok 描画=${painted} 色数=${colors}"
+  else
+    echo "OK: 最初の画面=${first}ms 編集=${applied}ms 走査中央値=${median_us}us 到達行=${reached}/${rows} 取消=ok 描画=${painted} 色数=${colors}"
+    echo "注記: 所要時間の要件は判定していない（ソフトウェアラスタライザ。要件 11.7 の前提の外）。"
+  fi
 fi
 echo "OK: 判定の閾値は要件値である（1 秒 / 100 ミリ秒 / 16.67 ミリ秒）。走査の中央値にだけ計測の刻みの許容 ${TRACE_TOLERANCE_MS} ms を足している（research.md「中央値 17.00 ms の読み方」）"

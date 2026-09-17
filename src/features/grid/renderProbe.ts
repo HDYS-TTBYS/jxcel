@@ -190,8 +190,24 @@ export function probePaint(canvas: HTMLCanvasElement): boolean {
  *
  * 読めない面（汚染されている等）と、大きさが 2 に満たない面は **0** を返す（呼び出し側が
  * 測定不能として扱えるようにする。0 は「一様である」とは別の状態である）。**投げない。**
+ *
+ * **直接読めないときは、控えの 2D の面へ取り込んでから数える**（環境によっては元の面を直接
+ * 読み戻せない。CI の実測: Windows の WebView2 が 0 色、Linux の WebKitGTK が 2 色）。
  */
 export function countDistinctColors(canvas: HTMLCanvasElement): number {
+  const direct = countColorsInPlace(canvas);
+  if (direct !== 0) {
+    return direct;
+  }
+  // **直接読めないときだけ、面を取り込んだ控えの面を読む。**環境によっては元の面を直接
+  // 読み戻せない（CI の実測: Windows の WebView2 で **0 色**＝読めない、他の OS では読める）。
+  // 控えの面は自分が作った 2D の面なので、**元の面が GPU 側にあっても**読める。
+  // 費用はこの経路に入ったときだけである（`drawImage` 1 回 + 走査 1 回）。
+  return countColorsOfSnapshot(canvas) ?? 0;
+}
+
+/** 面を直接読む（読めなければ 0）。 */
+function countColorsInPlace(canvas: HTMLCanvasElement): number {
   try {
     const context = canvas.getContext("2d", { willReadFrequently: true });
     if (context === null) {
@@ -202,25 +218,76 @@ export function countDistinctColors(canvas: HTMLCanvasElement): number {
     if (width < 2 || height < 2) {
       return 0;
     }
-    const colors = new Set<number>();
-    for (let y = 0; y < height; y += COLOR_COUNT_STEP_PX) {
-      for (let x = 0; x < width; x += COLOR_COUNT_STEP_PX) {
-        const pixel = context.getImageData(x, y, 1, 1).data;
-        colors.add(
-          ((pixel[0] ?? 0) << 24) |
-            ((pixel[1] ?? 0) << 16) |
-            ((pixel[2] ?? 0) << 8) |
-            (pixel[3] ?? 0),
-        );
-        if (colors.size > COLOR_COUNT_LIMIT) {
-          return colors.size;
-        }
-      }
-    }
-    return colors.size;
+    return countColorsInContext(context, width, height);
   } catch {
     return 0;
   }
+}
+
+/**
+ * 元の面を**控えの 2D の面へ取り込んで**から色数を数える（取り込めなければ `null`）。
+ *
+ * 取り込みの大きさは、まず元の面の実寸（`width` / `height`）、それが退化していれば
+ * **見た目の寸法**（`clientWidth` / `clientHeight`）を使う。控えの面は `OffscreenCanvas` が
+ * あればそれを使う（`node` 環境では無いので、そのときは `null` を返して諦める — 画面の無い
+ * 環境では面も無い）。
+ */
+function countColorsOfSnapshot(canvas: HTMLCanvasElement): number | null {
+  try {
+    const width = canvas.width >= 2 ? canvas.width : canvas.clientWidth;
+    const height = canvas.height >= 2 ? canvas.height : canvas.clientHeight;
+    if (width < 2 || height < 2) {
+      return null;
+    }
+    const snapshot = createSnapshotSurface(width, height);
+    if (snapshot === null) {
+      return null;
+    }
+    snapshot.context.drawImage(canvas, 0, 0, width, height);
+    return countColorsInContext(snapshot.context, width, height);
+  } catch {
+    // 取り込みも読めない（汚染された面など）。**0 と区別せず、読めなかったとして扱う。**
+    return null;
+  }
+}
+
+/** 控えの面（`OffscreenCanvas`。無ければ `null`）。 */
+function createSnapshotSurface(
+  width: number,
+  height: number,
+): { readonly context: CanvasRenderingContext2D } | null {
+  if (typeof OffscreenCanvas === "undefined") {
+    return null;
+  }
+  const surface = new OffscreenCanvas(width, height);
+  const context = surface.getContext("2d");
+  if (context === null) {
+    return null;
+  }
+  // `OffscreenCanvasRenderingContext2D` は `drawImage` と `getImageData` を持つ（型は
+  // 2D の文脈と互換でないため、必要な口だけを借りる）。
+  return { context: context as unknown as CanvasRenderingContext2D };
+}
+
+/** 2D の文脈から色数を数える（[`COLOR_COUNT_STEP_PX`] ごとに 1 画素）。 */
+function countColorsInContext(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+): number {
+  const colors = new Set<number>();
+  for (let y = 0; y < height; y += COLOR_COUNT_STEP_PX) {
+    for (let x = 0; x < width; x += COLOR_COUNT_STEP_PX) {
+      const pixel = context.getImageData(x, y, 1, 1).data;
+      colors.add(
+        ((pixel[0] ?? 0) << 24) | ((pixel[1] ?? 0) << 16) | ((pixel[2] ?? 0) << 8) | (pixel[3] ?? 0),
+      );
+      if (colors.size > COLOR_COUNT_LIMIT) {
+        return colors.size;
+      }
+    }
+  }
+  return colors.size;
 }
 
 /**

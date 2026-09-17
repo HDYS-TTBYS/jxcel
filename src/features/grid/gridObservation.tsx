@@ -52,6 +52,7 @@ import { invokeCommand, type CommandName } from "../../ipc/client";
 import type {
   ObservationItem,
   ObservationItemOutcome,
+  ObservationItemReason,
   RenderHealthRecordRequest,
 } from "../../ipc/bindings";
 import { documentDiscard, documentNew } from "../../ipc/documentSession";
@@ -107,6 +108,7 @@ function recordObservation(observation: Observation): void {
       items: observation.items.map((result) => ({
         item: result.item,
         outcome: result.outcome,
+        reason: result.reason ?? null,
       })),
     },
   };
@@ -128,7 +130,7 @@ function recordObservation(observation: Observation): void {
 export const GRID_OBSERVATION_SCREEN_ID = "grid-observation";
 
 /** 観測の行を書くまでの上限（この時間で打ち切って、それまでの実測を書く）。 */
-const OBSERVATION_DEADLINE_MS = 200_000;
+const OBSERVATION_DEADLINE_MS = 260_000;
 
 /** 表が組み立てられるのを待つ上限（要件 11.2 の 1 秒より十分に長く取る）。 */
 const TABLE_WAIT_MS = 20_000;
@@ -475,23 +477,35 @@ async function editAndUndo(): Promise<EditOutcome> {
  * **記録へ運ぶ値は生成物の閉じた型**（`ObservationItem` / `ObservationItemOutcome`）である —
  * 綴りを 2 つ持たない（`./../ipc/bindings`）。
  */
-/** 筋書きの 1 項目の判定（型の結果と、人が読む理由）。 */
+/** 筋書きの 1 項目の判定（型の結果・**止まった場所**・人が読む理由）。 */
 interface ItemOutcome {
   readonly outcome: ObservationItemOutcome;
   readonly note: string;
+  /** 成立しなかったときの止まった場所（成立したときは `undefined`）。 */
+  readonly reason: ObservationItemReason | undefined;
 }
 
 /** 成立した（理由は要らない）。 */
-const OK: ItemOutcome = { outcome: "ok", note: "" };
+const OK: ItemOutcome = { outcome: "ok", note: "", reason: undefined };
 
-/** 成立しなかった（理由を人が読む行へ載せる）。 */
-function NG(note: string): ItemOutcome {
-  return { outcome: "ng", note };
+/**
+ * 成立しなかった。**止まった場所（閉じた札）と、人が読む理由の両方**を持つ。
+ *
+ * 札は記録へ出る（3 OS の検査器が読む唯一の場所。CI の実測: Windows で「どの項目が ng か」
+ * までしか分からず、原因の切り分けに往復を要した）。文言は人が読む行にだけ載る。
+ */
+function NG(reason: ObservationItemReason, note: string): ItemOutcome {
+  return { outcome: "ng", note, reason };
 }
 
 interface ItemResult {
   readonly item: ObservationItem;
   readonly outcome: ObservationItemOutcome;
+  /**
+   * 成立しなかったときの**止まった場所**（閉じた札）。記録へ出る（3 OS の検査器が読む唯一の
+   * 場所）。成立したときは `undefined` である。
+   */
+  readonly reason: ObservationItemReason | undefined;
   /**
    * 成立しなかった理由（**人が読む行にだけ載る**。記録は閉じた型だけを運ぶ — 任意の文字列を
    * 記録へ流さない規律）。**空文字は「理由が無い」ではなく「成立した」**である。
@@ -509,7 +523,7 @@ const ITEM_WAIT_MS = 10_000;
  * 探すので、10 万行の表を描いている最中は 1 巡に時間がかかる（実測: 30 秒では足りず、印が消えた
  * あとに段が探し続けた）。**この待ちの間、画面は静かである**（他の項目は走らない）。
  */
-const PASTE_WAIT_MS = 90_000;
+const PASTE_WAIT_MS = 150_000;
 
 /** 検証用の要素を 1 つ引く（`data-testid` の綴りは製品のものを使う）。 */
 function elementOf(testid: string): HTMLElement | null {
@@ -601,37 +615,37 @@ function violationReasonOf(): {
 async function driveInsertRow(): Promise<ItemOutcome> {
   const before = rowCountOf();
   if (before === null) {
-    return NG("行数を読めなかった");
+    return NG("row_count_unreadable", "行数を読めなかった");
   }
   if (!clickOf("jxcel-grid-insert-row")) {
-    return NG("行の追加の入口が無い");
+    return NG("entry_missing", "行の追加の入口が無い");
   }
   if (!(await waitForRowCount(before + 1, ITEM_WAIT_MS))) {
-    return NG("追加で行数が増えなかった");
+    return NG("row_count_unchanged", "追加で行数が増えなかった");
   }
   const inserted = currentPositionOf();
   if (!clickOf("jxcel-grid-undo")) {
-    return NG("取り消しの入口が無い");
+    return NG("entry_missing", "取り消しの入口が無い");
   }
   if (!(await waitForRowCount(before, ITEM_WAIT_MS))) {
-    return NG("取り消しで行数が戻らなかった");
+    return NG("row_count_not_restored", "取り消しで行数が戻らなかった");
   }
   const afterUndo = currentPositionOf();
   if (!clickOf("jxcel-grid-redo")) {
-    return NG("やり直しの入口が無い");
+    return NG("entry_missing", "やり直しの入口が無い");
   }
   if (!(await waitForRowCount(before + 1, ITEM_WAIT_MS))) {
-    return NG("やり直しで行数が増えなかった");
+    return NG("row_count_unchanged", "やり直しで行数が増えなかった");
   }
   // **後始末**: 追加を戻す（後続の項目が同じ前提で走れるように）。
   clickOf("jxcel-grid-undo");
   await waitForRowCount(before, ITEM_WAIT_MS);
   if (inserted === null || afterUndo === null) {
-    return NG("現在位置を読めなかった");
+    return NG("position_unreadable", "現在位置を読めなかった");
   }
   return afterUndo.row === inserted.row
     ? OK
-    : NG(`現在位置が対象の行へ移らなかった（${String(inserted.row)} → ${String(afterUndo.row)}）`);
+    : NG("position_not_moved", `現在位置が対象の行へ移らなかった（${String(inserted.row)} → ${String(afterUndo.row)}）`);
 }
 
 /**
@@ -642,14 +656,14 @@ async function driveInsertRow(): Promise<ItemOutcome> {
  */
 async function driveViolationReason(): Promise<ItemOutcome> {
   if (!clickOf("jxcel-grid-next-violation")) {
-    return NG("違反の巡回の入口が無い");
+    return NG("entry_missing", "違反の巡回の入口が無い");
   }
   const first = await waitFor(() => {
     const reason = violationReasonOf();
     return reason !== null && reason.text.includes("違反") ? reason : null;
   }, ITEM_WAIT_MS);
   if (first === null) {
-    return NG("違反の理由が読めなかった");
+    return NG("violation_reason_missing", "違反の理由が読めなかった");
   }
   for (let step = 0; step < 8; step += 1) {
     pressOnTable("ArrowRight");
@@ -664,7 +678,7 @@ async function driveViolationReason(): Promise<ItemOutcome> {
       return OK;
     }
   }
-  return NG("同じ行の別の違反セルで理由が読めなかった");
+  return NG("violation_reason_not_repeated", "同じ行の別の違反セルで理由が読めなかった");
 }
 
 /**
@@ -679,25 +693,25 @@ async function driveViolationReason(): Promise<ItemOutcome> {
 async function driveReferenceRows(): Promise<ItemOutcome> {
   const state = await createGridClient().readDocumentState();
   if (state.status !== "ok" || state.data.status.state !== "Open") {
-    return NG("文書が保持されていない");
+    return NG("document_not_held", "文書が保持されていない");
   }
   const sheet = state.data.status.sheets[0];
   if (sheet === undefined) {
-    return NG("シートが無い");
+    return NG("sheet_missing", "シートが無い");
   }
   const opened = await createGridClient().openSheet(sheet.id);
   if (opened.status !== "ok") {
-    return NG(`シートを開けなかった（${opened.error.detail.message}）`);
+    return NG("sheet_open_failed", `シートを開けなかった（${opened.error.detail.message}）`);
   }
   const column = opened.data.sheet.columns.findIndex((entry) => entry.reference_sheet !== null);
   if (column < 0) {
-    return NG("参照の列が無い");
+    return NG("reference_column_missing", "参照の列が無い");
   }
   // 現在位置をその列へ移す（画面は 1 行 1 列から始まらないので、差を打鍵で詰める）。
   for (let step = 0; step < 40; step += 1) {
     const position = currentPositionOf();
     if (position === null) {
-      return NG("現在位置を読めなかった");
+      return NG("position_unreadable", "現在位置を読めなかった");
     }
     if (position.column === column) {
       break;
@@ -707,10 +721,10 @@ async function driveReferenceRows(): Promise<ItemOutcome> {
   }
   const position = currentPositionOf();
   if (position === null || position.column !== column) {
-    return NG(`参照の列へ移れなかった（${String(position?.column)} → ${String(column)}）`);
+    return NG("position_not_moved", `参照の列へ移れなかった（${String(position?.column)} → ${String(column)}）`);
   }
   if (!pressEditorOpen()) {
-    return NG("表が無い");
+    return NG("table_missing", "表が無い");
   }
   const listed = await waitFor(() => {
     const panel = elementOf("jxcel-grid-reference");
@@ -721,7 +735,7 @@ async function driveReferenceRows(): Promise<ItemOutcome> {
     return Number.isSafeInteger(rows) && rows > 0 ? true : null;
   }, ITEM_WAIT_MS);
   closeEditor();
-  return listed === null ? NG("参照の面が行を一覧しなかった") : OK;
+  return listed === null ? NG("reference_not_listed", "参照の面が行を一覧しなかった") : OK;
 }
 
 /**
@@ -735,10 +749,10 @@ async function driveNestedExpansion(): Promise<ItemOutcome> {
   const scroller = scrollerOf();
   const before = arrivalsOf();
   if (expand === null) {
-    return NG("展開の入口が無い");
+    return NG("entry_missing", "展開の入口が無い");
   }
   if (scroller === null || before === null) {
-    return NG("面か窓の到着の数を読めなかった");
+    return NG("surface_unreadable", "面か窓の到着の数を読めなかった");
   }
   expand.click();
   const arrived = await waitFor(() => {
@@ -746,7 +760,7 @@ async function driveNestedExpansion(): Promise<ItemOutcome> {
     return now !== null && now > before ? true : null;
   }, ITEM_WAIT_MS);
   if (arrived === null) {
-    return NG("展開のあとに窓が届かなかった");
+    return NG("arrivals_unchanged", "展開のあとに窓が届かなかった");
   }
   // 展開のあとに走査する（窓の要求が空にならないこと。面が一様なら内容が無い）。
   const rowsPerPixel = scroller.scrollHeight / (rowCountOf() ?? 1);
@@ -759,9 +773,9 @@ async function driveNestedExpansion(): Promise<ItemOutcome> {
   const colors = await waitForSurfaceColors(ITEM_WAIT_MS);
   const after = arrivalsOf();
   if (colors === null || colors < 2) {
-    return NG(`展開のあとの面が一様である（色数=${String(colors)}）`);
+    return NG("surface_uniform", `展開のあとの面が一様である（色数=${String(colors)}）`);
   }
-  return after !== null && after > before ? OK : NG("展開のあとに窓の到着が増えなかった");
+  return after !== null && after > before ? OK : NG("arrivals_unchanged", "展開のあとに窓の到着が増えなかった");
 }
 
 /**
@@ -773,10 +787,10 @@ async function driveSortThenDelete(): Promise<ItemOutcome> {
   const before = rowCountOf();
   const sort = document.querySelector<HTMLElement>('[data-testid="jxcel-grid-column-sort"]');
   if (before === null) {
-    return NG("行数を読めなかった");
+    return NG("row_count_unreadable", "行数を読めなかった");
   }
   if (sort === null) {
-    return NG("並べ替えの入口が無い");
+    return NG("entry_missing", "並べ替えの入口が無い");
   }
   const directionBefore = sort.dataset["sortDirection"] ?? "";
   sort.click();
@@ -786,16 +800,16 @@ async function driveSortThenDelete(): Promise<ItemOutcome> {
     return direction !== directionBefore ? true : null;
   }, ITEM_WAIT_MS);
   if (sorted === null) {
-    return NG("並べ替えが表示へ反映されなかった");
+    return NG("sort_not_reflected", "並べ替えが表示へ反映されなかった");
   }
   // 位置を指定して追加する（現在位置を 2 行進めてから）。
   pressOnTable("ArrowDown", { count: 2 });
   await nextFrame();
   if (!clickOf("jxcel-grid-insert-row")) {
-    return NG("並べ替えた表示で行の追加の入口が無い");
+    return NG("entry_missing", "並べ替えた表示で行の追加の入口が無い");
   }
   if (!(await waitForRowCount(before + 1, ITEM_WAIT_MS))) {
-    return NG("並べ替えた表示で行数が増えなかった");
+    return NG("row_count_unchanged", "並べ替えた表示で行数が増えなかった");
   }
   // 範囲を選んで削除する（行全体の選択 = shift + 空白。範囲は shift + 矢印で広げる）。
   pressOnTable(" ", { shift: true });
@@ -803,10 +817,10 @@ async function driveSortThenDelete(): Promise<ItemOutcome> {
   await nextFrame();
   const selected = selectionRowsOf();
   if (selected === null || selected < 1) {
-    return NG(`範囲を選べなかった（選択=${String(selected)}）`);
+    return NG("selection_empty", `範囲を選べなかった（選択=${String(selected)}）`);
   }
   if (!clickOf("jxcel-grid-delete-rows")) {
-    return NG("削除の入口が無い");
+    return NG("entry_missing", "削除の入口が無い");
   }
   // **確認は「押した後」に現れる**（選んだ行数が見えている行数を超えるとき、または画面の高さが
   // 未知のときに出る。`./rowOps` の `deleteNeedsConfirmation`）。現れるのを待ってから押す —
@@ -822,7 +836,7 @@ async function driveSortThenDelete(): Promise<ItemOutcome> {
   await waitForRowCount(before + 1, ITEM_WAIT_MS);
   clickOf("jxcel-grid-undo");
   await waitForRowCount(before, ITEM_WAIT_MS);
-  return deleted ? OK : NG(`削除で行数が減らなかった（選択=${String(selected)} 行）`);
+  return deleted ? OK : NG("row_count_unchanged", `削除で行数が減らなかった（選択=${String(selected)} 行）`);
 }
 
 /**
@@ -836,22 +850,22 @@ async function driveSheetSwitchUndo(): Promise<ItemOutcome> {
   const client = createGridClient();
   const state = await client.readDocumentState();
   if (state.status !== "ok" || state.data.status.state !== "Open") {
-    return NG("文書が保持されていない");
+    return NG("document_not_held", "文書が保持されていない");
   }
   const first = state.data.status.sheets[0];
   const other = state.data.status.sheets[1];
   if (first === undefined || other === undefined) {
-    return NG("切り替え先のシートが無い");
+    return NG("sheet_missing", "切り替え先のシートが無い");
   }
   const before = rowCountOf();
   if (before === null) {
-    return NG("行数を読めなかった");
+    return NG("row_count_unreadable", "行数を読めなかった");
   }
   if (!clickOf("jxcel-grid-insert-row")) {
-    return NG("行の追加の入口が無い");
+    return NG("entry_missing", "行の追加の入口が無い");
   }
   if (!(await waitForRowCount(before + 1, ITEM_WAIT_MS))) {
-    return NG("追加で行数が増えなかった");
+    return NG("row_count_unchanged", "追加で行数が増えなかった");
   }
   // 別のシートへ切り替えてから、**元のシートへ戻る**（利用者の操作に相当する選択を、UI が
   // 無いので境界から行う）。**戻らずに取り消すと、応答は「触っていないシート」の行数を運ぶ**
@@ -863,18 +877,18 @@ async function driveSheetSwitchUndo(): Promise<ItemOutcome> {
     const described = state.data.status.sheets
       .map((entry) => `${entry.name}(列=${String(entry.columns)} 行=${String(entry.rows)})`)
       .join("/");
-    return NG(`別のシートを開けなかった（${switched.error.detail.message} / シート=${described}）`);
+    return NG("sheet_open_failed", `別のシートを開けなかった（${switched.error.detail.message} / シート=${described}）`);
   }
   if ((await client.openSheet(first.id)).status !== "ok") {
-    return NG("元のシートへ戻れなかった");
+    return NG("sheet_not_restored", "元のシートへ戻れなかった");
   }
   await nextFrame();
   // **戻った状態で**画面の取り消しを押す。履歴は文書の単位なので、切り替えをまたいでも戻る。
   if (!clickOf("jxcel-grid-undo")) {
-    return NG("取り消しの入口が無い");
+    return NG("entry_missing", "取り消しの入口が無い");
   }
   const undone = await waitForRowCount(before, ITEM_WAIT_MS);
-  return undone ? OK : NG("シートを切り替えたあとの取り消しで行数が戻らなかった");
+  return undone ? OK : NG("row_count_not_restored", "シートを切り替えたあとの取り消しで行数が戻らなかった");
 }
 
 /**
@@ -887,20 +901,20 @@ async function driveSheetSwitchUndo(): Promise<ItemOutcome> {
 async function driveReplaceDocument(): Promise<ItemOutcome> {
   const before = rowCountOf();
   if (before === null || before < 2) {
-    return NG("差し替える前の行数を読めなかった");
+    return NG("row_count_unreadable", "差し替える前の行数を読めなかった");
   }
   // **未保存の変更があると「新規」は拒否される**（`DocumentNewOutcome::Refused`。封筒は成功の
   // まま返る）。筋書きの前の項目が文書へ加えた変更を**破棄してから**差し替える。
   const discarded = await documentDiscard();
   if (discarded.status !== "ok") {
-    return NG("未保存の変更を破棄できなかった");
+    return NG("discard_failed", "未保存の変更を破棄できなかった");
   }
   const replaced = await documentNew();
   if (replaced.status !== "ok") {
-    return NG("新規の文書を作れなかった");
+    return NG("document_new_failed", "新規の文書を作れなかった");
   }
   if (replaced.data.outcome.outcome !== "Created") {
-    return NG(`新規の文書が拒否された（${replaced.data.outcome.reason}）`);
+    return NG("document_new_failed", `新規の文書が拒否された（${replaced.data.outcome.reason}）`);
   }
   // **古い行を残さず追随したこと**を、**100,000 行の表そのものが消え、新しい文書の提示
   // （列が無い・行が無い）へ替わったこと**で見る。新しい文書は列 0 本・行 0 件であり、表の面
@@ -912,7 +926,7 @@ async function driveReplaceDocument(): Promise<ItemOutcome> {
     return replacedByNewDocument && tableOf() === null ? true : null;
   }, ITEM_WAIT_MS);
   if (followed === null) {
-    return NG("表が古い行を残したままである（新しい文書の提示へ替わらなかった）");
+    return NG("document_not_followed", "表が古い行を残したままである（新しい文書の提示へ替わらなかった）");
   }
   return OK;
 }
@@ -932,7 +946,7 @@ async function driveReplaceDocument(): Promise<ItemOutcome> {
 async function drivePasteThroughMenu(): Promise<ItemOutcome> {
   const table = tableOf();
   if (table === null) {
-    return NG("表が無い");
+    return NG("table_missing", "表が無い");
   }
   // **静かになるまで待ってから基準を取る**（前の項目の描き直しが残っていると、貼り付けが
   // 届いていなくても到着の数が増え、偽の成立になる。実測: それが起きた）。
@@ -949,9 +963,15 @@ async function drivePasteThroughMenu(): Promise<ItemOutcome> {
   // **複製は DOM の `copy` の経路である**（移植口が器の内側の面へ**捕獲の段**で結線している。
   // 器へ送ると子孫の聴取には届かない）— 人が `Ctrl+C` を打つと基盤が起こすイベントを、
   // 同じ形で起こす。`Ctrl+C` の keydown では**この経路は走らない**（実測）。
-  const canvas = table.querySelector("canvas");
+  // **面は組み直しの間だけ消えることがある**（表の表示を変える項目の直後）。1 回読んで
+  // 無かったことを「面が無い」と読むと、健全な起動でも落ちる（実測: 手元の Linux で
+  // この項目だけが落ちた）。面が現れるまで待つ。
+  const canvas = await waitFor(
+    () => table.querySelector("canvas"),
+    ITEM_WAIT_MS,
+  );
   if (canvas === null) {
-    return NG("表の面が無い");
+    return NG("surface_unreadable", "表の面が無い");
   }
   canvas.dispatchEvent(new ClipboardEvent("copy", { bubbles: true, cancelable: true }));
   await nextFrame();
@@ -970,7 +990,7 @@ async function drivePasteThroughMenu(): Promise<ItemOutcome> {
   marker?.removeAttribute("aria-label");
   const arrived = arrivalsOf();
   if (pasted === null) {
-    return NG(`貼り付けが表へ届かなかった（到着 ${String(before)} → ${String(arrived)}）`);
+    return NG("paste_not_delivered", `貼り付けが表へ届かなかった（到着 ${String(before)} → ${String(arrived)}）`);
   }
   return OK;
 }
@@ -1068,9 +1088,14 @@ async function runScenario(): Promise<ItemResult[]> {
       result = await drive();
     } catch (error: unknown) {
       console.warn(`筋書きの項目が例外で止まった: ${item}`, error);
-      result = NG(`例外で止まった: ${String(error)}`);
+      result = NG("exception", `例外で止まった: ${String(error)}`);
     }
-    results.push({ item, outcome: result.outcome, note: result.note });
+    results.push({
+      item,
+      outcome: result.outcome,
+      note: result.note,
+      reason: result.reason,
+    });
   };
   await run("insert_row", driveInsertRow);
   await run("violation_reason", driveViolationReason);
