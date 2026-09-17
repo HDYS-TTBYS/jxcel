@@ -1439,7 +1439,7 @@ export type ObservationItemOutcome = "ok" | "ng";
  * （実測: Windows の段で「項目が ng」までしか分からず、原因の切り分けに 1 往復を要した）。
  * 記録へ**札**として載せ、3 OS の検査器が同じ形で読めるようにする。
  */
-export type ObservationItemReason = "entry_missing" | "row_count_unreadable" | "row_count_unchanged" | "row_count_not_restored" | "position_unreadable" | "position_not_moved" | "document_not_held" | "sheet_missing" | "reference_column_missing" | "sheet_open_failed" | "sheet_not_restored" | "sort_not_reflected" | "selection_empty" | "violation_reason_missing" | "violation_reason_not_repeated" | "surface_uniform" | "surface_unreadable" | "arrivals_unchanged" | "paste_not_delivered" | "table_missing" | "document_new_failed" | "document_not_followed" | "discard_failed" | "reference_not_listed" | "exception";
+export type ObservationItemReason = "entry_missing" | "row_count_unreadable" | "row_count_unchanged" | "row_count_not_restored" | "position_unreadable" | "position_not_moved" | "document_state_unreadable" | "document_not_open" | "sheet_missing" | "reference_column_missing" | "sheet_open_failed" | "sheet_not_restored" | "sort_not_reflected" | "selection_empty" | "violation_reason_missing" | "violation_reason_not_repeated" | "surface_uniform" | "surface_unreadable" | "arrivals_unchanged" | "paste_not_delivered" | "table_missing" | "document_new_failed" | "document_not_followed" | "discard_failed" | "reference_not_listed" | "exception";
 /**
  * 筋書きの 1 項目の結果（[`RenderHealthReport::Observation`]）。
  */

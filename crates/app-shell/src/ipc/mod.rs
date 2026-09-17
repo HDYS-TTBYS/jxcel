@@ -859,8 +859,11 @@ pub enum ObservationItemReason {
     PositionUnreadable,
     /// 現在位置が対象の行へ移らなかった。
     PositionNotMoved,
-    /// 文書が保持されていない。
-    DocumentNotHeld,
+    /// 文書の状態を読めなかった（境界の往復が失敗した。**保持されていないこととは別である** —
+    /// 遅い環境では往復が期限に間に合わないことがあり、原因の切り分けが変わる）。
+    DocumentStateUnreadable,
+    /// 文書が保持されていない（状態が `Open` でない）。
+    DocumentNotOpen,
     /// シートが無い。
     SheetMissing,
     /// 参照の列が無い。

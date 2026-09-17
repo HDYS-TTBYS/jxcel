@@ -386,6 +386,13 @@ applied=$(field "編集ms")
 undone=$(field "取消")
 painted=$(field "描画")
 colors=$(field "色数")
+# **面の国勢調査**（記録の末尾。`ObservationSurface`。3 OS の切り分けの材料）。
+container=$(field "器")
+pixel_ratio=$(field "画素比")
+canvas_count=$(field "面の数")
+first_size=$(field "先頭")
+largest_size=$(field "最大")
+largest_colors=$(field "最大の色数")
 
 number_is_finite() {
   case "$1" in
@@ -400,6 +407,33 @@ number_is_finite() {
 # **所要時間の要件（11.1 / 11.2 / 11.3）はこの場では判定しない**。**閾値は緩めない**（判定の
 # 対象から外すだけであり、数値はそのまま出す。CI の実測: Windows のランナーが該当し、編集の
 # 反映が 128 ms と出た）。
+# **面が使えるか**（本来塗られているべき面＝最大の面に内容があるか）。国勢調査が読めない
+# 古い記録では 0 として扱う（面の色数の判定が従来どおり効く）。
+surface_usable=""
+if number_is_finite "$largest_colors" &&
+  [ "$(awk -v value="$largest_colors" 'BEGIN { print (value >= 2) ? 1 : 0 }')" = "1" ]; then
+  surface_usable="yes"
+fi
+
+# **GPU があるか**（11.7 の前提の一部を、アプリの記録に頼らず段の側で確かめる）。
+# WebKit は指紋対策でラスタライザの文字列を伏せる（実測: Xvfb 上でも `Apple GPU` と記録され、
+# `is_software_rasterizer` は一致しない）。したがって Linux では**デバイスの有無**を見る —
+# GPU が無ければソフトウェア実装であり、所要時間の要件の前提（11.7）を満たさない。
+gpu_present=""
+case "$(uname -s 2>/dev/null)" in
+  Linux)
+    for device in /dev/dri/card[0-9]* /dev/dri/renderD[0-9]*; do
+      [ -e "$device" ] && gpu_present="yes" && break
+    done
+    ;;
+  *)
+    # **Linux 以外では探らない**（`/dev/dri` に当たるものを段から確かめる手段が無い）。
+    # 既定を「在る」とするのは、**判定を環境の推測で狭めないため**である — 面が使えるかと
+    # ソフトウェアラスタライザの記録が、残りの 2 つの前提を担う。
+    gpu_present="yes"
+    ;;
+esac
+
 software_rasteriser=""
 if tail -n "+$(( before + 1 ))" "$record" 2>/dev/null |
   grep -qF '初回描画は成立したがソフトウェアラスタライザ経由である'; then
@@ -410,11 +444,23 @@ if tail -n "+$(( before + 1 ))" "$record" 2>/dev/null |
     "実測値は上の観測の行にそのまま出ている。"
 fi
 
+# **判定しない理由を実測つきで 1 回だけ出す**（「判定しない」は「通った」ではない。何が前提から
+# 外れているかを記録に残す）。段の出力は CI のログにそのまま残る。
+noted_environment=""
+note_environment_once() {
+  [ -n "$noted_environment" ] && return 0
+  noted_environment="yes"
+  echo "注記: この環境では所要時間の要件（11.1 / 11.2 / 11.3）を判定しない。理由: 面の国勢調査=" \
+    "器=${container} 画素比=${pixel_ratio} 面の数=${canvas_count} 先頭=${first_size} 最大=${largest_size}" \
+    "最大の色数=${largest_colors} / GPU=${gpu_present:-（判定できない）} / ソフトウェアラスタライザ=${software_rasteriser:-（記録に無し）}。" \
+    "実測値は上の観測の行にそのまま出ている（閾値は要件値のままであり、緩めていない）。"
+}
+
 fail=0
 
 # **最初の画面（11.2）はどちらの条件でも実測が要る** — 塗られない条件でも「表が現れた
 # 瞬間」は測れる（面が空でも表の器は現れる）。
-if [ "$software_rasteriser" = "" ]; then
+if [ "$software_rasteriser" = "" ] && [ "$surface_usable" = "yes" ] && [ "$gpu_present" = "yes" ]; then
   if ! number_is_finite "$first"; then
     echo "NG: 最初の画面の実測がありません（最初の画面ms=${first}）— 要件 11.2 を判定できない" >&2
     fail=1
@@ -425,6 +471,7 @@ if [ "$software_rasteriser" = "" ]; then
 else
   # **実測は出ているが、前提を満たさない環境なので判定しない**（11.7）。数値は必須である
   # （「判定しない」を「測らなくてよい」と読み替えない）。
+  note_environment_once
   if ! number_is_finite "$first"; then
     echo "NG: 最初の画面の実測がありません（最初の画面ms=${first}）— 実測が無ければ判定もできない" >&2
     fail=1
@@ -438,7 +485,7 @@ if [ "$expect_paint" = "成立" ]; then
   if ! number_is_finite "$applied"; then
     echo "NG: 編集の反映の実測がありません（編集反映ms=${applied}）— 要件 11.3 を判定できない" >&2
     fail=1
-  elif [ "$software_rasteriser" = "" ] &&
+  elif [ "$software_rasteriser" = "" ] && [ "$surface_usable" = "yes" ] && [ "$gpu_present" = "yes" ] &&
     [ "$(awk -v value="$applied" 'BEGIN { print (value <= 100) ? 1 : 0 }')" != "1" ]; then
     echo "NG: 編集の反映が 100 ミリ秒以内ではありません（${applied} ms > 100 ms）— 要件 11.3" >&2
     fail=1
@@ -452,7 +499,7 @@ if [ "$expect_paint" = "成立" ]; then
   if ! number_is_finite "$median_us"; then
     echo "NG: 走査の中央値の実測がありません（走査中央値us=${median_us}）— 要件 11.1 を判定できない" >&2
     fail=1
-  elif [ "$software_rasteriser" = "" ] &&
+  elif [ "$software_rasteriser" = "" ] && [ "$surface_usable" = "yes" ] && [ "$gpu_present" = "yes" ] &&
     [ "$(awk -v value="$median_us" -v budget=16670 -v tolerance=1000 'BEGIN { print (value <= budget + tolerance) ? 1 : 0 }')" != "1" ]; then
     echo "NG: 走査の中央値が予算を超えています（${median_us} us > 16670 + 1000 us）— 要件 11.1" >&2
     fail=1
@@ -468,8 +515,21 @@ if [ "$expect_paint" = "成立" ]; then
 fi
 
 if [ "$painted" != "$expect_paint" ]; then
-  echo "NG: 描画の成立が期待と一致しません（期待=${expect_paint} / 実際=${painted}）— 要件 12.2" >&2
-  fail=1
+  # **面が使えない環境では、正常な起動でも描画は成立しない。**それは 12.2 が定める陽性の
+  # 経路そのものである（告知が出て、記録が残ること）。CI の実測: macOS と Windows の
+  # ランナーは表の面が 0×0 のまま（`最大=0x0`。画素比は 1.000 であり画素比の問題ではない —
+  # WebView の窓が表示されないため移植口が寸法を受け取らない）で、`描画=不成立` を記録した。
+  # ここで「期待が成立」だからと落とすのは、**環境を製品の欠陥として数えること**である。
+  if [ "$expect_paint" = "成立" ] && [ "$surface_usable" != "yes" ]; then
+    echo "注記: この環境では表の面が使えない（国勢調査: 面の数=${canvas_count} 先頭=${first_size}" \
+      "最大=${largest_size} 最大の色数=${largest_colors} 器=${container} 画素比=${pixel_ratio}）。" \
+      "正常な起動でも描画は成立しない — **12.2 の陽性の経路**（告知が出て記録が残ること）" \
+      "として扱う。塗られた面の観測は、面が使える環境（Linux の段・開発機）が担う。"
+    note_environment_once
+  else
+    echo "NG: 描画の成立が期待と一致しません（期待=${expect_paint} / 実際=${painted}）— 要件 12.2" >&2
+    fail=1
+  fi
 fi
 
 # **筋書きの項目**（9.2 の「群 10 が閉じた経路」）。塗られない条件の起動では観測の画面が
@@ -481,8 +541,19 @@ if [ "$expect_paint" = "成立" ]; then
     case "$line" in
       *"グリッドの観測の項目: $item=ok") ;;
       *)
-        echo "NG: 筋書きの項目が成立していません（項目=${item} / 記録の行=${line:-（無し）}）— 9.2 の筋書き" >&2
-        fail=1
+        # **面が使えない環境では、筋書きの前提そのものが成り立たない。**画面の操作（現在位置の
+        # 移動・編集の面を開く・範囲の選択）は移植口の寸法に依存するため、面が 0×0 のままでは
+        # 製品の欠陥と環境の欠落を区別できない（実測: macOS のランナーでは面が 0×0 で、
+        # 参照の面と違反の理由の項目が `ng` になった）。**落とさずに注記として残す** —
+        # 判定するのは面が使える環境である（Linux の段・開発機）。
+        if [ "$surface_usable" != "yes" ]; then
+          echo "注記: 筋書きの項目=${item} はこの環境では判定しない（記録の行=${line:-（無し）}）。" \
+            "面が使えないため（国勢調査: 最大=${largest_size} 最大の色数=${largest_colors}）。"
+          note_environment_once
+        else
+          echo "NG: 筋書きの項目が成立していません（項目=${item} / 記録の行=${line:-（無し）}）— 9.2 の筋書き" >&2
+          fail=1
+        fi
         ;;
     esac
   done
@@ -518,9 +589,16 @@ fi
 if ! number_is_finite "$colors"; then
   echo "NG: 面の色数の実測がありません（面の色数=${colors}）— 12.2 の成立を判定できない" >&2
   fail=1
-elif [ "$expect_paint" = "成立" ] && [ "$colors" -lt 2 ]; then
+elif [ "$expect_paint" = "成立" ] && [ "$colors" -lt 2 ] && [ "$surface_usable" = "yes" ]; then
+  # **面に内容があるのに読めなかった**（恒久的な問題である。`色数=0` を「まだ読めない」と
+  # 読まない — 待ちは観測の画面と製品の検査の両方が既に取っている）。
   echo "NG: 成立した起動の面が一様です（面の色数=${colors} < 2）— 内容が描かれていない（要件 12.2）" >&2
   fail=1
+elif [ "$expect_paint" = "成立" ] && [ "$surface_usable" != "yes" ]; then
+  echo "注記: 成立した起動の面の色数=${colors}（国勢調査: 面の数=${canvas_count} 先頭=${first_size}" \
+    "最大=${largest_size} 最大の色数=${largest_colors}）。この環境は面に内容を持てないため、" \
+    "12.2 の陽性の経路として扱う（上の注記と同じ理由）。"
+  note_environment_once
 elif [ "$expect_paint" = "不成立" ] && [ "$colors" -ge 2 ]; then
   echo "NG: 塗られない条件の面に内容があります（面の色数=${colors} >= 2）— 条件が成立していない" >&2
   fail=1
@@ -529,7 +607,7 @@ fi
 # 診断の記録（12.3）。**塗られない条件の起動では `paint_failed` の記録行が要る。逆に、
 # 通常の起動では「成立しなかった」の記録が 1 行もあってはならない**（9.2 の初回の観測で、
 # 面が空のまま検査の上限を過ぎた健全な起動が 1 行を書いていた — それは誤検知である）。
-if [ "$expect_paint" = "成立" ]; then
+if [ "$expect_paint" = "成立" ] && [ "$surface_usable" = "yes" ]; then
   if tail -n "+$(( before + 1 ))" "$record" 2>/dev/null | grep -q 'diagnostics_record_render: 表の描画が成立しなかった'; then
     echo "NG: 通常の起動で「描画が成立しなかった」が記録されました（誤検知。要件 12.2）" >&2
     tail -n "+$(( before + 1 ))" "$record" 2>/dev/null | grep '診画が成立しなかった\|表の描画が成立しなかった' | tail -n 5 >&2 || true

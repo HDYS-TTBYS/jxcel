@@ -771,8 +771,11 @@ async function driveViolationReason(): Promise<ItemOutcome> {
  */
 async function driveReferenceRows(): Promise<ItemOutcome> {
   const state = await createGridClient().readDocumentState();
-  if (state.status !== "ok" || state.data.status.state !== "Open") {
-    return NG("document_not_held", "文書が保持されていない");
+  if (state.status !== "ok") {
+    return NG("document_state_unreadable", "文書の状態を読めなかった");
+  }
+  if (state.data.status.state !== "Open") {
+    return NG("document_not_open", `文書が保持されていない（状態=${state.data.status.state}）`);
   }
   const sheet = state.data.status.sheets[0];
   if (sheet === undefined) {
@@ -929,7 +932,7 @@ async function driveSheetSwitchUndo(): Promise<ItemOutcome> {
   const client = createGridClient();
   const state = await client.readDocumentState();
   if (state.status !== "ok" || state.data.status.state !== "Open") {
-    return NG("document_not_held", "文書が保持されていない");
+    return NG("document_state_unreadable", "文書の状態を読めなかった");
   }
   const first = state.data.status.sheets[0];
   const other = state.data.status.sheets[1];
