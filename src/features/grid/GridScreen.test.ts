@@ -3944,6 +3944,29 @@ describe("文書の差し替えと破棄を画面が追随する（10.7。要件
     ]);
   });
 
+  it("表の対象を持っていない提示（読み込み中）では、同じシートの通知でも組み直す", async () => {
+    // **`presentedSheetOf` が `null` を返す腕である**（`loading` / `failed`）。この腕では
+    // 「同じシートだから何もしない」と読んではならない — まだ表の対象を持っていないので、
+    // 通知を無視すると「ドキュメントがありません」のまま留まる（実起動で最も起きる形）。
+    const client = fakeClient({
+      state: ok(openDocument([sheetOf("s1", "標本シート", 1, 3)])),
+      open: ok(openedSheet({ columns: [descriptor(0, "名前")], row_count: 3 })),
+      view: ok(derivedView(3)),
+    });
+    const model = initialGridScreenModel();
+    expect(model.state.status).toBe("loading");
+
+    const after = await gridScreenSessionChanged(
+      client,
+      model,
+      ok(openDocument([sheetOf("s1", "標本シート", 1, 3)])),
+    );
+    expect(after).not.toBe(model);
+    expect(after.state.status).toBe("ready");
+    // 組み直しは**渡された状態**から始める（取り直しの往復は増やさない）。
+    expect(client.calls).toEqual(["grid_open_sheet:s1", "grid_set_view:000"]);
+  });
+
   it("表を描いていない状態（行 0 件）でも、同じシートの通知では開き直さない", async () => {
     const client = fakeClient({
       state: ok(openDocument([sheetOf("s1", "空のシート", 1, 0)])),
