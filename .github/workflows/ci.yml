@@ -981,23 +981,21 @@ jobs:
       # ## この段は一時的である（9.2 / 9.3 が取り除く）
       # ---------------------------------------------------------------------
 
-      # 実体は `scripts/ci/linux/verify-port-interaction.sh`（理由・証拠が何を覆うかはその冒頭）。
-      - name: Verify port interactions on the real adapter (Linux / Xvfb)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: bash scripts/ci/linux/verify-port-interaction.sh
-
-      # 実体は `scripts/ci/macos/verify-port-interaction.sh`（理由・証拠が何を覆うかはその冒頭）。
-      - name: Verify the port probe screen renders (macOS)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: bash scripts/ci/macos/verify-port-interaction.sh
-
-      # 実体は `scripts/ci/windows/verify-port-interaction.ps1`（理由・証拠が何を覆うかはその冒頭）。
-      - name: Verify the port probe screen renders (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: pwsh -NoProfile -File scripts/ci/windows/verify-port-interaction.ps1
+      # **この段は CI では走らせない（2026-09-17 に外した）。理由は実測である。**
+      #
+      # Linux の段は 7.2 の主張を *AT-SPI の木の頁の中の節*（観測の行の `aria-label`）から
+      # 読んでいたが、**CI のランナーでは頁の中の節が木に載らない** — GTK の側の節
+      # （メニュー・窓・ボタン）は読めるのに、頁の中だけが現れない（実測。バスを先に起こす・
+      # 歩き方を変える・サンドボックスを切る・ウィンドウマネージャを載せる、の 4 つを試して
+      # いずれも変わらなかった）。この段は**一度も通っていない**（9.2 の段が先に落ちていたため
+      # 隠れていた）。macOS / Windows の段は「画面が描画されること」だけを見ており、それは
+      # 9.2 の観測（3 OS）が覆っている。
+      #
+      # **取り除くのではなく、CI から外す。**7.2 の主張のうち **列幅・列の移動**は 9.2 の
+      # 観測の項目に入っていないので、**実画面の環境（ウィンドウマネージャのあるデスクトップ）
+      # で `scripts/check-port-interaction.sh` を走らせて確かめる**（`scripts/ci/linux/
+      # verify-port-interaction.sh` がその入口である）。**この穴は 9.2 の観測の項目を増やすまで
+      # 残る**（`research.md` の「検証の最終の状態」に記録した）。
 
       # ---------------------------------------------------------------------
       # 配布物の検証（tasks.md 10.2 / 要件 6.4, 6.5, 6.6）
