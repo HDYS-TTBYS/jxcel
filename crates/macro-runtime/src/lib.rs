@@ -50,6 +50,7 @@ pub mod engine;
 pub mod host;
 pub mod source;
 pub mod surface;
+pub mod types;
 
 pub use engine::actor::{ActorError, MacroActor};
 pub use engine::outcome::{

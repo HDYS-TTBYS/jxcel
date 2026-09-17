@@ -61,9 +61,12 @@
 //! - **文書の読み**: アダプタ（`src-tauri/src/macro_host.rs`。タスク 4.1）が
 //!   `document-session` から供給する。エンジンは文書を知らない（design.md 決定 3）。
 //!   存在しない行を指した読みの拒否（要件 5.4）も、文書を引ける側であるアダプタが行う
-//! - **`.d.ts` への写し**: `ts-rs` の導出はタスク 3.3 が足す（`CellValue` の綴りや
-//!   `TypeKind` の写し方を本モジュールが決めると、生成器の側と二重になる）。本モジュールが
-//!   固定するのは**境界の型名**だけである
+//! - **`.d.ts` への写し**: 本モジュールの型は `ts-rs` の導出を持ち（タスク 3.3 が付けた）、
+//!   生成器（`crate::types`）がその宣言を読む。上流の型（`SheetId` / `RowId` / `CellValue` /
+//!   `TypeKind`）には導出を付けない — `ts-rs` の導出は `crates/app-shell/src/ipc/` の内側に
+//!   限る規約があり（`ipc-contract.md`）、上流のクレートへ持ち出せないためである。したがって
+//!   **マクロから見える綴り**はフィールドの `#[ts(type = ...)]` でここに決め、その綴りの
+//!   宣言（`type SheetId = string;` など）は生成器が 1 箇所で持つ（綴りを 2 箇所で決めない）
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -74,9 +77,17 @@ use schema_engine::{ColumnIndex, TypeKind};
 use crate::host::changes::ChangeSet;
 
 /// マクロから見たシート 1 枚（要件 4.1 の「シートの一覧」）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// マクロ向けの `.d.ts` へは `ts-rs` の導出で出る（タスク 3.3。モジュール docs の
+/// 「`.d.ts` への写し」）。
+#[derive(Debug, Clone, PartialEq, Eq, ts_rs::TS)]
 pub struct SheetInfo {
     /// シート識別子。読み書きの要求（`columns` / `readRange` / `setCells`）へ渡す。
+    ///
+    /// マクロから見える形は**文字列**である（`document-format` の識別子は文字列として
+    /// 往復し、マクロは読みで受け取った文字列をそのまま書きの要求へ渡す）。上流の型に
+    /// `ts-rs` の導出が無いため、綴りはここで決める（宣言は `crate::types` が持つ）。
+    #[ts(type = "SheetId")]
     pub id: SheetId,
     /// シート名（利用者に見えている名前）。
     pub name: String,
@@ -94,12 +105,17 @@ pub struct SheetInfo {
 /// の「値の正否の判定」）。違反は適用のときに画面と同じ形で提示される（要件 5.2）。
 ///
 /// [`to_js`]: crate::host::value::to_js
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, ts_rs::TS)]
 pub struct ColumnTypeInfo {
     /// 列名（`RowPage` のセルの並びはこの並びと同じ順である）。
     pub name: String,
     /// 宣言された型。名前付き型定義への参照（`TypeDecl::Ref`）は、アダプタが解決した先の
     /// 種別をここへ渡す（`schema-engine` の compile / resolve 層が解決を持つ）。
+    ///
+    /// マクロから見える形は**種別の綴りの合併型**である（`"Int" | "Float" | …`。
+    /// [`TypeKind`] に `ts-rs` の導出が無いため、綴りは `crate::types` が種別カタログ
+    /// （`TypeKind::ALL`）を走査して 1 箇所で組み立てる）。
+    #[ts(type = "TypeKind")]
     pub kind: TypeKind,
     /// 値なしを許さないか（上流の宣言の `required`）。
     pub required: bool,
@@ -116,7 +132,7 @@ pub struct ColumnTypeInfo {
 ///
 /// 位置は文書の行の並び（表示の順）であり、行の識別子の順とは一致しない
 /// （`document-format` は行の並べ替えを持つ）。[`RowSpan::resolve`] が位置を行数へ当てる。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
 pub struct RowSpan {
     /// 始まりの位置（0 起点。含む）。
     pub from: usize,
@@ -146,16 +162,23 @@ impl RowSpan {
 }
 
 /// 範囲の読みで返る 1 行（要件 4.4）。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, ts_rs::TS)]
 pub struct ReadRow {
     /// 行識別子。書き込み（`host.setCells` の `CellWrite`）へそのまま渡せる。
+    ///
+    /// マクロから見える形は**文字列**である（[`SheetInfo::id`] と同じ理由）。
+    #[ts(type = "RowId")]
     pub id: RowId,
     /// 列の並び順のセル値（[`ColumnTypeInfo`] の並びと同じ順）。
+    ///
+    /// マクロから見える形は**セル値の合併型の並び**である（セル値そのものの綴りは
+    /// `crate::types` が持つ）。
+    #[ts(type = "CellValue[]")]
     pub cells: Vec<CellValue>,
 }
 
 /// 範囲の読みの結果（要件 4.4）。**1 回の呼び出しで範囲の全部を返す。**
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, ts_rs::TS)]
 pub struct RowPage {
     /// 要求した範囲の行（要求した順のまま）。
     pub rows: Vec<ReadRow>,

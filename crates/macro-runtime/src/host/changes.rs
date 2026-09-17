@@ -80,15 +80,23 @@ use schema_engine::ColumnIndex;
 /// 位置）である。行は文書の識別子であり、マクロは**読みで受け取った識別子**をそのまま返す
 /// （タスク 2.4 の範囲の読みが `RowId` を渡す）。
 ///
-/// JS 側の型名 `CellWrite`（要件 4.6 / 10.1）を持つのはこの型であり、タスク 3.3 の生成器が
-/// 宣言表と本型から `.d.ts` へ出す。
-#[derive(Debug, Clone, PartialEq)]
+/// JS 側の型名 `CellWrite`（要件 4.6 / 10.1）を持つのはこの型であり、タスク 3.3 の生成器
+/// （`crate::types`）が宣言表と本型の `ts-rs` の宣言から `.d.ts` へ出す。
+///
+/// 上流の型（`RowId` / `ColumnIndex` / `CellValue`）には `ts-rs` の導出を付けない
+/// （`ts-rs` の導出は `crates/app-shell/src/ipc/` の内側に限る規約。`ipc-contract.md`）ため、
+/// **マクロから見える綴り**はフィールドの `#[ts(type = ...)]` でここに決める。その綴りの
+/// 宣言（`type RowId = string;` など）は `crate::types` が 1 箇所で持つ。
+#[derive(Debug, Clone, PartialEq, ts_rs::TS)]
 pub struct CellWrite {
-    /// 書き込む行（文書の識別子）。
+    /// 書き込む行（文書の識別子）。マクロから見える形は**文字列**である。
+    #[ts(type = "RowId")]
     pub row: RowId,
-    /// 書き込む列（0 起点）。
+    /// 書き込む列（0 起点）。マクロから見える形は**数値**である。
+    #[ts(type = "ColumnIndex")]
     pub column: ColumnIndex,
-    /// 書き込む値。
+    /// 書き込む値。マクロから見える形は**セル値の合併型**である。
+    #[ts(type = "CellValue")]
     pub value: CellValue,
 }
 
