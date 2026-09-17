@@ -11,27 +11,33 @@
 #   開く 3 秒の内側で走るため、その予算を圧迫しない上限）。さらに、10 万行 × 30 列の
 #   **すべてのセルを置き換える一括の適用を 1 秒以内**に完了する（要件 3.5。セッションの
 #   経路の予算であり、開く 3 秒の内側で走る）。
+#   さらに、10 万行 × 30 列のシートへの**1 万行の貼り付けを 3 秒以内**に完了する
+#   （.kiro/specs/data-grid/requirements.md 11.5・design.md「Performance & Scalability」・
+#   tasks.md 9.1。判定の場は `benches/large_grid.rs` の `large_grid/paste_10k` ただ 1 つで
+#   あり、data-grid の他の計測（窓の符号化・順序の再計算）は要件に絶対値が無いため
+#   判定しない — 計測値は criterion のレポートに残る）。
 #   `.github/workflows/bench.yml` の
-#   `cargo bench -p document-format -p schema-engine -p document-session` が残す criterion の
+#   `cargo bench -p document-format -p schema-engine -p document-session -p data-grid` が
+#   残す criterion の
 #   計測値（`target/criterion/**/new/estimates.json`）を読み、平均（mean）の点推定値が予算を
 #   超えていれば非 0 で終了し、CI を失敗させる。これにより予算超過を機能追加と同時に検出する。
 #
 # 単位: criterion の `estimates.json` の値はナノ秒（ns）である（criterion の既定単位）。
 #   予算は 3 秒 = 3_000_000_000 ns / 2 秒 = 2_000_000_000 ns / 1 秒 = 1_000_000_000 ns
-#   （シートの全件検証・一括の適用）。
+#   （シートの全件検証・一括の適用・1 万行の貼り付け）。
 #
 # 計測環境（要件 8.3）: 予算判定は CI の GitHub-hosted ランナー（ubuntu-latest /
 #   macos-latest / windows-latest）で計測した release の値に対して行う。private
 #   リポジトリのランナーは 2 vCPU（macOS は 3 コア M1）で要件 8.3 の「4 コア以上」より
 #   弱いが、閾値は要件値のまま使う（弱い環境で通れば要件の環境でも通るとみなす
 #   保守的な代理。bench.yml 冒頭の「計測環境」）。ローカルでも同じコマンドで同じ判定を
-#   再現できる（`cargo bench -p document-format -p schema-engine -p document-session` の後に
-#   本スクリプト）。
+#   再現できる（`cargo bench -p document-format -p schema-engine -p document-session
+#   -p data-grid` の後に本スクリプト）。
 #
 # POSIX sh 互換: `bash scripts/check-bench-budget.sh` が Linux / macOS /
 # Windows (Git Bash) のいずれでも動作すること（3 OS マトリクス共用）。
 #
-# 使い方: sh scripts/check-bench-budget.sh [criterion ディレクトリ] [開く予算 ns] [保存予算 ns] [検証予算 ns] [一括の適用の予算 ns]
+# 使い方: sh scripts/check-bench-budget.sh [criterion ディレクトリ] [開く予算 ns] [保存予算 ns] [検証予算 ns] [一括の適用の予算 ns] [1 万行の貼り付けの予算 ns]
 #   予算の引数は既定（要件値）を上書きする。CI は引数なしで呼ぶ
 #   （予算判定の閾値を CI から差し替えない）。
 # 終了コード: 0 = 全予算内 / 1 = 予算超過 / 2 = 計測値が無い・解釈できない
@@ -42,6 +48,8 @@ SAVE_BUDGET="${3:-2000000000}"
 VALIDATE_BUDGET="${4:-1000000000}"
 # 一括の適用（全セルの置き換え。要件 3.5、tasks.md 5.1）の予算。既定は要件値の 1 秒。
 BULK_BUDGET="${5:-1000000000}"
+# 1 万行の貼り付け（要件 7.7, 11.5、tasks.md 9.1）の予算。既定は要件値の 3 秒。
+PASTE_BUDGET="${6:-3000000000}"
 CRITERION="${1:-target/criterion}"
 
 # criterion の mean.point_estimate（ナノ秒, 浮動小数）を取り出す。
@@ -125,6 +133,11 @@ check_budget "apply (10万行×30列)" "large_session/apply_bulk_edit_100k_rows_
 check_budget "open+hold (10万行×30列)" "large_session/open_and_hold_100k_rows_x_30_columns" "$OPEN_BUDGET" ||
   record_status $?
 check_budget "save (10万行×30列, セッション経路)" "large_session/save_100k_rows_x_30_columns" "$SAVE_BUDGET" ||
+  record_status $?
+# data-grid の 1 万行の貼り付け（要件 7.7, 11.5。tasks.md 9.1）。`benches/large_grid.rs` の
+# `paste_10k` が残す計測値であり、**計測が無ければ 2（fail-closed）**である — data-grid の
+# ベンチをワークフローの `cargo bench` から落とす変更は、この 2 で検出される。
+check_budget "paste (1万行×30列)" "large_grid/paste_10k" "$PASTE_BUDGET" ||
   record_status $?
 
 exit "$status"

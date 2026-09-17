@@ -8,19 +8,23 @@
 #   ここで通れば要件の環境でも通るとみなす保守的な代理であり、ランナーが弱いことを
 #   理由に閾値を緩めない。
 #
-# 対象の限定（tasks.md 1.1 / 5.1）: 計測対象はドメインクレートの criterion ベンチだけである
+# 対象の限定（tasks.md 1.1 / 5.1 / data-grid 9.1）: 計測対象はドメインクレートの criterion
+#   ベンチだけである
 #   （`document-format` の 10 万行 × 30 列の open / save — 要件 8.1, 8.2。`schema-engine`
 #   の 10 万行 × 30 列のシートの全件検証 — 要件 10.1, 10.3。`document-session` の
-#   10 万行 × 30 列の読み込みと保持・保存・一括の適用 — 要件 3.5, 5.6, 8.1）。Tauri アプリ
+#   10 万行 × 30 列の読み込みと保持・保存・一括の適用 — 要件 3.5, 5.6, 8.1。`data-grid` の
+#   1 万行 × 30 列の貼り付け — 要件 11.5, 7.7）。Tauri アプリ
 #   （`src-tauri/`）をビルドすると、ベンチの本質と無関係な WebView 依存のコンパイル時間を
 #   毎回払うことになり、さらに GUI 依存のクレートが計測の前提に混ざる。したがってトリガの
-#   `paths:` と実行コマンドの双方をこの 3 クレートに限定する（`--workspace` を使わない）。
+#   `paths:` と実行コマンドの双方をこの 4 クレートに限定する（`--workspace` を使わない）。
 #
 # 予算アサーション（開く 3 秒 / 保存 2 秒。要件 8.1 / 8.2。全件検証 1 秒。要件 10.1 / 10.3。
-# 一括の適用 1 秒。要件 3.5）は scripts/check-bench-budget.sh が criterion の計測値
+# 一括の適用 1 秒。要件 3.5。1 万行の貼り付け 3 秒。要件 7.7, 11.5）は
+# scripts/check-bench-budget.sh が criterion の計測値
 # （target/criterion 配下の estimates.json）に対して行い、超過していれば最後のステップで
-# ジョブを失敗させる（tasks.md 8.9 / 9.2 / 5.1）。本ワークフローは計測値の記録・保存と
-# 予算判定を行う。
+# ジョブを失敗させる（tasks.md 8.9 / 9.2 / 5.1 / data-grid 9.1）。本ワークフローは計測値の
+# 記録・保存と予算判定を行う。data-grid の他の計測（窓の符号化・順序の再計算）は要件に
+# 絶対値が無いため判定しない（計測値は criterion のレポートに残る）。
 #
 # 権限・checkout・アクションの固定の方針は ci.yml の冒頭と同じ（読み取りだけの GITHUB_TOKEN、
 # 認証情報を残さない checkout、サードパーティのアクションはコミット SHA で固定）。
@@ -33,13 +37,15 @@ on:
     - cron: "0 3 * * 1"
   push:
     branches: [main]
-    # document-format / schema-engine / document-session のベンチ本体と予算判定スクリプトを
-    # 対象にする。`crates/**` を対象にすると、Tauri アプリを含む他クレートの変更でも本
-    # ワークフローが走り、無関係なビルドを強いられる（tasks.md 1.1 / 5.1）。
+    # document-format / schema-engine / document-session / data-grid のベンチ本体と予算判定
+    # スクリプトを対象にする。`crates/**` を対象にすると、Tauri アプリを含む他クレートの
+    # 変更でも本ワークフローが走り、無関係なビルドを強いられる（tasks.md 1.1 / 5.1 /
+    # data-grid 9.1）。
     paths:
       - "crates/document-format/**"
       - "crates/document-session/**"
       - "crates/schema-engine/**"
+      - "crates/data-grid/**"
       - "scripts/check-bench-budget.sh"
 
 permissions:
@@ -68,15 +74,18 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # criterion: ベースライン名は OS 横断で「main」として保存する。
-      # `-p document-format -p schema-engine -p document-session` に限定する（Tauri アプリを
-      # ビルド対象に巻き込まない）。予算判定はこの 3 クレートの criterion の計測値を読む。
-      # `document-session` を落とすと、本スペックの計測（一括の適用を含む）が 1 度も走らず、
-      # 判定器は計測の不在で 2 を返す（fail-closed。tasks.md 5.1）。
+      # `-p document-format -p schema-engine -p document-session -p data-grid` に限定する
+      # （Tauri アプリをビルド対象に巻き込まない）。予算判定はこの 4 クレートの criterion の
+      # 計測値を読む。`document-session` を落とすと、本スペック（document-session）の計測
+      # （一括の適用を含む）が 1 度も走らず、判定器は計測の不在で 2 を返す（fail-closed。
+      # tasks.md 5.1）。同じ理由で `data-grid` を落とすと `large_grid/paste_10k` が走らず、
+      # 判定器は 2 を返す（tasks.md 9.1）。
       - name: Bench (criterion, baseline=main)
-        run: cargo bench -p document-format -p schema-engine -p document-session -- --save-baseline=main
+        run: cargo bench -p document-format -p schema-engine -p document-session -p data-grid -- --save-baseline=main
 
       # 予算アサーション（開く 3 秒 / 保存 2 秒。要件 8.1 / 8.2。全件検証 1 秒。要件 10.1 /
-      # 10.3。一括の適用 1 秒。要件 3.5）。criterion の計測値
+      # 10.3。一括の適用 1 秒。要件 3.5。1 万行の貼り付け 3 秒。要件 7.7, 11.5）。criterion
+      # の計測値
       # （target/criterion/**/new/estimates.json）の平均が予算を超えていれば非 0 で終了し、
       # このステップでジョブを失敗させる（予算超過を機能追加と同時に検出する）。判定は
       # POSIX sh の scripts/check-bench-budget.sh（Linux / macOS / Windows Git Bash 共用）。
@@ -85,7 +94,7 @@ jobs:
       #
       # 予算判定はレポートの保存より**前**に置く。保存が一時的に失敗しても（artifact の
       # 403 など）判定が飛ばされないようにするため。
-      - name: Performance budget (open 3s / save 2s / validate 1s / apply 1s)
+      - name: Performance budget (open 3s / save 2s / validate 1s / apply 1s / paste 3s)
         shell: bash
         run: bash scripts/check-bench-budget.sh
 

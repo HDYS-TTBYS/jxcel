@@ -37,7 +37,8 @@ description = "jxcel データグリッド: 表示状態・編集命令・取り
 #    （最初の画面 1 秒 / 編集の反映 100 ミリ秒 / 1 万行の貼り付け 3 秒、要件 11.2・11.3・
 #    11.5）、`cargo test` の緑では守れない。実測を criterion のベンチとして置き、
 #    `scripts/check-bench-budget.sh` のゲートで機械判定するため、本クレートはベンチ
-#    ターゲットを持つ（`large_grid/` の下の bench id を同スクリプトが読む）。
+#    ターゲットを持つ（`large_grid/` の下の bench id を同スクリプトが読む。要件に絶対値が
+#    あるのは 11.5 だけなので、判定器へ足すのは `large_grid/paste_10k` の 3 秒である）。
 # ---------------------------------------------------------------------------
 [dependencies]
 # 上流のドメインクレート（依存グラフの根）。Document / CellValue / Row / SheetId / RowId を
@@ -61,9 +62,8 @@ path = "src/lib.rs"
 bench = false
 
 # criterion ベンチターゲット（harness 直結）。計測の対象は窓の符号化・並べ替え・絞り込み・
-# 貼り付けであり（tasks.md 1.1 のスキャフォールド。実ベンチは後続のタスクが実装する。
-# 要件 11.2, 11.5, 11.6, 11.7）、`scripts/check-bench-budget.sh` のゲートが `large_grid/` の
-# 下の bench id を読む。
+# 貼り付けであり（tasks.md 9.1。要件 11.5, 11.6, 11.7）、`scripts/check-bench-budget.sh` の
+# ゲートが `large_grid/` の下の bench id（`paste_10k`）を読む。
 [[bench]]
 name = "large_grid"
 harness = false

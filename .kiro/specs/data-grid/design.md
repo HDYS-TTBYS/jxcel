@@ -195,7 +195,7 @@ error / types → view → edit → history → transport → api
 crates/data-grid/
 ├── Cargo.toml              # tauri 非依存。依存は document-format と schema-engine のみ
 ├── benches/
-│   └── large_grid.rs       # 窓の符号化・並べ替え・絞り込み・貼り付けの計測
+│   └── large_grid.rs       # 窓の符号化・並べ替え・絞り込み・貼り付けの計測（4 本。予算の判定器が読むのは `paste_10k` の 3 秒だけ）
 └── src/
     ├── lib.rs              # 層の鎖の宣言と公開面の再輸出
     ├── error.rs            # GridError。宣言の誤りと値の不適合を混ぜない
@@ -249,6 +249,7 @@ src/features/grid/
 - `package.json` — `@glideapps/glide-data-grid` を追加
 - `package.json` / `package-lock.json` / `vitest.config.ts` / `.github/workflows/ci.yml` — フロントエンドのテストの走らせ手（`vitest`）と、その段（タスク 7.1）。群 7・群 8 のフロントエンドのタスクは「テストで示す」ことを要求するため、走らせ手ごと導入した。**ジョブもワークフローも新設しない** — 既存の `test` ジョブへ段を 1 つ足す（要件 6.2、タスク 1.4 の申し送り）。走らせる環境は `node` であり、追加の依存も表示先も要らない
 - `scripts/ci/` — `check-core-deps.sh data-grid` の段、ベンチ予算への `large_grid/*` の追加、および 3 OS で 10 万行の走査と編集を観測する台本（要件 12.1, 12.4）。**既存の 3 OS 検証マトリクスを拡張し、独立した系統を新設しない**
+- `scripts/check-bench-budget.sh` / `.github/workflows/bench.yml` — 9.1 が `large_grid/paste_10k` を要件値（3 秒）の判定へ足し、計測を残す `cargo bench` に `-p data-grid` と `paths:` の `crates/data-grid/**` を足した（**ワークフローは新設しない**。`research.md`「実測と固定: 性能の計測と予算のゲート（タスク 9.1）」）
 
 ## System Flows
 
@@ -531,7 +532,7 @@ impl RowOrder {
 
 **Implementation Notes**
 - Integration: 並べ替えの比較はセルの表示文字列ではなく**値の変種ごとの順序**で行う（数値は数値として比較する）
-- Risks: 10 万行 × 複数の基準列の並べ替えが要件 11 の予算に入るかは計測で確かめる。`benches/large_grid.rs` の対象とする
+- Risks: 10 万行 × 複数の基準列の並べ替えが要件 11 の予算に入るかは計測で確かめる。`benches/large_grid.rs` の対象とする — **計測済み**（`large_grid/recompute_order`: 10 万行 × 2 基準列の並べ替えと絞り込みが 11.45 ミリ秒。`research.md`「実測と固定: 性能の計測と予算のゲート（タスク 9.1）」）。要件に絶対値が無いため予算の判定器へは足さない
 
 #### EditApply
 
@@ -570,7 +571,7 @@ pub enum EditCommand {
     InsertRows { at: RowAnchor, count: usize },
     RemoveRows { target: RowTarget },
     DuplicateRows { target: RowTarget },
-    PasteRange { anchor: CellAddress, text: String },
+    PasteRange { anchor: CellAddress, rows: Vec<RowId>, text: String },
 }
 
 /// 10.4 が足した: 行の集合（削除・複製の対象）の指し方。
@@ -754,7 +755,7 @@ impl<'a> UndoRedo<'a> {
 
 **Implementation Notes**
 - Integration: 生バイト経路は封筒を運べないため、**失敗は空の窓で表す**（`bulk_echo` が確立した規律と同じ）
-- Risks: 符号化の費用が要件 11.2 の 1 秒に入るかを計測する。`benches/large_grid.rs` の対象とする
+- Risks: 符号化の費用が要件 11.2 の 1 秒に入るかを計測する。`benches/large_grid.rs` の対象とする — **計測済み**（`large_grid/encode_window`: 可視 1 窓 256 行 × 30 列の符号化が 106.30 マイクロ秒であり、要件 11.2 の 1 秒に対して 4 桁の余裕がある。行数を 10 分の 1 にした `large_grid/encode_window_10k` は 105.61 マイクロ秒であり、**費用は行数に比例しない**（要件 11.6 の材料）。`research.md`「実測と固定: 性能の計測と予算のゲート（タスク 9.1）」）
 
 ### 適応層とフロントエンド
 
@@ -2215,10 +2216,13 @@ pub enum GridError {
 - 入れ子の列を展開・折りたたみ、詳細表示から編集できること（5.1, 5.2, 5.5）
 
 ### Performance/Load
-- `large_grid/encode_window` — 可視 1 窓の符号化
-- `large_grid/recompute_order` — 10 万行 × 2 基準列の並べ替えと絞り込み
-- `large_grid/paste_10k` — 1 万行の貼り付け（要件 7.7, 11.5）
+- `large_grid/encode_window` — 10 万行 × 30 列のシートの可視 1 窓（256 行 × 30 列）の符号化
+- `large_grid/encode_window_10k` — 同じ符号化を 1 万行の標本で測る（要件 11.6 の比較。10 倍の行数で費用が増えないことを示す材料であり、予算の判定には使わない）
+- `large_grid/recompute_order` — 10 万行 × 2 基準列の並べ替えと絞り込み（`GridSession::set_view` のフル経路）
+- `large_grid/paste_10k` — 1 万行 × 30 列の貼り付け（要件 7.7, 11.5。**予算 3 秒を機械判定する唯一のベンチである**）
 - 走査中のフレーム時間の中央値（要件 11.1）— 実画面の観測として `scripts/ci/` に置く
+
+実体は `crates/data-grid/benches/large_grid.rs` にあり、標本は 1.4 の生成器（`crates/data-grid/tests/common/sample.rs`）を相対パスで取り込んで使う（写しを作らない）。
 
 ## Performance & Scalability
 
@@ -2227,9 +2231,10 @@ pub enum GridError {
 | 走査中の描画更新 | 毎秒 60 回 | 11.1 | 実画面の観測（3 OS） |
 | 最初の画面 | 1 秒 | 11.2 | 実画面の観測 |
 | 編集の反映 | 100 ミリ秒 | 11.3 | 実画面の観測 |
-| 1 万行の貼り付け | 3 秒 | 11.5 | `large_grid/paste_10k` |
-| 表示のための資源 | 行数に比例しない | 11.6 | 窓の記憶の上限を固定し、10 倍の行数で比較する |
+| 1 万行の貼り付け | 3 秒 | 11.5 | `large_grid/paste_10k`（`scripts/check-bench-budget.sh` が要件値で機械判定する） |
+| 表示のための資源 | 行数に比例しない | 11.6 | 窓の記憶の上限を固定し（`windowCache.test.ts` が `WINDOW_ROWS` × `MAX_WINDOWS` で表明する）、10 倍の行数で比較する（`large_grid/encode_window` と `large_grid/encode_window_10k` の実測比。`research.md`「窓の符号化の費用は行数に比例しない」） |
 
 - 予算は**要件値で判定し、CI ランナーの遅さを理由に緩めない**（`verification.md`「ランナーの扱い」）
 - **計測が無い状態で予算ゲートだけ先に結線しない。**結線は計測を入れるタスクが行う（`structure.md`）
+- **要件に絶対値を持つのは 11.5 だけである。**したがって判定器（`scripts/check-bench-budget.sh`）へ足すのは `large_grid/paste_10k` の 3 秒だけであり、窓の符号化と順序の再計算は**計測値を criterion のレポートに残す**（11.1 / 11.2 / 11.3 の判定の場は実画面の観測であり、ベンチではない）
 - `schema-engine` の実測（全件 255 ミリ秒 / 1 列 31 ミリ秒）は本機能の予算の**内側で既に使われている**。編集のたびに全件検証を呼ばないこと（要件 11.4）が予算成立の前提である
