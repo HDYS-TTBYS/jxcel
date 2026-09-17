@@ -325,6 +325,15 @@
   - **既存の 3 OS の検証マトリクスを拡張する。**独立した検証系統を新設しない
   - 台本の実体は検査器ではなくランナー固有の手順として置き、ワークフローの段は 1 行で呼ぶ
   - 検証専用の経路が出荷物に残っていないことを、既存の検査で確かめる
+  - **群 10 が閉じた経路を筋書きに含める**（単体テストが観測できないものを実起動で確かめる）:
+    - **入れ子の列を展開したあとに走査する**（10.1。かつては展開で世代がずれ、窓が永久に空になっていた）
+    - **行を追加して取り消し・やり直しをし、現在位置が対象の行へ移り変更箇所が見える**（10.5。9.8 の前半）
+    - **並べ替えた表示で位置を指定して行を追加し、範囲を選んで削除する**（10.4。6.1 / 6.2）
+    - **違反しているセルを指定して理由を読み、同じ行の別の違反セルでもその理由になる**（10.6。4.2）
+    - **参照の列の面が行を一覧し、続きを読む**（10.3。要件 3.8）
+    - **貼り付けた文字がシステムのクリップボードを経由して戻る**（10.8。7.2 の「他のアプリケーションへ渡せる」の証明）
+    - **シートを切り替えても取り消しが効く**（10.2。要件 9.5）
+    - **文書を差し替えたとき、表が古い行を残さずに追随する**（10.7。要件 1.7。**単体テストが観測しない結線である**）
   - 3 つの OS それぞれで観測が成功し、失敗したときに何が起きたかが記録から分かる
   - _Requirements: 12.1, 12.4_
 
@@ -401,7 +410,7 @@
   - _Requirements: 4.1, 4.2, 4.5_
   - _Boundary: crates/app-shell/src/ipc/grid.rs, src/ipc/bindings.ts, src-tauri/src/commands/grid.rs, crates/data-grid/src/view/violations.rs, crates/data-grid/src/api.rs, src/features/grid/, .kiro/specs/data-grid/design.md_
 
-- [ ] 10.7 文書の差し替えと破棄を画面が追随する（要件 1.7 のうち本機能が閉じられる部分）
+- [x] 10.7 文書の差し替えと破棄を画面が追随する（要件 1.7 のうち本機能が閉じられる部分）
   - 画面が `DOCUMENT_SESSION_CHANGED_EVENT` を購読し、`document_state` を取り直す。文書が差し替わった／無くなったときは、保持しているセッションと窓の記憶を捨て、提示を「文書なし」「シートなし」へ移す（**古い表を残さない**）
   - **内容だけが本機能以外の経路で変わった場合の検出は本機能では閉じられない**（`document_state` が版を運ばないため）。**上流（`document-session`。`Slot` は既に版を持っている）へ差し戻し、design.md の Revalidation Triggers と Implementation Notes に記録する。**画面側の推測（定期的な全件再読など）で代用しない（要件 11.6 に反する）
   - **検査**: 文書を差し替えたあと、画面が古い行を描かずに新しい状態へ移る
@@ -421,6 +430,12 @@
 
 ## Implementation Notes
 
+- **10.7 が確定させたこと（親が記録する）**: 画面は `DOCUMENT_SESSION_CHANGED_EVENT` を購読して `document_state` を取り直し、**先頭のシートの識別子**が変わったときだけ提示を組み直す（同じシートでは `grid_open_sheet` も `grid_set_view` も呼ばない）。**内容だけが本機能以外の経路で変わった場合は本機能では閉じられない** — `document_state`（`DocumentSessionStatus`）が**版を運ばない**ためである。`document-session` の `Slot` は既に `AtomicU64` の版を持っているので、**境界の型へ版を足すのが筋**（design.md の Revalidation Triggers と Allowed Dependencies に記録済み）。**画面側の推測（定期的な再読・時間による再取得）で代用しない**（要件 11.6）。
+- **10.7 のレビューが残した非阻害の申し送り（次にこの辺りを触る人が拾うこと）**:
+  1. `GridScreen.tsx` の通知の組み直し（`gridScreenLoaded` 相当の 4 欄）が読み込みの効果と**同じ組み立てを書き写している** — 規則を 1 箇所に保つため `gridScreenLoaded(model, await loadGridScreenState(client, answer))` を呼ぶ形にできる。
+  2. **`presentedSheetOf` が `null` を返す腕の検査が無い**（`loading` / `failed` の状態へ通知が来て文書が現れる経路。**実起動で最も起きうる**）。レビューが使い捨ての検査で「`failed`(Absent) の提示 + `ok(Open[s7])` → `grid_open_sheet:s7` が 1 回だけ、`document_state` の読みは増えない」ことを実測しており、恒久の検査を 1 件足すのが望ましい。
+  3. `src/features/grid/documentRequests.ts` は既存の `src/ipc/documentSession.ts` の `installDocumentSessionChanged` とほぼ同じ購読を作っている（既存は「解除後に解決した読みを捨てる」も持つ）。**既存関数は取り直した答えをそのまま渡す**ので、新 module とその検査 3 件を削って既存へ寄せられる（残すなら理由を design.md に書く）。
+  4. 通知の組み直し（`documentTokenRef`）と `attempt` 依存の読み込み（`cancelled`）は**それぞれ自分の重なりしか守っておらず**、両者をまたぐ「新しいものが勝つ」順序が無い（IPC の順序とセッションのロックから現実には起きにくいが、記録は無い）。
 - **検証の集合に `cargo test -p app-shell`（lib の単体テスト）を必ず含めること（10.5 が実測）**: 10.4 は `crates/app-shell/src/ipc/mod.rs` の `edit_command_mirrors_the_domain_commands` を追随させず、**10.4 の時点で `cargo test -p app-shell` がコンパイルできなくなっていた**（`bindings_drift` は統合テストなので緑のまま通る）。10.5 の作業で発見して追随させた。**境界の型やコマンドの形を変えたタスクは、`-p app-shell` の lib の検査まで走らせること。**
 
 - **10.3 が残した限界（親が記録する）**:

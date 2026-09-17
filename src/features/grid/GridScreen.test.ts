@@ -91,6 +91,7 @@ import {
   gridScreenRetried,
   gridScreenRowOperationSettled,
   gridScreenSelectionChanged,
+  gridScreenSessionChanged,
   gridScreenViewSettled,
   initialGridScreenModel,
   loadEditorReference,
@@ -379,7 +380,7 @@ describe("2 つの空の状態（要件 1.5、1.6）", () => {
 
     const state = await loadGridScreenState(client);
 
-    expect(state).toEqual({ status: "no-schema", sheetName: "空のシート" });
+    expect(state).toEqual({ status: "no-schema", sheet: "s1", sheetName: "空のシート" });
     // **開く呼び出しをしない。** 列 0 本の計画は Rust 側が `SchemaUnusable` として拒むので
     // （`GridSession::open`）、「表を描かない」という答えは境界の答えを待たずに決まる。
     expect(client.calls).toEqual(["document_state"]);
@@ -1595,6 +1596,7 @@ describe("違反のバーと巡回（8.4。要件 4.1〜4.4、4.6）", () => {
   it("表を描いていないときは、バーも出ない（総数の源が無い）", () => {
     const markup = markOfState({
       status: "no-rows",
+      sheet: "s1",
       sheetName: "空のシート",
       columns: [descriptor(0, "名前")],
     });
@@ -3816,6 +3818,172 @@ describe("表示の操作（8.8。要件 8.1〜8.7）", () => {
     ]);
     // 影響を受けた行の窓は捨てられる（取り直すまで、その行の識別子は引けない）。
     expect(cache.rowId({ row: 2, column: 3 })).toBeNull();
+  });
+});
+
+// ===========================================================================
+// 3.5 文書の差し替えと破棄への追随（10.7。要件 1.7）
+// ===========================================================================
+
+describe("文書の差し替えと破棄を画面が追随する（10.7。要件 1.7）", () => {
+  /**
+   * 表を描いている画面（シート 1 枚・行 3 件）と、その境界。**通知の処理は同じ偽の境界を
+   * 通る**ので、呼び出しの列をそのまま数えられる（通知そのものが運ぶのは状態ではなく、
+   * 状態の源は `document_state` である — `src/ipc/documentSession.ts`）。
+   */
+  async function readyScreen(): Promise<{
+    readonly client: FakeClient;
+    readonly model: GridScreenModel;
+  }> {
+    const client = fakeClient({
+      state: ok(openDocument([sheetOf("s1", "標本シート", 1, 3)])),
+      open: ok(openedSheet({ columns: [descriptor(0, "名前")], row_count: 3 })),
+      view: ok(derivedView(3)),
+    });
+    const model = gridScreenLoaded(initialGridScreenModel(), await loadGridScreenState(client));
+    expect(markOf(model)).toContain("jxcel-grid-table");
+    return { client, model };
+  }
+
+  it("通知で文書が無くなったとき、古い行を残さず「文書なし」の提示へ移る（要件 1.7）", async () => {
+    const { client, model } = await readyScreen();
+
+    const after = await gridScreenSessionChanged(
+      client,
+      model,
+      ok<DocumentStateResponse>({ context: CONTEXT, status: { state: "Absent" } }),
+    );
+
+    // **古い表を残さない** — セッションも窓の記憶も捨て、内容の領域そのものが「文書なし」に
+    // 入れ替わる（表の器が描かれないので、古い行が残る場所が無い）。
+    const markup = markOf(after);
+    expect(markup).not.toContain("jxcel-grid-table");
+    expect(markup).toContain("このウィンドウにはドキュメントがありません");
+    // **問い合わせ直しは増えない**（通知の処理は既に読まれた答えを写すだけである）。
+    expect(client.calls).toEqual([
+      "document_state",
+      "grid_open_sheet:s1",
+      "grid_set_view:000",
+    ]);
+  });
+
+  it("通知でシートが差し替わったとき、新しいシートの表が組まれる（古い行が残らない）", async () => {
+    const answers: {
+      state: IpcResult<DocumentStateResponse, IpcClientError>;
+      open: IpcResult<GridOpenResponse, IpcClientError>;
+      view: IpcResult<GridViewResponse, IpcClientError>;
+    } = {
+      state: ok(openDocument([sheetOf("s1", "前のシート", 1, 3)])),
+      open: ok(openedSheet({ columns: [descriptor(0, "前の列")], row_count: 3 })),
+      view: ok(derivedView(3)),
+    };
+    const client = fakeClient(answers);
+    const model = gridScreenLoaded(initialGridScreenModel(), await loadGridScreenState(client));
+
+    // 文書が差し替わった（先頭のシートの識別子が変わった）。
+    answers.state = ok(openDocument([sheetOf("s2", "新しいシート", 1, 1)]));
+    answers.open = ok(openedSheet({ columns: [descriptor(0, "新しい列")], row_count: 1 }, "1"));
+    answers.view = ok(derivedView(1, 0, [], "2"));
+
+    const after = await gridScreenSessionChanged(client, model, answers.state);
+
+    // **新しいシートを開き直す**（前のシートの表は捨てられる）。
+    expect(client.calls).toEqual([
+      "document_state",
+      "grid_open_sheet:s1",
+      "grid_set_view:000",
+      "grid_open_sheet:s2",
+      "grid_set_view:000",
+    ]);
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態にならなかった");
+    }
+    expect(after.state.sheet).toBe("s2");
+    expect(after.state.summary.row_count).toBe(1);
+    // 前のシートの痕跡（**列**）は 1 つも残らず、新しいシートの表が組まれている。
+    // **表を描く腕はシート名を持たない**（`ready` の状態は識別子と要約だけを持つ。名前を出す
+    // のは表を描かない 2 つの腕である）ので、ここで読めるのは列の並びと行数である。
+    const markup = markOf(after);
+    expect(markup).toContain("jxcel-grid-table");
+    expect(markup).toContain("新しい列");
+    expect(markup).not.toContain("前の列");
+  });
+
+  it("同じ文書の同じシートの通知では、開き直しも組み直しも起きない（表をちらつかせない）", async () => {
+    const { client, model } = await readyScreen();
+
+    const after = await gridScreenSessionChanged(
+      client,
+      model,
+      ok(openDocument([sheetOf("s1", "標本シート", 1, 3)])),
+    );
+
+    // **同じ 1 つの値をそのまま返す**（同じ値の `setState` で React は再描画しない — 表が
+    // ちらつかないことの根拠である）。
+    expect(after).toBe(model);
+    expect(client.calls).toEqual([
+      "document_state",
+      "grid_open_sheet:s1",
+      "grid_set_view:000",
+    ]);
+  });
+
+  it("表を描いていない状態（行 0 件）でも、同じシートの通知では開き直さない", async () => {
+    const client = fakeClient({
+      state: ok(openDocument([sheetOf("s1", "空のシート", 1, 0)])),
+      open: ok(openedSheet({ columns: [descriptor(0, "名前")], row_count: 0 })),
+    });
+    const model = gridScreenLoaded(initialGridScreenModel(), await loadGridScreenState(client));
+    expect(model.state.status).toBe("no-rows");
+
+    const same = await gridScreenSessionChanged(
+      client,
+      model,
+      ok(openDocument([sheetOf("s1", "空のシート", 1, 0)])),
+    );
+    expect(same).toBe(model);
+    expect(client.calls).toEqual(["document_state", "grid_open_sheet:s1"]);
+
+    // 別のシートへ差し替われば開き直す（**表を描いていない状態でも追随する**）。
+    const after = await gridScreenSessionChanged(
+      client,
+      model,
+      ok(openDocument([sheetOf("s2", "別のシート", 1, 0)])),
+    );
+    if (after.state.status !== "no-rows") {
+      throw new Error("行が無いことの提示にならなかった");
+    }
+    expect(after.state.sheet).toBe("s2");
+    expect(after.state.sheetName).toBe("別のシート");
+    expect(client.calls).toEqual([
+      "document_state",
+      "grid_open_sheet:s1",
+      "grid_open_sheet:s2",
+    ]);
+  });
+
+  it("通知の処理は投げない（失敗は画面内の告知として扱う）", async () => {
+    const { client, model } = await readyScreen();
+
+    // ① 問い合わせ直しの封筒が失敗したとき（経路の失敗）。**表も状態も動かさない。**
+    const failed = await gridScreenSessionChanged(client, model, err<DocumentStateResponse>());
+    expect(failed.state).toBe(model.state);
+    expect(failed.notice).toContain("文書の状態を確認できませんでした");
+    expect(markOf(failed)).toContain("jxcel-grid-table");
+
+    // ② 組み直しの途中で境界の口そのものが拒否したとき。**拒否を外へ出さない**
+    // （`ScreenBoundary` は非同期の拒否を捕まえない）。
+    const broken: GridClient = {
+      ...client,
+      openSheet: () => Promise.reject(new Error("口が壊れている")),
+    };
+    const caught = await gridScreenSessionChanged(
+      broken,
+      model,
+      ok(openDocument([sheetOf("s2", "別のシート", 1, 1)])),
+    );
+    expect(caught.state).toBe(model.state);
+    expect(caught.notice).toContain("口が壊れている");
   });
 });
 

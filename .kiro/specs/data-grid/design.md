@@ -55,6 +55,7 @@
     - **変更の適用**: `DocumentSessionsApi::edit(&self, window, &mut dyn FnMut(&mut Document) -> R) -> Result<Edited<R>, SessionError>`。**閉包の内側で `EditCommand` を適用する**形であり、本設計の `GridSession::apply(&mut self, doc: &mut Document, command)` は「`doc` を受け取る」という前提をそのまま保てる（所有者から可変参照を借りる閉包の中で呼ぶ）。**閉包の内側から同じセッションを呼び返してはならない**（再入禁止。ロックを保持したまま呼ぶのでデッドロックする）— `GridSession` の `apply` は記録を要する問い合わせ（`state` / `may_close` / 保存）を内部で呼ばないこと。
     - **一括の書き換え**: `Document::set_cells(sheet: SheetId, cells: &[(RowId, usize, CellValue)]) -> Result<(), CellWriteError>` が上流 `document-format` に入った（1 回の呼び出しで 10 万行 × 30 列 = 全 300 万セルを 1 秒以内に置き換えることを実測済み。予算 1 秒に対して **0.117 s**）。**`document-session` が本機能より先にこの口を必要としたため、本設計の「上流への最小の追加」（`remove_rows` / `insert_row_at`）を待たずに実装された** — 本設計のその口は依然として本機能の群 1 が実装する（**2026-09-14 に実施済み: 3 メソッドとも `crates/document-format` の `Document` に入った**）。**重複する行・列は「入力順の last-wins」**であり（仕様書に明記が無くテストも無い。`document-session` の 1.2 の申し送り）、貼り付けが重複を生成しうるなら本機能側で契約として明記するか重複を弾くこと。
     - **境界の型**: `crates/app-shell/src/ipc/document.rs` に 4 コマンド（`document_state` / `document_save` / `document_new` / `document_discard`）ぶんの応答型が入った。**64 ビット整数を出さず・位置を出さない・他のドメインクレートの型を参照しない**という本設計の境界の前提はそのままである（シートの件数は `u32`、識別子は文字列）。`GridCommands` が組み立てる境界型もこの規約に従う。
+    - **10.7 が見つけた隙間（上流への申し送り）**: `DocumentSessionStatus` / `DocumentStateResponse` は**版（世代）を運ばない**。したがって本機能は「文書が差し替わった・無くなった」ことは検出できるが、**同じシートのまま内容だけが外の経路で変わった**ことは検出できない（要件 1.7 の残り）。保持側の `Slot` は既に版を持つので、境界へ版を足すのが筋である — 再検証の相手は下の Revalidation Triggers に記録した。
 - `app-shell`: 画面登録簿、IPC 境界、コマンド登録の根、メニュー登録口、診断の記録
 - **制約**:
   - `crates/data-grid` は `tauri` に依存しない（`scripts/check-core-deps.sh` が固定する）
@@ -71,6 +72,7 @@
 | **境界に選択肢・参照先・ユーザー定義型の識別子を足す**（7.4 が記録した隙間 1〜3） | 8.3 の画面（`ColumnConstraints` の組み立て）と 7.4 の面 |
 | **確定の文字の運び手を登録に足す設計の改訂**（7.4 が記録した隙間 4。入れ子は `SetNested` でなければ適合しない） | 8.3 の画面、`custom-types`、7.4 の面 |
 | 窓の転送単位・符号化の形 | 要件 11 の予算の再測定 |
+| **境界の `document_state` が版（世代）を運ぶようになる**（10.7 が記録した隙間。要件 1.7 の「本機能の外の経路が**内容だけ**を変えた」場合を画面が検出できない） | **`document-session`**（保持している `Slot` は既に版を持つ。境界の `DocumentSessionStatus` / `DocumentStateResponse` へその版を足す）と、**本機能の追随**（`GridScreen.gridScreenSessionChanged`）— 版を足した暦では、**同じシートの通知でも版が変われば提示を組み直す**（いまは「先頭のシートの識別子が同じなら何もしない」である。下の「10.7 が確定させたもの」） |
 | `schema-engine` の判定 API の形 | 本機能の編集経路 |
 | **`document-session` の design 確定** | **本設計（能力の水準で依存しているため、API の形が決まった時点で整合を取り直す）** — **2026-09-14 に実施済み**（`document-session` が実装完了。確定した公開面は「Allowed Dependencies」の `document-session` の項に記録した。想定と一致し、設計の変更は要らなかった） |
 | `document-format` への 3 メソッド追加の形 | `document-format` の決定的出力の契約は不変。行の集合と並びのみ |
@@ -319,7 +321,7 @@ stateDiagram-v2
 |-------------|---------|------------|------------|-------|
 | 1.1, 1.2, 1.3, 1.4 | 10 万行の表示と走査、位置の提示、端への直接移動 | WindowCache, RendererPort, GlideAdapter, WindowCodec | `encode_window`, `GridRendererPort.mount` | 窓の取得と先読み |
 | 1.5, 1.6 | 行なし・列なしの提示 | GridScreen, GridSession | `GridOpenResponse.row_count`, `columns` | — |
-| 1.7 | 外部経路の変更を表示へ反映 | WindowCache, GridScreen（`cellEdit.ts`） | `WindowCache.invalidate`（`EditOutcome.affected` をそのまま渡す） | 編集の適用と判定 |
+| 1.7 | 外部経路の変更を表示へ反映 | WindowCache, GridScreen（`cellEdit.ts`。**文書の差し替え・破棄は `documentRequests.ts` と `GridScreen.gridScreenSessionChanged`（10.7）**） | `WindowCache.invalidate`（`EditOutcome.affected` をそのまま渡す）、**`DOCUMENT_SESSION_CHANGED_EVENT` と `document_state`（10.7。同一シートなら開き直さない。内容だけの変更は版が無いため閉じられない — 下の「10.7 が確定させたもの」）** | 編集の適用と判定 |
 | 2.1, 2.2, 2.3, 2.4, 2.5, 2.6 | 現在位置・選択・追従・範囲の対象化 | GridScreen（`selection.ts`）, RendererPort | `RendererSpec.selection` / `onSelectionChange` / `onVisibleSpanChange` / `rowMarkers`, `RendererHandle.setSelection` / `scrollTo` | — |
 | 3.1, 3.2, 3.8 | 型に応じた入力手段（日時・選択肢・真偽・シート間参照） | EditorRegistry, editors, GridScreen（`CellEditorPanel`）, **ColumnConstraints の組み立て（10.3）** | `CellEditorRegistry.resolve` / `resolveCarrier`（`customTypeId` つき）, `CellEditorProps.constraints`（**10.3 が材料を渡す** — 選択肢・参照先の行・入れ子の宣言・値なしを許すか）, `GridCommands` の `grid_reference_rows` | 3.8 の行の一覧は**頁ごと**に読む（`GRID_REFERENCE_PAGE_LIMIT`） |
 | 3.3, 3.4, 3.5 | 判定への送付、変換の提示、違反値の保持 | EditApply, GridCommands, GridScreen（`cellEdit.ts`） | `EditCommand::SetCells`, `GridClient.applyEdit`, `GridEditResponse.coercions` / `violations` / `violation_total` | 編集の適用と判定 |
@@ -1500,7 +1502,7 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 
 #### GridScreen / NestedInspector / ViolationBar（要約）
 
-- **GridScreen**: `ScreenProps` だけを受け取り、`SHELL_SCREEN_REGISTRY` に 1 件登録される。**`ScreenBoundary` はイベントハンドラと非同期の失敗を捕まえない**ため、IPC の失敗・キーボード操作の失敗は画面内の状態として扱う。配色は `var(--jxcel-*)` の 10 本のみを参照する。要件 6.5 の確認、要件 9.8 の移動を持つ。要件 7.8 のメニュー登録は**器の層**（`src-tauri/src/commands/grid.rs`）が持ち、画面は**その活性化を購読して移植口の入口を呼ぶ**（`clipboardRequests.ts`。9.5 の診断の導線と同じ分担である）。要件 9.9 のメニュー登録は 8.9 が同じ形で足した（`history.ts`。荷は生成物の `GridHistoryDirection`、キーボードの経路はアクセラレータである）
+- **GridScreen**: `ScreenProps` だけを受け取り、`SHELL_SCREEN_REGISTRY` に 1 件登録される。**`ScreenBoundary` はイベントハンドラと非同期の失敗を捕まえない**ため、IPC の失敗・キーボード操作の失敗は画面内の状態として扱う。配色は `var(--jxcel-*)` の 10 本のみを参照する。要件 6.5 の確認、要件 9.8 の移動を持つ。要件 7.8 のメニュー登録は**器の層**（`src-tauri/src/commands/grid.rs`）が持ち、画面は**その活性化を購読して移植口の入口を呼ぶ**（`clipboardRequests.ts`。9.5 の診断の導線と同じ分担である）。要件 9.9 のメニュー登録は 8.9 が同じ形で足した（`history.ts`。荷は生成物の `GridHistoryDirection`、キーボードの経路はアクセラレータである）。**要件 1.7 の文書の差し替え・破棄への追随は 10.7 が同じ形で足した**（`documentRequests.ts`。荷は `DOCUMENT_SESSION_CHANGED_EVENT` であり、購読側で `document_state` を取り直す — 下の「10.7 が確定させたもの」）
 - **NestedInspector**: 入れ子の値の構造を各フィールドの型とともに示し、その中の編集を `EditCommand::SetNested` へ流す（要件 5.5, 5.7）
 - **ViolationBar**: 違反の総数を示し、次の違反へ移動させる（要件 4.3, 4.4）
 
@@ -2017,6 +2019,26 @@ DOM へ出るか」と、要素が持つ受け口がどの操作を組み立て�
 | 表示中のシートでない場合 | `untouched_sheet_outcome` が `affected_ordinals` を**空**にする（`affected` と同じ） | 別のシートの行である。空であれば画面は現在位置を動かさない（要件 9.8 の「移す先が無ければ動かさない」） |
 | 検査 | ① `src-tauri`: **絞り込みで可視の序数と文書の位置を食い違わせ**、応答の序数を**窓**（`RowOrder::row_at` を通る唯一の経路）と突き合わせる（`the_affected_ordinals_are_the_display_ordinals_of_the_rows`）② `src-tauri`: **行の追加のやり直し**で序数が運ばれる（`redoing_an_insertion_reports_the_ordinal_of_the_restored_row`）③ `src-tauri`: 順序に無い行は載らない（`a_row_outside_the_displayed_order_has_no_ordinal`）④ **`src-tauri`: 複数行が影響する適用と取り消しで、序数が `affected` と同じ順に並び、先頭が最初の写せた行である**（`the_affected_ordinals_follow_the_affected_order` — 可視の序数が文書の順と**逆**になる表示で測るので、表示の順に並べ直す実装も写す順を逆にする実装も落ちる）⑤ **`src-tauri`: 写せない行を混ぜても、その行は載らず他の行の序数は保たれる**（`the_affected_ordinals_skip_a_row_outside_the_display_and_keep_the_others`）⑥ **`data-grid`: 写像の口は渡した順に答え、順序に無い行を落とし、重複を畳み、可視の並びを 1 回だけ走る**（`visible_ordinals_of_answers_in_the_given_order_and_skips_rows_without_a_position` と `visible_ordinals_of_a_trailing_batch_of_a_hundred_thousand_rows_is_one_scan`）⑦ 画面: **序数が 2 つ以上あるときも先頭へ移る**（最小でも末尾でもない。`GridScreen.test.ts`）、**行の操作と貼り付けの経路でも現在位置が移り選択が 1 セルへ畳まれる**（同。10.5 より前はこの 2 つの経路がつねに `null` だった）、**セルの編集の経路は移らない**（同）、本物の経路（`applyHistory` → 遷移 → 追随）で `setSelection` と `scrollTo` がその序数を名乗る | ①②は「文書の位置を写した実装」「適用の前の並びから写す実装」を落とす。④⑤は 10.5 のレビューが実測した生存変異（写す順を逆にする・写せない行を含める）を落とす — これらの検査が入るまで、序数を表明する検査は**すべて要素数 0 か 1** であり、どちらの変異も全緑だった。⑥は費用の表明であり、行ごとの形（3.0 秒）で落ちる |
 | 限界（申し送り） | **`WindowCache.ordinalOf`（8.9 が足した口）は残すと決めた。**10.5 以降、本番の経路からは呼ばれていない（序数は応答が運ぶ）が、① 能力そのものは本物であり、② **7.3 の検査がこの口で序数と行の対応を固定している**（`windowCache.test.ts` の 3 件 — `rowId` との往復・綴りの規律・捨てた窓の扱い）。`windowCache.ts` の doc は**実態へ直した**（「取り消しとやり直しの移動先のための口である」「捨てる前に引くこと」という 2 つの記述は 10.5 が消した経路のものであり、偽になっていた）。**次に窓の記憶を触るときに、消すかどうかを決めること**（消すなら 7.3 の検査と記録を追随させる） | 残しても害は無い（本番の経路から呼ばれない）。写像の費用は**上のように 1 回の走査**であり、**行ごとに引く口を置かないこと**が二次の費用を戻さない仕掛けである（行ごとの口が無いので、二次の形は「1 要素の並びで影響行の数だけ呼ぶ」という不格好な形でしか書けず、`outcome_to_boundary` の 1 箇所を見れば分かる）。⑥の検査は**口そのものの費用**を押さえる |
+
+##### 10.7 が確定させたもの（文書の差し替えと破棄への追随。`src/features/grid/documentRequests.ts`）
+
+**要件 1.7 のうち、本機能が閉じられる部分は「文書そのものが差し替わった・無くなった」ことである。**
+器（`src-tauri`）は状態を変えた操作（メニューの「開く…」「新規」「保存」）のあと、対象ウィンドウへ
+`DOCUMENT_SESSION_CHANGED_EVENT` を 1 回送る（`ipc/documentSession.ts` の module doc）。画面は
+それを購読し、**`document_state` を取り直してから**提示を突き合わせる。
+
+| 論点 | 決定 | 根拠 |
+|---|---|---|
+| 通知の購読 | `./documentRequests` の `installDocumentChangeRequests(onChange)`。**入口は引数を取らず、通知の本文も読まない**。マウントで 1 回だけ設置し、解除では `cancelled` の守りで登録の完了を待つ | 状態の源は `document_state` ただ 1 つである。本文を解釈しないことは最も強い防御であり（本文がどんな値でも取り直しは壊れない）、源が 2 つに割れる余地も残さない。同じ判断が `installDocumentSessionChanged` と `installGridCopyRequests` にある |
+| 突き合わせの鍵 | **先頭のシートの識別子**。提示の側は `ready` / `no-rows` / `no-schema` の `sheet`（**10.7 が `no-rows` と `no-schema` へ識別子を足した** — それまでは名前しか持たず、名前は同一性ではない） | 境界は文書の識別子を運ばないが、**シートの識別子はドメインの ULID** である（`sheet_to_boundary` が文字列で運ぶ）ので、**独立に作られた文書のシートと衝突しない**。名前で突き合わせると、別の文書の既定のシート名と衝突して**差し替えを取りこぼす**。**限界**: シートの識別子はファイル形式に永続するため、**同一の系譜の複製（Save As）と同一ファイルの読み直しでは識別子が一致する** — この差し替えは取りこぼし、古い行が残りうる。帰結は下の「内容だけが変わった場合」と同一であり、**境界の型へ版が入れば一緒に閉じる**。境界が運ぶのはシートの識別子だけなので、**現行の境界で取りうる最善**である（名前は衝突し、文書の出所の位置は境界に無い） |
+| 同じシートの通知 | **何もしない** — `grid_open_sheet` も `grid_set_view` も呼ばず、**渡された状態機械をそのまま返す**（同じ値の `setState` は React の再描画を起こさない） | メニューの保存など、表の中身が変わらない通知でも表をちらつかせない。読みの回数も検査が呼び出しの形で数える |
+| 差し替えの反映 | 提示そのものを差し替える（`state` を組む）。**窓の記憶は新しい面が組む**（`GridSurface` の組み立ては `sheet` を依存に持つ）ので、古い行を映す場所が無い。読み込みの番号（`attempt`）は動かさない — 動かすと開く効果が走り直す | 「古い表を残さない」は**提示の型**で保証する（表を描かない腕へ移れば、古い行の置き場が無い）。再読は 1 通知 1 回であり、取り直した答えをそのまま開く流れへ渡す（**同じ問い合わせを 2 回にしない**） |
+| 確認できなかったとき（封筒の失敗） | **提示を動かさない**（告知 1 行に理由を出す） | 何が変わったか分からない状態で表を捨てると、無事な文書の表が消える。次の通知で取り直せばよい |
+| 境界の口そのものが拒否したとき | 握って告知へ写す（`gridScreenSessionChanged` は全域であり、投げない） | 購読は `ScreenBoundary` の外側（イベントハンドラ）から呼ばれる。`ScreenBoundary` はイベントハンドラの例外を捕まえない |
+| **内容だけが変わった場合（本機能では閉じられない）** | **上流へ差し戻す。**`document_state` の `DocumentSessionStatus` は**版（世代）を運ばない**ため、同じシートのまま中身だけが変わったことを画面は知り得ない。`document-session` の `Slot` は既に版を持っているので、**境界の型へ版を足す**のが筋である（Revalidation Triggers の同項） | **画面側の推測で代用しない** — 定期的な再読・時間による再取得は要件 11.6（予算）に反し、要らない問い合わせを恒常的に積む。版が来るまでは「差し替えと破棄」までが本機能の閉じられる範囲である |
+| **内容だけが変わった場合に、画面は何もしないこと** | 版を待たずに縮退しない。**同じシートの通知では 1 度も読み直さない**（差分の検出は取り直した答えの突き合わせだけで行う） | 「取りあえず全件を読み直す」形を 1 つ置くと、要件 11 の予算の下で**観測されない費用**が常態化する。10.7 の検査③がこの不作為を固定する |
+| 検査 | `GridScreen.test.ts`「文書の差し替えと破棄を画面が追随する」: ① 文書が無くなった通知で古い表が描かれず「文書なし」へ移る ② シートが差し替わった通知で新しい表が組まれ、前の列が 1 つも残らない ③ 同じシートの通知では `grid_open_sheet` の呼び出しが増えず、**同じ状態機械が返る** ④ 表を描いていない腕（行 0 件）でも同じ規則 ⑤ 失敗の 2 経路（封筒の失敗・口の拒否）がどちらも投げずに告知になる。`documentRequests.test.ts`: 宛先は生成物の定数・1 通知 1 回・解除の取りこぼしなし・設置失敗を投げない | 通知そのものが無い状態（10.7 の前）では、① ② が**落ちる**（`gridScreenSessionChanged` が無い）。③ は「通知でつねに再読する」形の実装（同じシートでも開き直す）を落とす |
+| 限界（単体テストが観測しないもの） | 購読の**結線**（`GridScreen` の効果）は走らない — 画面の検査は `GridScreenView` を `renderToStaticMarkup` で**描くだけ**であり（`GridScreen` の実体をマウントしない）、`vitest` の環境も `node` である（7.2 の結論）。**実物の起動で 1 度観測すること**: 文書を差し替えたあと、表が新しいシートへ入れ替わり、古い行が残らないこと（**9.2 の筋書きに含めてある**。起こせる通知は「新規」または別ファイルの「開く…」であり、**「破棄」では通知が飛ばない** — `should_notify` が送り先の無い変化を送らないためである） | 効果を持たない環境で「マウント時に 1 回設置される」ことを表明しても、観測する対象が無い。結線の正しさは実起動の観測と、`documentRequests.test.ts` の module 契約の 2 つで支える（8.7・8.9 の「単体テストが観測しないもの」と同じ規律） |
 
 ## Data Models
 

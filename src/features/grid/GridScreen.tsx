@@ -343,9 +343,10 @@ import {
 } from "react";
 
 import { APPEARANCE_VARS } from "../../shell/theme";
-import { assertNever, describeIpcError } from "../../ipc/client";
+import { assertNever, describeIpcError, type IpcClientResult } from "../../ipc/client";
 import type {
   ColumnDescriptor,
+  DocumentStateResponse,
   GridCoercionNotice,
   GridEditOutcome,
   GridExpansionState,
@@ -417,6 +418,7 @@ import {
   type PasteSettlement,
 } from "./clipboard";
 import { installGridCopyRequests, type CopyEntry } from "./clipboardRequests";
+import { installDocumentChangeRequests } from "./documentRequests";
 import {
   clampSelection,
   followTarget,
@@ -473,11 +475,18 @@ export type GridScreenState =
    * 直らない失敗は偽）。
    */
   | { readonly status: "failed"; readonly message: string; readonly canRetry: boolean }
-  /** 列が 1 本も宣言されていない（要件 1.6）。**表を描かない。** */
-  | { readonly status: "no-schema"; readonly sheetName: string }
+  /**
+   * 列が 1 本も宣言されていない（要件 1.6）。**表を描かない。**
+   *
+   * `sheet` は**この提示が組まれたシート**である（表を描かない腕にも載せる理由は
+   * [`presentedSheetOf`] — 文書の差し替えの通知で「同じシートか」を突き合わせる鍵であり、
+   * 名前は同一性ではない）。
+   */
+  | { readonly status: "no-schema"; readonly sheet: string; readonly sheetName: string }
   /** 列はあるが行が 1 件も無い（要件 1.5）。**列の構成を示し、行が無いことを示す。** */
   | {
       readonly status: "no-rows";
+      readonly sheet: string;
       readonly sheetName: string;
       readonly columns: readonly ColumnDescriptor[];
     }
@@ -1618,14 +1627,21 @@ export function needsViewRefresh(options: {
  *
  * 例外を投げない（`GridClient` の口は封筒の失敗を値で返す）。宣言された列が 1 本も無いときは
  * **開く呼び出しをしない**（モジュール doc の表）。
+ *
+ * `answer` は**既に読んだ答え**である（省略できる）。文書の差し替えへの追随（10.7）は通知を
+ * 受けて `document_state` を 1 回読んでからここへ来るので、**渡されたときは読み直さない** —
+ * 同じ問い合わせを 2 回にしないためである（読みの回数は検査が呼び出しの形で数える）。
  */
-export async function loadGridScreenState(client: GridClient): Promise<GridScreenState> {
-  const answer = await client.readDocumentState();
-  if (answer.status === "error") {
-    return { status: "failed", message: describeIpcError(answer.error), canRetry: true };
+export async function loadGridScreenState(
+  client: GridClient,
+  answer?: IpcClientResult<DocumentStateResponse>,
+): Promise<GridScreenState> {
+  const read = answer ?? (await client.readDocumentState());
+  if (read.status === "error") {
+    return { status: "failed", message: describeIpcError(read.error), canRetry: true };
   }
 
-  const session = answer.data.status;
+  const session = read.data.status;
   if (session.state === "Unavailable") {
     return {
       status: "failed",
@@ -1648,7 +1664,7 @@ export async function loadGridScreenState(client: GridClient): Promise<GridScree
   }
   if (sheet.columns === 0) {
     // 要件 1.6。**開く呼び出しをしない**（モジュール doc「2 つの空の状態」）。
-    return { status: "no-schema", sheetName: sheet.name };
+    return { status: "no-schema", sheet: sheet.id, sheetName: sheet.name };
   }
 
   const opened = await client.openSheet(sheet.id);
@@ -1658,11 +1674,11 @@ export async function loadGridScreenState(client: GridClient): Promise<GridScree
   const summary = opened.data.sheet;
   if (summary.columns.length === 0) {
     // 防御: `GridSheetSummary` の型は列 0 本を許す（現在の Rust 側は開く前に拒む）。
-    return { status: "no-schema", sheetName: sheet.name };
+    return { status: "no-schema", sheet: sheet.id, sheetName: sheet.name };
   }
   if (summary.row_count === 0) {
     // 要件 1.5。**列の構成を示したうえで**行が無いことを示す（表を描かないので順序も要らない）。
-    return { status: "no-rows", sheetName: sheet.name, columns: summary.columns };
+    return { status: "no-rows", sheet: sheet.id, sheetName: sheet.name, columns: summary.columns };
   }
 
   // 可視行の順序は `grid_set_view` が導出する（`GridSession::set_view` が `recompute_order`
@@ -1719,6 +1735,100 @@ export async function loadGridScreenState(client: GridClient): Promise<GridScree
     // 開いた直後は削除の確認を待っていない（8.6。尋ねるのは利用者の操作の後である）。
     pendingDelete: null,
   };
+}
+
+// ===========================================================================
+// 2.8 文書の差し替えと破棄への追随（10.7。要件 1.7）
+// ===========================================================================
+
+/**
+ * その提示が**どのシートから組まれたか**（突き合わせの鍵）。
+ *
+ * 文書そのものの識別子は境界を越えない（`DocumentStateResponse` の `status` が運ぶのは名前・
+ * 出所・未保存とシートの一覧だけである）が、**シートの識別子はドメインの ULID である**
+ * （`document-format` の `SheetId`。`src-tauri/src/session/commands.rs` の `sheet_to_boundary` が
+ * その文字列を運ぶ）ので、別の文書のシートと同じ綴りになることは無い。したがって
+ * **先頭のシートの識別子が一致すること**が「同じ文書の同じシート」の判定である
+ * （**名前で突き合わせない** — 名前は同一性ではなく、別の文書の既定のシート名と衝突しうる）。
+ *
+ * `null` は「**まだ**文書のシートに由来しない提示」であり、**つねに組み直す**印である —
+ * `loading` と `failed` は表の対象を持っていない。通知を取りこぼすと「このウィンドウには
+ * ドキュメントがありません」のまま、メニューで開いた文書を映せない（**通知が要るのはまさに
+ * この場合である**）。
+ */
+function presentedSheetOf(state: GridScreenState): string | null {
+  switch (state.status) {
+    case "ready":
+    case "no-rows":
+    case "no-schema":
+      return state.sheet;
+    case "loading":
+    case "failed":
+      return null;
+  }
+}
+
+/**
+ * 文書の差し替え・破棄の通知を、**提示へ反映する**（10.7。要件 1.7）。`answer` は通知を受けて
+ * 画面が取り直した `document_state` の封筒である（`./documentRequests` の
+ * [`installDocumentChangeRequests`]）。
+ *
+ * # 3 つの腕
+ *
+ * | 取り直した状態 | すること |
+ * |---|---|
+ * | **同じ文書の同じシート** | **何もしない**（渡された状態機械をそのまま返す）。`grid_open_sheet` も `grid_set_view` も呼ばない — 表をちらつかせない |
+ * | **違う**（文書が無い・シートが差し替わった・文書が現れた） | 提示を組み直し、**いまのセッションと窓の記憶を捨てる**（`state` そのものを差し替えるので、表の面は新しい `sheet` で組み直され、古い行を映す場所が無くなる） |
+ * | **確認できなかった**（封筒の失敗） | **提示を動かさない**。何が変わったか分からない状態で表を捨てると、無事な文書の表が消える。告知に理由を出す |
+ *
+ * **内容だけが変わった場合は本機能では閉じられない。** `document_state` の応答は版を運ばない
+ * ので、「同じシートのまま中身が変わった」ことを画面は知り得ない（design.md の Revalidation
+ * Triggers を参照）。画面側の推測（定期的な再読・時間による再取得）で代用してはならない
+ * （要件 11.6）。
+ *
+ * **投げない。** 境界の口は封筒の失敗を値で返すが、口そのものが拒否する場合（実装の失敗）も
+ * ある。購読の登録は非同期であり、`ScreenBoundary` はイベントハンドラから上がる例外を捕まえない
+ * ので、ここで握って告知へ写す。
+ *
+ * 文書の差し替えは**編集も選択も伴わない**（前の文書の位置と入力中の値を持ち越す先が無い）ので、
+ * 組み直した提示は開いた直後の状態（先頭のセルが現在位置、詳細表示なし、確認なし）になる。
+ */
+export async function gridScreenSessionChanged(
+  client: GridClient,
+  model: GridScreenModel,
+  answer: IpcClientResult<DocumentStateResponse>,
+): Promise<GridScreenModel> {
+  if (answer.status === "error") {
+    return gridScreenFailed(
+      model,
+      `文書の状態を確認できませんでした: ${describeIpcError(answer.error)}`,
+    );
+  }
+
+  const presented = presentedSheetOf(model.state);
+  if (
+    presented !== null &&
+    answer.data.status.state === "Open" &&
+    answer.data.status.sheets[0]?.id === presented
+  ) {
+    return model;
+  }
+
+  try {
+    return {
+      // 読み込みの番号は動かさない（動かすと開く効果が走り直し、同じシートをもう一度開く）。
+      attempt: model.attempt,
+      state: await loadGridScreenState(client, answer),
+      // **前の文書についての告知と報告は残さない**（差し替わった文書の話では無くなる）。
+      notice: null,
+      editReport: null,
+    };
+  } catch (error: unknown) {
+    return gridScreenFailed(
+      model,
+      `文書の差し替えに追随できませんでした: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 // ===========================================================================
@@ -3635,6 +3745,46 @@ export function GridScreen(): ReactElement {
       cancelled = true;
     };
   }, [model.attempt]);
+
+  /**
+   * 文書の差し替え・破棄への追随（10.7。要件 1.7）。
+   *
+   * 器（`src-tauri`）は状態を変えた操作のあとに対象ウィンドウへ `DOCUMENT_SESSION_CHANGED_EVENT`
+   * を 1 回送る。購読は**1 回だけ**設置し（読み込みの効果に混ぜない — 試行の番号が動くたびに
+   * 走り直してはならない）、入口は**最新の状態機械を指す参照**を通す（`GridSurface` の
+   * `historyEntryRef` と同じ規律である。1 回だけ設置した購読が古い閉包を握ると、突き合わせる
+   * 相手が古いままになる）。
+   *
+   * 通知は状態を運ばないので、ここで `document_state` を取り直してから突き合わせる
+   * （状態の源は 1 つである。`./documentRequests` の doc）。**遅れて届いた答えは捨てる** —
+   * 2 つの通知が重なったとき、古いほうの組み直しが新しいほうの提示を上書きしないためである
+   * （`traversalRef` / `viewRef` と同じ規律）。
+   *
+   * **この処理は投げない。** 取り直しは封筒を返す（`invokeCommand` が拒否を封筒へ写す。
+   * `src/ipc/client.ts`）ので、ここから上がる例外は無い — 封筒の失敗は「確認できなかった」の
+   * 告知になり、境界の口そのものが拒否した場合は [`gridScreenSessionChanged`] が握る
+   * （`ScreenBoundary` はイベントハンドラの例外を捕まえない）。
+   *
+   * 2 つの効果の**順序**は意味を持つ: 参照を差し替える効果を購読の効果より先に置くので、
+   * 購読が設置される時点で入口は既に本物である（マウント時の初期値は 1 度も呼ばれない）。
+   */
+  const documentChangeRef = useRef<() => Promise<void>>(async () => undefined);
+  const documentTokenRef = useRef(0);
+  useEffect(() => {
+    documentChangeRef.current = async () => {
+      const token = (documentTokenRef.current += 1);
+      const answer = await DEFAULT_CLIENT.readDocumentState();
+      const next = await gridScreenSessionChanged(DEFAULT_CLIENT, model, answer);
+      if (token !== documentTokenRef.current) {
+        return;
+      }
+      setModel(next);
+    };
+  });
+  useEffect(
+    () => installDocumentChangeRequests(() => void documentChangeRef.current()),
+    [],
+  );
 
   const retry = useCallback(() => {
     setModel(gridScreenRetried);
