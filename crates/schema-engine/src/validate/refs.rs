@@ -97,6 +97,17 @@ pub fn scan<'a, I>(
 where
     I: IntoIterator<Item = (RowId, &'a [CellValue])>,
 {
+    // **入口で入力の前提を確かめる。**`selected` は昇順・重複除去済みであること
+    // （`validate_columns` が正規化する）。ここで `binary_search` を使うため、未整列の列を
+    // 渡すと**黙って取りこぼす** — 本番の経路は常に整列済みだが、crate の外からこの関数を
+    // 直接呼ぶ経路（下流の spec）のために、テストの下では落ちるようにしておく。
+    debug_assert!(
+        selected.map_or(true, |selected| selected.windows(2).all(|pair| match pair {
+            [left, right] => left < right,
+            _ => true,
+        })),
+        "selected は昇順・重複除去済みでなければならない（validate_columns が正規化する）"
+    );
     // 列ごとの参照の形を 1 回だけ組み立てる（入れ子の内側の参照も含む）。
     let mut sheets: Vec<SheetId> = Vec::new();
     let mut plan: Vec<(ColumnIndex, RefShape<'_>)> = Vec::new();
