@@ -147,7 +147,7 @@
  * | 要件 | 何を出すか | 源 | どこが担うか |
  * |---|---|---|---|
  * | 4.1 違反しているセル | 印（地色の上書き） | 窓が運ぶセルごとの違反の札（5.1） | 移植口の実装（本 module は `RenderCell.violated` を渡すだけである） |
- * | 4.2 指定したセルの理由 | 理由の文言 | `grid_find_violation` の `reason`（組み立てるのは適応層） | `./violations` の `reasonInRow` と、表（窓の印と行の識別子を読む） |
+ * | 4.2 指定したセルの理由 | 理由の文言 | `grid_find_violation` の `reason`（組み立てるのは適応層）。要求は**指したセルの文書の列**を名指しする（タスク 10.6） | `./violations` の `reasonInRow` と、表（窓の印と行の識別子を読む） |
  * | 4.3 シート全体の総数 | 数 | `grid_set_view` / `grid_apply_edit` の応答 | `ready.violationTotal` と `./violationBar` |
  * | 4.4 次の違反への移動 | 現在位置の移動と、その違反の理由 | `grid_find_violation`（前向き） | `./violations` の `nextViolation` と `gridScreenNextViolation` |
  *
@@ -323,12 +323,14 @@
  *   `WindowCache.getCell` と編集の宛先 `WindowCache.documentColumn` が同じ値を引く）。①（8.8）
  *   は**同じ 1 つへ揃える**こと — 列の並びの変更は窓の中身を変えないので、揃えるのは `getCell`
  *   へ渡す位置の側である（8.8 の担当）
- * - **8.4 の提示も同じ写像を通る（境界修復の後に足した是正）**: 境界の `GridViolationLocation`
- *   が運ぶ列は**文書の列**であるため、`./violations` の `reasonInRow` / `nextViolation` は
- *   `ColumnSpace.displayPosition`（**逆向き**。文書の列 + 内側の位置 → 表示の位置）で落としてから
- *   名乗る・着く。本 module は写像を渡すだけであり（`GridSurface` は `summary` から 1 つ引き、
- *   巡回は押下ごとに `summary.columns` から引く）、**バー（`./violationBar`）と
- *   `gridScreenNextViolation` は表示の位置を受け取る側なので変わっていない**
+ * - **8.4 の提示も同じ写像を通る（境界修復の後に足した是正。10.6 が順方向も足した）**: 境界の
+ *   `GridViolationLocation` が運ぶ列は**文書の列**であるため、`./violations` の
+ *   `reasonInRow` / `nextViolation` は `ColumnSpace.displayPosition`（**逆向き**。文書の列 +
+ *   内側の位置 → 表示の位置）で落としてから名乗る・着く。**10.6 は順方向も使う** — 4.2 の要求は
+ *   指したセルの**文書の列**を運ぶ（`ColumnSpace.documentColumn`。写せなければ指定を送らない）。
+ *   本 module は写像を渡すだけであり（`GridSurface` は `summary` から 1 つ引き、巡回は押下ごとに
+ *   `summary.columns` から引く）、**バー（`./violationBar`）と `gridScreenNextViolation` は
+ *   表示の位置を受け取る側なので変わっていない**
  */
 import {
   useCallback,
@@ -2209,7 +2211,8 @@ function GridSurface({
    */
   const violationWaitingRef = useRef(false);
   /**
-   * いまの構成の写像（**境界の列を表示の位置へ落とす口**。要件 4.2、4.4）。
+   * いまの構成の写像（**2 つの空間の唯一の口**。要件 4.2、4.4）。逆向きは境界の答える列を
+   * 表示の位置へ落とし、順方向は**指したセルの文書の列**を要求へ載せる（タスク 10.6）。
    *
    * 窓の記憶が組む写像（[`createGridSurfaceCache`]）と**同じ並びから引く**（どちらも
    * [`columns`] ＝ 表示順の構成である）。したがって写像は 1 つのままである — 表が読む

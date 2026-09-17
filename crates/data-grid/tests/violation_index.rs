@@ -1369,3 +1369,115 @@ fn indexed_violations_counts_every_inner_path_not_every_column() {
         "索引に載った違反の件数が報告の保持した件数と違う"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 11. 行と列を指定して引く（要件 4.2、4.5）
+// ---------------------------------------------------------------------------
+
+/// **指定したセルの違反が返る**（行の最小の列ではない）。
+///
+/// 1 行の 2 列が違反しているとき、[`ViolationIndex::find`] は行の最小の列しか返さない
+/// （要件 4.4 の移動先を 1 つに定める規則である）。要件 4.2 の「**指定したセル**の違反の
+/// 理由」はそれでは足りない — 利用者が指したのが右のセルでも、返るのは左のセルになる。
+/// [`ViolationIndex::cell_at`] は列を**指定**として受け取り、そのセルの違反を返す。
+///
+/// 併せて、内側の位置が保たれること（要件 4.5）と、**指定が無い側の意味が変わっていない
+/// こと**（`find` は行の最小の列のまま）を同じ材料で固定する。
+#[test]
+fn asking_for_a_cell_answers_that_cells_violation() {
+    let sample = sample(&SampleOptions::new(4, 3).with_ratio(0.0));
+    let row = row_id(&sample, 1);
+    let inner = ValuePathSegment::Field("内側".into());
+    let mut report = ViolationReport::new(&ValidationOptions::unlimited());
+    // 行 1 は列 0（左）と列 2（右）が違反している。行 2 は列 0 だけが違反している。
+    report.push(violation_at_path(row, ColumnIndex::new(0), Vec::new()));
+    report.push(violation_at_path(
+        row,
+        ColumnIndex::new(2),
+        vec![inner.clone()],
+    ));
+    report.push(violation_at_path(
+        row_id(&sample, 2),
+        ColumnIndex::new(0),
+        Vec::new(),
+    ));
+    let report = report.finish(sample.sheet());
+
+    let (order, index) = indexed(&sample, &report);
+    assert_order_is_the_document_order(&sample, &order);
+    assert_eq!(3, index.indexed_violations(), "前提: 3 件載っている");
+
+    // 前提: 行列 1 の列 2 は違反しており、内側の位置を 1 つ持つ。
+    let right = index
+        .cell_at(RowOrdinal::new(1), ColumnIndex::new(2))
+        .expect("前提: 行 1 の列 2 は違反している");
+    assert_eq!(ColumnIndex::new(2), right.column(), "違反している列が違う");
+    assert_eq!(
+        vec![NestedPathSegment::Field("内側".into())],
+        right.paths()[0].segments().to_vec(),
+        "内側の位置が保たれていない"
+    );
+
+    // **右の列を指定すると、右のセルの違反が返る**（行の最小の列へ落とさない）。
+    assert_eq!(
+        Some(ColumnIndex::new(2)),
+        index
+            .cell_at(RowOrdinal::new(1), ColumnIndex::new(2))
+            .map(|cell| cell.column()),
+        "指定した列の違反が返らない（行の最小の列へ落としている）"
+    );
+    // 左の列を指定すれば左の違反が返る（どちらの指定も自分自身を答える）。
+    let left = index
+        .cell_at(RowOrdinal::new(1), ColumnIndex::new(0))
+        .expect("行 1 の列 0 も違反している");
+    assert_eq!(ColumnIndex::new(0), left.column());
+    assert!(left.paths()[0].is_root(), "左の違反はセル直下である");
+
+    // **指定が無い側の意味は変わらない** — 探索は行の最小の列のままである（要件 4.4）。
+    assert_eq!(
+        Some(CellAddress::new(row, ColumnIndex::new(0))),
+        index.find(RowOrdinal::new(1), SearchDirection::Forward),
+        "指定が無いときの答え（行の最小の列）が変わっている"
+    );
+}
+
+/// **違反していないセルを指定すると「違反が無い」である**（別の列の違反を名乗らない）。
+///
+/// 行が違反を持っていても、**指定した列**が違反していなければ `None` である。行そのものが
+/// 索引に載っていない（違反を 1 件も持たない）序数と、可視行数の外の序数も `None` である。
+#[test]
+fn asking_for_a_cell_that_does_not_violate_answers_nothing() {
+    let sample = sample(&SampleOptions::new(4, 3).with_ratio(0.0));
+    let row = row_id(&sample, 1);
+    let mut report = ViolationReport::new(&ValidationOptions::unlimited());
+    // 行 1 は列 0 だけが違反している（列 1 と列 2 は適合している）。
+    report.push(violation_at_path(row, ColumnIndex::new(0), Vec::new()));
+    let report = report.finish(sample.sheet());
+
+    let (order, index) = indexed(&sample, &report);
+    assert_order_is_the_document_order(&sample, &order);
+    assert_eq!(
+        Some(CellAddress::new(row, ColumnIndex::new(0))),
+        index.find(RowOrdinal::new(1), SearchDirection::Forward),
+        "前提: 行 1 は列 0 が違反している"
+    );
+
+    for column in [1usize, 2] {
+        assert_eq!(
+            None,
+            index.cell_at(RowOrdinal::new(1), ColumnIndex::new(column)),
+            "違反していない列 {column} に違反を名乗っている"
+        );
+    }
+    // 違反を 1 件も持たない行（序数 0）と、可視行数の外の序数。
+    assert_eq!(
+        None,
+        index.cell_at(RowOrdinal::new(0), ColumnIndex::new(0)),
+        "違反を持たない行に違反を名乗っている"
+    );
+    assert_eq!(
+        None,
+        index.cell_at(RowOrdinal::new(4), ColumnIndex::new(0)),
+        "可視行数の外の序数に違反を名乗っている"
+    );
+}

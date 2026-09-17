@@ -11,7 +11,7 @@
 //! | [`grid_rows_window`] | 生バイトの要求を読み、[`GridSession::encode_window`] | 可視範囲の窓（二進。要件 1.1、11.2） |
 //! | [`grid_apply_edit`] | [`GridSession::apply`] | 影響範囲・型強制・違反・行数（要件 3.3、3.5） |
 //! | [`grid_history`] | [`GridSession::undo`] / [`GridSession::redo`] | 同じ要約（要件 9.2、9.3） |
-//! | [`grid_find_violation`] | [`GridSession::find_violation`] | 次の違反の位置と理由（要件 4.2、4.4、4.5） |
+//! | [`grid_find_violation`] | [`GridSession::find_violation`] / [`GridSession::find_violation_at`] | 次の違反、または**指定したセル**の位置と理由（要件 4.2、4.4、4.5） |
 //! | [`grid_reference_rows`] | 宣言から参照先のシートを引き、[`reference_page`] で頁を組む | 参照先の行の頁と総数（要件 3.8） |
 //!
 //! **6 つは封筒（[`IpcResult`]）を返し、[`grid_rows_window`] だけが生バイトを返す**
@@ -1846,26 +1846,34 @@ pub(crate) fn answer_history(
 ///
 /// 1. **経路の成立を確かめる** — 保持しているシートが文書に在ること。無ければ**経路の失敗**
 ///    である（`violation: None` ではない。下の「3 つの状態の区別」）
-/// 2. **[`GridSession::find_violation`] が位置を答える**（可視行の序数から最も近い違反セルへ。
-///    索引を読むだけなので、表示範囲の外にある違反にも到達する。要件 4.4）
+/// 2. **宛先のセルを決める**（タスク 10.6 が列の指定を足した）。
+///    - 要求が列を指定していれば（`column: Some`）**そのセル**である。行は `from` の序数、
+///      列は要求の値であり、[`GridSession::find_violation_at`] が索引に引く（**探索しない**）
+///    - 指定が無ければ従来どおり [`GridSession::find_violation`] が**最も近い違反セル**を
+///      答える（要件 4.4。行の最小の違反列）
 /// 3. **理由を組み立てる**（要件 4.2）。理由を持つのは判定だけであり、セッションは
-///    違反そのものを外へ出さない。そこで**見つかった列をもう一度だけ判定**し
+///    違反そのものを外へ出さない。そこで**宛先の列をもう一度だけ判定**し
 ///    （[`SchemaEngineApi::validate_columns`]。全件検証ではない）、その列の報告から
-///    見つかったセルの違反を選んで文言へ写す
-/// 4. **見つからなければ `None` を返す** — 「これ以上違反が無い」は正常な結果である
+///    宛先のセルの違反を選んで文言へ写す
+/// 4. **宛先が違反していなければ `None` を返す** — 「これ以上違反が無い」と「指定されたセルは
+///    違反していない」のどちらも正常な結果である
 ///
-/// # 3 つの状態の区別（6.2 のレビューが残した点。6.3 で揃えた）
+/// # 3 つの状態の区別（6.2 のレビューが残した点。6.3 で揃えた。10.6 が列の指定を足した）
 ///
 /// | 状態 | 答え | 根拠 |
 /// |---|---|---|
 /// | 保持しているシートが文書に無い | 封筒の**失敗腕**（経路の失敗） | [`grid_set_view`] / [`grid_apply_edit`] / [`grid_history`] は同じ状態でセッションの `SchemaUnusable` を失敗腕へ写す |
-/// | 違反が 1 件も無い | 成功腕の `violation: None` | 要件 4.4「これ以上違反が無い」＝**正常な結果** |
+/// | **列を指定した要求で、序数が表示の並びに無い** | 封筒の**失敗腕**（経路の失敗） | 探す先が無い。ドメインの `RowOrder::row_at` が `None` を返すのと同じ状態である（`visible_row_count` が序数の上限そのものである） |
+/// | 違反が 1 件も無い、または**指定されたセルが違反していない** | 成功腕の `violation: None` | 要件 4.4「これ以上違反が無い」＝**正常な結果**。10.6 は「そのセルの違反は無い」をここへ載せる（**別の列の理由を名乗らない**） |
 /// | 違反が在る | 成功腕の `violation: Some(...)` | 要件 4.2、4.4 |
 ///
-/// **1 つ目を 2 つ目と同じ答えにしてはならない。** 文書が差し替わると（メニュー「開く…」→
+/// **1 つ目を 3 つ目と同じ答えにしてはならない。** 文書が差し替わると（メニュー「開く…」→
 /// `dialog::hand_off` → [`DocumentSessionsApi::attach`]。未保存でなければ同じウィンドウへ
 /// 引き渡せる）、セッションは前のシートを表示したまま残る。その状態は「表示しているシートが
 /// もう無い」であり、探す先が無い — 画面が開き直すべき失敗である。
+///
+/// **2 つ目も 3 つ目と同じ答えにしてはならない**（同じ理由である）— 序数が表示の並びに無い
+/// 要求は「そのセルは違反していない」ではなく「そのセルが存在しない」である。
 ///
 /// [`GridSession`] は文書を所有しないため（`data-grid` の `api` のモジュール docs）、
 /// **この照合は本層が行う**（他の 5 つは文書を受け取るドメインの操作が同じ照合を内側で
@@ -1874,6 +1882,14 @@ pub(crate) fn answer_history(
 ///
 /// 手順 3 の判定は**列に閉じた 1 回**である。理由は利用者が明示的に指示したときにだけ要る
 /// （要件 4.2）ため、走査の経路（窓の符号化）でこの費用を払うことはない。
+///
+/// # 列を指定した腕では探索しない（タスク 10.6）
+///
+/// 列の指定は**宛先そのもの**である（`from` の序数の行の、その列）。向きに沿って最も近い
+/// 違反を探すと、`from` の行がその列で違反していないときに**別の行の違反**が返り、利用者が
+/// 指したセルと関係の無い理由を、指したセルの理由として見せることになる。したがってこの腕は
+/// 索引への 1 回の問い合わせ（[`GridSession::find_violation_at`]）だけで宛先を決め、
+/// `direction` を読まない。
 pub(crate) fn answer_find_violation(
     documents: &Arc<DocumentSessions>,
     grids: &GridSessions,
@@ -1914,11 +1930,51 @@ pub(crate) fn answer_find_violation(
     }
 
     let from = RowOrdinal::new(request.from as usize);
-    let direction = match request.direction {
-        GridSearchDirection::Forward => SearchDirection::Forward,
-        GridSearchDirection::Backward => SearchDirection::Backward,
+    // **宛先の位置を決める**（要件 4.2、4.4、4.5。タスク 10.6）。
+    //
+    // | 要求の `column` | 決め方 | 宛先が無いときの答え |
+    // |---|---|---|
+    // | `Some(column)` | `from` の序数の行の**その列のセル**（索引に引く。探索しない） | `violation: None`（**そのセルは違反していない**） |
+    // | `None` | `from` と `direction` から最も近い違反セル（従来どおり。行の最小の違反列） | `violation: None`（これ以上違反が無い） |
+    //
+    // 列を指定した腕では**行そのものが表示の並びに無ければ経路の失敗**である（探す先が無い。
+    // 「そのセルは違反していない」と同じ答えにしない — 経路の失敗の規律と同じである。
+    // `visible_row_count` は可視の序数の上限そのものであり、推定を挟まない）。
+    let located = match request.column {
+        Some(column) => {
+            if from.get() >= entry.session.visible_row_count() {
+                return IpcResult::Err {
+                    error: path_failure(
+                        command,
+                        label,
+                        &format!(
+                            "可視行の序数 {} が表示の並びに無い（可視は {} 行である）",
+                            request.from,
+                            entry.session.visible_row_count()
+                        ),
+                    ),
+                };
+            }
+            let column = ColumnIndex::new(usize::try_from(column).unwrap_or(usize::MAX));
+            entry
+                .session
+                .find_violation_at(from, column)
+                // 返る列は**索引が答えた列**である（指定をそのまま写さない — 写すと、索引が
+                // 別の列を指したときに要求の側の値が答えを覆い隠す）。
+                .map(|(row, cell)| (row, cell.column()))
+        }
+        None => {
+            let direction = match request.direction {
+                GridSearchDirection::Forward => SearchDirection::Forward,
+                GridSearchDirection::Backward => SearchDirection::Backward,
+            };
+            entry
+                .session
+                .find_violation(from, direction)
+                .map(|found| (found.row(), found.column()))
+        }
     };
-    let Some(found) = entry.session.find_violation(from, direction) else {
+    let Some((row, column)) = located else {
         return IpcResult::Ok {
             data: GridViolationResponse {
                 context,
@@ -1927,8 +1983,7 @@ pub(crate) fn answer_find_violation(
         };
     };
 
-    let column = found.column();
-    let row = found.row().to_string();
+    let row = row.to_string();
     // 理由は判定だけが持つ。**見つかった列に閉じた 1 回の判定**で写す（全件検証ではない）。
     // シートを引けない場合は `Err`（**「理由が無い」ではなく経路の失敗**）として返す —
     // 手順 1 の照合と読みが分かれているため、その間に文書が差し替わりうる。
@@ -4999,6 +5054,7 @@ mod tests {
             &GridViolationRequest {
                 from: 0,
                 direction: GridSearchDirection::Forward,
+                column: None,
             },
         ));
         let violation = found.violation.expect("前提: その違反は探索で見つかる");
@@ -5048,6 +5104,7 @@ mod tests {
             &GridViolationRequest {
                 from: 0,
                 direction: GridSearchDirection::Forward,
+                column: None,
             },
         ));
         assert_eq!(
@@ -5139,6 +5196,7 @@ mod tests {
             &GridViolationRequest {
                 from: 0,
                 direction: GridSearchDirection::Forward,
+                column: None,
             },
         ));
         assert!(
@@ -5390,6 +5448,7 @@ mod tests {
             &GridViolationRequest {
                 from: 0,
                 direction: GridSearchDirection::Forward,
+                column: None,
             },
         ));
         assert!(none.violation.is_none(), "違反が無ければ見つからない");
@@ -5411,6 +5470,7 @@ mod tests {
             &GridViolationRequest {
                 from: 0,
                 direction: GridSearchDirection::Forward,
+                column: None,
             },
         ));
         let violation = found.violation.expect("違反が見つかる");
@@ -5435,6 +5495,7 @@ mod tests {
             &GridViolationRequest {
                 from: 3,
                 direction: GridSearchDirection::Forward,
+                column: None,
             },
         ));
         assert!(past.violation.is_none(), "末尾より後ろには違反が無い");
@@ -5447,11 +5508,285 @@ mod tests {
             &GridViolationRequest {
                 from: 2,
                 direction: GridSearchDirection::Backward,
+                column: None,
             },
         ));
         assert!(
             backward.violation.is_some(),
             "後ろ向きでも同じ違反へ到達する"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 指定したセルの違反の理由（要件 4.1、4.2、4.5。タスク 10.6）
+    // -----------------------------------------------------------------------
+
+    /// **指定した列のセルの理由が返る**（タスク 10.6 の 1 つ目の検査。要件 4.2）。
+    ///
+    /// 同じ行の 2 列（数量 = 上限の外、単価 = 下限の外）を違反させ、**右の列を指定すると右の
+    /// 理由**が返ることを見る。列の指定が無ければ**従来どおり**（行の最小の違反列）である。
+    /// 左の理由を名乗っていないことは、文言に埋め込まれる値（`999` と `-5`）で見分ける。
+    #[test]
+    fn specifying_the_column_answers_that_cells_reason() {
+        let (scratch, sessions, grids, label) = opened("violation-column");
+        let path = scratch.file("台帳.jxcel");
+        let rows = stored_rows(&path);
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+
+        // 前提: 同じ行の 2 列を違反させる（数量は上限 100 の外、単価は下限 0 の外）。
+        for (column, text) in [(1u32, "999"), (2, "-5")] {
+            data(answer_apply_edit(
+                &sessions,
+                &grids,
+                &label,
+                &GridEditRequest {
+                    command: set_one(&rows[2], column, text),
+                },
+            ));
+        }
+
+        // **指定が無ければ従来どおり**（行の最小の違反列 = 数量）。
+        let legacy = data(answer_find_violation(
+            &sessions,
+            &grids,
+            &label,
+            &GridViolationRequest {
+                from: 0,
+                direction: GridSearchDirection::Forward,
+                column: None,
+            },
+        ));
+        let violation = legacy.violation.expect("前提: その行は違反している");
+        assert_eq!(Some(rows[2].clone()), violation.location.row);
+        assert_eq!(
+            1, violation.location.column,
+            "指定が無いときは行の最小の違反列である（後方互換）"
+        );
+        assert!(
+            violation.reason.contains("999"),
+            "指定が無いときの理由は最小の列のものである: {}",
+            violation.reason
+        );
+
+        // **右の列（単価）を指定すると、右のセルの理由が返る。**
+        let right = data(answer_find_violation(
+            &sessions,
+            &grids,
+            &label,
+            &GridViolationRequest {
+                from: 2,
+                direction: GridSearchDirection::Forward,
+                column: Some(2),
+            },
+        ));
+        let violation = right.violation.expect("指定したセルは違反している");
+        assert_eq!(
+            Some(rows[2].clone()),
+            violation.location.row,
+            "指定した行の違反である"
+        );
+        assert_eq!(2, violation.location.column, "指定した列の違反である");
+        assert!(
+            violation.reason.contains("-5"),
+            "右のセルの理由が返る: {}",
+            violation.reason
+        );
+        assert!(
+            !violation.reason.contains("999"),
+            "左のセルの理由を名乗っている: {}",
+            violation.reason
+        );
+
+        // 左の列を指定すれば左の理由である（どちらの指定も自分自身を答える）。
+        let left = data(answer_find_violation(
+            &sessions,
+            &grids,
+            &label,
+            &GridViolationRequest {
+                from: 2,
+                direction: GridSearchDirection::Forward,
+                column: Some(1),
+            },
+        ));
+        let violation = left.violation.expect("指定したセルは違反している");
+        assert_eq!(1, violation.location.column);
+        assert!(
+            violation.reason.contains("999"),
+            "左のセルの理由が返る: {}",
+            violation.reason
+        );
+    }
+
+    /// **違反していないセルを指定すると「違反が無い」である**（10.6 の 2 つ目の検査。要件 4.2）。
+    ///
+    /// 行が違反を持っていても、**指定した列**が違反していなければ `violation: None` である —
+    /// 別の列の理由を名乗らない。可視行数の外の序数は**経路の失敗**である（探す先が無い。
+    /// 「違反が無い」と同じ答えにしない）。
+    #[test]
+    fn specifying_a_cell_that_does_not_violate_answers_no_violation() {
+        let (scratch, sessions, grids, label) = opened("violation-clear-cell");
+        let path = scratch.file("台帳.jxcel");
+        let rows = stored_rows(&path);
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+
+        // 前提: 数量（列 1）だけを違反させる（品番 = 列 0 は適合している）。
+        data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest {
+                command: set_one(&rows[2], 1, "999"),
+            },
+        ));
+        let violating = data(answer_find_violation(
+            &sessions,
+            &grids,
+            &label,
+            &GridViolationRequest {
+                from: 2,
+                direction: GridSearchDirection::Forward,
+                column: Some(1),
+            },
+        ));
+        assert!(
+            violating.violation.is_some(),
+            "前提: 数量のセルは違反している"
+        );
+
+        // **違反していないセル**（同じ行の品番）を指定すると、違反は無い。
+        let clear = data(answer_find_violation(
+            &sessions,
+            &grids,
+            &label,
+            &GridViolationRequest {
+                from: 2,
+                direction: GridSearchDirection::Forward,
+                column: Some(0),
+            },
+        ));
+        assert!(
+            clear.violation.is_none(),
+            "違反していないセルに別の列の理由を名乗っている: {:?}",
+            clear.violation
+        );
+
+        // **可視行数の外の序数**は探す先が無い（経路の失敗。「違反が無い」ではない）。
+        let failure = error(answer_find_violation(
+            &sessions,
+            &grids,
+            &label,
+            &GridViolationRequest {
+                from: 9,
+                direction: GridSearchDirection::Forward,
+                column: Some(0),
+            },
+        ));
+        assert!(
+            matches!(failure, IpcError::Document { .. }),
+            "順序に無い行は経路の失敗である: {failure:?}"
+        );
+    }
+
+    /// **入れ子の内側の違反は、内側の位置つきで返る**（10.6 の検査の 4 つ目。要件 4.5）。
+    ///
+    /// 提供元（列 1）の内側の `code` を型に合わない値にし、同じ行の数量（列 2）も違反させる。
+    /// 内側の列を指定したときに返るのは**内側の位置を持つ理由**であり、数量を指定したときに
+    /// 返るのは**セル直下の理由**である（どちらの指定も自分自身を答える）。
+    #[test]
+    fn specifying_a_nested_cell_answers_its_inner_position() {
+        let (_scratch, sessions, grids, label) = opened_nested("violation-nested-cell");
+        let path = _scratch.file("台帳.jxcel");
+        let rows = stored_rows(&path);
+        data(answer_set_view(
+            &sessions,
+            &grids,
+            &label,
+            &GridViewRequest { view: empty_view() },
+        ));
+
+        // 前提: 提供元の内側の `code`（宣言は text）へ整数を書き、数量も上限の外へ出す。
+        data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest {
+                command: GridEditCommand::SetNested {
+                    cell: GridCellAddress {
+                        row: rows[1].clone(),
+                        column: 1,
+                    },
+                    json: r#"{"name":"提供元","code":12}"#.to_owned(),
+                },
+            },
+        ));
+        data(answer_apply_edit(
+            &sessions,
+            &grids,
+            &label,
+            &GridEditRequest {
+                command: set_one(&rows[1], 2, "999"),
+            },
+        ));
+
+        // 内側の列（提供元）を指定すると、**内側の位置**を持つ理由が返る。
+        let nested = data(answer_find_violation(
+            &sessions,
+            &grids,
+            &label,
+            &GridViolationRequest {
+                from: 1,
+                direction: GridSearchDirection::Forward,
+                column: Some(1),
+            },
+        ));
+        let violation = nested.violation.expect("前提: 内側の違反がある");
+        assert_eq!(Some(rows[1].clone()), violation.location.row);
+        assert_eq!(1, violation.location.column);
+        assert_eq!(
+            vec![GridPathSegment::Field {
+                name: "code".to_owned()
+            }],
+            violation.location.path,
+            "内側の位置が返っていない"
+        );
+        assert!(
+            violation.reason.contains("12"),
+            "内側の値が理由に現れる: {}",
+            violation.reason
+        );
+
+        // 数量（列 2）を指定すると、セル直下の理由が返る（別のセルの理由を名乗らない）。
+        let shallow = data(answer_find_violation(
+            &sessions,
+            &grids,
+            &label,
+            &GridViolationRequest {
+                from: 1,
+                direction: GridSearchDirection::Forward,
+                column: Some(2),
+            },
+        ));
+        let violation = shallow.violation.expect("前提: 数量も違反している");
+        assert_eq!(2, violation.location.column);
+        assert!(
+            violation.location.path.is_empty(),
+            "セル直下の違反に内側の位置を名乗っている: {:?}",
+            violation.location.path
+        );
+        assert!(
+            violation.reason.contains("999"),
+            "数量の理由が返る: {}",
+            violation.reason
         );
     }
 
@@ -5483,6 +5818,7 @@ mod tests {
             &GridViolationRequest {
                 from: 0,
                 direction: GridSearchDirection::Forward,
+                column: None,
             },
         ));
         assert!(found.violation.is_some(), "索引に違反が 1 件ある");
@@ -5507,6 +5843,7 @@ mod tests {
             &GridViolationRequest {
                 from: 0,
                 direction: GridSearchDirection::Forward,
+                column: None,
             },
         ));
         assert!(matches!(failure, IpcError::Document { .. }));

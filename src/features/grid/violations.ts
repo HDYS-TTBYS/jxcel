@@ -10,7 +10,7 @@
  * | 要件 | 何が源か | 本 module の役割 |
  * |---|---|---|
  * | 4.1 違反しているセルを区別する | 窓の違反の印（`RenderCell.violated`）と、移植口の実装の色 | **印を 3 つの状態へ読むだけ**（[`violationMark`]）。色は決めない |
- * | 4.2 指定したセルの違反の理由 | `GridViolationResponse.reason`（組み立てるのは適応層） | 答えが**いまの行のものか**を確かめてから返す（[`reasonInRow`]） |
+ * | 4.2 指定したセルの違反の理由 | `GridViolationResponse.reason`（組み立てるのは適応層） | 要求へ**指したセルの文書の列**を載せ（10.6）、答えが**いまの行のものか**を確かめてから返す（[`reasonInRow`]） |
  * | 4.3 シート全体の違反の総数 | `grid_set_view` / `grid_apply_edit` の応答 | **触らない**（画面がそのまま持つ。数え直す経路を作らない） |
  * | 4.4 次の違反への移動 | `grid_find_violation`（前向き） | 違反の**可視行の序数**を解決して返す（[`nextViolation`]） |
  * | 4.5 入れ子の内側の違反の位置 | 窓の内側の位置の札と `NestedInspector`（8.5） | **触らない**（`GridViolationLocation.path` は運ぶが、その提示は 8.5 である） |
@@ -35,6 +35,11 @@
  * **入れ子の展開が 2 つを離す**（`crates/data-grid/src/view/mod.rs` の `push_column` は内側の
  * 位置を**親と同じ文書の列**の下へ並べる。`./columnSpace` の module doc）。したがって 2 つの
  * 関数は `ColumnSpace.displayPosition`（文書の列 + 内側の位置 → 表示の位置）を通してから返す。
+ *
+ * **逆向き（表示の位置 → 文書の列）も同じ 1 つの口を通す**（10.6）。[`reasonInRow`] は要求へ
+ * **指したセルの文書の列**を載せる（境界はそのセルの違反を答える）ためであり、上の写像と同じ
+ * 値から引く。**写せないときは指定を載せない** — 推測した列を載せれば、境界はその列のセルの違反を
+ * 答え、画面はそれを指したセルのものであると扱う。
  * **落とせないときは名乗らない** — [`reasonInRow`] は取り下げ（`cleared`）、[`nextViolation`] は
  * **現在位置を動かさずに**失敗を返す（推測した列へ着かない。規則と、答えられない場合の定義は
  * `ColumnSpace.displayPosition` の doc が唯一の源である）。
@@ -138,27 +143,33 @@ function sameRow(left: string, right: string): boolean {
 }
 
 /**
- * **いまの行**の違反の理由を引く（要件 4.2）。現在位置の行を起点に前向きへ問い合わせ、
+ * **指したセル**の違反の理由を引く（要件 4.2）。要求は現在のセルの**文書の列**を名指しし、
  * 返った答えが**いまの行のものか**を確かめてから返す。
  *
- * # なぜ確かめるのか
+ * # 要求は指したセルを名指しする（タスク 10.6）
  *
- * `grid_find_violation` は「起点**以降**で最初の違反」を返すため、いまの行に違反が無ければ
+ * 列の指定が無い要求は「起点**以降**で最初の違反」を返すため、いまの行に違反が無ければ
  * **後ろの行の違反**が返る。それをいまの行の理由として出すと、利用者が指したセルと関係の
  * 無い理由を、指したセルの理由として見せることになる（要件 4.2 の提示が事実と食い違う）。
  * 確かめる手段は窓から読む**行の識別子**である（`WindowCache.rowId`）。
  *
- * # 返る位置は「その行の最小の違反列」である
+ * 行を確かめるだけでは足りない — **同じ行の列**も食い違いうる。索引は行ごとに**最小の列**の
+ * 違反しか返さないため（`crates/data-grid/src/view/violations.rs` の `find`）、利用者が指した
+ * のが右のセルでも左のセルの理由が返っていた。したがって本関数は**指した位置の文書の列**を
+ * 要求に載せる（`ColumnSpace` の 1 箇所で写す）。境界はそのセルの違反を答え、そのセルが
+ * 違反していなければ「違反が無い」を返す。
  *
- * 索引は行ごとに**最小の列**の違反しか返さない（`crates/data-grid/src/view/violations.rs`
- * の `find`）。利用者が指した列と違うことがあるので、返る [`ViolationPresentation.position`]
- * は**その理由が属するセル**を名乗る（表示は位置を名乗る。`./violationBar`）。
- * 行の同じセルを指していれば、それがそのまま要件 4.2 の答えである。**名乗る列は表示の位置で
- * あり、境界の文書の列ではない**（module doc「位置は表示の位置である」）。
+ * **列を写せないときは指定を送らない**（推測した列を送れば、境界はその列のセルの違反を
+ * 答えるが、画面はそれが自分が指したセルのものであると扱う）。そのときは従来の答え
+ * （行の最小の違反列）が返り、下の位置の名乗りが食い違いを示す。
  *
- * 名乗れる位置が無ければ（展開された親の値そのものの違反など。規則は
- * [`ColumnSpace::displayPosition`] の doc）**取り下げる** — 名乗れない理由を、推測した列の
- * 理由として見せるより、出さない方が事実に合う。
+ * # 名乗るのは**返ってきた位置**である
+ *
+ * [`ViolationPresentation.position`] は**その理由が属するセル**を名乗る（表示は位置を名乗る。
+ * `./violationBar`）。**名乗る列は表示の位置であり、境界の文書の列ではない**（module doc
+ * 「位置は表示の位置である」）。名乗れる位置が無ければ（展開された親の値そのものの違反など。
+ * 規則は [`ColumnSpace::displayPosition`] の doc）**取り下げる** — 名乗れない理由を、推測した
+ * 列の理由として見せるより、出さない方が事実に合う。
  *
  * 行の識別子が無ければ**問い合わせない**（確かめる手段が無いため。上の理由）。
  */
@@ -168,16 +179,30 @@ export async function reasonInRow(options: {
   readonly current: CellPosition;
   /** いまの行の識別子（窓から読む。無ければ `null`）。 */
   readonly rowId: string | null;
-  /** いまの構成の写像（**境界の列を表示の位置へ落とす唯一の口**）。 */
-  readonly space: Pick<ColumnSpace, "displayPosition">;
+  /**
+   * いまの構成の写像（**2 つの空間の唯一の口**）。
+   *
+   * 逆向き（表示の位置 → 文書の列）を使うのは、要求が**文書の列**を運ぶためである
+   * （後述「要求は指したセルを名指しする」）。
+   */
+  readonly space: Pick<ColumnSpace, "displayPosition" | "documentColumn">;
 }): Promise<ViolationReading> {
   if (options.rowId === null) {
     return { kind: "cleared" };
   }
 
+  // **要求は指したセルを名指しする**（タスク 10.6。要件 4.2）。境界は列の指定がある要求に
+  // **そのセルの違反**を答え、指定が無ければ行の最小の違反列を答える。したがって列を写せれば
+  // 「指したセルの理由」が返り、写せなければ従来の答え（行の最小の違反列）が返る。
+  //
+  // **写せないときに推測した列を送らない。** 送れば境界はその列のセルの違反を答えるが、画面は
+  // それが自分が指したセルのものであると扱う — 位置を名乗る現在の提示（下の `displayPosition`）
+  // のほうが事実に合う。
+  const column = options.space.documentColumn(options.current.column);
   const answer = await options.client.findViolation({
     from: options.current.row,
     direction: "forward",
+    column,
   });
   if (answer.status === "error") {
     return { kind: "failed", message: describeIpcError(answer.error) };
@@ -188,8 +213,8 @@ export async function reasonInRow(options: {
   if (found === null || found.location.row === null || !sameRow(found.location.row, options.rowId)) {
     return { kind: "cleared" };
   }
-  const column = options.space.displayPosition(found.location.column, found.location.path);
-  if (column === null) {
+  const position = options.space.displayPosition(found.location.column, found.location.path);
+  if (position === null) {
     // **名乗れる位置が無い**（展開された親の値そのものの違反など）。推測した列を名乗ると、
     // バーが**描かれている違反のセルと違うセル**を指す（取り下げておけば、間違った場所を
     // 指すことはない）。
@@ -197,7 +222,7 @@ export async function reasonInRow(options: {
   }
   return {
     kind: "reason",
-    position: { row: options.current.row, column },
+    position: { row: options.current.row, column: position },
     reason: found.reason,
   };
 }
@@ -228,7 +253,8 @@ export async function nextViolation(options: {
 }): Promise<ViolationReading> {
   // 起点は**いまの行の次**である（いまの行の違反は「次の違反」ではない）。
   const from = options.current.row + 1;
-  const first = await options.client.findViolation({ from, direction: "forward" });
+  // **列は指定しない** — 移動先は探索が決める（`column: null` が従来の腕である。要件 4.4）。
+  const first = await options.client.findViolation({ from, direction: "forward", column: null });
   if (first.status === "error") {
     return { kind: "failed", message: describeIpcError(first.error) };
   }
@@ -252,7 +278,7 @@ export async function nextViolation(options: {
   let hi = Math.max(lo, options.rowCount - 1);
   while (lo < hi) {
     const mid = lo + Math.ceil((hi - lo) / 2);
-    const answer = await options.client.findViolation({ from: mid, direction: "forward" });
+    const answer = await options.client.findViolation({ from: mid, direction: "forward", column: null });
     if (answer.status === "error") {
       // 途中で失敗したら**位置を決めない**（部分的な答えから推測しない）。
       return { kind: "failed", message: describeIpcError(answer.error) };

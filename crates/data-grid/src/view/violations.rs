@@ -392,6 +392,7 @@ impl ColumnViolations {
 /// |---|---|---|
 /// | シートの違反の総数 | [`ViolationIndex::violation_total`] | 4.3 |
 /// | 指定した位置から最も近い違反セル | [`ViolationIndex::find`] | 4.4 |
+/// | **行と列を指定したセルの違反**（内側の位置を含む） | [`ViolationIndex::cell_at`] | 4.2, 4.5 |
 /// | 序数ごとの違反（内側の位置を含む） | [`ViolationIndex::row_violations`] | 4.1, 4.5 |
 /// | 行に属さない違反（列そのものの問題） | [`ViolationIndex::column_violations`] | 4.3 |
 /// | 2.2 への据え付け | [`ViolationIndex::presence`] / [`ViolationIndex::install`] | 4.3, 8.4 |
@@ -818,6 +819,34 @@ impl ViolationIndex {
     pub fn row_violations(&self, ordinal: RowOrdinal) -> Option<&RowViolations> {
         let row = self.ordinals.get(&ordinal)?;
         self.rows.get(row)
+    }
+
+    /// **行と列を指定して引く**（要件 4.2、4.5）。可視の序数 `ordinal` の行の、列 `column` の
+    /// セルの違反（そのセルが違反していなければ `None`）。
+    ///
+    /// # なぜ「行の最小の列」では足りないのか
+    ///
+    /// [`ViolationIndex::find`] は**行の中で最も小さい列**を返す（1 行に複数の列が違反して
+    /// いるとき、移動先を 1 つに定める規則である）。それは要件 4.4 の「次の違反への移動」には
+    /// 足りるが、要件 4.2 の「**指定したセル**の違反の理由」には足りない — 利用者が指したのが
+    /// 同じ行の**右**のセルであっても、返るのは左のセルの理由になり、指したセルと関係の無い
+    /// 理由を、指したセルの理由として見せることになる。
+    ///
+    /// したがって本口は列を**指定**として受け取り、行の最小の列へは落とさない。行そのものが
+    /// 違反を持たない、または指定の列が違反していなければ `None` である（**別の列の違反を
+    /// 名乗らない**）。
+    ///
+    /// # 返るのは入れ子の内側の位置を保った値である（要件 4.5）
+    ///
+    /// [`CellViolations`] は**そのセルの違反の内側の位置の並び**をそのまま持つ。理由を組み立てる
+    /// 側はこの値から、報告の中の違反をセルへ絞り込める（[`RowViolations::cell`] と同じ形で
+    /// あり、本口はそれを**序数から**引く）。
+    ///
+    /// 序数の意味は [`ViolationIndex::row_violations`] と同じである（可視の序数。可視行数の外
+    /// なら `None`）。
+    #[must_use]
+    pub fn cell_at(&self, ordinal: RowOrdinal, column: ColumnIndex) -> Option<&CellViolations> {
+        self.row_violations(ordinal)?.cell(column)
     }
 
     /// 行に属さない違反（列そのものの問題。報告の順。要件 4.3）。

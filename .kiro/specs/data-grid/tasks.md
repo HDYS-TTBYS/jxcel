@@ -392,7 +392,7 @@
   - _Requirements: 9.2, 9.3, 9.8_
   - _Boundary: crates/app-shell/src/ipc/grid.rs, src/ipc/bindings.ts, src-tauri/src/commands/grid.rs, crates/data-grid/src/edit/, src/features/grid/history.ts, src/features/grid/GridScreen.tsx, .kiro/specs/data-grid/design.md_
 
-- [ ] 10.6 指定したセルの違反の理由を返す
+- [x] 10.6 指定したセルの違反の理由を返す
   - `GridViolationRequest` に**文書の列の添字**を足し、`grid_find_violation` が**その位置の違反**を返す（指定が無いときは今の「行の最小の違反列」）
   - 索引に「行と列を指定して引く」口を足す（入れ子の内側の位置を保つ）
   - 画面は要求したセルの列を送る（`ColumnSpace` を通した文書の列）。**列を指定できないときは推測せず、位置を名乗る現在の提示に留める**

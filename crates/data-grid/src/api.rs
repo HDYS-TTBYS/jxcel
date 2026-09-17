@@ -245,8 +245,8 @@ use crate::history::{UndoEntry, UndoLabel, UndoRedo, UndoStack};
 use crate::transport::{Generation, WindowCodec, WindowRequest, WindowRowSource};
 use crate::types::{CellAddress, RowOrdinal, RowSpan, SearchDirection};
 use crate::view::{
-    ColumnLayout, ExpansionState, LayoutColumn, RowOrder, ViewSpec, ViewState, ViewSummary,
-    ViolationIndex,
+    CellViolations, ColumnLayout, ExpansionState, LayoutColumn, RowOrder, ViewSpec, ViewState,
+    ViewSummary, ViolationIndex,
 };
 
 /// 取り消し履歴の上限の既定（要件 9.6）。
@@ -744,6 +744,33 @@ impl GridSession {
         direction: SearchDirection,
     ) -> Option<CellAddress> {
         self.index.find(from, direction)
+    }
+
+    /// **行と列を指定して**、そのセルの違反を引く（要件 4.2、4.5）。
+    ///
+    /// [`GridSession::find_violation`] は「指定した位置から最も近い違反セル」を返す（要件 4.4
+    /// の移動のための問いであり、行の中で最も小さい列へ落とす）。**本口は落とさない** —
+    /// 利用者が指したセルそのものを指定として受け取り、そのセルが違反していなければ `None` を
+    /// 返す（別の列の違反を名乗らない。要件 4.2「指定したセルの違反の理由」）。
+    ///
+    /// 返るのは**行の識別子**（理由を引く側が、報告の中の違反をその行へ絞る鍵である —
+    /// 報告は同じ列・同じ内側の位置の違反を複数の行に持ちうる）と、そのセルの違反
+    /// （列と、**入れ子の内側の位置の並び**。要件 4.5）である。
+    ///
+    /// 序数の意味は [`GridSession::find_violation`] と同じ**可視行の序数**である。可視行数の外
+    /// の序数・違反を持たない行・その列が違反していないセルはすべて `None` になる
+    /// （「そのセルは違反していない」の 1 つの答えであり、理由を組み立てる材料が無い）。
+    ///
+    /// 委譲先は [`ViolationIndex::cell_at`] と [`ViolationIndex::row_violations`] であり、
+    /// 本層は解釈を足さない。
+    #[must_use]
+    pub fn find_violation_at(
+        &self,
+        at: RowOrdinal,
+        column: ColumnIndex,
+    ) -> Option<(RowId, &CellViolations)> {
+        let row = self.index.row_violations(at)?.row();
+        self.index.cell_at(at, column).map(|cell| (row, cell))
     }
 
     /// 適用の前後で索引と順序を整合させる（[`GridSession::apply`] / `undo` / `redo` の共通の後段）。

@@ -7,9 +7,11 @@
  * 1. **窓の印の読み取り**（要件 4.1）。3 つの状態（違反・違反でない・未取得）を区別し、
  *    **未取得を「違反していない」と取り違えない**（取り違えると、窓が届く前のセルの理由を
  *    出さないままにする — 出してはいけない理由を出すよりは害が小さいが、どちらも誤りである）
- * 2. **いまの行の違反の理由**（要件 4.2）。境界の答えが**いまの行のものか**を確かめてから
- *    出し、確かめられなければ出さない。文言は境界が組み立てたものをそのまま載せる
- *    （**画面は 2 つ目の文言を作らない**）
+ * 2. **指定したセルの違反の理由**（要件 4.2）。要求は**現在のセルの文書の列**を名指しする
+ *    （表示の位置からの写像は `./columnSpace` の 1 箇所を通す。タスク 10.6）。写せないときは
+ *    **指定を送らない**（推測した列を送れば、指していないセルの理由をそのセルの理由として
+ *    見せることになる）。境界の答えが**いまの行のものか**を確かめてから出し、確かめられなければ
+ *    出さない。文言は境界が組み立てたものをそのまま載せる（**画面は 2 つ目の文言を作らない**）
  * 3. **次の違反への移動**（要件 4.4）。境界が返すのは**行の識別子**であり、可視行の序数では
  *    ない。序数は「その序数以降で最初の違反の行」を問い合わせる**二分探索**で解く
  *    （下の「序数の解決」）。表示範囲の外の違反にも到達し、費用は行数の対数で収まる
@@ -84,15 +86,22 @@ interface FakeViolation {
   readonly reason: string;
 }
 
-/** 偽の境界。**どの起点で問い合わせたかを順に数える**。 */
+/** 偽の境界。**どの起点で、どの列を指定して問い合わせたかを順に数える**。 */
 interface FakeSearch extends Pick<GridClient, "findViolation"> {
   readonly calls: readonly number[];
+  /** 問い合わせが指定した**文書の列**（指定が無ければ `null`）。 */
+  readonly columns: readonly (number | null)[];
 }
 
 /**
- * 偽の索引（**境界の意味を写したもの**）。`from` 以降で最初の違反の行を返す
- * （`from` は含む。`crates/data-grid/src/view/violations.rs` の `find` と同じ）。該当が
- * 無ければ `null`（「これ以上違反が無い」）。
+ * 偽の境界（**境界の意味を写したもの**。2 つの腕を持つ）。
+ *
+ * - **列の指定があるとき** — `from` の序数の行の、**その列のセル**の違反を返す（探索しない）。
+ *   そのセルが違反していなければ `null`（`answer_find_violation` の「列を指定した腕」。
+ *   タスク 10.6）
+ * - **指定が無いとき** — `from` 以降で最初の違反の行を返す（`from` は含む。
+ *   `crates/data-grid/src/view/violations.rs` の `find` と同じ）。該当が無ければ `null`
+ *   （「これ以上違反が無い」）
  *
  * `failOnCall` は**何回目の問い合わせを失敗させるか**である（回数で指定するのは、序数の解決の
  * 問い合わせる点が実装の性質であり、特定の序数を名指しすると検査が実装を写すことになるため）。
@@ -103,14 +112,22 @@ function searchOf(
   options: { readonly failOnCall?: number; readonly rowlessAt?: readonly number[] } = {},
 ): FakeSearch {
   const calls: number[] = [];
+  const columns: (number | null)[] = [];
   return {
     calls,
+    columns,
     findViolation: async (request) => {
       calls.push(request.from);
+      columns.push(request.column);
       if (calls.length === options.failOnCall) {
         return err<GridViolationResponse>();
       }
-      const found = all.find((violation) => violation.ordinal >= request.from);
+      const found = request.column === null
+        ? all.find((violation) => violation.ordinal >= request.from)
+        : all.find(
+            (violation) =>
+              violation.ordinal === request.from && violation.column === request.column,
+          );
       if (found === undefined) {
         return ok<GridViolationResponse>({ context: CONTEXT, violation: null });
       }
@@ -211,13 +228,45 @@ describe("いまの行の違反の理由（要件 4.2）", () => {
     expect(search.calls).toEqual([5]);
   });
 
-  it("行の最小の違反列が現在の列と違っても、その列を名乗る（指定したセルと取り違えない）", async () => {
-    // 5 行目の違反は列 1 にあり、利用者は列 3 を指している。**返るのは列 1 の理由**である
-    // （索引は行ごとに最小の列しか返さない）。位置を名乗るので、どのセルの理由かは読める。
+  it("要求は現在のセルの**文書の列**を名指しする（展開があれば写像を通す）", async () => {
+    // 展開が無ければ表示の位置がそのまま文書の列である（列 3 を指せば 3 を送る）。
+    const identity = searchOf(SAMPLE);
+    await reasonInRow({ client: identity, current: { row: 5, column: 3 }, rowId: ROW_B, space: IDENTITY });
+    expect(identity.columns).toEqual([3]);
+
+    // 展開があるときは**写像を通す** — 表示の位置 3 が描いているのは文書の列 2 である。
+    // 文書の列をそのまま送れば、指していないセル（提供元.code）の理由が返る。
+    const expanded = searchOf([{ ordinal: 5, row: ROW_B, column: 2, reason: "参照先の行が無い" }]);
+    const reading = await reasonInRow({ client: expanded, current: { row: 5, column: 3 }, rowId: ROW_B, space: EXPANDED });
+    expect(expanded.columns).toEqual([2]);
+    expect(reading).toEqual({
+      kind: "reason",
+      position: { row: 5, column: 3 },
+      reason: "参照先の行が無い",
+    });
+  });
+
+  it("指定したセルが違反していなければ、理由を出さない（行の別の列の理由を名乗らない）", async () => {
+    // 5 行目の違反は列 1 にあり、利用者は列 2 を指している。列の指定がある問い合わせは
+    // **指したセルそのもの**を答えるため、返るのは「違反が無い」である — 行の最小の列の
+    // 理由を、指していないセルの理由として見せない。
     const search = searchOf(SAMPLE);
 
-    const reading = await reasonInRow({ client: search, current: { row: 5, column: 3 }, rowId: ROW_B, space: IDENTITY });
+    const reading = await reasonInRow({ client: search, current: { row: 5, column: 2 }, rowId: ROW_B, space: IDENTITY });
 
+    expect(search.columns).toEqual([2]);
+    expect(reading).toEqual({ kind: "cleared" });
+  });
+
+  it("文書の列を写せないときは指定を送らない（位置を名乗る現在の提示に留める）", async () => {
+    // 構成の外の位置を指している（窓と構成が食い違っている）。**推測した列を送らない** —
+    // 指定が無ければ境界は従来どおり行の最小の違反列を返し、画面はその位置を名乗る
+    // （指したセルと違うことは位置が示す）。
+    const search = searchOf(SAMPLE);
+
+    const reading = await reasonInRow({ client: search, current: { row: 5, column: 99 }, rowId: ROW_B, space: IDENTITY });
+
+    expect(search.columns).toEqual([null]);
     expect(reading).toEqual({
       kind: "reason",
       position: { row: 5, column: 1 },

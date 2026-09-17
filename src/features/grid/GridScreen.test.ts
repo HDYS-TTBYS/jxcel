@@ -49,6 +49,7 @@ import type {
   GridReferenceRequest,
   GridReferenceResponse,
   GridSheetSummary,
+  GridViolationRequest,
   GridViolationResponse,
   GridViewResponse,
   GridViewSpec,
@@ -210,7 +211,9 @@ function fakeClient(answers: {
   readonly view?: IpcResult<GridViewResponse, IpcClientError>;
   readonly edit?: IpcResult<GridEditResponse, IpcClientError>;
   /** 違反の探索の答え（既定は「見つからない」）。 */
-  readonly search?: (from: number) => IpcResult<GridViolationResponse, IpcClientError>;
+  readonly search?: (
+    request: GridViolationRequest,
+  ) => IpcResult<GridViolationResponse, IpcClientError>;
   /** 履歴の答え（既定は封筒の失敗である。**8.9 の検査だけが与える**）。 */
   readonly history?: (direction: GridHistoryDirection) => IpcResult<GridEditResponse, IpcClientError>;
   /** 参照先の行の答え（**タスク 10.3 の検査だけが与える**。与えなければ投げる）。 */
@@ -253,7 +256,7 @@ function fakeClient(answers: {
     findViolation: async (request) => {
       calls.push(`grid_find_violation:${request.direction}`);
       searches.push(request.from);
-      return answers.search?.(request.from) ?? ok({ context: CONTEXT, violation: null });
+      return answers.search?.(request) ?? ok({ context: CONTEXT, violation: null });
     },
     // 参照先の行は**要求を控えてから**答える（タスク 10.3）。答えが与えられていなければ投げる —
     // ページを読まない標本が読んでいたら、それに気づけるようにするためである。
@@ -274,14 +277,23 @@ function fakeClient(answers: {
 }
 
 /**
- * 偽の索引（**境界の意味を写したもの**。`./violations.test.ts` の `searchOf` と同じ規則である）。
- * `from` 以降で最初の違反を返す（`from` は含む）。
+ * 偽の境界（**2 つの腕を写したもの**。`./violations.test.ts` の `searchOf` と同じ規則である）。
+ *
+ * - **列の指定があるとき** — `from` の序数の行の、**その列のセル**の違反を返す（探索しない。
+ *   タスク 10.6 が足した腕）。そのセルが違反していなければ `null` — 画面が送る列が食い違って
+ *   いれば（写像を通していなければ）、理由は出ずに下の表明が落ちる
+ * - **指定が無いとき** — `from` 以降で最初の違反を返す（`from` は含む）
  */
 function indexOf(
   all: readonly { readonly ordinal: number; readonly row: string; readonly column: number; readonly reason: string }[],
-): (from: number) => IpcResult<GridViolationResponse, IpcClientError> {
-  return (from) => {
-    const found = all.find((violation) => violation.ordinal >= from);
+): (request: GridViolationRequest) => IpcResult<GridViolationResponse, IpcClientError> {
+  return (request) => {
+    const found =
+      request.column === null
+        ? all.find((violation) => violation.ordinal >= request.from)
+        : all.find(
+            (violation) => violation.ordinal === request.from && violation.column === request.column,
+          );
     if (found === undefined) {
       return ok<GridViolationResponse>({ context: CONTEXT, violation: null });
     }
@@ -296,7 +308,9 @@ function indexOf(
 }
 
 /** 探索そのものが失敗する偽の索引（経路の不達）。 */
-function failingIndex(): (from: number) => IpcResult<GridViolationResponse, IpcClientError> {
+function failingIndex(): (
+  request: GridViolationRequest,
+) => IpcResult<GridViolationResponse, IpcClientError> {
   return () => err<GridViolationResponse>();
 }
 

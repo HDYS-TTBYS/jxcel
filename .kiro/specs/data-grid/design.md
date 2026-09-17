@@ -324,9 +324,9 @@ stateDiagram-v2
 | 3.1, 3.2, 3.8 | 型に応じた入力手段（日時・選択肢・真偽・シート間参照） | EditorRegistry, editors, GridScreen（`CellEditorPanel`）, **ColumnConstraints の組み立て（10.3）** | `CellEditorRegistry.resolve` / `resolveCarrier`（`customTypeId` つき）, `CellEditorProps.constraints`（**10.3 が材料を渡す** — 選択肢・参照先の行・入れ子の宣言・値なしを許すか）, `GridCommands` の `grid_reference_rows` | 3.8 の行の一覧は**頁ごと**に読む（`GRID_REFERENCE_PAGE_LIMIT`） |
 | 3.3, 3.4, 3.5 | 判定への送付、変換の提示、違反値の保持 | EditApply, GridCommands, GridScreen（`cellEdit.ts`） | `EditCommand::SetCells`, `GridClient.applyEdit`, `GridEditResponse.coercions` / `violations` / `violation_total` | 編集の適用と判定 |
 | 3.6, 3.7 | 編集の取消、値なしへ戻す | GridScreen（`cellEdit.ts`。**取消は境界へ何も送らない**）, EditApply | `CellEditorProps.cancel`, `WindowCache.rowId`（宛先の行の識別子）, 空の文字列＝値なし（`edited_value`） | — |
-| 4.1, 4.2, 4.6 | 違反の区別・理由・解消 | WindowCodec, GridScreen, ViolationBar | 窓の違反札, `GridViolationResponse.reason` | 編集の適用と判定 |
-| 4.3, 4.4, 4.6 | 違反の総数と次の違反への移動、解消の反映 | ViolationIndex, GridSession, ViolationBar | `violation_total`, `find_violation` | 編集の適用と判定 |
-| 4.5 | 入れ子の内側の違反位置 | WindowCodec, NestedInspector | `Violation.path` の写し | — |
+| 4.1, 4.2, 4.6 | 違反の区別・**指定したセル**の理由・解消 | WindowCodec, GridScreen, ViolationBar, **GridCommands（10.6）** | 窓の違反札, `GridViolationResponse.reason`, **`GridViolationRequest.column`（指したセルの文書の列。10.6）** | 編集の適用と判定 |
+| 4.3, 4.4, 4.6 | 違反の総数と次の違反への移動、解消の反映 | ViolationIndex, GridSession, ViolationBar | `violation_total`, `find_violation`, **`find_violation_at` / `cell_at`（10.6 が足した「行と列を指定して引く」口）** | 編集の適用と判定 |
+| 4.5 | 入れ子の内側の違反位置 | WindowCodec, NestedInspector, **ViolationIndex** | `Violation.path` の写し, **`CellViolations.paths`（10.6 が指定されたセルから引く）** | — |
 | 5.1, 5.2, 5.3, 5.4, 5.6 | 入れ子の展開・折りたたみ・深さの上限・要素数 | ViewState, GridSession, GridCommands, GridScreen | `ViewState.expansion`, `MAX_EXPANSION_DEPTH`, `GridViewResponse.columns`（導出後の構成）, `ColumnSpace`（表示の位置 → 文書の列） | — |
 | 5.5, 5.7 | 入れ子の詳細表示とその中の編集 | NestedInspector, EditApply | `EditCommand::SetNested` | 編集の適用と判定 |
 | 6.1, 6.2, 6.3, 6.4 | 行の追加・削除・複製と一意違反 | EditApply, document-format の 3 メソッド, GridScreen（`rowOps.ts`） | `EditCommand::InsertRows/RemoveRows/DuplicateRows`, `GridClient.applyEdit`。**対象と位置は `RowTarget` / `RowAnchor` の 2 つの空間で指せる**（10.4 が足した） | 編集の適用と判定 |
@@ -457,6 +457,16 @@ impl GridSession {
         history: &mut UndoStack,
     ) -> Result<Option<EditOutcome>, GridError>;
     pub fn find_violation(&self, from: RowOrdinal, direction: SearchDirection) -> Option<CellAddress>;
+    /// 10.6 が足した: **行と列を指定して引く**（要件 4.2、4.5）。列の指定がある要求の宛先で
+    /// あり、**行の最小の列へ落とさない**。返るのは行の識別子（理由を引く側が、報告の中の
+    /// 違反をその行へ絞る鍵である — 同じ列・同じ内側の位置の違反は複数の行にありうる）と、
+    /// そのセルの違反（`view::CellViolations`。**入れ子の内側の位置を保つ**）。指定したセルが
+    /// 違反していなければ `None`（**別の列の違反を名乗らない**）
+    pub fn find_violation_at(
+        &self,
+        at: RowOrdinal,
+        column: ColumnIndex,
+    ) -> Option<(RowId, &CellViolations)>;
 }
 
 pub const DEFAULT_UNDO_LIMIT: usize = 1_000;
@@ -467,6 +477,7 @@ pub const DEFAULT_UNDO_LIMIT: usize = 1_000;
 - Postconditions: `apply` は適用が対を組んだとき、**渡された履歴**へ `UndoStack::push` で 1 件積む（要件 9.1。状態を変えない適用は積まない）
 - Invariants: `set_view` と `encode_window` は `Document` を変更しない。**履歴にも触れない**（signature が `&Document` だけを受け取る — 10.2）
 - Invariants: `violation_total` は**索引を組み立てた後（`set_view` を 1 度呼んだ後）**は `apply` / `undo` / `redo` の直後につねに最新である。**全件検証の再実行ではなく、判定が返した違反との差分で索引を更新する**（要件 11.4 が全件検証を禁じているため）。**`set_view` の前は据え置き（0 のまま）である** — これは実装の逃げではなく**固定の前提**である: `open(sheet, schema)` は**文書を受け取らない** signature であり、索引はシートを読まなければ組み立てられないため、`set_view(&doc, spec)` が文書を渡すまで物理的に作れない（据え置きの規則は Implementation Notes「索引をまだ組み立てていないセッション」）
+- Invariants: **`find_violation_at` は「行と列を指定して引く」口であり、`find_violation` が行う「行の最小の列への集約」を行わない。**指定したセルが違反していなければ `None` であり、`find_violation` の答え（同じ行の最小の違反列）を代わりに返すことはない（要件 4.2 の「指定したセルの理由」はそれでは満たない。10.6）
 - Invariants: **適用先が表示中のシートでないとき（`EditOutcome.sheet != self.sheet`）は、索引にも順序にも 1 つも触れない。**そのときの `violation_total` と `find_violation` は**表示中のシートの答えのまま**である — 表示中のシートの中身は 1 つも変わっておらず、`set_view` が組み立てた総数・据え付け・鍵がそのまま最新だからである。別のシートの報告で据え直せば**表示中のシートの違反が黙って消える**（10.2 のレビューが実測した欠陥。実装は `GridSession::settle` が `EditOutcome.sheet` を見て早期に返る）。規則と限界は「UndoStack」の同項目にある
 - **`columns` の戻り値は `view` 層の `LayoutColumn` である。**design.md の `ColumnDescriptor` は 6.1 の境界型であり、本クレートに写しを足さない — `LayoutColumn` が写しに要るもの（列の添字・内側の位置・表示名・葉の型の札・要素数の能力・展開の可否）を全部持つためである。**6.1 はここから境界型へ写す**
 - **判定の縫い目を差し替える `with_query` を公開する。**要件 11.4 の観測（編集・取り消し・やり直しの経路で `validate_sheet` が 0 回であること）は、本番の縫い目を包んだ実装を差し込んで**呼び出しの形を数える**ことでしか取れない（`open` は本番の縫い目で開く薄い入口である）
@@ -810,6 +821,10 @@ impl<'a> UndoRedo<'a> {
   落ちる**（要件 10.4 の道を塞がない）
 - **違反の理由（`ViolationReason`）は 6.1 の荷に無い。** `GridViolationResponse.reason` は
   6.2 / 6.3 が定義する（要件 4.2）
+- **理由は「答えたセル」のものである（10.6）。** `GridViolationRequest.column` を指定した要求に
+  対しては、適応層が**そのセルの違反**を報告から選んで文言へ写す（列に閉じた 1 回の判定。
+  `SchemaEngineApi::validate_columns`）。したがって `reason` と `location` はつねに**同じセル**を
+  指す — 指定が無い要求では従来どおり行の最小の違反列であり、こちらは探索の答えである（要件 4.4）
 - **値は打たれた文字として運ぶ。** 境界にセル値の型を置かない（窓の二進形式も「数値としての
   値を一切含まない」）。`SetNested` の構造表現と `PasteRange` の表形式テキストは文字列である
 
@@ -825,7 +840,7 @@ impl<'a> UndoRedo<'a> {
 | `grid_set_view` | `view: GridViewSpec`（並べ替え・絞り込み・展開の**完全な記述**） | `context`、**この応答を組み立てた時点の世代**（10.1。1 つの呼び出しの内側で複数回進みうる）、**導出後の列の構成**（`ColumnDescriptor` の並び。左から右への表示順）、可視行数、隠された行数、違反の総数 |
 | `grid_apply_edit` | `command: GridEditCommand` | `context`、**この応答を組み立てた時点の世代**（10.1）、`GridEditOutcome`（`null` は取り得ない） |
 | `grid_history` | `direction`（`undo` / `redo` の閉じた列挙） | `context`、**この応答を組み立てた時点の世代**（10.1）、`GridEditOutcome \| null`（`null` は「進める履歴が無い」） |
-| `grid_find_violation` | `from`（可視行の序数）と `direction`（`forward` / `backward`） | `context` と、見つかった違反（位置と理由）または `null` |
+| `grid_find_violation` | `from`（可視行の序数）と `direction`（`forward` / `backward`）、**`column`（指定したセルの文書の列。任意。10.6）** | `context` と、見つかった違反（位置と理由）または `null` |
 
 6.2 が決めた点と、その根拠:
 
@@ -1011,7 +1026,7 @@ impl<'a> UndoRedo<'a> {
 （10 万行のシートの 99,800 番目から 200 行を取る実測は約 139 ミリ秒。要件 11.2 の 1 秒に対する
 余裕は `commands/grid.rs` のテストが固定する）。
 
-##### 6.3 が揃えた写像（6.2 のレビューが残した 2 件）
+##### 6.3 が揃えた写像（6.2 のレビューが残した 2 件と、10.6 が足した 1 件）
 
 6 つのコマンドの失敗の写像を一致させ、**要求だけで決まる失敗を適用の閉包の内側へ残さない**。
 
@@ -1026,6 +1041,13 @@ impl<'a> UndoRedo<'a> {
    3 つの命令は同じ計画の列数で先に弾く**（規則はドメインと同じ数から取るため 2 つ目の規則を
    作らない）。閉包の内側に残る失敗は「文書の現在の内容」に依るもの（`SchemaUnusable` /
    `UnknownRow`）だけである
+3. **`grid_find_violation` の `column` の有無で、可視の序数が外のときの答えが変わる**（10.6 が
+   足した意図的な非対称。**利用者に見える矛盾は無い** — 指定を送るのは、いまのセルの理由を
+   引く `./violations` の 1 経路だけで、探索（`column: None`）は巡回が末尾を越えたことを
+   「これ以上違反が無い」（成功腕）として受け取る）。`column: None` は従来どおり
+   **`violation: null`**（探索であり、末尾を越えるのは正常な結果である）。`column: Some(..)`
+   は**経路の失敗**にする — 「そのセルが存在しない」は要求の前提が崩れていることであり、
+   上の 1（「シートが文書に無い」を失敗にする）と同じ規律である
 
 #### EditorRegistry（拡張点の所有者）
 
@@ -1591,7 +1613,8 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 |---|---|---|
 | **違反の印の色**（8.1 の開いた点 1） | **移植口を広げない。**色は実装（`VIOLATION_THEME`）の既定のままである | ① 移植口が保証するのは**印を落とさないこと**であり（4.1 は「区別できる形で示す」を求める）、色そのものは Glide の `Theme` という**ライブラリ固有の型**に属する。`RendererSpec` へ載せると、移植口を差し替えるたびにその写しを書き直すことになる。② 画面は**自前の配色を持たない**ので（8.1 の表「配色」）、色を渡す口を作っても渡せる色が無い — `APPEARANCE_VARS` の 10 本に違反の色は無い（足すのは器の設計の変更である）。③ 実装を差し替えても「違反が区別できること」は要件として残るが、**色の値**は要件ではない |
 | 理由（4.2）の文言の源 | **`grid_find_violation` の `reason` だけである**（画面は 2 つ目の文言を作らない） | 文言を組み立てるのは適応層であり（`ViolationReason` の 12 変種と `Expected` の 11 変種を書き分ける。6.2 が確定）、ドメインは表示用の文言を持たない。画面が写しを作ると、同じ違反が経路によって別の言い方になる |
-| 返る位置が「行の最小の違反列」であること | **その位置を名乗って出す**（利用者が指した列と違うことがある） | 索引は行ごとに最小の列の違反しか返さない（`crates/data-grid/src/view/violations.rs` の `find`）。位置を名乗らなければ、**別のセルの理由を、指したセルの理由として見せる**ことになる |
+| **指定したセルの違反を引く（10.6 が足した）** | 要求が**指したセルの文書の列**を運び（`GridViolationRequest.column`）、境界は**そのセルの違反**を答える（`GridSession::find_violation_at`）。そのセルが違反していなければ `violation: null` であり、**同じ行の別の列の理由を名乗らない**。列を写せないときは指定を送らず（`null`）、境界は従来どおり行の最小の違反列を返す | 索引は行ごとに最小の列の違反しか返さないため（`crates/data-grid/src/view/violations.rs` の `find`）、10.6 の前は**利用者が指したのが右のセルでも左のセルの理由**になっていた（位置を名乗るだけでは「指したセルの理由」にならない。要件 4.2）。写像は `./columnSpace` の**順方向**（表示の位置 → 文書の列）1 箇所であり、画面は推測した列を送らない |
+| 返る位置を名乗って出す | 境界が答えた位置を名乗る（列を写せずに従来の答えが返ったときは、**利用者が指した列と違うことがある**） | 位置を名乗らなければ、**別のセルの理由を、指したセルの理由として見せる**ことになる |
 | **提示と巡回の列は表示の位置である**（境界修復が露わにした是正） | 境界が運ぶ**文書の列**を `./columnSpace` の `ColumnSpace.displayPosition`（文書の列 + 内側の位置 → 表示の位置）で落としてから名乗る／着く。落とせなければ**名乗らない**（`reasonInRow` は取り下げ、`nextViolation` は現在位置を動かさずに失敗を返す） | `GridViolationLocation.column` は**文書の列**であり、`CellPosition` の列（バーの「M 列目」＝ `./violationBar` が 1 を足す数、巡回の着地点＝ `selectionAt` へ渡す数）は**表示の位置**である。8.5 の展開が 2 つを離す（`push_column` は内側の位置を親と同じ文書の列の下へ並べる）ため、写像を通さないと**描かれている列と違う列**を名乗る。**行は写像しない** — 可視行の序数は 1 つの空間しか持たず、序数の解決（上の行）で既に畳んである |
 | 理由を出す門番 | **窓の印である**（`RenderCell.violated`。未取得は「不明」であって「違反していない」ではない） | 印の無いセルで境界へ問い合わせると、矢印で動くたびに往復が起きる（`schema-engine` の実測が全件 255 ms / 1 列 31 ms である。本節の Performance の表）。未取得のセルは窓の到着で引き直す |
 | **違反の位置（可視行の序数）** | 行の識別子から**二分探索で解く**（`./violations` の「序数の解決」） | **境界が序数を運ばない**（応答は行の識別子と列だけである。`GridViolationResponse`）。使える問い合わせは「起点の序数以降で最初の違反の行」だけであり、そこから序数を確定するには**行数の対数**回の問い合わせが要る（10 万行で 17 回）。**行数を走査する経路を作らない**（要件 11 の目的） |
@@ -1615,7 +1638,7 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 | # | 何が足りないか | どの要件か | どこへ足すか |
 |---|---|---|---|
 | 1 | **違反の可視行の序数**（`GridViolationResponse` は行の識別子と列と理由しか運ばない） | 4.4 | `crates/app-shell/src/ipc/grid.rs` の `GridViolation` に欄を 1 つ足し、`src-tauri/src/commands/grid.rs` の `answer_find_violation` で埋める。**値は既にそこにある** — `ViolationIndex::find` は序数を鍵とする写像（`ordinals`）から引いており、いまは行の識別子へ写して捨てている（`crates/data-grid/src/view/violations.rs`）。**足せば画面の二分探索（10 万行で 17 往復）が 1 往復になる** |
-| 2 | 行ごとの違反の**列の一覧**（索引は行の最小の列しか返さない） | 4.2 | 索引の保持（`RowViolations.columns`）は既に列の並びを持つので、応答の型を広げれば足りる。**満たないままでも 4.2 は成立する**（位置を名乗るので、事実と食い違う提示にはならない） |
+| 2 | 行ごとの違反の**列の一覧**（索引は行の最小の列しか返さない） | 4.2 | 索引の保持（`RowViolations.columns`）は既に列の並びを持つので、応答の型を広げれば足りる。**10.6 が閉じた** — 要求が**文書の列**を運び（`GridViolationRequest.column`）、索引の口（`ViolationIndex::cell_at`）が**指定されたセル**の違反を返す（行の最小の列へ落とさない）。一覧を応答で運ぶのではなく**指定して引く**形にしたのは、画面が要るのが**指した 1 セル**の理由だけだからである（一覧を運べば、指していないセルの分まで運ぶことになる） |
 
 ##### 8.5 が確定させたもの（入れ子の展開と詳細表示。`src/features/grid/nestedInspector.tsx` / `columnSpace.ts`）
 
