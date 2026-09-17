@@ -1,0 +1,22 @@
+{
+  "feature_name": "macro-runtime",
+  "created_at": "2026-09-17T09:12:05Z",
+  "updated_at": "2026-09-17T09:44:04Z",
+  "language": "ja",
+  "phase": "tasks-generated",
+  "approvals": {
+    "requirements": {
+      "generated": true,
+      "approved": true
+    },
+    "design": {
+      "generated": true,
+      "approved": true
+    },
+    "tasks": {
+      "generated": true,
+      "approved": true
+    }
+  },
+  "ready_for_implementation": true
+}
