@@ -203,6 +203,7 @@ atspi_read_name() {
 import json
 import subprocess
 import sys
+from collections import deque
 
 
 def run(command):
@@ -245,8 +246,15 @@ class Atspi:
 ACCESSIBLE = "org.a11y.atspi.Accessible"
 REGISTRY = "org.a11y.atspi.Registry"
 ROOT_PATH = "/org/a11y/atspi/accessible/root"
-PRUNE_ROLES = {"scroll pane", "document web", "document frame", "table", "grid", "tree table"}
+# **刈るのは巨大な部分木だけである。**頁の中身（`document web` / `scroll pane`）を刈っては
+# ならない — 読む針（観測の行）は頁の中にある（実測: この刈り方で CI の Linux ランナーが
+# 「観測の行を読めませんでした」で落ちた。頁の下の節は役割が空であり、刈ると針へ届かない）。
+PRUNE_ROLES = {"table", "grid", "tree table"}
 MAX_DEPTH = 18
+# **1 回の歩きに上限を置く。**深く広く歩き続けると **WebKit のアクセシビリティが答えなくなる**
+# （実測: 565 節まで見えた直後の巡回から 14 節へ落ち、以後 300 秒以上戻らなかった）。
+# 針は頁の浅い位置にあるので、上限つきの幅優先（浅い節から見る）で足りる。
+VISIT_BUDGET = 900
 
 app_name = sys.argv[1]
 needle = sys.argv[2]
@@ -263,18 +271,26 @@ if app is None:
     sys.exit(3)
 
 found = []
-stack = [(app[0], app[1], 0)]
+stack = deque([(app[0], app[1], 0)])
+visits = 0
 while stack:
-    dest, path, depth = stack.pop()
-    if depth > MAX_DEPTH:
+    dest, path, depth = stack.popleft()
+    if depth > MAX_DEPTH or visits >= VISIT_BUDGET:
         continue
-    role = atspi.call(dest, path, ACCESSIBLE, "GetRoleName")
-    name = atspi.name(dest, path)
+    visits += 1
+    try:
+        role = atspi.call(dest, path, ACCESSIBLE, "GetRoleName")
+        name = atspi.name(dest, path)
+        children = atspi.children(dest, path)
+    except (RuntimeError, ValueError, json.JSONDecodeError):
+        # **過渡の失敗で歩みを止めない**（木は走行中に変わる。消えた経路を読むと
+        # 「オブジェクトが存在しません」が返る）。
+        continue
     if needle in name:
         found.append(name)
     if role in PRUNE_ROLES:
         continue
-    for child_name, child_path in atspi.children(dest, path):
+    for child_name, child_path in children:
         stack.append((child_name, child_path, depth + 1))
 
 for line in found:
