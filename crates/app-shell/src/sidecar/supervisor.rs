@@ -454,8 +454,10 @@ pub trait SidecarSupervisor {
 
     /// 起動したすべての補助プロセスを終了させる（要件 5.6）。
     ///
-    /// 種類ごとに、まずグループ / ジョブ宛の穏やかな終了を送り、[`DEFAULT_GRACE`]（テストでは
-    /// [`Supervisor::with_grace`] が与える値）だけ待ってから強制終了へ移る。**直接の子だけでなく
+    /// 種類ごとに、まずグループ / ジョブ宛の穏やかな終了を送り、**与えられた猶予**
+    /// （[`Supervisor::with_grace`] の値。既定は [`DEFAULT_GRACE`] であり、**本番は
+    /// `SIDECAR_SHUTDOWN_GRACE` を与える** — `src-tauri/src/lifecycle.rs`）だけ待ってから
+    /// 強制終了へ移る。**直接の子だけでなく
     /// 孫プロセスまで対象にする**（Unix は `killpg`、Windows は `TerminateJobObject`）。
     ///
     /// 冪等である: 登録簿はこの呼び出しで空になり、既に終了した子・存在しないグループへの信号は

@@ -52,7 +52,8 @@
 //!
 //! - 構築時に `lifecycle::run` の `.manage(DocumentHostPort::default())` を
 //!   `.manage(DocumentHostPort::new(Arc::new(自分の実装)))` へ置き換える、または
-//! - 自分の `setup` フック（`Builder::build` の中で走り、`app.run` より前）で
+//! - 自分の `setup` フック（**`Builder::setup` なら `RunEvent::Ready`**、プラグインの `setup`
+//!   なら `Builder::build` の中 — いずれも**消費側が走り出すより前**）で
 //!   `app.state::<DocumentHostPort>().install(Arc::new(自分の実装))` を呼ぶ。
 //!
 //! 消費側（タスク 7.6 の終了拒否の仲介、タスク 7.7 のネイティブファイル選択）は
