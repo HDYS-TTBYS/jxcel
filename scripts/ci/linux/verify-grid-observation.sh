@@ -66,7 +66,18 @@ with_display() {
   if [ -n "${DISPLAY:-}" ]; then
     "$@"
   elif command -v xvfb-run >/dev/null 2>&1; then
-    xvfb-run -a --server-args="-screen 0 1280x1024x24" "$@"
+    # **仮想ディスプレイに最小のウィンドウマネージャを載せる。**ウィンドウマネージャの無い
+    # セッションでは **GTK の「活性のある窓」が決まらない**ため、メニューの活性化が対象
+    # ウィンドウへ届かない（CI の実測: 貼り付けの活性化は成功として返るのに、器は貼り付けの
+    # 要求を 1 件も記録しなかった。手元のデスクトップでは同じ検査器が成立する）。
+    # **実機のデスクトップと同じ前提にする**（要件 11.7 が前提とする環境）。
+    # **この段だけの話である** — 窓の数を数える他の段の Xvfb には載せない。
+    if command -v openbox >/dev/null 2>&1; then
+      xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+        sh -c 'openbox >/dev/null 2>&1 & exec "$@"' sh "$@"
+    else
+      xvfb-run -a --server-args="-screen 0 1280x1024x24" "$@"
+    fi
   else
     "$@"
   fi

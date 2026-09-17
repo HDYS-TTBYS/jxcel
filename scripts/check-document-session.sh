@@ -472,7 +472,10 @@ judge_run() {
 template_bytes=$(wc -c < "$template" | tr -d ' ')
 echo "検証用の形: $app"
 echo "診断記録: $record"
-echo "雛形: $template（${template_bytes} B）"
+# **変数名の直後に全角文字を置かない。**macOS の bash 3.2 は UTF-8 のロケールで
+# `$template` の直後に `（` を置くと、それを変数名の一部として読み、`set -u` の下で
+# 「template（: unbound variable」になる（CI の macOS の実測。Linux では起きない）。
+echo "雛形: ${template}（${template_bytes} B）"
 echo "書き換える行数: ${rows} / 1 走行のタイムアウト: ${timeout_seconds} 秒 / OS: ${os_mode}"
 echo "作業領域: $work"
 
