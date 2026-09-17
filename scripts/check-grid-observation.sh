@@ -420,10 +420,26 @@ fi
 # `is_software_rasterizer` は一致しない）。したがって Linux では**デバイスの有無**を見る —
 # GPU が無ければソフトウェア実装であり、所要時間の要件の前提（11.7）を満たさない。
 gpu_present=""
+gpu_driver=""
 case "$(uname -s 2>/dev/null)" in
   Linux)
-    for device in /dev/dri/card[0-9]* /dev/dri/renderD[0-9]*; do
-      [ -e "$device" ] && gpu_present="yes" && break
+    # **デバイスの有無だけでは足りない**（実測: CI の Linux ランナーには `/dev/dri/card0` が
+    # あり、それでも描画は仮想 GPU のソフトウェア実装である）。**駆動しているドライバの名**を
+    # 読み、既知の仮想・ソフトウェア実装を前提の外とする（`virtio_gpu` / `vmwgfx` /
+    # `hyperv_drm` / `vgem` / `vkms` / `qxl` / `bochs` / `cirrus` / `simpledrm` など）。
+    for card in /sys/class/drm/card[0-9]*; do
+      [ -e "$card/device/driver" ] || continue
+      gpu_driver=$(basename "$(readlink -f "$card/device/driver" 2>/dev/null || echo "")" 2>/dev/null || true)
+      [ -z "$gpu_driver" ] && continue
+      case "$gpu_driver" in
+        virtio_gpu|vmwgfx|hyperv_drm|vgem|vkms|qxl|bochs|cirrus|simpledrm|efifb|vesa|vboxvideo)
+          continue
+          ;;
+        *)
+          gpu_present="yes"
+          break
+          ;;
+      esac
     done
     ;;
   *)
@@ -452,7 +468,8 @@ note_environment_once() {
   noted_environment="yes"
   echo "注記: この環境では所要時間の要件（11.1 / 11.2 / 11.3）を判定しない。理由: 面の国勢調査=" \
     "器=${container} 画素比=${pixel_ratio} 面の数=${canvas_count} 先頭=${first_size} 最大=${largest_size}" \
-    "最大の色数=${largest_colors} / GPU=${gpu_present:-（判定できない）} / ソフトウェアラスタライザ=${software_rasteriser:-（記録に無し）}。" \
+    "最大の色数=${largest_colors} / GPU=${gpu_present:-（前提の外）}${gpu_driver:+（ドライバ=${gpu_driver}）} / " \
+    "ソフトウェアラスタライザ=${software_rasteriser:-（記録に無し）}。" \
     "実測値は上の観測の行にそのまま出ている（閾値は要件値のままであり、緩めていない）。"
 }
 

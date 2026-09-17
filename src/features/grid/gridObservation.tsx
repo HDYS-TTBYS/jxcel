@@ -907,9 +907,11 @@ async function driveSortThenDelete(): Promise<ItemOutcome> {
   // **確認は「押した後」に現れる**（選んだ行数が見えている行数を超えるとき、または画面の高さが
   // 未知のときに出る。`./rowOps` の `deleteNeedsConfirmation`）。現れるのを待ってから押す —
   // 押した直後に読むと `null` であり、削除が 1 件も送られない（実測: これで落ちていた）。
+  // **確認の面を待つ上限は項目の上限に合わせる**（遅い環境では 2 秒で現れず、確認を押さないまま
+  // 削除が送られない — 実測: CI の Linux ランナーで `row_count_unchanged` になった）。
   const confirmation = await waitFor(
     () => elementOf("jxcel-grid-delete-confirm-yes"),
-    2_000,
+    ITEM_WAIT_MS,
   );
   confirmation?.click();
   const deleted = await waitForRowCount(before + 1 - selected, ITEM_WAIT_MS);
@@ -918,7 +920,12 @@ async function driveSortThenDelete(): Promise<ItemOutcome> {
   await waitForRowCount(before + 1, ITEM_WAIT_MS);
   clickOf("jxcel-grid-undo");
   await waitForRowCount(before, ITEM_WAIT_MS);
-  return deleted ? OK : NG("row_count_unchanged", `削除で行数が減らなかった（選択=${String(selected)} 行）`);
+  return deleted
+    ? OK
+    : NG(
+        "row_count_unchanged",
+        `削除で行数が減らなかった（選択=${String(selected)} 行 / 確認の面=${confirmation === null ? "現れなかった" : "押した"}）`,
+      );
 }
 
 /**
@@ -1084,7 +1091,10 @@ async function drivePasteThroughMenu(): Promise<ItemOutcome> {
     const again = arrivalsOf();
     pasted = again !== null && before !== null && again > before;
   }
-  marker?.removeAttribute("aria-label");
+  // **印はここでは外さない。**外すのは観測の最後である（`runScenario` の末尾）— 段の走査は
+  // 1 節ずつ `busctl` を呼ぶので数十秒かかることがあり、**この項目が早く結論した瞬間に外すと
+  // 段が活性化の機会を失う**（実測: CI の Linux ランナーで印が見つからず、貼り付けの要求が
+  // 1 件も記録されなかった）。印の要素は画面が `aria-label` を書かない専用のものである。
   const arrived = arrivalsOf();
   if (pasted === null) {
     return NG("paste_not_delivered", `貼り付けが表へ届かなかった（到着 ${String(before)} → ${String(arrived)}）`);
@@ -1332,6 +1342,8 @@ async function observe(): Promise<Observation> {
   // **筋書き（群 10 が閉じた経路）を走らせる。**計測が済んだ後に走らせるのは、走査の標本が
   // 100,000 行の標本そのものを測るためである（表示を変えると前提が変わる）。
   const items = await runScenario();
+  // **貼り付けの準備の印を外す**（観測の最後。上で述べた理由により、ここまでは残す）。
+  elementOf("jxcel-grid-paste-ready")?.removeAttribute("aria-label");
   return {
     firstScreenMs,
     traversal,
