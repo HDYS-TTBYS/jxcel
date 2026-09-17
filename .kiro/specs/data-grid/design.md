@@ -338,7 +338,7 @@ stateDiagram-v2
 | 7.3, 7.4, 7.5, 7.7 | 貼り付けの判定・行の補充・部分的違反・1 万行 | PasteCodec, EditApply | `EditCommand::PasteRange` | 編集の適用と判定 |
 | 7.6 | 貼り付けが取り消しの 1 操作 | UndoStack | `UndoStack.push` | — |
 | 7.8（複製・打鍵） | メニューとキーボードの双方から複製を実行 | GridScreen（`clipboardRequests.ts`）, GridCommands, メニュー登録口 | `RendererHandle.copySelection`（両者が同じ入口を叩く）, `GRID_COPY_REQUESTED_EVENT`, `MenuRegistry::register` | — |
-| 7.8（貼り付け・メニュー） | **未達。障碍はクリップボードの読み口の不在**（打鍵からの貼り付けは成立している） | GridScreen（`clipboard.ts`）, RendererPort | `RendererSpec.onPaste`（打鍵の経路）。メニュー項目は登録しない（下の「8.7 が確定させたもの」） | — |
+| 7.8（貼り付け・メニュー） | メニューから貼り付けを実行（**10.8 が閉じた**。打鍵からの貼り付けは 8.7 の時点で成立していた） | GridScreen（`clipboard.ts`, `clipboardRequests.ts`）, GridCommands, メニュー登録口 | `RendererHandle.pasteText`（打鍵とメニューが同じ入口）, `GRID_PASTE_REQUESTED_EVENT`（荷は `GridPasteRequestedEvent.text` ＝ 器が読んだ文字）, `tauri-plugin-clipboard-manager` の読み取り（**Rust 側だけ**）, `MenuRegistry::register`（**アクセラレータ無し**） | — |
 | 9.9 | 取り消しとやり直しをメニューとキーボードから実行 | GridScreen（`history.ts`）, メニュー登録口 | `GridClient.readHistory`, `GRID_HISTORY_REQUESTED_EVENT`（**8.9 が結線した**。7.8 の複製が越えた境界と同じ形。荷は生成物の `GridHistoryDirection`）, アクセラレータ（非 macOS `Ctrl+Z` / `Ctrl+Shift+Z`、macOS `Cmd+Z` / `Cmd+Shift+Z`） | — |
 | 8.1, 8.2 | 列幅と表示上の列順 | DisplayState | `DisplayState.columnWidths/columnOrder` | — |
 | 8.3, 8.4, 8.7 | 並べ替え・絞り込み・隠れた行数 | RowOrder, GridSession | `set_view`, `GridViewResponse` | — |
@@ -1200,6 +1200,7 @@ export interface RendererHandle {
   readonly scrollTo: (position: CellPosition) => void;
   readonly invalidate: (span: RowSpan) => void;
   readonly copySelection: () => Promise<void>;   // 選択の範囲の複製（8.7。打鍵とメニューの唯一の入口）
+  readonly pasteText: (text: string) => Promise<void>;  // 読んだ文字の貼り付け（10.8。打鍵とメニューの唯一の入口）
   readonly destroy: () => void;
 }
 
@@ -1223,6 +1224,15 @@ export interface GridRendererPort {
 「いまの選択」を移植口が持つため、画面（TS）から触れる唯一の口が移植口だからである
 （下の「8.7 が確定させたもの」）。`Exactly<keyof RendererHandle, …>` の検査を同じ変更で直した
 （欄が増えれば `npm run typecheck` が落ちる）。
+
+**10.8 が同じ形で `pasteText(text)` を 1 つ足した**（`RendererSpec` は 1 欄も広げていない）。
+理由も同じである — 打鍵（DOM の `paste`）とメニューの活性化（器が読んだ文字）の 2 つの入口を
+1 つへ着けるためであり、**錨（起点）の決定に要る「いまの選択」を移植口が持つ**ので、画面から
+触れる唯一の口が移植口になる（下の「10.8 が確定させたもの」）。複製との違いは、**本文を引数に
+取ること**（本文は器だけが読める）と、**錨を引数に取らないこと**（錨は移植口が持つ選択から
+決まる）の 2 点だけである。**同じ変更で `Exactly<keyof RendererHandle, …>` の検査
+（`port.test.ts`）を `pasteText` を含む形へ直した** — 宣言と検査が食い違えば
+`npm run typecheck` が落ちる。
 
 **Implementation Notes**
 - Integration: Glide の `getCellContent` は引きに来る形であり、窓単位の記憶とそのまま噛み合う。並べ替えと絞り込みは Glide が持たないが、本設計ではいずれも Rust 側にあるため欠点にならない
@@ -1747,7 +1757,7 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 | 行数が変わったあと（要件 1.7） | 影響を受けた行があれば `WindowCache.clear(row_count)`。反映の形は**8.6 と同一の遷移**（`appliedRowOperation`）を通る（**現在位置の移動の規則も同じ 1 つである** — 10.5） | 貼り付けは**行を補充しうる**ので、`invalidate`（影響を受けた行の窓を捨てる）では足りない — 増えた行は永久に読み込み中のままになる（7.3 の申し送り）。形を 2 つに割ると、片方だけが寄せを持つ日が来る |
 | **打鍵からの実行**（要件 7.8 の前者） | **移植口の `onCopy` / `onPaste` がその経路である**（7.2 の面が DOM の `copy` / `paste` を捕獲の段で受け、移植口へ渡す）。8.7 は `copy` の着地点を**移植口の `copySelection` 1 つ**にまとめた（2 行下） | 打鍵（Ctrl+C / Ctrl+V）はそのイベントを起こす。7.2 の設計がクリップボードの経路を**移植口の 1 本**に決めたので、画面が打鍵を別に扱う経路は作らない（2 本にすると同じ操作が 2 度走る）。7.2 は**実物の起動でこの経路を観測している**（合成の `copy` / `paste` を canvas へ注ぎ、移植口が範囲と文字列を受け取る） |
 | **メニューからの実行（複製）**（要件 7.8 の後者。**8.7 が結線した**） | 器の登録口へ `data-grid.copy`（`編集 > 複製`、非 macOS `Ctrl+C` / macOS `Cmd+C`）を登録し、活性化を `GRID_COPY_REQUESTED_EVENT` として**活性化の対象ウィンドウ**（7.5 の振り向け）へ `emit_to` する。画面（`clipboardRequests.ts`）が購読し、**`RendererHandle.copySelection` を呼ぶ** — 打鍵が着くのと**同じ 1 つ**である | 9.5 の診断の導線と**同じ形**（`emit_to` ＋ 生成物のイベント名の定数）であり、新しい依存も新しい境界の型も要らない。**「TS の画面からは到達できない」は誤りだった** — 画面がメニューの登録 API を持たないことは、器が `emit` で画面へ届ける経路を作れないことを意味しない（9.5 が既にその形で成立しており、複製の入口は画面側にもともと在った）。入口を移植口の `copySelection` に置いたのは、**範囲を決めるのに移植口が持つ選択が要る**ためである — TS の画面から配線に触れる唯一の口が移植口である |
-| **メニューからの実行（貼り付け）**（要件 7.8 の後者。**8.7 は登録していない**） | **項目を登録しない。**障碍は**クリップボードの読み口が無いこと**であり、読み口が無いまま項目を登録すると、`Ctrl+V` が**基盤のメニューに取られて DOM の `paste` イベントが届かなくなる**（＝いま動いている打鍵の貼り付けを壊す） | 下の「**貼り付けの項目を今 登録しない理由**」に、読み口の不在の実測（プラグインは依存に無く、`navigator.clipboard.readText()` は 7.2 の実起動で `不可`）と併せて記録した |
+| **メニューからの実行（貼り付け）**（要件 7.8 の後者。**8.7 は登録していない。10.8 が結線した**） | 器の登録口へ `data-grid.paste`（`編集 > 貼り付け`。**アクセラレータ無し**）を登録し、活性化のときに**クリップボードを読んで**（`tauri-plugin-clipboard-manager` の読み取り API。**Rust 側だけ**）荷（[`GridPasteRequestedEvent`] の `text`）として `GRID_PASTE_REQUESTED_EVENT` を対象ウィンドウへ `emit_to` する。画面（`clipboardRequests.ts`）が購読し、**`RendererHandle.pasteText` を呼ぶ** — 打鍵（DOM の `paste`）が着くのと**同じ 1 つ**である | 8.7 の時点の障碍は**クリップボードの読み口が無いこと**だった（下の「8.7 の時点の記録」）。**利用者の決定（2026-09-17）で公式プラグインを足して閉じた** — 読み取りを越える機能は使わず、フロントエンドへ権限も取り込みも足さない（越えるのは生成物のイベントだけである）。**アクセラレータを付けないことが契約である**（付ければ `Ctrl+V` が基盤に取られ、DOM の `paste` が届かなくなる）。詳細は下の「10.8 が確定させたもの」 |
 
 ##### 8.7 が加えた入口（`RendererHandle.copySelection`）と、2 つの入口の合流
 
@@ -1773,6 +1783,13 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
   必要が生じたのはこの入口のためであり、必要になった行だけ引く実装は「覚えるが描かない」に
   変わった（`port.test.ts` の比較表が両方で同じ並びを要求する）
 
+**10.8 が同じ形で 2 つ目の入口（`RendererHandle.pasteText`）を足した。**複製と違うのは、
+**本文（クリップボードの文字）を引数に取る**ことと、**錨（起点）を引数に取らない**ことの 2 点
+だけである — 本文は器（Rust 側）だけが読める値であり、錨は移植口が持つ選択から決まる
+（`currentAnchor`。上の「範囲を引数にしない」と同じ理由である）。打鍵は
+`attachPasteKeystroke` が同じメソッドへ結線し（`GlideSurface` は `copy` / `paste` の 2 つを
+捕獲の段で受けて、それぞれの入口へ流す）、メニューの購読も同じメソッドを呼ぶ。
+
 ##### メニューの複製の結線（タスク 8.7 が越えた境界）
 
 **8.7 は器の層（`src-tauri`）と境界の形（`crates/app-shell/src/ipc/mod.rs`）へ最小の手を入れた。**
@@ -1793,14 +1810,17 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 1 回、両方走れば同じテキストが 2 回書かれる — 書き込みは冪等であり、利用者に見える差は無い）。
 **貼り付けはこの性質が逆向きに効く**（下）。
 
-##### 貼り付けの項目を今 登録しない理由（要件 7.8 の後半は未達のまま）
+##### 8.7 の時点の記録: 貼り付けの項目を登録しなかった理由（**10.8 が閉じた**）
 
-**障碍は「クリップボードを読む経路が無いこと」である。**実測した事実だけを並べる。
+**この節は 8.7 の時点の記録である**（何が障碍で、なぜ止めたか）。**10.8 が閉じた** — 障碍だった
+読み口は公式プラグイン（`tauri-plugin-clipboard-manager`。**利用者の決定 2026-09-17**）で足し、
+項目（`data-grid.paste`）とイベント（`GRID_PASTE_REQUESTED_EVENT`）も本タスクが同じ形で足した。
+**閉じた形は下の「10.8 が確定させたもの」にある。**
 
-1. **アプリの読み口は DOM の `paste` イベントだけである。**7.2 が面（`GlideSurface`）で
+1. **アプリの読み口は DOM の `paste` イベントだけだった。**7.2 が面（`GlideSurface`）で
    `paste` を捕獲して移植口へ渡す形に決めた。メニューの活性化には `ClipboardEvent` が無いので、
    この経路は使えない
-2. **`tauri-plugin-clipboard-manager` は依存に無い**（`src-tauri/Cargo.toml`）。本タスクの
+2. **`tauri-plugin-clipboard-manager` は依存に無かった**（`src-tauri/Cargo.toml`）。当時のタスクの
    「新しい依存を足さない」制約があり、`scripts/check-forbidden-plugins.sh` が禁じる 4 つ
    （fs / shell / store / dialog）に**これは含まれない** — 禁じているのは依存方針と制約のほうで
    ある（この区別は 8.7 の記録の訂正である）
@@ -1809,12 +1829,39 @@ export function sampleFrameTimes(durationMs: number): Promise<number>;
 4. **読み口が無いまま項目を登録すると、いま動いている打鍵の貼り付けを壊す。**`Ctrl+V` を
    アクセラレータとして登録すると、基盤が先に受け取る環境では DOM の `paste` が届かなくなる。
    複製と違い、貼り付けは**メニュー側に代わりの経路が無い**（読めない）ので、その環境では
-   貼り付けが丸ごと使えなくなる。**「動いている半分を守り、動かない項目は登録しない」**
+   貼り付けが丸ごと使えなくなる（**10.8 はこの 4 を契約として残した** — 読み口ができても
+   アクセラレータは付けない。読むのは器であり、打鍵の経路とは別だからである）
 
-**誰が埋めるか**: ① クリップボードを読む口（プラグインか、`readText` が使えることの実測）、
-② その口から `RendererSpec.onPaste`（＝画面の `planPaste` / `applyPaste`）へ繋ぐ経路、
-③ 項目の登録（`data-grid.paste`）と活性化（`GRID_PASTE_REQUESTED_EVENT`）。**8.7 は ① が
-無いことを実測で確かめて止めた** — ②③ は ① が解けた日に、上の複製と同じ形で足せる。
+##### 10.8 が確定させたもの（貼り付けのメニュー項目とクリップボードの読み口。要件 7.8 の後半）
+
+**10.8 は ① 読み口を足し ② 項目を登録し ③ 画面を既存の入口へ繋いだ。**8.7 が「① が無い」ことを
+実測で確かめて止めた 3 点（`design.md` の前節「誰が埋めるか」）を、そのままの順で閉じた。
+
+| 論点 | 決定 | 根拠 |
+|---|---|---|
+| **読み口**（`tauri-plugin-clipboard-manager` を足すか） | **足す**（利用者の決定 2026-09-17）。`src-tauri` の依存に 1 行足し、**Rust 側だけで使う**（`AppHandle::clipboard().read_text()` を呼ぶのは `TauriPasteHost` 1 つだけであり、縫い目は下の行） | 要件 4.7 が禁じるのは「任意のファイルを読み書きする経路」「任意のプロセスを起動する経路」であり、禁止プラグインは `-fs` / `-shell` / `-store` / `-dialog` の 4 つである（`scripts/check-forbidden-plugins.sh`）。**本プラグインはその 4 つを含まず、推移的にも引き込まない**（`cargo tree` の検査が同じ理由で許す）。`navigator.clipboard.readText()`（画面側の道）は 7.2 の実起動で `不可` だったので、**Rust 側から読むのが唯一現実的な道**である |
+| **フロントエンドへ権限を与えない** | `capabilities/default.json` は `core:default` のままである（`clipboard-manager:*` を**足さない**）。`@tauri-apps/plugin-clipboard-manager` も取り込まない | 画面が要るのは**読んだ文字だけ**であり、それは生成物のイベント（`GRID_PASTE_REQUESTED_EVENT` の荷 `text`）で届く。取り込めば、画面が任意の時点でクリップボードを読む経路ができる（要件 4.7 の精神 — 境界を越えるのは生成物経由だけである） |
+| **読み取った文字の扱い** | **記録（`log`）へは出さない**（文字数のみ記録する）。**解釈も正規化もしない** — 荷にそのまま載せ、画面も解釈せず移植口へ渡す | 記録に文書の内容を書かない規律（要件 8.3 の通信内容保護。9.5 の診断の導線と同じ扱い）。解釈の源は 1 つ（ドメインの `PasteCodec::parse`）であり、2 つ目の解釈者を作らない |
+| **読めないとき・空のとき** | **イベントそのものを送らない**（静かに何もしない）。失敗の提示も新しく作らない | 打鍵の経路と同じ扱いである（`RendererSpec.onPaste` に空文字を渡せば、画面は「貼り付けた」と見える何かを出す）。判断は適応層の純粋関数（`paste_event_from`）に 1 つだけ置く |
+| **検査の縫い目（読み口と送り口）** | 器の側を**1 つの trait**（`src-tauri/src/commands/grid.rs` の `PasteHost`。読み口 `read_clipboard_text` と送り口 `emit_paste`）へ閉じ、本番は `TauriPasteHost`（`ClipboardExt::read_text` と `emit_to`）、検査は二重を差し込む。`install_paste` / `request_paste` がこの縫い目を引数に取る | **純粋関数だけを固定しても、適応層が読み口を引くことは観測できない** — 初版は実際にそうなっており、「読み口の呼び出しを定数へ置き換える」変異が貼り付けの検査 4 件すべてを緑のまま通過した（レビューが実測。`session/watch.rs` の `WindowDestroyEvents` と同じ形へ直した）。二重は**別の値**を返すので、その置換は「読んだ文字がそのまま荷になる」の表明で落ちる（`cargo test -p jxcel`） |
+| **記録の文字数** | `chars().count()` で数える（`String::len` は UTF-8 のバイト長であり、日本語では文字数と一致しない）。**中身は記録へ出さない** | 記録は「何文字を運んだか」を写す（9.5 の診断の導線と同じ扱い。要件 8.3 の通信内容保護） |
+| **項目**（`data-grid.paste`） | `編集 > 貼り付け` を `MenuRegistry::register` へ登録する。**アクセラレータは付けない** | 打鍵（DOM の `paste`）の経路を**1 つも奪わない**ためである（上の節の 4）。利用者が打鍵で貼り付ける経路は今までどおりであり、メニューは選ばれたときにだけ動く |
+| **画面の入口** | `RendererHandle.pasteText(text)` を**移植口へ 1 つ足す**。打鍵（DOM の `paste`）は `attachPasteKeystroke` が同じメソッドへ結線し、メニューの購読（`clipboardRequests.ts` の `installGridPasteRequests`）も同じメソッドを呼ぶ | **入口を 2 つに割らない**（8.7 が複製で採ったのと同じ形である）。**錨（起点）を引数に取らない** — 錨を決めるのは Glide の選択を持つ移植口 1 つであり（`anchorOfSelection`。Glide の `onPasteInternal` の写し）、呼ぶ側に計算させれば**錨の決定が 2 箇所へ分かれる** |
+| **イベントの形** | `GRID_PASTE_REQUESTED_EVENT = "grid_paste_requested"` と荷の型 `GridPasteRequestedEvent { text: String }`（`crates/app-shell/src/ipc/mod.rs`）。生成物（`src/ipc/bindings.ts`）へ定数と型を出し、ドリフト検査が守る | 9.5 の診断の導線・8.7 の複製・8.9 の履歴と**同じ形**である（`emit_to` ＋ 生成物の定数）。**複製と違って荷を持つ**のは、読んだ文字が器にしか無いからである |
+| **送り先** | **活性化の対象ウィンドウ 1 つ**（7.5 の振り向け）。対象が無ければ**読まずに何もしない** | 触っていないウィンドウの表を書き換える経路を作らない（要件 3.5。複製と同じ判断である） |
+| **メニュー項目の期待** | `scripts/check-menu-shortcut.sh` の `EXPECTED`（配布物・検証用の両方）へ `編集 > 貼り付け`（**キーバインド無し**の対照）を足し、配置の記録の期待を **12 項目 → 13 項目**へ、`scripts/ci/macos/verify-menu-shortcuts.sh` も同じ数と一覧へ動かした | 項目を 1 つ足せば 3 OS の検査器の期待も動く（`structure.md`「メニュー項目の登録口」の規約。**越えた境界の 1 つ**である） |
+
+**打鍵の経路は 1 つも変わらない（契約として固定する）**: `Ctrl+V` を扱う項目を登録していない
+ことを `src-tauri` の検査（`no_item_registers_the_paste_keystroke`）と
+`scripts/check-menu-shortcut.sh` の期待（`貼り付け` の行が「キーバインド無し」であること）の
+両方で固定する。**画面の検査は「打鍵とメニューが同じ関数を通る」ことを数える**
+（`clipboardRequests.test.ts` が `RendererHandle.pasteText` の呼び出しを両方の経路で観測し、
+`port.test.ts` が取っ手の口の集合に `pasteText` を要求する）。
+
+**歴史的な記録の扱い（申し送り）**: `research.md` の 8.7 の節（1575 / 1660 / 1724 / 1947 行付近）には
+「貼り付けのメニュー項目は未達である」「検査が『登録していないこと』を固定する」という**その時点の
+記録**が残っている（**削除済みの検査名 `no_paste_item_is_registered` を参照している**）。`research.md`
+は**調査の記録**であり、**現在の契約は本節と `tasks.md` の 10.8 が正典**である（10.8 が閉じた）。
 
 ##### 8.7 が切り出した画面の面（`createClipboardSurface`）と、覆った 3 つの穴
 
@@ -1937,7 +1984,8 @@ DOM へ出るか」と、要素が持つ受け口がどの操作を組み立て�
 経路は**存在しない** — `./selection` の `selectionForKey` は空白と矢印だけを引き受け（`z` は
 `ARROWS` に無い）、`./renderer` の打鍵の聴取は `copy` / `paste` の 2 つだけである。したがって
 アクセラレータは**動いている半分を 1 つも奪わない**。**奪われる経路を作らない**のは 8.7 が
-貼り付けの項目を登録しなかった判断と同じであり、ここでは逆に「奪われるものが無い」ことを
+貼り付けの項目を登録しなかった判断（**10.8 が読み口を足した後も同じ契約を保った** — 貼り付けの
+項目には `Ctrl+V` を載せていない）と同じであり、ここでは逆に「奪われるものが無い」ことを
 確かめて登録した（確かめずに登録すれば、`Ctrl+Z` を先に受け取る環境で DOM の経路が黙って死ぬ）。
 
 ##### 単体テストが観測しないもの（8.9。実物の起動で観測する）

@@ -28,10 +28,14 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
-import { GRID_COPY_REQUESTED_EVENT } from "../../ipc/bindings";
-import { createGridCopyEntry } from "./GridScreen";
-import { installGridCopyRequests } from "./clipboardRequests";
-import { attachCopyKeystroke, createGlideWiring } from "./renderer/glideAdapter";
+import { GRID_COPY_REQUESTED_EVENT, GRID_PASTE_REQUESTED_EVENT } from "../../ipc/bindings";
+import { createGridCopyEntry, createGridPasteEntry } from "./GridScreen";
+import { installGridCopyRequests, installGridPasteRequests } from "./clipboardRequests";
+import {
+  attachCopyKeystroke,
+  attachPasteKeystroke,
+  createGlideWiring,
+} from "./renderer/glideAdapter";
 import {
   arrayRowSource,
   createRendererSpec,
@@ -82,7 +86,7 @@ function wiringWithRecordedClipboard(): {
  */
 function listeningNode(): {
   readonly node: Pick<HTMLElement, "addEventListener" | "removeEventListener">;
-  readonly dispatch: (type: string) => void;
+  readonly dispatch: (type: string, event?: Event) => void;
   readonly listeners: readonly string[];
 } {
   const handlers = new Map<string, (event: Event) => void>();
@@ -95,17 +99,31 @@ function listeningNode(): {
         handlers.delete(type);
       },
     } as Pick<HTMLElement, "addEventListener" | "removeEventListener">,
-    dispatch: (type) => {
+    dispatch: (type, event) => {
       const handler = handlers.get(type);
       if (handler === undefined) {
         throw new Error(`器に ${type} の聴取者が居ない`);
       }
-      handler({ preventDefault: () => undefined } as unknown as Event);
+      handler(event ?? ({ preventDefault: () => undefined } as unknown as Event));
     },
     get listeners() {
       return [...handlers.keys()];
     },
   };
+}
+
+/**
+ * DOM の `paste` の代役。**`ClipboardEvent` は `node` 環境に無い**ので、グローバルを立てた
+ * うえでその型の値を作る（打鍵の経路が `event instanceof ClipboardEvent` で本文を読むため、
+ * 見せかけの型では通らない — 本物と同じ判定を通すことが要点である）。
+ */
+class PasteEventForTest extends Event {
+  readonly clipboardData: { readonly getData: (type: string) => string };
+
+  constructor(text: string) {
+    super("paste");
+    this.clipboardData = { getData: () => text };
+  }
 }
 
 /** 微小タスクを 1 巡ぶん流す（`copySelection` も `listen` の解決も非同期である）。 */
@@ -205,6 +223,132 @@ describe("打鍵とメニューの活性化は、同じ入口へ着く（要件 
 
     expect(() => {
       entry();
+    }).not.toThrow();
+  });
+});
+
+describe("メニューからの貼り付け（タスク 10.8。要件 7.8）", () => {
+  it("購読は生成物の定数を宛先にし、荷の文字をそのまま入口へ渡す", async () => {
+    listen.mockReset();
+    const stops: (() => void)[] = [];
+    listen.mockImplementation(async () => {
+      const stop = (): void => undefined;
+      stops.push(stop);
+      return stop;
+    });
+
+    const entries: string[] = [];
+    const stop = installGridPasteRequests((text) => {
+      entries.push(text);
+    });
+    await settle();
+
+    // **宛先は生成物の定数である**（`src/ipc/bindings.ts`。名前が変わればこの行が落ちる）。
+    expect(GRID_PASTE_REQUESTED_EVENT).toBe("grid_paste_requested");
+    expect(listen).toHaveBeenCalledTimes(1);
+    expect(listen.mock.calls[0]?.[0]).toBe(GRID_PASTE_REQUESTED_EVENT);
+
+    // 器が読んだ文字が、**1 バイトも変えずに**入口へ届く（解釈は画面も適応層もしない）。
+    const handler = listen.mock.calls[0]?.[1] as (event: { payload: unknown }) => void;
+    handler({ payload: { text: "1\t2\n3\t4" } });
+    expect(entries).toEqual(["1\t2\n3\t4"]);
+
+    stop();
+    expect(stops).toHaveLength(1);
+  });
+
+  it("解釈できない荷は捨てる（投げない）", async () => {
+    listen.mockReset();
+    listen.mockImplementation(async () => () => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const entries: string[] = [];
+    const stop = installGridPasteRequests((text) => {
+      entries.push(text);
+    });
+    await settle();
+    const handler = listen.mock.calls[0]?.[1] as (event: { payload: unknown }) => void;
+
+    // **型は実行時の保証ではない**（荷の形は何でもありうる）。解釈できない値は捨てる —
+    // 綴りが変われば生成物のドリフト検査が落ちるが、実行時に届く値は別に守る。
+    for (const payload of [null, undefined, {}, { text: 12 }, "貼り付け", []]) {
+      expect(() => {
+        handler({ payload });
+      }).not.toThrow();
+    }
+    expect(entries).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+    stop();
+  });
+
+  it("打鍵とメニューの活性化は、同じ入口（移植口の pasteText）へ着く", async () => {
+    listen.mockReset();
+    listen.mockImplementation(async () => () => undefined);
+    vi.stubGlobal("ClipboardEvent", PasteEventForTest);
+    const { handle, calls } = wiringWithRecordedClipboard();
+
+    // **入口そのものを数える** — 2 つの経路が同じ関数を叩いたことを、関数の側で観測する。
+    const entered: string[] = [];
+    const shared: RendererHandle = {
+      ...handle,
+      pasteText: (text) => {
+        entered.push(text);
+        return handle.pasteText(text);
+      },
+    };
+
+    // 打鍵の経路（器の DOM の `paste` → 本物の結線 → 入口）。
+    const node = listeningNode();
+    attachPasteKeystroke(node.node, shared);
+    expect(node.listeners).toEqual(["paste"]);
+    node.dispatch("paste", new PasteEventForTest("1\t2"));
+    await settle();
+
+    // メニューの経路（器のイベント → 購読 → **画面が組む入口** → 同じ取っ手）。
+    const stop = installGridPasteRequests(createGridPasteEntry(() => shared));
+    await settle();
+    (listen.mock.calls[0]?.[1] as (event: { payload: unknown }) => void)({
+      payload: { text: "1\t2" },
+    });
+    await settle();
+    stop();
+    vi.stubGlobal("ClipboardEvent", undefined);
+
+    // **同じ関数が 2 回**（入口が 2 つに分かれていないこと）。
+    expect(entered).toEqual(["1\t2", "1\t2"]);
+    // **同じ錨と同じ文字**が移植口の `onPaste` へ 2 回出る（錨は移植口が持つ選択の**矩形の
+    // 起点**から決まり、画面は錨を計算しない — 打鍵のときと 1 つも変わらない）。
+    expect(callsNamed(calls, "onPaste")).toEqual([
+      { call: "onPaste", args: [SELECTION.range.start, "1\t2"] },
+      { call: "onPaste", args: [SELECTION.range.start, "1\t2"] },
+    ]);
+  });
+
+  it("選択が無いときは貼り付けを起こさない（錨を推測で作らない）", async () => {
+    const written: string[] = [];
+    const calls: RecordedCall[] = [];
+    const spec = createRendererSpec({
+      source: arrayRowSource(),
+      record: (call, args) => calls.push({ call, args }),
+      selection: null,
+    });
+    const handle = createGlideWiring(spec, async (text) => void written.push(text)).handle;
+
+    const node = listeningNode();
+    attachPasteKeystroke(node.node, handle);
+    await handle.pasteText("1\t2");
+
+    // 錨（現在位置）が無ければ移植口は何もしない — 起点の無い貼り付けを起こさない。
+    expect(callsNamed(calls, "onPaste")).toEqual([]);
+    expect(written).toEqual([]);
+  });
+
+  it("器がまだ無いときのメニューの活性化は、何もしない（投げない）", () => {
+    const entry = createGridPasteEntry(() => null);
+
+    expect(() => {
+      entry("1\t2");
     }).not.toThrow();
   });
 });

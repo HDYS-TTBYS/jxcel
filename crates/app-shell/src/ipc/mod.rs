@@ -60,6 +60,10 @@
 //!   （[`GRID_HISTORY_REQUESTED_EVENT`] / [`GridHistoryRequestedEvent`]）。**荷は向きだけ**
 //!   であり、2 つの項目（取り消し・やり直し）を 1 つのイベントで運ぶ（9.5 の診断の導線と
 //!   同じ形。8.7 の複製は引数を取らないので荷を持たない）
+//! - 10.8: 貼り付けのメニューの活性化を画面へ引き渡すイベント
+//!   （[`GRID_PASTE_REQUESTED_EVENT`] / [`GridPasteRequestedEvent`]）。**荷はクリップボードから
+//!   読んだ文字**であり、読めなかったときはこのイベントを送らない（8.7 の複製が荷を持たない
+//!   のと対照的である — 貼り付けは器だけが読める値を運ぶ必要がある）
 
 use serde::{Deserialize, Serialize};
 
@@ -644,6 +648,43 @@ pub const GRID_COPY_REQUESTED_EVENT: &str = "grid_copy_requested";
 /// 自分で判断する。器は関知しない）。
 pub const GRID_HISTORY_REQUESTED_EVENT: &str = "grid_history_requested";
 
+/// グリッドへの貼り付けがメニューから要求されたことを伝える Tauri イベントの名前
+/// （タスク 10.8。要件 7.8）。
+///
+/// `invoke` の宛先を持たないためコマンド名の配列（[`COMMAND_NAMES`]）には現れない。設定変更の
+/// 通知（[`SETTINGS_CHANGED_EVENT`]）と同じく、**生成物（`src/ipc/bindings.ts`）へ定数として
+/// 出す**ことで、フロントエンドが文字列リテラルを綴り間違える経路を塞ぐ（タスク 2.3 の
+/// ドリフト検査がこの定数もバイト比較する）。
+///
+/// **複製（[`GRID_COPY_REQUESTED_EVENT`]）と違い、荷を持つ。**複製は引数を取らない（対象は
+/// 「そのとき移植口が持っている選択」である）が、貼り付けは**クリップボードの文字**を要する —
+/// 器（Rust 側）だけが読めるので、読んだ文字をこのイベントで画面へ渡す（[`GridPasteRequestedEvent`]）。
+///
+/// 送り先は**活性化の対象ウィンドウ**（7.5 の振り向け）1 つだけである。グリッドの画面を
+/// 出していないウィンドウには購読者が居ないので、そこで選んでも何も起きない（画面が
+/// 自分で判断する。器は関知しない）。
+pub const GRID_PASTE_REQUESTED_EVENT: &str = "grid_paste_requested";
+
+/// メニューの活性化を画面へ引き渡す通知（タスク 10.8。要件 7.8）。
+///
+/// メニューの処理はイベントループのスレッドで走り、対象ウィンドウのフロントエンドへ届ける
+/// 必要がある。そこで 7.4 の登録口が受けた選択を、この 1 つのイベントとして**活性化の対象
+/// ウィンドウへ**送る（7.5 の振り向けの結果を使う。要件 3.5）。
+///
+/// **運ぶのはクリップボードから読んだ文字だけである。**貼り付けの解釈（何行何列か、どの列の
+/// 型に掛けるか）はドメインの `PasteCodec::parse` と適用層の仕事であり、ここは**文字列を
+/// 1 バイトも変えずに運ぶ**（画面も解釈しない。`design.md` の「貼り付けのテキストは
+/// 1 バイトも変えない」）。
+///
+/// **読めなかったときはこのイベントそのものを送らない** — 空の荷を送れば、画面は空の矩形を
+/// 貼り付けて「貼り付けられた」と見える何かを出す（打鍵の経路と同じ扱いであり、新しい失敗の
+/// 提示を作らない）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct GridPasteRequestedEvent {
+    /// クリップボードから読んだ文字。**解釈も正規化もしない**（そのまま `onPaste` へ渡る）。
+    pub text: String,
+}
+
 /// メニューの活性化を画面へ引き渡す通知（タスク 8.9。要件 9.9）。
 ///
 /// メニューの処理はイベントループのスレッドで走り、対象ウィンドウのフロントエンドへ届ける
@@ -701,14 +742,15 @@ fn command_names_constant() -> String {
     out
 }
 
-/// イベント名の定数を生成する（タスク 7.1 / 9.5 / 3.1 / 8.7 / 8.9。要件 7.4、8.1、8.6、8.7、1.6、
-/// 7.8、9.9）。
+/// イベント名の定数を生成する（タスク 7.1 / 9.5 / 3.1 / 8.7 / 8.9 / 10.8。要件 7.4、8.1、8.6、
+/// 8.7、1.6、7.8、9.9）。
 ///
 /// 設定変更の通知（[`SETTINGS_CHANGED_EVENT`]）・診断の導線の要求
 /// （[`DIAGNOSTICS_REQUESTED_EVENT`]）・ドキュメントの状態変化
 /// （[`DOCUMENT_SESSION_CHANGED_EVENT`]）・グリッドの複製の要求
 /// （[`GRID_COPY_REQUESTED_EVENT`]）・グリッドの履歴の要求
-/// （[`GRID_HISTORY_REQUESTED_EVENT`]）は `invoke` の宛先を持たないため
+/// （[`GRID_HISTORY_REQUESTED_EVENT`]）・グリッドの貼り付けの要求
+/// （[`GRID_PASTE_REQUESTED_EVENT`]）は `invoke` の宛先を持たないため
 /// [`command_names::COMMAND_NAMES`] には現れないが、**フロントエンドが文字列リテラルを
 /// 綴り間違えない**ように、名前を生成物へ定数として出す。生成物はタスク 2.3 のドリフト検査が
 /// バイト比較するので、名前の変更は生成のやり直しを強制する。
@@ -733,6 +775,7 @@ fn event_names_constant() -> String {
         ),
         ("GRID_COPY_REQUESTED_EVENT", GRID_COPY_REQUESTED_EVENT),
         ("GRID_HISTORY_REQUESTED_EVENT", GRID_HISTORY_REQUESTED_EVENT),
+        ("GRID_PASTE_REQUESTED_EVENT", GRID_PASTE_REQUESTED_EVENT),
     ] {
         out.push_str(&format!("export const {constant} = \"{event}\";\n"));
     }
@@ -1104,6 +1147,7 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<GridHistoryDirection>(&cfg),
         declared::<GridHistoryRequest>(&cfg),
         declared::<GridHistoryRequestedEvent>(&cfg),
+        declared::<GridPasteRequestedEvent>(&cfg),
         declared::<GridSearchDirection>(&cfg),
         declared::<GridViolationRequest>(&cfg),
         declared::<GridViolation>(&cfg),
@@ -1944,6 +1988,36 @@ mod tests {
             ts.contains("direction: GridHistoryDirection"),
             "荷の欄の名前が違う（画面は `direction` を読む）:\n{ts}"
         );
+    }
+
+    /// 生成物が 10.8 の貼り付けの要求（イベント名と荷の型）を宣言していることを固定する
+    /// （タスク 10.8。要件 7.8）。
+    ///
+    /// **ドリフト検査だけでは足りない**（[`bindings_declare_the_document_surface`] と同じ理由）。
+    /// 画面はこの定数だけを参照する — 文字列リテラルを綴り間違えると、メニューの活性化が
+    /// **無言で届かなくなる**（購読側の名前が一致しないため。エラーにもならない）。荷の欄の
+    /// 名前も固定する: **画面が読むのは `text`** であり、名前が変われば画面は荷を捨てる
+    /// （`clipboardRequests.ts` の `parsePasteText`）。
+    #[test]
+    fn bindings_declare_the_grid_paste_event() {
+        let ts = render_bindings().unwrap();
+        for declaration in [
+            "export const GRID_PASTE_REQUESTED_EVENT = \"grid_paste_requested\";",
+            "export type GridPasteRequestedEvent = {",
+        ] {
+            assert!(
+                ts.contains(declaration),
+                "生成物に `{declaration}` が無い:\n{ts}"
+            );
+        }
+        assert!(
+            ts.contains("text: string"),
+            "荷の欄の名前が違う（画面は `text` を読む）:\n{ts}"
+        );
+        // 荷は**文字 1 つだけ**である（余分な欄を足せば、画面が読む欄が 2 つに分かれる）。
+        let declared = generated::<GridPasteRequestedEvent>();
+        assert_no_any(&declared);
+        assert_no_type_token(&declared, "bigint");
     }
 
     /// 診断の失敗は**設定の失敗と区別できる**（要件 4.4）。種別が違えば `kind` も違う。

@@ -44,6 +44,7 @@ export const DIAGNOSTICS_REQUESTED_EVENT = "diagnostics_requested";
 export const DOCUMENT_SESSION_CHANGED_EVENT = "document_session_changed";
 export const GRID_COPY_REQUESTED_EVENT = "grid_copy_requested";
 export const GRID_HISTORY_REQUESTED_EVENT = "grid_history_requested";
+export const GRID_PASTE_REQUESTED_EVENT = "grid_paste_requested";
 
 // ---------------------------------------------------------------------------
 // 境界を越える型（crates/app-shell/src/ipc/ の定義から ts-rs が生成）
@@ -961,6 +962,27 @@ sheet: GridSheetSummary, };
 // シートを開いた応答の具体形。ジェネリックな `IpcResult` の宣言はペイロード型を
 // 名指ししないため、境界が名指しできる具体形を明示的に置く。
 export type GridOpenResult = IpcResult<GridOpenResponse, IpcError>;
+/**
+ * メニューの活性化を画面へ引き渡す通知（タスク 10.8。要件 7.8）。
+ *
+ * メニューの処理はイベントループのスレッドで走り、対象ウィンドウのフロントエンドへ届ける
+ * 必要がある。そこで 7.4 の登録口が受けた選択を、この 1 つのイベントとして**活性化の対象
+ * ウィンドウへ**送る（7.5 の振り向けの結果を使う。要件 3.5）。
+ *
+ * **運ぶのはクリップボードから読んだ文字だけである。**貼り付けの解釈（何行何列か、どの列の
+ * 型に掛けるか）はドメインの `PasteCodec::parse` と適用層の仕事であり、ここは**文字列を
+ * 1 バイトも変えずに運ぶ**（画面も解釈しない。`design.md` の「貼り付けのテキストは
+ * 1 バイトも変えない」）。
+ *
+ * **読めなかったときはこのイベントそのものを送らない** — 空の荷を送れば、画面は空の矩形を
+ * 貼り付けて「貼り付けられた」と見える何かを出す（打鍵の経路と同じ扱いであり、新しい失敗の
+ * 提示を作らない）。
+ */
+export type GridPasteRequestedEvent = { 
+/**
+ * クリップボードから読んだ文字。**解釈も正規化もしない**（そのまま `onPaste` へ渡る）。
+ */
+text: string, };
 /**
  * 入れ子の内側の位置の 1 段（タスク 6.1。要件 4.5、5.5）。
  *

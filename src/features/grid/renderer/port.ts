@@ -328,6 +328,20 @@ export interface RendererHandle {
    * 「複製できた」と見える）。
    */
   readonly copySelection: () => Promise<void>;
+  /**
+   * **クリップボードから読んだ文字を貼り付ける**（タスク 10.8。要件 7.3、7.4、7.8）。
+   *
+   * **打鍵（DOM の `paste`）とメニューの活性化の唯一の入口である。**文字列を引数に取るのは
+   * 貼り付けの本文が**移植口の外から来る**ためであり（打鍵は `ClipboardEvent`、メニューは
+   * 器が読んだ文字。`GRID_PASTE_REQUESTED_EVENT` の荷）、**錨は引数に取らない** —
+   * 取れば呼ぶ側が錨を計算することになり、**錨の決定が 2 箇所へ分かれる**（`copySelection` と
+   * 同じ理由である。錨を決めるのは Glide の選択を持つ移植口 1 つに閉じる）。
+   *
+   * 錨（現在位置）が無ければ**何もしない**（起点の無い貼り付けを起こさない。推測で埋めない）。
+   * 文字列は**1 バイトも解釈しない** — 何行何列かもどの列の型に掛けるかも、移植口の外
+   * （画面の `planPaste` と Rust 側の `PasteCodec`）の仕事である。
+   */
+  readonly pasteText: (text: string) => Promise<void>;
   /** 描き手を片付ける。**以後その `RendererHandle` を使ってはならない。** */
   readonly destroy: () => void;
 }

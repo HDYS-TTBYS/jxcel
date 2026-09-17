@@ -360,6 +360,17 @@ pub fn run() -> Result<(), StartupError> {
 
     // 手順 3.5: 記録機構の登録。単一インスタンス（手順 2）の後・構築（手順 4）の前である。
     let builder = register_logging(builder, &logging);
+    // 手順 3.6: クリップボードの読み口（要件 7.8 の後半。タスク 10.8）。**メニューの「貼り付け」が
+    //   システムのクリップボードを読むために要る**（`commands/grid.rs` の `request_paste` が
+    //   `AppHandle::clipboard()` を通す）。DOM の `paste`（打鍵）はこの経路を使わない — 打鍵は
+    //   基盤が `ClipboardEvent` を組み立てており、読み口は要らない。
+    //   **フロントエンドへ権限を与えない**（`capabilities/default.json` は `core:default` のままで
+    //   あり、`clipboard-manager:*` は許可しない）。Rust 側の API は capability の外側にあるため、
+    //   この登録だけでは画面から読み書きできない — 画面へ渡るのは生成物のイベント
+    //   （`GRID_PASTE_REQUESTED_EVENT` の荷 `text`）だけである（`src-tauri/Cargo.toml` の依存方針）。
+    //   登録の位置は記録機構と同じく構築の前であり、**メニューの処理（構築後）より前に
+    //   管理状態が置かれる**ことを保証する。
+    let builder = builder.plugin(tauri_plugin_clipboard_manager::init());
     // 明示的な終了の掛け金（5.4）。終了要求のコールバックがここから読む。
     let builder = builder.manage(ExitControl::default());
     // ウィンドウのレジストリ（要件 2.1・2.5。タスク 6.1）。アプリ全体で 1 実体だけ持ち、
@@ -495,9 +506,14 @@ pub fn run() -> Result<(), StartupError> {
     //   複製そのもの（範囲の決定・表形式テキスト・クリップボード）はフロントエンドの表の面が
     //   移植口（`RendererHandle.copySelection`）を通して行う — **打鍵（DOM の `copy`）が着く
     //   のと同じ入口である**（`src/features/grid/clipboardRequests.ts`）。
-    //   **貼り付けの項目は登録しない** — クリップボードの読み口が無く、読み口が無いまま
-    //   `Ctrl+V` を登録すると、いま動いている打鍵の貼り付けを基盤のメニューが奪う
-    //   （理由と実測は `commands/grid.rs` の `install` の doc）。
+    //   **貼り付けの項目も同じ登録口へ登録する**（タスク 10.8。要件 7.8 の後半）— `編集 > 貼り付け`
+    //   （`data-grid.paste`）であり、**アクセラレータは付けない**。付ければ `Ctrl+V` を基盤の
+    //   メニューが先に受け取り、**いま動いている打鍵の DOM の `paste` が届かなくなる**。
+    //   選択されたときの処理は、クリップボードを読んで（手順 3.6 で登録した
+    //   `tauri-plugin-clipboard-manager` の読み取り API。**Rust 側だけで使う**）荷として
+    //   `GRID_PASTE_REQUESTED_EVENT` を活性化の対象ウィンドウへ送るだけであり、適用は複製と
+    //   同じ入口（`RendererHandle.pasteText`）が担う。**読めないとき・空のときは送らない**
+    //   （理由は `commands/grid.rs` の `paste_item_spec` と `request_paste` の doc）。
     //   8.9 が同じ登録口へ `編集 > 元に戻す` / `編集 > やり直し`（非 macOS `Ctrl+Z` /
     //   `Ctrl+Shift+Z`、macOS `Cmd+Z` / `Cmd+Shift+Z`）を足した。選択されたときの処理は、
     //   **同じ 1 つのイベント**（`GRID_HISTORY_REQUESTED_EVENT`。どちらの項目かは荷が運ぶ）を

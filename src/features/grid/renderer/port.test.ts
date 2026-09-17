@@ -92,7 +92,12 @@ const CANONICAL_SEQUENCE: readonly RecordedCall[] = [
   // 直前に下ろした選択（`setSelection` の矩形）が現れる。
   { call: "copySelection", args: [] },
   { call: "onCopy", args: [{ start: { row: 0, column: 0 }, end: { row: 1, column: 1 } }] },
-  { call: "onPaste", args: [{ row: 4, column: 0 }, "0:0\t0:1\n1:0\t1:1"] },
+  // **貼り付け**（タスク 10.8。要件 7.8）。打鍵（DOM の `paste`）とメニューの活性化は同じ入口
+  // （`RendererHandle.pasteText`）へ結線されているので、台本は 1 段だけである。錨は**渡さない**
+  // — 実装が持つ選択の**矩形の起点**（直前に下ろした選択の左上）から決まる。文字列は複製の
+  // 戻り値そのものである。
+  { call: "pasteText", args: ["0:0\t0:1\n1:0\t1:1"] },
+  { call: "onPaste", args: [{ row: 0, column: 0 }, "0:0\t0:1\n1:0\t1:1"] },
   { call: "scrollTo", args: [{ row: 40, column: 2 }] },
   { call: "invalidate", args: [{ start: 8, count: 4 }] },
   { call: "destroy", args: [] },
@@ -310,7 +315,7 @@ const rendererSpecSurface: Exactly<
 > = true;
 const rendererHandleSurface: Exactly<
   keyof RendererHandle,
-  "setSelection" | "scrollTo" | "invalidate" | "copySelection" | "destroy"
+  "setSelection" | "scrollTo" | "invalidate" | "copySelection" | "pasteText" | "destroy"
 > = true;
 const renderColumnSurface: Exactly<keyof RenderColumn, "title" | "width"> = true;
 const cellPositionSurface: Exactly<keyof CellPosition, "row" | "column"> = true;

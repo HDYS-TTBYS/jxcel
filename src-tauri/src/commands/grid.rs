@@ -44,9 +44,14 @@
 //! （`design.md` の「メニューの取り消し・やり直しの結線」）。画面側は
 //! `src/features/grid/history.ts` が購読して 1 つの入口へ渡す。
 //!
-//! **貼り付けの項目は登録しない。**障碍はクリップボードを読む経路が無いことであり、読み口が
-//! 無いまま `Ctrl+V` を登録すると、基盤のメニューが打鍵を先に受け取っていま動いている貼り付けを
-//! 壊す（[`install`] の doc に実測と併せて記録した。要件 7.8 の後半は未達である）。
+//! **貼り付けの項目も本タスク 10.8 が同じ形で足した** — `編集 > 貼り付け`
+//! （`data-grid.paste`。**アクセラレータは付けない**）。クリップボードを読むのは器（Rust 側）
+//! だけであり（`tauri-plugin-clipboard-manager` の読み取り API）、読んだ文字を荷として
+//! [`GRID_PASTE_REQUESTED_EVENT`] で対象ウィンドウへ送る。画面側は
+//! `src/features/grid/clipboardRequests.ts` が購読して、**打鍵（DOM の `paste`）と同じ入口**
+//! （移植口の `RendererHandle.pasteText`）へ渡す — 錨の決定も適用の経路も 1 つに閉じる。
+//! **アクセラレータを付けないのが契約である**（付ければ `Ctrl+V` が基盤に取られ、いま動いて
+//! いる打鍵の貼り付けが届かなくなる。[`install`] の doc を参照）。
 //!
 //! # 失敗の載せ方（design.md「Error Handling」の表）
 //!
@@ -266,23 +271,23 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use app_shell::ipc::{
-    ColumnChoice, ColumnDescriptor, ColumnElementCount, ColumnExpandability,
-    ColumnMemberDescriptor, GRID_COPY_REQUESTED_EVENT, GRID_HISTORY_REQUESTED_EVENT,
-    GRID_REFERENCE_PAGE_LIMIT, GridCellAddress, GridCoercionNotice, GridEditCommand,
-    GridEditOutcome, GridEditRequest, GridEditResponse, GridExpansionState, GridFilterSpec,
-    GridHistoryDirection, GridHistoryRequest, GridHistoryRequestedEvent, GridOpenRequest,
-    GridOpenResponse, GridPathSegment, GridReferenceRequest, GridReferenceResponse,
+    command_names, ColumnChoice, ColumnDescriptor, ColumnElementCount, ColumnExpandability,
+    ColumnMemberDescriptor, GridCellAddress, GridCoercionNotice, GridEditCommand, GridEditOutcome,
+    GridEditRequest, GridEditResponse, GridExpansionState, GridFilterSpec, GridHistoryDirection,
+    GridHistoryRequest, GridHistoryRequestedEvent, GridOpenRequest, GridOpenResponse,
+    GridPasteRequestedEvent, GridPathSegment, GridReferenceRequest, GridReferenceResponse,
     GridReferenceRow, GridRowAnchor, GridRowTarget, GridSearchDirection, GridSheetSummary,
     GridViewRequest, GridViewResponse, GridViewSpec, GridViolation, GridViolationLocation,
     GridViolationRequest, GridViolationResponse, IpcError, IpcResult, TypeKindTag, WindowContext,
-    WindowLabel, command_names,
+    WindowLabel, GRID_COPY_REQUESTED_EVENT, GRID_HISTORY_REQUESTED_EVENT,
+    GRID_PASTE_REQUESTED_EVENT, GRID_REFERENCE_PAGE_LIMIT,
 };
 use data_grid::{
-    CellAddress, CoercionNotice, ColumnIndex, DEFAULT_UNDO_LIMIT, EMPTY_WINDOW, EditCommand,
+    display_text, reference_page, CellAddress, CoercionNotice, ColumnIndex, EditCommand,
     EditOutcome, ElementCount, Expandability, ExpansionState, FilterSpec, Generation, GridError,
     GridSession, LayoutColumn, NestedPathSegment, ReferencePage, RowAnchor, RowOrdinal, RowSpan,
     RowTarget, SearchDirection, SortKey, UndoStack, ViewSpec, WindowCodec, WindowRequest,
-    display_text, reference_page,
+    DEFAULT_UNDO_LIMIT, EMPTY_WINDOW,
 };
 use document_session::{DocumentSessions, DocumentSessionsApi, SessionError};
 use schema_engine::compile::plan::ColumnValidator;
@@ -292,6 +297,7 @@ use schema_engine::{
 };
 use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_log::log;
 
 use crate::menu::{MenuItemSpec, MenuPath, MenuRegistry, MenuSelection};
@@ -2447,14 +2453,21 @@ fn request_copy(app: &AppHandle, selection: &MenuSelection) {
 /// （メニュー項目が引けないことより、アプリが立ち上がらないことの方が悪い。診断の導線と同じ
 /// 判断）。
 ///
-/// # 貼り付けの項目を登録しない理由（**要件 7.8 の後半は未達である**）
+/// # 貼り付けの項目（タスク 10.8。要件 7.8 の後半）
 ///
-/// 障碍は**クリップボードを読む経路が無いこと**である。本アプリの読み口は DOM の `paste`
-/// イベントだけであり（7.2 が面で捕獲する形に決めた）、メニューの活性化には `ClipboardEvent`
-/// が無い。加えて**読み口が無いまま `Ctrl+V` を項目に登録すると、基盤のメニューが打鍵を
-/// 先に受け取り、いま動いている貼り付け（DOM の `paste`）が届かなくなる** — 複製はメニュー側に
-/// 代わりの経路があるので安全だが、貼り付けにはそれが無い。**動いている半分を守り、動かない
-/// 項目は登録しない**（詳細と実測は `design.md`「貼り付けの項目を今 登録しない理由」）。
+/// **`編集 > 貼り付け` を 1 件登録する**（`data-grid.paste`。**アクセラレータは付けない**）。
+/// 障碍だったのは**クリップボードを読む経路が無いこと**であり、本タスクで
+/// `tauri-plugin-clipboard-manager` を足して解いた（読み取りは**Rust 側だけ**で使い、
+/// フロントエンドへ権限も取り込みも足さない。`src-tauri/Cargo.toml` の依存方針）。
+///
+/// 活性化の処理は [`request_paste`] である — クリップボードを読み、読めたら荷
+/// （[`GridPasteRequestedEvent`]）として [`GRID_PASTE_REQUESTED_EVENT`] を対象ウィンドウへ送る。
+/// 読めないとき・空のときは**静かに何もしない**（打鍵の経路と同じ扱い）。
+///
+/// **アクセラレータを付けない**理由は [`paste_item_spec`] の doc にある（付ければ `Ctrl+V` が
+/// 基盤に取られ、**いま動いている打鍵の `paste` が届かなくなる**）。**要件 7.8 の後半
+/// （メニューからの実行）は本タスクの主題であり**、8.7 が障碍（読み口の不在）を理由に残した
+/// 1 件をここで閉じる。
 ///
 /// # 取り消し・やり直しの項目（タスク 8.9。要件 9.9）
 ///
@@ -2472,6 +2485,188 @@ pub fn install(app: &AppHandle) {
     install_copy(app, &registry);
     install_history(app, &registry, GridHistoryDirection::Undo);
     install_history(app, &registry, GridHistoryDirection::Redo);
+    install_paste(app, &registry, Arc::new(TauriPasteHost::new(app.clone())));
+}
+
+// ---------------------------------------------------------------------------
+// メニューからの貼り付け（タスク 10.8。要件 7.8）
+// ---------------------------------------------------------------------------
+
+/// 貼り付けの項目の識別子。**アプリ全体で一意でなければならない。**
+const PASTE_ITEM_ID: &str = "data-grid.paste";
+
+/// 貼り付けの項目の表示名。
+const PASTE_LABEL: &str = "貼り付け";
+
+/// 貼り付けの項目を置く部分メニュー（複製と同じ `編集`。7.4 が決めたトップレベルの並び）。
+fn paste_menu_path() -> MenuPath {
+    MenuPath::new([crate::menu::EDIT_MENU_LABEL]).expect("位置は空でない")
+}
+
+/// 貼り付けの項目の登録内容を組み立てる（複製の [`copy_item_spec`] と同じ形）。
+///
+/// # アクセラレータを付けない理由（**本タスクの契約**）
+///
+/// 複製の項目は `Ctrl+C` / `Cmd+C` を載せている（打鍵とメニューが**同じ入口**へ着くので、
+/// 基盤が打鍵を先に受け取っても利用者から見た結果は変わらない）。**貼り付けはそうではない** —
+/// 打鍵の経路は DOM の `paste` であり、`onPaste` へ着く前に `ClipboardEvent` が要る。
+/// `Ctrl+V` をアクセラレータに登録すると、基盤のメニューが打鍵を先に受け取る環境では
+/// **DOM の `paste` が起こらなくなり、いま動いている打鍵の貼り付けが丸ごと止まる**。
+///
+/// したがって**メニューは選ばれたときにだけ動く**（アクセラレータ無し＝打鍵を 1 つも奪わない）。
+/// 利用者が打鍵で貼り付ける経路は今までどおり DOM の `paste` であり、両者は
+/// [`GRID_PASTE_REQUESTED_EVENT`] の先（画面の移植口 `RendererHandle.pasteText`）で 1 本に
+/// 合流する（`design.md` の「メニューの貼り付けの結線」）。
+fn paste_item_spec(handler: impl Fn(&MenuSelection) + Send + Sync + 'static) -> MenuItemSpec {
+    MenuItemSpec::new(
+        OWNER,
+        PASTE_ITEM_ID,
+        paste_menu_path(),
+        PASTE_LABEL,
+        handler,
+    )
+}
+
+/// 貼り付けの要求が使う**器の側**（本番は Tauri とクリップボードのプラグイン、テストは二重）。
+///
+/// この縫い目が表すのは 2 つだけである:
+///
+/// 1. システムのクリップボードから文字を読む（**読み口**）
+/// 2. 対象ウィンドウへ荷を送る（**送り口**）
+///
+/// **読み口だけを縫い目にしていない理由**: 検査が固定したいのは「読んだ文字がそのまま荷に
+/// なる」ことであり、読む口と送る口を別の縫い目へ割ると、その 2 つを繋ぐ判断
+/// （[`paste_event_from`]）がどちらの検査からも見えなくなる。**初版はまさにそれで、純粋関数
+/// だけを固定していた** — そのため「読み口の呼び出しを定数へ置き換える」変異が 4 件すべてを
+/// 緑のまま通した（レビューが実測）。`session/watch.rs` の [`WindowDestroyEvents`] が「破棄の
+/// 購読」と「引けるか」を 1 つの縫い目へ束ねているのと同じ形である。
+///
+/// **荷の中身にも判断にも触れない** — 何を送るかは [`request_paste`] が決める。
+pub trait PasteHost: Send + Sync {
+    /// システムのクリップボードから文字を読む。読めなければ理由を返す。
+    fn read_clipboard_text(&self) -> Result<String, String>;
+
+    /// 対象ウィンドウへ荷を送る。送れなければ理由を返す。
+    fn emit_paste(&self, label: &WindowLabel, event: GridPasteRequestedEvent)
+        -> Result<(), String>;
+}
+
+/// Tauri の器と公式プラグインを使う実装（**本番**）。
+///
+/// 読み口は `tauri-plugin-clipboard-manager` の読み取り API 1 つであり（**Rust 側だけで使う**。
+/// capability は足していない。`src-tauri/Cargo.toml` の依存方針）、送り口は診断の導線・複製・
+/// 履歴と同じ `emit_to` である（対象ウィンドウは 7.5 の振り向けが決める）。
+pub struct TauriPasteHost {
+    /// クリップボードとウィンドウを引く唯一の入口（アプリの寿命と一致するハンドル）。
+    app: AppHandle,
+}
+
+impl TauriPasteHost {
+    /// アプリのハンドルから作る（ハンドルは `Clone` である）。
+    fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl PasteHost for TauriPasteHost {
+    fn read_clipboard_text(&self) -> Result<String, String> {
+        self.app
+            .clipboard()
+            .read_text()
+            .map_err(|error| error.to_string())
+    }
+
+    fn emit_paste(
+        &self,
+        label: &WindowLabel,
+        event: GridPasteRequestedEvent,
+    ) -> Result<(), String> {
+        self.app
+            .emit_to(label.as_str(), GRID_PASTE_REQUESTED_EVENT, event)
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// クリップボードの読み口の結果を、**送る荷**へ整える（純粋関数。GUI もクリップボードも要らない）。
+///
+/// - 読めた文字は**そのまま**荷になる（解釈も正規化もしない。`GRID_PASTE_REQUESTED_EVENT` の doc）。
+/// - **空文字と読み取りの失敗は `None`** である — 空の荷を送れば画面は空の矩形を貼り付け、
+///   利用者には「貼り付けられた」と見える何かが出る。失敗を提示する経路も作らない
+///   （打鍵の経路と同じ扱いであり、`design.md` の「読めないときは静かに何もしない」）。
+///
+/// 失敗を `String` で受けるのは、**プラグインの誤り型をこの関数へ持ち込まない**ためである
+/// （判断の規則をテストできる形に閉じる。`crate::menu` の書き換え検証と同じ規律）。
+fn paste_event_from(read: Result<String, String>) -> Option<GridPasteRequestedEvent> {
+    match read {
+        Ok(text) if !text.is_empty() => Some(GridPasteRequestedEvent { text }),
+        Ok(_) | Err(_) => None,
+    }
+}
+
+/// 貼り付けの要求を、**活性化の対象ウィンドウ**（7.5 の振り向け）へ通知する。
+///
+/// メニューの処理はイベントループのスレッドで走るため、ここでブロックしてはならない。読むのは
+/// 1 回だけで、送るのは 1 つのイベント（[`GRID_PASTE_REQUESTED_EVENT`]。荷は読んだ文字）である。
+/// 送り先は**選ばれた時点で対象になっているウィンドウ**である（要件 3.5）— 対象が無ければ
+/// **読まずに何もしない**（触っていないウィンドウの表を書き換える経路を作らない）。
+///
+/// **読めなかったときは静かに何もしない**（記録には理由を 1 行残すが、利用者へ新しい失敗の
+/// 提示は作らない）。読んだ文字そのものは記録へ出さない（要件 8.3 の通信内容保護。
+/// 記録に文書の内容を書かない規律）。
+///
+/// # 器の側を引数で受け取る理由
+///
+/// 読む口と送る口は [`PasteHost`] の 1 つの縫い目に閉じてあり、**本番の実装**
+/// （[`TauriPasteHost`]）と**検査の二重**を差し替えられる（`session/watch.rs` の
+/// [`WindowDestroyEvents`] と同じ形）。選択から対象ウィンドウを解く 1 行
+/// （[`MenuSelection::window`]）は呼ぶ側に残るが、**読み口から送り口までの判断は全部ここに
+/// あるので、二重を渡すだけで実物の適応層のまま観測できる**。
+fn request_paste(host: &dyn PasteHost, target: Option<&WindowLabel>) {
+    let Some(label) = target else {
+        log::warn!("グリッドの貼り付け: 対象ウィンドウが無いため画面へ送らない");
+        return;
+    };
+    let Some(event) = paste_event_from(host.read_clipboard_text()) else {
+        log::warn!(
+            "グリッドの貼り付け: クリップボードを読めなかった（または空だった）ため画面へ送らない（ウィンドウ = {}）",
+            label.as_str(),
+        );
+        return;
+    };
+    // **文字数は `chars().count()` である**（`String::len` は UTF-8 のバイト長であり、日本語では
+    // 文字数と一致しない。記録は「何文字を運んだか」を写す — 中身は写さない）。
+    let characters = event.text.chars().count();
+    match host.emit_paste(label, event) {
+        Ok(()) => log::info!(
+            "グリッドの貼り付けの要求を送った: ウィンドウ = {} / 文字数 = {}",
+            label.as_str(),
+            characters,
+        ),
+        Err(error) => log::error!(
+            "グリッドの貼り付けの要求を送れなかった（ウィンドウ = {}）: {error}",
+            label.as_str(),
+        ),
+    }
+}
+
+/// 貼り付けの項目を登録する（[`install`] から 1 回呼ぶ。複製の [`install_copy`] と同じ形）。
+///
+/// **器の側（[`PasteHost`]）を引数で受け取る** — 本番の実装を検査の二重へ差し替えられる形に
+/// しておくためである（`session/watch.rs` の `WindowDestroyEvents` と同じ規律）。
+///
+/// 登録に失敗しても起動は続ける（複製と同じ判断である — 項目が引けないことより、アプリが
+/// 立ち上がらないことの方が悪い）。
+fn install_paste(app: &AppHandle, registry: &MenuRegistry, host: Arc<dyn PasteHost>) {
+    let spec = paste_item_spec(move |selection| {
+        request_paste(host.as_ref(), selection.window());
+    });
+    if let Err(error) = registry.register(app, spec) {
+        log::error!(
+            "グリッドの貼り付けのメニュー項目を登録できなかった（{PASTE_ITEM_ID}）: {error}"
+        );
+        return;
+    }
+    log::info!("グリッドの貼り付けの導線をメニューへ登録した（{PASTE_ITEM_ID}）");
 }
 
 // ---------------------------------------------------------------------------
@@ -2621,21 +2816,22 @@ fn install_copy(app: &AppHandle, registry: &MenuRegistry) {
 mod tests {
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     use app_shell::ipc::{
         GridCellEdit, GridEditRequest, GridHistoryRequest, GridOpenRequest, GridSearchDirection,
         GridSortKey, GridViewRequest, GridViolationRequest,
     };
-    use data_grid::{HEADER_LEN, ROW_KEY_LEN, VariantTag, WINDOW_FORMAT_VERSION, decode_window};
+    use data_grid::{decode_window, VariantTag, HEADER_LEN, ROW_KEY_LEN, WINDOW_FORMAT_VERSION};
     use document_format::{
         CellValue, Document, DocumentFormat, DocumentFormatApi, IdFactory, NestedValue, RowId,
         SchemaPart,
     };
     use document_session::{DocumentSessions, DocumentSessionsApi, SessionState};
     use schema_engine::{
-        ColumnDecl, Constraints, DeclaredKind, FieldDecl, Schema, TypeDecl, TypeKind,
-        schema_to_text,
+        schema_to_text, ColumnDecl, Constraints, DeclaredKind, FieldDecl, Schema, TypeDecl,
+        TypeKind,
     };
     use tauri::ipc::{InvokeResponseBody, IpcResponse};
 
@@ -2643,8 +2839,8 @@ mod tests {
 
     use super::*;
     use crate::menu::EDIT_MENU_LABEL;
-    use crate::session::watch::DestroyHandler;
     use crate::session::watch::testing::AlwaysPresent;
+    use crate::session::watch::DestroyHandler;
 
     /// 一時ディレクトリ（`session/commands.rs` のテストと同じ規律。プロセスごとに一意）。
     struct Scratch {
@@ -4192,7 +4388,11 @@ mod tests {
             ));
             let window = decode_window(&bytes).expect("窓は復号できる");
             assert_eq!(COUNT, window.row_count(), "選択の全体が 1 つの窓で読める");
-            window.rows().iter().map(|row| row.key()).collect::<Vec<_>>()
+            window
+                .rows()
+                .iter()
+                .map(|row| row.key())
+                .collect::<Vec<_>>()
         };
         let first = selected[0];
         let last = selected[COUNT - 1];
@@ -4234,11 +4434,16 @@ mod tests {
         removed.sort_unstable();
         expected.sort_unstable();
         assert_eq!(
-            expected, removed,
+            expected,
+            removed,
             "消えた行の集合は、可視の序数 {FROM}..{} の行の集合そのものである",
             FROM + COUNT
         );
-        assert_eq!((ROWS - COUNT) as u32, outcome.row_count, "行数は選択の数だけ減る");
+        assert_eq!(
+            (ROWS - COUNT) as u32,
+            outcome.row_count,
+            "行数は選択の数だけ減る"
+        );
 
         // 文書を直接読む（窓の記憶が保っている範囲に依らない）。消えた行が本当に消え、
         // 選択の外の行が 1 つも失われていないことを、識別子そのもので確かめる。
@@ -4583,7 +4788,13 @@ mod tests {
         );
         assert_eq!(
             row_key(&added),
-            row_key_at(&sessions, &grids, &label, &sheet, redone.affected_ordinals[0]),
+            row_key_at(
+                &sessions,
+                &grids,
+                &label,
+                &sheet,
+                redone.affected_ordinals[0]
+            ),
             "その序数の窓が運ぶのは、戻ってきた行そのものである"
         );
         assert!(
@@ -6806,33 +7017,222 @@ mod tests {
         assert!(Accelerator::parse("CmdOrCtrl+C").is_err());
     }
 
-    /// **貼り付けの項目を登録していない**（要件 7.8 の後半は未達である。理由は [`install`] の doc）。
+    /// 貼り付けの項目が**編集の部分メニュー**へ登録され、**アクセラレータを持たない**こと
+    /// （タスク 10.8。要件 7.8）。
     ///
-    /// 読み口が無いまま `Ctrl+V` を登録すると、基盤のメニューが打鍵を先に受け取り、**いま
-    /// 動いている打鍵の貼り付け（DOM の `paste`）が届かなくなる**。この検査は「登録しない」と
-    /// いう判断が実装に現れていることを固定する（判断を変えるときは、読み口を先に足す）。
+    /// **アクセラレータを付けないことが契約である。**`Ctrl+V` を項目に載せると、基盤のメニューが
+    /// 打鍵を先に受け取る環境で DOM の `paste` が届かなくなる — **いま動いている打鍵の貼り付けが
+    /// 壊れる**（複製の `Ctrl+C` は同じ入口へ着くので被害が無いが、貼り付けはメニュー側の入口が
+    /// 別である）。したがって読み口（`GridPasteRequestedEvent` を運ぶ経路）は**アクセラレータを
+    /// 持たずに**登録する。
     #[test]
-    fn no_paste_item_is_registered() {
+    fn the_paste_item_is_registered_in_the_edit_submenu_without_an_accelerator() {
+        let registry = MenuRegistry::new();
+        registry
+            .enroll(paste_item_spec(|_: &MenuSelection| {}))
+            .expect("競合なく登録できる");
+
+        assert_eq!(
+            paste_menu_path().segments(),
+            &[EDIT_MENU_LABEL.to_owned()],
+            "貼り付けは編集の部分メニューに置く"
+        );
+
+        let model = registry.model();
+        let items = model.items();
+        assert_eq!(
+            items.len(),
+            1,
+            "この module が置くのは貼り付けの 1 件だけである"
+        );
+        let node = items[0];
+        assert_eq!(node.item(), &MenuItemId::new(PASTE_ITEM_ID));
+        assert_eq!(node.label(), PASTE_LABEL);
+        assert_eq!(node.owner().as_str(), OWNER);
+        // **アクセラレータを持たない**（`with_accelerator` を呼ばない）。載せれば打鍵の経路を
+        // 奪う — この表明がその 1 行を固定する。
+        assert_eq!(
+            node.accelerator(),
+            None,
+            "貼り付けの項目にアクセラレータを付けてはならない（打鍵の貼り付けを奪う）"
+        );
+    }
+
+    /// **`Ctrl+V` / `Cmd+V` をアクセラレータに持つ項目を 1 つも登録していない**（タスク 10.8。
+    /// 要件 7.8 の「打鍵の経路を奪っていないこと」）。
+    ///
+    /// 貼り付けの項目そのものは在ってよい — 禁じるのは**打鍵の登録**である。本 module が登録する
+    /// 項目（複製・取り消し・やり直し・貼り付け）を 1 つの登録口へ入れ、`Ctrl+V` の組み合わせを
+    /// 持つものが 1 つも無いことを確かめる（`CmdOrCtrl+V` は 4.6 の構文契約が受理しないので、
+    /// プラットフォームごとの綴りを両方試す）。
+    #[test]
+    fn no_item_registers_the_paste_keystroke() {
         let registry = MenuRegistry::new();
         registry
             .enroll(copy_item_spec(|_: &MenuSelection| {}))
             .expect("競合なく登録できる");
+        for direction in [GridHistoryDirection::Undo, GridHistoryDirection::Redo] {
+            registry
+                .enroll(history_item_spec(direction, |_: &MenuSelection| {}))
+                .expect("競合なく登録できる");
+        }
+        registry
+            .enroll(paste_item_spec(|_: &MenuSelection| {}))
+            .expect("競合なく登録できる");
 
         let model = registry.model();
         let items = model.items();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].item().as_str(), COPY_ITEM_ID);
-
-        let paste = Accelerator::parse("Ctrl+V").expect("正準形");
-        assert!(
-            items.iter().all(|item| item.accelerator() != Some(&paste)),
-            "貼り付けのショートカットを登録していない"
+        assert_eq!(
+            items.len(),
+            4,
+            "複製・取り消し・やり直し・貼り付けの 4 件である"
         );
-        assert!(
-            items
+        for spelling in ["Ctrl+V", "Cmd+V"] {
+            let chord = Accelerator::parse(spelling).expect("正準形");
+            let carrier = items.iter().find(|item| item.accelerator() == Some(&chord));
+            assert!(
+                carrier.is_none(),
+                "貼り付けの打鍵（{spelling}）を持つ項目が登録されている: {:?}",
+                carrier.map(|item| item.item().as_str())
+            );
+        }
+        assert!(Accelerator::parse("CmdOrCtrl+V").is_err());
+    }
+
+    /// テストが駆動する**二重の器の側**（**本番の実装ではない**。`PasteHost` の縫い目）。
+    ///
+    /// 読み口が返す値と、**送られた荷**をそのまま記録する。読み口を引かれた回数も数える
+    /// （「対象が無ければ読まない」を表明できるようにするためである）。
+    ///
+    /// **別の値を返すことが要点である** — 適応層が読み口を引かずに定数を載せる実装へ戻れば、
+    /// 下の 2 つの検査が落ちる（初版は純粋関数だけを固定しており、その置換が 4 件すべてを
+    /// 緑のまま通した。レビューが実測）。
+    struct FakePasteHost {
+        /// 読み口が返す値。
+        read: Result<String, String>,
+        /// 読み口を引かれた回数。
+        reads: AtomicUsize,
+        /// 送られた荷（ラベルと荷）。送られなければ空である。
+        sent: Mutex<Vec<(WindowLabel, GridPasteRequestedEvent)>>,
+    }
+
+    impl FakePasteHost {
+        /// 与えられた文字が読める状態で作る。
+        fn reading(text: &str) -> Self {
+            Self {
+                read: Ok(text.to_owned()),
+                reads: AtomicUsize::new(0),
+                sent: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// 読めない状態で作る。
+        fn failing() -> Self {
+            Self {
+                read: Err("クリップボードを読めない".to_owned()),
+                reads: AtomicUsize::new(0),
+                sent: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// 読み口を引かれた回数。
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+
+        /// 送られた荷を（ラベル, 本文）の並びとして返す。
+        fn sent(&self) -> Vec<(String, String)> {
+            self.sent
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
                 .iter()
-                .all(|item| !item.item().as_str().contains("paste")),
-            "貼り付けの項目を作っていない"
+                .map(|(label, event)| (label.as_str().to_owned(), event.text.clone()))
+                .collect()
+        }
+    }
+
+    impl PasteHost for FakePasteHost {
+        fn read_clipboard_text(&self) -> Result<String, String> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.read.clone()
+        }
+
+        fn emit_paste(
+            &self,
+            label: &WindowLabel,
+            event: GridPasteRequestedEvent,
+        ) -> Result<(), String> {
+            self.sent
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((label.clone(), event));
+            Ok(())
+        }
+    }
+
+    /// **読み口が実際に引かれ、読んだ文字がそのまま荷になる**（タスク 10.8。要件 7.8）。
+    ///
+    /// 二重は「読み口を引かれた回数」と「送られた荷」を記録するので、次の 3 つの実装の誤りが
+    /// すべてこの 1 つの表明で落ちる: ①読み口を引かない（回数 0 件）②読み口を定数へ置き換える
+    /// （本文が食い違う）③送らない（荷が 0 件）。**解釈も正規化もしない** — 文字列は
+    /// バイトそのままである（`paste_event_from` の doc）。
+    #[test]
+    fn the_text_read_from_the_clipboard_becomes_the_payload_of_the_paste_event() {
+        let host = FakePasteHost::reading("1\t2\n3\t4");
+
+        request_paste(&host, Some(&WindowLabel::new("doc-1")));
+
+        assert_eq!(host.reads(), 1, "読み口をちょうど 1 回引く");
+        assert_eq!(
+            host.sent(),
+            vec![("doc-1".to_owned(), "1\t2\n3\t4".to_owned())],
+            "読んだ文字がそのまま荷になり、対象ウィンドウへ送られる"
+        );
+
+        // **錨の側（空・失敗・対象なし）の表明は下の検査である。**
+        let blank = FakePasteHost::reading(" ");
+        request_paste(&blank, Some(&WindowLabel::new("doc-1")));
+        assert_eq!(
+            blank.sent(),
+            vec![("doc-1".to_owned(), " ".to_owned())],
+            "空白だけの値も利用者の値である（解釈は画面とドメインが行う）"
+        );
+    }
+
+    /// **読めない・空・対象なしなら、何も送らない**（タスク 10.8。要件 7.8）。
+    ///
+    /// 打鍵の経路と同じ扱いであり、新しい失敗の提示を作らない（要件 7.8 の後半。`design.md` の
+    /// 「読めないとき・空のとき」）。空の荷を送れば画面は空の矩形を貼り付け、利用者には
+    /// 「貼り付けられた」と見える何かが出る。**対象が無いときは読み口も引かない**（触っていない
+    /// ウィンドウのためにクリップボードを読む経路を作らない。要件 3.5）。
+    #[test]
+    fn nothing_is_sent_when_the_clipboard_cannot_be_read_or_is_empty() {
+        let empty = FakePasteHost::reading("");
+        request_paste(&empty, Some(&WindowLabel::new("doc-1")));
+        assert!(
+            empty.sent().is_empty(),
+            "空のクリップボードでは何も送らない"
+        );
+        assert_eq!(
+            empty.reads(),
+            1,
+            "空かどうかは読んでからでなければ分からない"
+        );
+
+        let unreadable = FakePasteHost::failing();
+        request_paste(&unreadable, Some(&WindowLabel::new("doc-1")));
+        assert!(unreadable.sent().is_empty(), "読めないときは何も送らない");
+
+        let no_target = FakePasteHost::reading("1\t2");
+        request_paste(&no_target, None);
+        assert!(
+            no_target.sent().is_empty(),
+            "対象ウィンドウが無ければ送らない"
+        );
+        assert_eq!(
+            no_target.reads(),
+            0,
+            "対象ウィンドウが無ければ読み口も引かない"
         );
     }
 

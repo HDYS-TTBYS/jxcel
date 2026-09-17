@@ -274,8 +274,11 @@
  *
  * **メニューの活性化は本 module が購読する**（`./clipboardRequests`。要件 7.8 の後者）。器
  * （`src-tauri`）が `編集 > 複製` の選択を対象ウィンドウへイベントで送り、本 module が
- * **打鍵と同じ入口**（`RendererHandle.copySelection`）へ渡す。**貼り付けの項目は器が登録して
- * いない**（クリップボードの読み口が無いため。理由は `design.md` と `./clipboardRequests` の doc）。
+ * **打鍵と同じ入口**（`RendererHandle.copySelection`）へ渡す。**貼り付けも同じ形で結線した**
+ * （タスク 10.8）— 器が `編集 > 貼り付け` を登録し、**クリップボードを読んでから**荷
+ * （`GridPasteRequestedEvent`）として送り、本 module が**打鍵と同じ入口**
+ * （`RendererHandle.pasteText`）へ渡す。**アクセラレータは無い**（付ければ DOM の `paste` の
+ * 経路が基盤のメニューに奪われる）。
  *
  * | 論点 | 決定 | どこが担うか |
  * |---|---|---|
@@ -287,7 +290,7 @@
  * | 貼り付けのテキスト | **1 バイトも変えない**（改行の正規化も、列の解釈もしない）。解釈はドメインの `PasteCodec::parse` が唯一の源である | `./clipboard` の `planPaste` |
  * | 行数が変わったあと（要件 1.7） | 適用が影響を受けた行を持てば `WindowCache.clear(row_count)` を呼び、**反映の形は 8.6 と同じ 1 つを通る**（行数を置き換え、現在位置と選択を寄せ、消えた行の面を閉じる）。貼り付けは**行を補充しうる**ので、`invalidate` では足りない | `./clipboard` の `applyPaste` と `gridScreenPasteSettled`（`appliedRowOperation`） |
  * | **打鍵からの実行**（要件 7.8 の前者） | **移植口の 2 つの口がその経路である。**7.2 の面（`GlideSurface`）が DOM の `copy` / `paste` を捕獲の段で受け、移植口へ渡す — 打鍵（Ctrl+C / Ctrl+V）はそのイベントを起こす | `createGridRendererSpec` の `onCopy` / `onPaste` |
- * | **メニューからの実行**（要件 7.8 の後者） | **複製は結線した**（器が `編集 > 複製` を登録し、活性化をイベントで送り、本 module が購読して**打鍵と同じ入口**を呼ぶ）。**貼り付けは結線していない** — 障碍は**クリップボードの読み口が無いこと**であり（読み口は DOM の `paste` だけ、プラグインは依存に無い、`navigator.clipboard.readText()` は 7.2 の実起動で `不可`）、**読み口が無いまま `Ctrl+V` を項目に登録すると、いま動いている打鍵の貼り付けを基盤のメニューが奪って壊す** | 複製は `./clipboardRequests` と `src-tauri/src/commands/grid.rs`。貼り付けは `design.md`「貼り付けの項目を今 登録しない理由」 |
+ * | **メニューからの実行**（要件 7.8 の後者） | **複製も貼り付けも結線した。**どちらも器が項目を登録し、活性化をイベントで送り、本 module が購読して**打鍵と同じ入口**（`RendererHandle.copySelection` / `RendererHandle.pasteText`）を呼ぶ。**貼り付けの項目はアクセラレータを持たない** — 読み口（`tauri-plugin-clipboard-manager`）は器（Rust 側）だけが使い、`Ctrl+V` を登録すれば DOM の `paste` の経路が奪われる（タスク 10.8） | `./clipboardRequests` と `src-tauri/src/commands/grid.rs` |
  *
  * **単体テストが観測しないもの（8.7）。**① **文書へ実際に値が書かれること**と、補充される行の
  * 既定値は Rust 側の契約である（`crates/data-grid` の検査）— 本 module は「何を送ったか」まで
@@ -307,10 +310,10 @@
  *   置いた `onUnavailable` の経路は、**結線と同時に落とした**（未結線の操作が 1 つも無くなった
  *   ためである）
  * - **8.7（範囲の複製・貼り付けと、メニュー・打鍵）**: 移植口の `onCopy` / `onPaste` を結線し、
- *   **複製はメニューからも実行できるようにした**（器の `MenuRegistry` への `data-grid.copy` の
- *   登録・プラットフォームで解決した綴り・活性化のイベント・本 module の購読。上の「8.7 が
- *   足したもの」）。**残っているのはメニューからの貼り付けだけである** — クリップボードの
- *   読み口が無い（`./clipboard` の module doc と design.md に理由を記録した）。
+ *   **複製も貼り付けもメニューから実行できるようにした**（器の `MenuRegistry` への `data-grid.copy`
+ *   と `data-grid.paste` の登録・複製はプラットフォームで解決した綴り・活性化のイベント・
+ *   本 module の購読。**貼り付けの項目はアクセラレータを持たない** — 付けると DOM の `paste` から
+ *   打鍵を奪う。10.8 がクリップボードの読み口を足して閉じた）。上の「8.7 が足したもの」
  *   **9.9（取り消しとやり直しのメニュー）は 8.9 が同じ形（器の登録 ＋ イベント ＋ 購読）で足す**
  * - **8.4（違反の提示）**: 実装済みである（上の「8.4 が確定させたもの」）。本 module が受け取る
  *   `violation_total` は 6.2 の時点で既に**シート全体**の数であり、広げる作業は無かった
@@ -417,7 +420,12 @@ import {
   type PastePlan,
   type PasteSettlement,
 } from "./clipboard";
-import { installGridCopyRequests, type CopyEntry } from "./clipboardRequests";
+import {
+  installGridCopyRequests,
+  installGridPasteRequests,
+  type CopyEntry,
+  type PasteEntry,
+} from "./clipboardRequests";
 import { installDocumentChangeRequests } from "./documentRequests";
 import {
   clampSelection,
@@ -1960,6 +1968,37 @@ export function createGridCopyEntry(handleOf: () => RendererHandle | null): Copy
 }
 
 /**
+ * メニューの活性化を貼り付けの入口へ渡す口を組む（要件 7.8 の後半。タスク 10.8）。
+ *
+ * **`createGridCopyEntry` と同じ形である**（切り出した理由も同じ — 効果は走らせないと観測
+ * できない）。入口は**移植口の `pasteText` だけ**であり、**錨（起点）は移植口が持つ選択から
+ * 決まる**（画面は錨を計算しない。`./renderer/port` の `pasteText` の docs）。文字列は
+ * 器が読んだクリップボードの文字であり、**画面は 1 バイトも解釈しない**（何行何列かも、
+ * どの列の型に掛けるかも `planPaste` とドメインの仕事である）。
+ *
+ * **打鍵（DOM の `paste`）と同じメソッドである** — `glideAdapter.tsx` の
+ * `attachPasteKeystroke` が同じ入口へ結線するので、2 本の経路が同じ 1 つへ着く。
+ *
+ * ここが持つのは複製と同じ 2 つだけである:
+ *
+ * 1. **器がまだ無いとき（`null`）は何もしない。**投げない（活性化は非同期に届くので、
+ *    片付いた後の画面を叩く経路を作らない）
+ * 2. **失敗を記録する。**貼り付けられない理由は、移植口の `onPaste` が**告知へ出してから**
+ *    拒否する（`createGridRendererSpec` の `refusePromise`）ので、ここでは記録だけを行う
+ */
+export function createGridPasteEntry(handleOf: () => RendererHandle | null): PasteEntry {
+  return (text) => {
+    const handle = handleOf();
+    if (handle === null) {
+      return;
+    }
+    void handle.pasteText(text).catch((error: unknown) => {
+      console.error("貼り付けを適用できなかった", error);
+    });
+  };
+}
+
+/**
  * 選択を移植口へ下ろし、必要なら表示範囲を追随させる（要件 2.4）。
  *
  * **`GridSurface` の効果の本体である。**効果は走らせないと観測できない（`node` の環境には
@@ -2507,6 +2546,19 @@ function GridSurface({
    * 理由を告知へ出してから拒否する。ここは**記録だけ**する。
    */
   useEffect(() => installGridCopyRequests(createGridCopyEntry(() => handleRef.current)), []);
+
+  /**
+   * **メニューからの貼り付けを購読する**（タスク 10.8。要件 7.8 の後半）。
+   *
+   * 器（`src-tauri`）が `編集 > 貼り付け` の選択を受けて**クリップボードを読み**、読んだ文字を
+   * 荷として活性化の対象ウィンドウへイベントで送る。入口は**打鍵と同じ 1 つ**
+   * （`RendererHandle.pasteText`）であり、錨（起点）の決め方も適用の経路も打鍵と共通である
+   * （`./clipboardRequests` の doc）。**アクセラレータは無い**ので、打鍵の経路
+   * （DOM の `paste`）は 1 つも奪われない。
+   *
+   * 複製の購読と同じ理由で 1 回だけ設置し、入口は `handleRef` を通して引く。
+   */
+  useEffect(() => installGridPasteRequests(createGridPasteEntry(() => handleRef.current)), []);
 
   /**
    * **世代を記憶へ下ろす**（8.5）。**組み直さない** — 適用は世代だけを進め、列の構成を変えない

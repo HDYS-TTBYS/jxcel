@@ -36,7 +36,7 @@
  * `interactionDriver.ts` のヘッダにその旨を書いてある。
  */
 import type { DrivableRenderer } from "./interactionDriver";
-import type { RendererSelection, RendererSpec, RowOrdinal } from "./port";
+import type { CellPosition, RendererSelection, RendererSpec, RowOrdinal } from "./port";
 
 /** 窓をまとめて引く実装が、マウントの時に一度に引く可視の行数。 */
 const EAGER_WINDOW_ROWS = 24;
@@ -51,6 +51,26 @@ function mountedSpec(spec: RendererSpec | null, operation: string): RendererSpec
     throw new Error(`移植口がマウントされていない（または破棄された）のに ${operation} が起きた`);
   }
   return spec;
+}
+
+/**
+ * 貼り付けの錨（**選択の矩形の起点**）。**本物の規則の写しである** — 本物（`glideAdapter.tsx` の
+ * `anchorOfSelection`。Glide の `onPasteInternal` の写し）が読むのは**現在の選択帯の矩形**
+ * （Glide の `current.range`）の `x` / `y` であり、**現在位置（Glide の `current.cell`）では
+ * ない**。移植口の [`RendererSelection`] では、その欄は `range`（正規化された矩形）である —
+ * `current` は Glide の `current.cell` の写しであり、本物は錨に使わない。
+ *
+ * **実測（`port.test.ts` の台本）**: 台本の選択は `current = {row: 1, column: 1}` /
+ * `range.start = {row: 0, column: 0}` であり、実物が `onPaste` へ載せる錨は
+ * **`{row: 0, column: 0}`（矩形の起点）**である — 同じ台本を実物（`glideDrivableRenderer`）へ
+ * 通す比較がこの一致を固定している（`current` を錨にすれば両者が食い違い、その比較が落ちる）。
+ *
+ * 本物は列の全体・行の全体の選択を別の腕で扱うが、**この 2 つの実装が持つ選択は画面から
+ * 下ろされた矩形と現在位置だけ**である（`RendererSelection`）— したがって写すのは矩形の起点
+ * 1 つに閉じる。選択が無ければ錨も無い（貼り付けを起こさない）。
+ */
+function anchorOf(selection: RendererSelection | null): CellPosition | null {
+  return selection === null ? null : selection.range.start;
 }
 
 /**
@@ -106,6 +126,15 @@ export function createEagerFakeRenderer(): DrivableRenderer {
           }
           clipboard = await mountedSpec(spec, "copySelection").onCopy(current.range);
         },
+        async pasteText(text) {
+          // **打鍵とメニューの唯一の入口**（10.8。本物と同じ意味論: 錨は選択の現在位置から決まり、
+          // 文字列はそのまま仕様へ渡る）。錨が無ければ何もしない（起点の無い貼り付けを起こさない）。
+          const anchor = anchorOf(selection);
+          if (anchor === null) {
+            return;
+          }
+          await mountedSpec(spec, "pasteText").onPaste(anchor, text);
+        },
         destroy() {
           spec = null;
         },
@@ -130,9 +159,6 @@ export function createEagerFakeRenderer(): DrivableRenderer {
     emitColumnMove(from, to) {
       mountedSpec(spec, "emitColumnMove").onColumnMove(from, to);
       return Promise.resolve();
-    },
-    async emitPaste(anchor, text) {
-      await mountedSpec(spec, "emitPaste").onPaste(anchor, text);
     },
     get clipboard() {
       return clipboard;
@@ -191,6 +217,15 @@ export function createLazyFakeRenderer(): DrivableRenderer {
           }
           clipboard = await mountedSpec(spec, "copySelection").onCopy(current.range);
         },
+        async pasteText(text) {
+          await Promise.resolve();
+          // **打鍵とメニューの唯一の入口**（10.8。意味論は窓をまとめて引く実装と同じである）。
+          const anchor = anchorOf(selection);
+          if (anchor === null) {
+            return;
+          }
+          await mountedSpec(spec, "pasteText").onPaste(anchor, text);
+        },
         destroy() {
           spec = null;
         },
@@ -219,10 +254,6 @@ export function createLazyFakeRenderer(): DrivableRenderer {
     async emitColumnMove(from, to) {
       await Promise.resolve();
       mountedSpec(spec, "emitColumnMove").onColumnMove(from, to);
-    },
-    async emitPaste(anchor, text) {
-      await Promise.resolve();
-      await mountedSpec(spec, "emitPaste").onPaste(anchor, text);
     },
     get clipboard() {
       return clipboard;

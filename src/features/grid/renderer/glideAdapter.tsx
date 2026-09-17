@@ -149,7 +149,6 @@ import {
 // 識別子**だけであり、ライブラリ本体とスタイルは配布物に入ってよい）。
 import "@glideapps/glide-data-grid/dist/index.css";
 import {
-  useCallback,
   useEffect,
   useRef,
   useSyncExternalStore,
@@ -560,6 +559,17 @@ export function createGlideWiring(
     return spec;
   };
 
+  /**
+   * 移植口の `onPaste` へ渡す唯一の適用（**錨つき**）。
+   *
+   * 配線の [`GlideWiring.pasteAt`]（検査の駆動器が使う面）と、取っ手の
+   * [`RendererHandle.pasteText`]（打鍵の結線とメニューの購読が使う面）は**どちらもここを通る** —
+   * 適用の経路が 2 本にならない。
+   */
+  const pasteAt = async (anchor: CellPosition, text: string): Promise<void> => {
+    await liveSpec("onPaste").onPaste(anchor, text);
+  };
+
   /** 描くものを差し替え、面を描き直させる（React の面が `useSyncExternalStore` で読む）。 */
   const drawSelection = (next: GridSelection): void => {
     selection = next;
@@ -631,9 +641,7 @@ export function createGlideWiring(
     currentRange: () => rangeOfSelection(selection, spec.rowCount, columns.length),
     currentAnchor: () => anchorOfSelection(selection),
     copyRange: async (range) => liveSpec("onCopy").onCopy(range),
-    pasteAt: async (anchor, text) => {
-      await liveSpec("onPaste").onPaste(anchor, text);
-    },
+    pasteAt,
     surfaceRef,
     handle: {
       setSelection(next) {
@@ -685,6 +693,26 @@ export function createGlideWiring(
           return;
         }
         await write(await liveSpec("onCopy").onCopy(range));
+      },
+      /**
+       * **打鍵とメニューの唯一の入口**（タスク 10.8。要件 7.3、7.4、7.8）。錨は**配線が持つ
+       * 選択**（Glide の `onPasteInternal` の規則の写し）から決め、文字列は仕様
+       * （`spec.onPaste`）へそのまま渡す。
+       *
+       * 呼ぶ側は 2 つある: 器の DOM の `paste`（[`attachPasteKeystroke`] が結線する）と、
+       * メニューの活性化（`src/features/grid/clipboardRequests.ts` の購読 → 画面 →
+       * `RendererHandle.pasteText`）である。**どちらも同じこのメソッドである**
+       * （[`copySelection`] と同じ理由 — 錨の決定を呼ぶ側へ持ち出さない）。
+       *
+       * 錨が無ければ何もしない（起点の無い貼り付けを起こさない）。テキストは解釈しない
+       * （空文字もそのまま渡す — 送るかどうかを決めるのは画面の `planPaste` である）。
+       */
+      async pasteText(text) {
+        const anchor = anchorOfSelection(selection);
+        if (anchor === null) {
+          return;
+        }
+        await pasteAt(anchor, text);
       },
     },
   };
@@ -756,6 +784,36 @@ export function attachCopyKeystroke(
 }
 
 /**
+ * 器の DOM の `paste` を配線の入口へ結線する（**React の外にある関数である**。タスク 10.8）。
+ *
+ * [`attachCopyKeystroke`] と同じ形にしてあるのは、**打鍵とメニューの 2 つの入口が同じ 1 つへ
+ * 着くこと**を DOM を持たない検査で観測できるようにするためである。入口そのものは
+ * `RendererHandle.pasteText` であり、この関数はそれを DOM へ繋ぐ。
+ *
+ * **本文は文字列 1 つである。**`ClipboardEvent` の `text/plain` を読み、**解釈せずに**入口へ渡す
+ * （何行何列かも、どの列の型に掛けるかも、移植口もこの関数も知らない）。錨は入口が決めるので、
+ * ここでは計算しない（`preventDefault` は常に呼ぶ — 表の面に貼り付けの既定動作は無く、
+ * Glide 自身のクリップボードの経路は `keybindings` で止めてある。錨が無ければ入口が何もしない）。
+ */
+export function attachPasteKeystroke(
+  node: Pick<HTMLElement, "addEventListener" | "removeEventListener">,
+  handle: RendererHandle,
+): () => void {
+  const listener = (event: Event): void => {
+    const text =
+      event instanceof ClipboardEvent ? (event.clipboardData?.getData("text/plain") ?? "") : "";
+    event.preventDefault();
+    void handle.pasteText(text).catch((error: unknown) => {
+      console.error("貼り付けを移植口へ渡せなかった", error);
+    });
+  };
+  node.addEventListener("paste", listener, true);
+  return () => {
+    node.removeEventListener("paste", listener, true);
+  };
+}
+
+/**
  * `DataEditor` を描く面。**移植口の意味論を持たない**（それは [`createGlideWiring`] の側である）。
  * ここが持つのは DOM にしか無いものだけである:
  *
@@ -773,40 +831,23 @@ function GlideSurface({ wiring }: { readonly wiring: GlideWiring }): ReactElemen
   // 選択は配線が持つ。**写しを React の状態として持たない**（所有者を 1 つにする）。
   const selection = useSyncExternalStore(wiring.subscribeSelection, () => wiring.selection);
 
-  const onPaste = useCallback(
-    (event: Event) => {
-      // **文字列を解釈しない。**クリップボードの生の表形式をそのまま移植口へ渡す
-      // （何行何列かも、どの列の型に掛けるかも移植口は知らない）。
-      const text =
-        event instanceof ClipboardEvent ? (event.clipboardData?.getData("text/plain") ?? "") : "";
-      const anchor = wiring.currentAnchor();
-      if (anchor === null) {
-        return;
-      }
-      event.preventDefault();
-      void wiring.pasteAt(anchor, text).catch((error: unknown) => {
-        console.error("貼り付けを移植口へ渡せなかった", error);
-      });
-    },
-    [wiring],
-  );
-
   useEffect(() => {
     const node = containerRef.current;
     if (node === null) {
       return;
     }
-    // 複製は**配線の入口**（`RendererHandle.copySelection`。打鍵とメニューの唯一の入口）へ
-    // 結線する。関数を [`attachCopyKeystroke`] として外に出してあるのは、2 つの入口が同じ 1 つへ
-    // 着くことを DOM を持たない検査で観測できるようにするためである（この面は React の部品で
-    // あり、`node` 環境の検査から組み立てられない）。
+    // 複製も貼り付けも**配線の入口**（`RendererHandle.copySelection` / `RendererHandle.pasteText`。
+    // 打鍵とメニューの唯一の入口である）へ結線する。関数を [`attachCopyKeystroke`] /
+    // [`attachPasteKeystroke`] として外に出してあるのは、2 つの入口が同じ 1 つへ着くことを
+    // DOM を持たない検査で観測できるようにするためである（この面は React の部品であり、
+    // `node` 環境の検査から組み立てられない）。
     const detachCopy = attachCopyKeystroke(node, wiring.handle);
-    node.addEventListener("paste", onPaste, true);
+    const detachPaste = attachPasteKeystroke(node, wiring.handle);
     return () => {
       detachCopy();
-      node.removeEventListener("paste", onPaste, true);
+      detachPaste();
     };
-  }, [wiring, onPaste]);
+  }, [wiring]);
 
   return (
     <div ref={containerRef} style={SURFACE_STYLE}>
@@ -846,8 +887,10 @@ export function createGlideAdapter(): GridRendererPort {
         invalidate: (span) => {
           wiring.handle.invalidate(span);
         },
-        // **複製の入口は配線のものがそのまま入る**（打鍵の面とメニューの購読が同じ 1 つを叩く）。
+        // **複製と貼り付けの入口は配線のものがそのまま入る**（打鍵の面とメニューの購読が
+        // 同じ 1 つを叩く）。
         copySelection: () => wiring.handle.copySelection(),
+        pasteText: (text) => wiring.handle.pasteText(text),
         destroy: () => {
           // 先に配線を破棄する（以後の知らせは投げる）。そのうえで React の根を片付ける。
           wiring.handle.destroy();

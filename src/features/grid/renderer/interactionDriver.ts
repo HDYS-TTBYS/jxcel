@@ -113,6 +113,7 @@ export type PortCall =
   | "scrollTo"
   | "invalidate"
   | "copySelection"
+  | "pasteText"
   | "destroy";
 
 /** 記録された 1 回の呼び出し。`args` は**移植口が受け取った引数そのもの**である。 */
@@ -142,8 +143,10 @@ export interface RendererEventSource {
   emitColumnResize(column: number, width: number): Promise<void>;
   /** 列の位置が変更された。 */
   emitColumnMove(from: number, to: number): Promise<void>;
-  /** 貼り付けが指示された（DOM の `paste`）。 */
-  emitPaste(anchor: CellPosition, text: string): Promise<void>;
+  // **貼り付けを注ぐ口は無い**（10.8）。打鍵（DOM の `paste`）もメニューの活性化も
+  // `RendererHandle.pasteText` という**同じ入口**へ結線されているので、台本はその口を
+  // 1 回叩く（複製の `copySelection` と同じ扱いである。2 つ目の口を作れば、入口が 2 つに
+  // 分かれていないことを検査する手段が消える）。
   /**
    * 直近に**クリップボードへ渡した**文字列（実装の側の控え）。複製の約束の値が移植口を通って
    * 描き手の側まで届いたことを観測するために使う。まだ複製していなければ `null`。
@@ -374,7 +377,6 @@ const RESIZE_COLUMN = 1;
 const RESIZE_WIDTH = 144;
 const MOVE_FROM = 2;
 const MOVE_TO = 0;
-const PASTE_ANCHOR: CellPosition = { row: 4, column: 0 };
 const SCROLL_TO: CellPosition = { row: 40, column: 2 };
 const INVALIDATE: RowSpan = { start: 8, count: 4 };
 
@@ -392,11 +394,14 @@ const INVALIDATE: RowSpan = { start: 8, count: 4 };
  * **下ろした指示が報せ返らないこと**を並びの比較が固定する（返せば `onSelectionChange` が
  * もう 1 つ現れる）。
  *
- * **複製は 2 段ある**（要件 7.8）。打鍵（`emitCopy` に範囲を渡す — DOM の `copy` が範囲を持つ）と、
- * メニューの活性化（`handle.copySelection` — 範囲は実装が持つ選択から決まる）である。
- * **両方が同じ入口へ着くこと**を、2 段が同じ種類の呼び出し（`onCopy`）を出すことで観測する。
+ * **複製と貼り付けは、どちらも取っ手（`handle`）の口を通る**（要件 7.8）。**打鍵（DOM の
+ * `copy` / `paste`）とメニューの活性化が同じ入口へ着く**からである — `handle.copySelection` は
+ * 範囲を実装が持つ選択から決め、`handle.pasteText` は錨を実装が持つ選択から決める
+ * （8.7 と 10.8 がそう決めた。本物は `attachCopyKeystroke` / `attachPasteKeystroke` が DOM を
+ * 繋ぎ、メニューの購読が同じメソッドへ来る）。したがって台本は**それぞれ 1 段だけ**叩く —
+ * 2 段に分ければ「入口が 2 つに分かれていないこと」を検査する手段が消える。
  *
- * 複製で返った文字列は**そのまま貼り付けの入力に使う** — 移植口が中身を解釈しないこと
+ * 貼り付けへ渡す文字列は、複製が返した文字列**そのもの**である — 移植口が中身を解釈しないこと
  * （素通しであること）を、同じバイトが往復することで示す。
  *
  * 知らせは 1 つずつ待ってから次へ進む。したがって**同期に通知する実装と、遅らせて通知する
@@ -439,7 +444,12 @@ export async function driveCanonicalSequence(
   // したがって台本もその入口を 1 回叩く — **範囲は渡さない**（実装が持つ選択から決まる）。
   record("copySelection", []);
   await handle.copySelection();
-  await renderer.emitPaste(PASTE_ANCHOR, copiedText);
+  // **貼り付け**（タスク 10.8。要件 7.8）。打鍵（DOM の `paste`）とメニューの活性化は
+  // 同じ入口（`RendererHandle.pasteText`）へ結線されている。**錨は渡さない** — 実装が持つ
+  // 選択の現在位置（直前に下ろした `PUSHED_SELECTION`）から決まる。文字列は複製の戻り値
+  // そのものである（同じバイトが往復する）。
+  record("pasteText", [copiedText]);
+  await handle.pasteText(copiedText);
 
   record("scrollTo", [SCROLL_TO]);
   handle.scrollTo(SCROLL_TO);
@@ -497,14 +507,16 @@ function selectionOf(selection: RendererSelection | null): GridSelection {
  * | `emitColumnResize` | `onColumnResize`（列, 幅, 添字, grow 込み） | `onColumnResize`（添字, 幅） |
  * | `emitColumnMove` | `onColumnMoved`（from, to） | `onColumnMove`（from, to） |
  * | （複製は `handle.copySelection`。下の段落） | DOM の `copy`（本物は `attachCopyKeystroke`） | `onCopy`（**選択から決めた範囲**） |
- * | `emitPaste` | DOM の `paste`（本物は `GlideSurface` が受ける） | `onPaste`（錨, 文字列） |
+ * | （貼り付けは `handle.pasteText`。下の段落） | DOM の `paste`（本物は `attachPasteKeystroke`） | `onPaste`（**選択から決めた錨**, 文字列） |
  *
  * **複製と貼り付けだけは Glide の props を通らない。** 本物の経路は DOM の `copy` / `paste` を
  * `GlideSurface` が自分で受けて配線へ渡す（Glide 自身のクリップボードの経路は移植口を通らない
- * ので止めてある。`glideAdapter.tsx` のモジュール doc）。**複製は 8.7 が入口を 1 つにした** —
- * DOM の `copy` は `attachCopyKeystroke` が `RendererHandle.copySelection` へ結線し、メニューの
- * 活性化も同じメソッドへ来る。したがってこの層は**その入口を直接叩く**（`pasteAt` と同じ形で
- * あり、`emitCopy(range)` という形は「面が範囲を渡していた」7.2 の写しである）。
+ * ので止めてある。`glideAdapter.tsx` のモジュール doc）。**複製は 8.7 が、貼り付けは 10.8 が
+ * 入口を 1 つにした** — DOM の `copy` / `paste` は `attachCopyKeystroke` /
+ * `attachPasteKeystroke` が `RendererHandle.copySelection` / `RendererHandle.pasteText` へ
+ * 結線し、メニューの活性化も同じメソッドへ来る。したがってこの層は**その入口を直接叩く**
+ * （`emitCopy(range)` という形は「面が範囲を渡していた」7.2 の写しであり、**貼り付けを注ぐ口は
+ * 10.8 が消した** — 入口が 2 つに割れていないことを数える手段を残すためである）。
  *
  * # 器は使わない
  *
@@ -568,9 +580,6 @@ export function glideDrivableRenderer(
     },
     async emitColumnMove(from, to) {
       wiringOf("emitColumnMove").props.onColumnMoved(from, to);
-    },
-    async emitPaste(anchor, text) {
-      await wiringOf("emitPaste").pasteAt(anchor, text);
     },
     get clipboard() {
       return clipboard;
