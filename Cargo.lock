@@ -3077,6 +3077,7 @@ dependencies = [
  "deno_core",
  "document-format",
  "schema-engine",
+ "tokio",
  "ts-rs",
 ]
 

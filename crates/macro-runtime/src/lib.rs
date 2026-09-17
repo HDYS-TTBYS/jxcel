@@ -49,6 +49,7 @@
 pub mod engine;
 pub mod source;
 
+pub use engine::actor::{ActorError, MacroActor};
 pub use engine::outcome::{
     ChangeSummary, FailureKind, Frame, LimitKind, Limits, MacroFailure, OutputLevel, OutputLine,
     RunOutcome, RunRequest, WindowLabel,

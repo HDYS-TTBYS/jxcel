@@ -32,7 +32,7 @@
   - _Requirements: 2.3, 2.4, 5.5, 6.1, 6.2, 9.1, 9.3_
   - _Boundary: engine/outcome_
 
-- [ ] 1.4 実行基盤の actor（専用スレッド・直列化・実行ごとの isolate）
+- [x] 1.4 実行基盤の actor（専用スレッド・直列化・実行ごとの isolate）
   - 専用 OS スレッドが current-thread の tokio ランタイムを 1 つ回し、**実行ごとに `JsRuntime` を作って所有スレッドの上で落とす**（design.md 決定 1）。`isolate` の生成は 1 箇所に閉じる
   - 要求は mpsc + oneshot で直列化し、**isolate をスレッドから出さない**。実行中の 2 つ目の要求は「実行中である」として断る
   - 評価は `execute_script` → `run_event_loop(Default::default())` → Promise の状態を読む（**`resolve` を使わない**）。結果は 1.3 の型で返す
