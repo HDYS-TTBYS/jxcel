@@ -604,6 +604,14 @@ interface ItemResult {
 const ITEM_WAIT_MS = 10_000;
 
 /**
+ * **隣のセルへ移ったあと、違反の理由の面が更新されるまでの待ち**（ミリ秒）。
+ *
+ * 1 フレームでは足りない環境がある（CI の Linux ランナーでこの取りこぼしが実測された）。
+ * 速い環境では最初のフレームで返るので、費用は増えない。
+ */
+const VIOLATION_STEP_WAIT_MS = 2_000;
+
+/**
  * 貼り付けが届くのを待つ上限（ミリ秒）。
  *
  * **活性化するのは段である** — 段はアクセシビリティの木を 1 節ずつ `busctl` でたどって準備の印を
@@ -763,14 +771,22 @@ async function driveViolationReason(): Promise<ItemOutcome> {
   }
   for (let step = 0; step < 8; step += 1) {
     pressOnTable("ArrowRight");
-    await nextFrame();
-    const other = violationReasonOf();
-    if (
-      other !== null &&
-      other.row === first.row &&
-      other.column !== first.column &&
-      other.text.includes("違反")
-    ) {
+    // **面の更新を待つ。**1 フレームでは足りない環境がある（実測: CI の Linux ランナーで
+    // この項目だけが `violation_reason_not_repeated` で落ち、同じ検査器が次の実行では通った
+    // ＝取りこぼしである）。待ちの上限は項目の上限に合わせる（速い環境では 1 フレームで返る）。
+    const other = await waitFor(() => {
+      const reason = violationReasonOf();
+      if (
+        reason !== null &&
+        reason.row === first.row &&
+        reason.column !== first.column &&
+        reason.text.includes("違反")
+      ) {
+        return reason;
+      }
+      return null;
+    }, VIOLATION_STEP_WAIT_MS);
+    if (other !== null) {
       return OK;
     }
   }
