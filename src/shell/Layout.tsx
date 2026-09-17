@@ -141,6 +141,10 @@ import {
 } from "../features/smoke/TableSmoke";
 import { GLIDE_PROBE_SCREEN_ID, GlideProbe } from "../features/smoke/glideProbe";
 import { PORT_PROBE_SCREEN_ID, PortProbe } from "../features/smoke/portProbe";
+import {
+  GRID_OBSERVATION_SCREEN_ID,
+  GridObservation,
+} from "../features/grid/gridObservation";
 import { resolveVerificationInitialScreen } from "./verificationScreen";
 import { SessionClosePrompt } from "./sessionClose";
 
@@ -279,6 +283,21 @@ const PORT_PROBE_SCREEN_DEFINITION: ScreenDefinition = {
   id: PORT_PROBE_SCREEN_ID,
   title: "描画確認: 移植口の操作",
   component: PortProbe,
+};
+
+/**
+ * 検証専用: **実用のグリッド画面を起動して観測する画面**（`src/features/grid/gridObservation.tsx`。
+ * tasks.md 9.2、要件 11.1〜11.3 / 12.1〜12.4）。
+ *
+ * 1.6 / 7.2 の 2 つの使い捨ての画面と同じ理由で**`SHELL_SCREEN_REGISTRY` へは直接足さず**、
+ * 本定義も `Layout` の `__JXCEL_VERIFICATION__` の分岐の中だけで参照する（既定のビルドでは
+ * 定数畳み込みで参照ごと消える）。**本画面は製品の画面（`GridScreen`）をそのまま描く**ので、
+ * 参考のため登録しておく必要があるのは**外から観測するための 1 行を書く側**である。
+ */
+const GRID_OBSERVATION_SCREEN_DEFINITION: ScreenDefinition = {
+  id: GRID_OBSERVATION_SCREEN_ID,
+  title: "観測: グリッド（9.2）",
+  component: GridObservation,
 };
 
 /** 外観を選ぶ操作の 1 項目。 */
@@ -471,6 +490,7 @@ export function Layout(): ReactElement {
             ...SHELL_SCREEN_REGISTRY.screens,
             GLIDE_PROBE_SCREEN_DEFINITION,
             PORT_PROBE_SCREEN_DEFINITION,
+            GRID_OBSERVATION_SCREEN_DEFINITION,
           ],
         }
       : SHELL_SCREEN_REGISTRY;

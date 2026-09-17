@@ -701,8 +701,7 @@ fn an_edit_under_an_active_sort_moves_neither_the_row_nor_the_saved_order() {
     );
     assert_eq!(recomputed.first().copied(), Some(row));
     assert_ne!(
-        order_before,
-        recomputed,
+        order_before, recomputed,
         "前提: 導き直した並びは、いまの表示の並びと実際に違う（空振りしない）"
     );
 
@@ -760,7 +759,10 @@ fn an_edit_under_an_active_sort_moves_neither_the_row_nor_the_saved_order() {
         .filter(|index| values_before[*index] != values_after[*index])
         .collect();
     assert_eq!(
-        vec![ids_before.iter().position(|id| *id == row).expect("行は文書にある")],
+        vec![ids_before
+            .iter()
+            .position(|id| *id == row)
+            .expect("行は文書にある")],
         changed,
         "値が変わった行は編集した行だけ"
     );

@@ -515,12 +515,12 @@ use std::collections::{HashMap, HashSet};
 
 use document_format::parts::RowsCodec;
 use document_format::{
-    CellValue, CellWriteError, Document, EntryName, Row, RowId, RowInsertionError, RowRemovalError,
-    Sheet, SheetId, from_json_bytes, to_json_bytes,
+    from_json_bytes, to_json_bytes, CellValue, CellWriteError, Document, EntryName, Row, RowId,
+    RowInsertionError, RowRemovalError, Sheet, SheetId,
 };
 use schema_engine::{
-    Coercion, ColumnIndex, CompiledSchema, EditVerdict, SheetReport, ValidationOptions, Violation,
-    WriteOrigin, WriteVerdict, validate_columns, validate_sheet, validate_write,
+    validate_columns, validate_sheet, validate_write, Coercion, ColumnIndex, CompiledSchema,
+    EditVerdict, SheetReport, ValidationOptions, Violation, WriteOrigin, WriteVerdict,
 };
 // 貼り付けは**判定を呼ばず**、強制の規則表だけをセルごとに引く（モジュール docs「貼り付け」）。
 // `coerce` は縫い目の 3 つの口（判定・再検証・全件検証）のいずれでもない — 縫い目が数えるのは
@@ -529,7 +529,7 @@ use schema_engine::coerce::coerce;
 
 use crate::error::GridError;
 use crate::types::{CellAddress, RowOrdinal, RowSpan};
-use crate::view::{RowOrder, display_text};
+use crate::view::{display_text, RowOrder};
 
 /// 行データの wire 形式（NDJSON）の予約キー（行識別子を 26 文字 ULID テキストで持つ）。
 ///

@@ -97,12 +97,7 @@ fn six_by_two() -> (Document, SheetId, Vec<RowId>) {
     let (document, sheet) = document_with(
         &["a", "b"],
         (0..6)
-            .map(|index| {
-                vec![
-                    CellValue::Int(index),
-                    CellValue::Text(format!("行{index}")),
-                ]
-            })
+            .map(|index| vec![CellValue::Int(index), CellValue::Text(format!("行{index}"))])
             .collect(),
     );
     let ids = row_ids(&document, sheet);
@@ -122,8 +117,14 @@ fn remove_rows_returns_removed_rows_with_ids_and_values_in_sheet_order() {
 
     assert_eq!(
         vec![
-            (ids[1], vec![CellValue::Int(1), CellValue::Text("行1".to_owned())]),
-            (ids[3], vec![CellValue::Int(3), CellValue::Text("行3".to_owned())]),
+            (
+                ids[1],
+                vec![CellValue::Int(1), CellValue::Text("行1".to_owned())]
+            ),
+            (
+                ids[3],
+                vec![CellValue::Int(3), CellValue::Text("行3".to_owned())]
+            ),
         ],
         values_of_rows(&removed),
         "要求引数の並びではなくシートの順序で返る"
@@ -190,7 +191,11 @@ fn remove_rows_with_unknown_sheet_returns_unknown_sheet_and_changes_nothing() {
         .expect_err("未知のシートは失敗する");
 
     assert_eq!(RowRemovalError::UnknownSheet { sheet: ghost }, error);
-    assert_eq!(before, values_of(&document, sheet), "文書は 1 行も変わらない");
+    assert_eq!(
+        before,
+        values_of(&document, sheet),
+        "文書は 1 行も変わらない"
+    );
 }
 
 #[test]
@@ -269,7 +274,11 @@ fn insert_row_at_with_index_beyond_row_count_is_out_of_range_and_changes_nothing
         },
         error
     );
-    assert_eq!(before, values_of(&document, sheet), "文書は 1 行も変わらない");
+    assert_eq!(
+        before,
+        values_of(&document, sheet),
+        "文書は 1 行も変わらない"
+    );
 }
 
 #[test]
@@ -283,7 +292,11 @@ fn insert_rows_at_restores_removed_rows_with_identifiers_values_and_positions() 
     let removed = document
         .remove_rows(sheet, &[ids[2], ids[1]])
         .expect("実在する行の削除は成功する");
-    assert_eq!(vec![ids[1], ids[2]], row_ids_of_rows(&removed), "シート順で返る");
+    assert_eq!(
+        vec![ids[1], ids[2]],
+        row_ids_of_rows(&removed),
+        "シート順で返る"
+    );
     assert_eq!(
         vec![ids[0], ids[3], ids[4], ids[5]],
         row_ids(&document, sheet),
@@ -357,7 +370,11 @@ fn insert_rows_at_with_index_beyond_row_count_is_out_of_range_and_changes_nothin
         },
         error
     );
-    assert_eq!(before, values_of(&document, sheet), "文書は 1 行も変わらない");
+    assert_eq!(
+        before,
+        values_of(&document, sheet),
+        "文書は 1 行も変わらない"
+    );
 }
 
 /// 2 シートを持つ文書と、それぞれの行識別子を返す（文書単位の一意性の観測に使う）。
@@ -396,7 +413,11 @@ fn all_row_ids(document: &Document) -> Vec<RowId> {
 fn assert_row_ids_are_unique_in_the_document(document: &Document) {
     let ids = all_row_ids(document);
     let unique: std::collections::HashSet<RowId> = ids.iter().copied().collect();
-    assert_eq!(ids.len(), unique.len(), "文書内に同じ行識別子が 2 つ現れてはならない");
+    assert_eq!(
+        ids.len(),
+        unique.len(),
+        "文書内に同じ行識別子が 2 つ現れてはならない"
+    );
 }
 
 #[test]

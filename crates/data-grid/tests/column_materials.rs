@@ -26,15 +26,14 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use data_grid::{
-    ColumnDeclaration, ColumnIndex, Expandability, LayoutColumn, LayoutMember, MAX_EXPANSION_DEPTH,
-    NestedPathSegment, ReferencePage, ViewState, reference_page,
+    reference_page, ColumnDeclaration, ColumnIndex, Expandability, LayoutColumn, LayoutMember,
+    NestedPathSegment, ReferencePage, ViewState, MAX_EXPANSION_DEPTH,
 };
 use document_format::{CellValue, Document, SheetId};
 use schema_engine::compile::plan::ColumnValidator;
 use schema_engine::{
-    ColumnDecl, CompiledSchema, Constraints, CustomType, CustomTypeFailure, CustomTypeId,
-    CustomVerdict, DeclaredKind, FieldDecl, Schema, TypeDecl, TypeKind, TypeRegistry,
-    compile_declaration,
+    compile_declaration, ColumnDecl, CompiledSchema, Constraints, CustomType, CustomTypeFailure,
+    CustomTypeId, CustomVerdict, DeclaredKind, FieldDecl, Schema, TypeDecl, TypeKind, TypeRegistry,
 };
 
 // ---------------------------------------------------------------------------
@@ -356,17 +355,13 @@ fn the_inner_declaration_is_cut_at_the_expansion_depth() {
         "位置の段数は上限で止まる（{LEVELS} 段の宣言でも材料は上限までである）",
     );
     // 上限を越える位置が 1 つも無い（件数そのものを固定する — 「返ってきた」ことではない）。
-    assert!(
-        declared
-            .iter()
-            .all(|member| member.path.len() <= usize::from(MAX_EXPANSION_DEPTH)),
-    );
+    assert!(declared
+        .iter()
+        .all(|member| member.path.len() <= usize::from(MAX_EXPANSION_DEPTH)),);
     // 上限の段に達した位置は、それ以上降りない（その位置自身は材料に載る）。
-    assert!(
-        declared
-            .iter()
-            .any(|member| member.path.len() == usize::from(MAX_EXPANSION_DEPTH))
-    );
+    assert!(declared
+        .iter()
+        .any(|member| member.path.len() == usize::from(MAX_EXPANSION_DEPTH)));
 
     // 展開の深さの上限と内側の宣言の深さの上限が同じ規律であること（印と材料が食い違わない）。
     let capped = ViewState::new().layout(&compiled);

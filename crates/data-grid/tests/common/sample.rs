@@ -408,6 +408,16 @@ pub fn sample(options: &SampleOptions) -> Sample {
     skeleton
         .set_sheet_columns(reference, reference_names.clone())
         .expect("標本の参照先シートは骨格にある");
+    // **参照先のシートにも宣言を置く**（1.4 の要求は「シートと、それに適合するスキーマ宣言」で
+    // ある）。宣言が無いシートは**表として開けない**（`GridSession::open` は列 0 本の計画を
+    // `SchemaUnusable` として拒む）ので、9.2 の「シートを切り替えても取り消しが効く」の観測が
+    // 切り替え先を持てなくなる（実測: 参照の列の一覧は読めるのに、参照先のシートは開けなかった）。
+    skeleton
+        .set_root_schema(
+            reference,
+            SchemaPart::parse(&envelope_text(&reference_names)).expect("参照先の宣言は妥当"),
+        )
+        .expect("標本の参照先シートは骨格にある");
     let (reference_entry, reference_bytes, reference_rows) = encode_rows(
         reference,
         &reference_names,
@@ -1319,6 +1329,26 @@ fn revisions_type() -> TypeDecl {
 fn envelope(columns: &[SampleColumn]) -> String {
     let schema = Schema {
         columns: columns.iter().map(|column| column.decl.clone()).collect(),
+    };
+    let root = schema_to_text(&schema).expect("標本の宣言は正準出力できる");
+    format!(r#"{{"root":{root},"types":[]}}"#)
+}
+
+/// 列名だけから宣言を組む（**参照先のシート**のように、種別が `Text` だけのシートに使う）。
+fn envelope_text(names: &[String]) -> String {
+    let schema = Schema {
+        columns: names
+            .iter()
+            .map(|name| {
+                column(
+                    name,
+                    typed(TypeKind::Text, Constraints::default()),
+                    true,
+                    false,
+                    None,
+                )
+            })
+            .collect(),
     };
     let root = schema_to_text(&schema).expect("標本の宣言は正準出力できる");
     format!(r#"{{"root":{root},"types":[]}}"#)

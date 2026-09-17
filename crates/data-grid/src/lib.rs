@@ -208,17 +208,17 @@ pub use types::{RowOrdinal, RowSpan, SearchDirection};
 // `view` 層の状態と指定: 表示の指定（並べ替えと絞り込み）、行の順序、要約、違反の有無の
 // 据え付け、そして表示文字列の写し（5.1 が写しを作らずに使う唯一の源）。
 pub use view::ViolationPresence;
-pub use view::{DisplayText, FilterSpec, RowOrder, SortKey, ViewSpec, ViewSummary, display_text};
+pub use view::{display_text, DisplayText, FilterSpec, RowOrder, SortKey, ViewSpec, ViewSummary};
 // `view` 層の入れ子の展開: 列ごとの展開の状態、段数の上限、そこから導かれる平坦な列の構成、
 // 要素数の能力、詳細表示へ委ねる印。
 pub use view::{
-    ColumnDeclaration, ColumnLayout, ElementCount, Expandability, ExpansionState, LayoutColumn,
-    LayoutMember, MAX_EXPANSION_DEPTH, ViewState, derive_layout,
+    derive_layout, ColumnDeclaration, ColumnLayout, ElementCount, Expandability, ExpansionState,
+    LayoutColumn, LayoutMember, ViewState, MAX_EXPANSION_DEPTH,
 };
 // `view` 層の参照先の頁（タスク 10.3）: 参照先のシートの行を頁ごとに読む。要件 3.8 の入力手段
 // （参照先の行からの選択）が要る材料であり、**件数の上限は境界が強制する**（本層は与えられた
 // 件数を使う）。
-pub use view::{ReferencePage, ReferenceRow, reference_page};
+pub use view::{reference_page, ReferencePage, ReferenceRow};
 // `view` 層の違反の索引（タスク 2.4）: 可視行の序数を鍵とする索引、その総数と探索、内側の
 // 位置の保持、鍵の張り直し、2.2 への据え付け。`GridSession::violation_total` /
 // `find_violation`（タスク 5.2）がこの層を読む。
@@ -257,9 +257,9 @@ pub use history::{UndoEntry, UndoLabel, UndoRedo, UndoStack};
 // 要約（要素数）だけを運ぶ。6.3 の生バイト経路が `encode` を呼び、7.3 の窓の記憶が
 // `decode_window` を呼ぶ。
 pub use transport::{
-    DecodedCell, DecodedRow, DecodedWindow, EMPTY_WINDOW, Generation, HEADER_LEN, ROW_KEY_LEN,
-    VariantTag, WINDOW_FORMAT_VERSION, WindowCodec, WindowDecodeError, WindowRequest,
-    WindowRowSource, decode_window, variant_tag,
+    decode_window, variant_tag, DecodedCell, DecodedRow, DecodedWindow, Generation, VariantTag,
+    WindowCodec, WindowDecodeError, WindowRequest, WindowRowSource, EMPTY_WINDOW, HEADER_LEN,
+    ROW_KEY_LEN, WINDOW_FORMAT_VERSION,
 };
 // `api` 層の**画面 1 枚ぶんの操作口**（タスク 5.2）: 表示状態（順序・違反の索引・入れ子の
 // 展開）と窓の世代を 1 つの型が所有する。**取り消し履歴は所有しない** — 履歴は
@@ -267,4 +267,4 @@ pub use transport::{
 // 受け取る（10.2 がウィンドウの保持へ移した）。**文書は所有しない** — 文書を触る
 // 呼び出しはすべて参照または可変参照を受け取る（design.md「GridSession」の
 // Responsibility）。`src-tauri` の適応層がこの 1 つをウィンドウごとに保持する。
-pub use api::{DEFAULT_UNDO_LIMIT, GridSession};
+pub use api::{GridSession, DEFAULT_UNDO_LIMIT};

@@ -247,10 +247,12 @@ src/features/grid/
 - `src-tauri/permissions/app.toml` — 権限ブロック（6.2 / 6.3 の 6 つ、10.3 の 1 つ、**9.3 の 1 つ**）と、`app-shell` の集合への所属。**足し忘れると `removeUnusedCommands` がそのコマンドを配布物から静かに削る**（`scripts/check-command-acl.sh` が固定する）
 - `src/ipc/bindings.ts` — 生成物。`cargo run -p app-shell --bin generate-bindings` で再生成（手で編集しない）
 - `src/shell/Layout.tsx` — `SHELL_SCREEN_REGISTRY` にグリッド画面を 1 件追加
-- `src-tauri/src/commands/diagnostics_cmds.rs` — **9.3** が `diagnostics_record_render`（描画の健全性を診断の記録へ 1 件残す適応層の実体）を足した。記録の 1 行を組み立てるのは本層であり、要求は札と数値しか運ばない
+- `src-tauri/src/commands/diagnostics_cmds.rs` — **9.3** が `diagnostics_record_render`（描画の健全性を診断の記録へ 1 件残す適応層の実体）を足した。記録の 1 行を組み立てるのは本層であり、要求は札と数値しか運ばない。**9.2 が `Observation` の腕を足した**（3 OS の観測の実測を残す。**AT-SPI を持つのは Linux のランナーだけ**であり、3 OS の検査器が同じ形で読める唯一の場所が記録である）
 - `package.json` — `@glideapps/glide-data-grid` を追加
 - `package.json` / `package-lock.json` / `vitest.config.ts` / `.github/workflows/ci.yml` — フロントエンドのテストの走らせ手（`vitest`）と、その段（タスク 7.1）。群 7・群 8 のフロントエンドのタスクは「テストで示す」ことを要求するため、走らせ手ごと導入した。**ジョブもワークフローも新設しない** — 既存の `test` ジョブへ段を 1 つ足す（要件 6.2、タスク 1.4 の申し送り）。走らせる環境は `node` であり、追加の依存も表示先も要らない
-- `scripts/ci/` — `check-core-deps.sh data-grid` の段、ベンチ予算への `large_grid/*` の追加、および 3 OS で 10 万行の走査と編集を観測する台本（要件 12.1, 12.4）。**既存の 3 OS 検証マトリクスを拡張し、独立した系統を新設しない**
+- `scripts/ci/` — `check-core-deps.sh data-grid` の段、ベンチ予算への `large_grid/*` の追加、および 3 OS で 10 万行の走査と編集を観測する台本（要件 12.1, 12.4）。**既存の 3 OS 検証マトリクスを拡張し、独立した系統を新設しない**。9.2 の実体は `scripts/check-grid-observation.sh`（POSIX sh の検査器。**3 OS のランナーで同じものを走らせる**）と `scripts/ci/{linux,macos,windows}/verify-grid-observation.{sh,ps1}` であり、1.6 の一時的な段（`verify-render-traversal.*`）は本段が入った時点で取り除いた
+- `src/features/grid/gridObservation.tsx` — 9.2 が足した**検証専用の観測の画面**（製品の `GridScreen` をそのまま描き、実測を診断の記録へ 1 行残す）。検証専用の初期画面の経路（`src/shell/verificationScreen.ts` と `Layout.tsx` の `__JXCEL_VERIFICATION__` の分岐）に載り、既定のビルドでは参照されない
+- `crates/data-grid/examples/make-large-sheet.rs` — 9.2 が足した**検証専用の標本の書き出し**（非既定の feature `verification-samples` を要求するので、既定のビルドではコンパイルすらされない）。標本の生成器は 1.4 の `tests/common/sample.rs` 1 つであり、本ターゲットはそれを `#[path]` で取り込んで保存するだけである
 - `scripts/check-bench-budget.sh` / `.github/workflows/bench.yml` — 9.1 が `large_grid/paste_10k` を要件値（3 秒）の判定へ足し、計測を残す `cargo bench` に `-p data-grid` と `paths:` の `crates/data-grid/**` を足した（**ワークフローは新設しない**。`research.md`「実測と固定: 性能の計測と予算のゲート（タスク 9.1）」）
 
 ## System Flows
@@ -2261,6 +2263,7 @@ pub enum GridError {
 | 経路の失敗 | IPC の不達、生バイト経路の空の窓 | 画面内の状態として扱い、読み込み中のまま再試行する。**`ScreenBoundary` は捕まえない** |
 | 描画の不成立 | 何も塗られない | 識別できる情報を提示する（要件 12.2） |
 | 描画の劣化 | フレーム時間の中央値が記録の閾値（要件値 16.67 ms + 計測の刻みの許容 1.00 ms）を超える | 診断へ記録する（要件 12.3）。**要件の合否の判定はここではない**（9.2 の実画面の観測が要件値で行う） |
+| 描画の成立の検査（12.2）の待ちの上限 | **3 秒**（`renderHealth.ts` の `PAINT_PROBE_MS`）。**最初の窓の到着を覆わなければならない** | 9.2 の実起動の実測: 面が空のまま 500 ms を過ぎる健全な起動があり（検査が面の組み立ての直後に走るため、移植口が面を用意する前に読む）、**色数 0 を「塗って読み戻せない」と誤って記録していた**。色数 0 は「塗れない」ではなく「まだ読めない」である — 取り直す側へ移した（`renderHealth.ts` の実装の doc） |
 
 ### Monitoring
 - 描画の劣化と窓の取得失敗は `app-shell` の診断へ記録する。**新しい記録の仕組みを作らない**
@@ -2316,7 +2319,10 @@ pub enum GridError {
 - `large_grid/encode_window_10k` — 同じ符号化を 1 万行の標本で測る（要件 11.6 の比較。10 倍の行数で費用が増えないことを示す材料であり、予算の判定には使わない）
 - `large_grid/recompute_order` — 10 万行 × 2 基準列の並べ替えと絞り込み（`GridSession::set_view` のフル経路）
 - `large_grid/paste_10k` — 1 万行 × 30 列の貼り付け（要件 7.7, 11.5。**予算 3 秒を機械判定する唯一のベンチである**）
-- 走査中のフレーム時間の中央値（要件 11.1）— 実画面の観測として `scripts/ci/` に置く
+- 走査中のフレーム時間の中央値（要件 11.1）— 実画面の観測として `scripts/ci/` に置く（9.2 が
+  恒久の段として載せた。判定の本体は `scripts/check-grid-observation.sh` であり、**観測の実測は
+  診断の記録（`diagnostics_record_render` の `Observation` の腕）から読む** — AT-SPI を持つのは
+  Linux のランナーだけであり、3 OS で同じ判定を閉じるには記録が唯一の読み口である）
 
 実体は `crates/data-grid/benches/large_grid.rs` にあり、標本は 1.4 の生成器（`crates/data-grid/tests/common/sample.rs`）を相対パスで取り込んで使う（写しを作らない）。
 

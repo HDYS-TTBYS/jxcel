@@ -544,18 +544,139 @@ fn bulk_rows_script() -> Option<String> {
     Some(format!("window.{} = [{list}];", VERIFY_BULK_ROWS_GLOBAL))
 }
 
+// ---------------------------------------------------------------------------
+// 検証専用: グリッドの観測（9.2）の起動の条件
+// ---------------------------------------------------------------------------
+
+/// 検証専用: グリッドの観測を要求する環境変数（`1` のときだけ有効）。
+///
+/// **`verification-triggers` feature の下にのみ存在する**（既定のビルドには環境変数の読み取り
+/// 自体が入らない）。9.2 の観測の画面（`src/features/grid/gridObservation.tsx`）は、この指定が
+/// 無ければ**登録簿に載るだけで一度も初期画面に選ばれない**（`../shell/Layout.tsx` の
+/// `__JXCEL_VERIFICATION__` の分岐と `src/shell/verificationScreen.ts` の対）。
+#[cfg(feature = "verification-triggers")]
+const VERIFY_GRID_OBSERVATION_ENV: &str = "JXCEL_VERIFICATION_GRID_OBSERVATION";
+
+/// 観測を要求したことを載せるグローバルの名前。**`src/features/grid/gridObservation.tsx` の
+/// `VERIFICATION_GRID_OBSERVATION_GLOBAL` と同じ綴りでなければならない**（既定のビルドには
+/// どちらか一方しか存在しない検証専用の対の契約）。
+#[cfg(feature = "verification-triggers")]
+const VERIFY_GRID_OBSERVATION_GLOBAL: &str = "__JXCEL_VERIFICATION_GRID_OBSERVATION__";
+
+/// 検証専用: **グリッドの面が塗られない条件**を要求する環境変数（`1` のときだけ有効）。
+///
+/// 9.2 は「描画を成立させない条件で起動したとき、無内容の領域のまま留まらず、識別できる情報が
+/// 提示され、`paint_failed` の記録が残ること」（要件 12.2 / 12.3）を実起動で観測する。**この
+/// 条件を作る引き金は 9.3 の時点で存在しなかった**（`scripts/check-no-paint.sh` の抑止は器の
+/// 初回描画のものであり、表の面の不成立ではない）ので、9.2 がここへ足す。
+///
+/// **実装の差し替えは行わない**（製品の分岐を増やさない）。値は観測の画面へ渡り、画面が
+/// **「描かない移植口」を選ぶ**（`src/features/grid/renderer/nonPaintingPort.tsx`）— 製品の
+/// 画面は通常どおり移植口を使い、その移植口が何も塗らないので、**描画成立の検査（7.6）と
+/// 告知（9.3）の経路そのもの**が不成立を観測する。
+#[cfg(feature = "verification-triggers")]
+const VERIFY_GRID_PAINT_FAILURE_ENV: &str = "JXCEL_VERIFICATION_GRID_PAINT_FAILURE";
+
+/// 塗られない条件を要求したことを載せるグローバルの名前（上の対の契約）。
+#[cfg(feature = "verification-triggers")]
+const VERIFY_GRID_PAINT_FAILURE_GLOBAL: &str = "__JXCEL_VERIFICATION_GRID_PAINT_FAILURE__";
+
+/// 検証専用: **貼り付けの往復の筋書き**（10.8。要件 7.2）を要求する環境変数（`1` で有効）。
+///
+/// 貼り付けの往復は**ネイティブのメニューの活性化**が要る（`data-grid.paste` には
+/// アクセラレータを付けない — 付けると DOM の打鍵の貼り付けが基盤に取られる）。活性化できるのは
+/// アクセシビリティの木を持つ Linux の段だけであり（macOS の WKWebView / Windows の WebView2 には
+/// AT-SPI が無い）、**活性化しない段では観測の画面が待ちに入らないように**この引き金で分ける。
+#[cfg(feature = "verification-triggers")]
+const VERIFY_GRID_PASTE_ENV: &str = "JXCEL_VERIFICATION_GRID_PASTE";
+
+/// 貼り付けの筋書きを要求したことを載せるグローバルの名前（上の対の契約）。
+#[cfg(feature = "verification-triggers")]
+const VERIFY_GRID_PASTE_GLOBAL: &str = "__JXCEL_VERIFICATION_GRID_PASTE__";
+
+/// 検証専用: 貼り付けの筋書きを要求する初期化スクリプト（9.2。10.8）。
+#[cfg(feature = "verification-triggers")]
+fn grid_paste_script() -> Option<String> {
+    let requested = std::env::var(VERIFY_GRID_PASTE_ENV).ok()?;
+    if !is_verify_switch_on(&requested) {
+        log::warn!(
+            "{} の値を貼り付けの筋書きの指定に使えない（無視する）: {requested:?}",
+            VERIFY_GRID_PASTE_ENV,
+        );
+        return None;
+    }
+    log::info!("検証用の貼り付けの筋書きを要求した: {VERIFY_GRID_PASTE_ENV}=1");
+    Some(format!("window.{} = true;", VERIFY_GRID_PASTE_GLOBAL))
+}
+
+/// 検証専用: 環境変数の値が「有効」の綴りか（`1` だけを有効とする）。
+///
+/// **`is_embeddable_screen_id` と同じ理由で厳しくする** — 値は初期化スクリプトのソースへ
+/// 埋め込まれるので、`true` 以外の任意の文字列を受け付けると式を混ぜられる。ここで扱う値は
+/// 真偽だけなので、受理するのは `1` ただ 1 つである（`0` は「指定しない」と同じ扱い）。
+#[cfg(feature = "verification-triggers")]
+fn is_verify_switch_on(value: &str) -> bool {
+    value.trim() == "1"
+}
+
+/// 検証専用: グリッドの観測を要求する初期化スクリプト（9.2）。
+///
+/// 指定が無い・`1` でないときは `None` を返し、**観測の画面は起動しない**（登録簿に載るだけで
+/// 初期画面にはならない）。**どの引き金を読んだかを記録に 1 行残す** — 3 OS の段は
+/// ウィンドウの出現と初回描画の成立と同じ記録から起動を識別する（10.4 / 10.8 と同じ規律）。
+#[cfg(feature = "verification-triggers")]
+fn grid_observation_script() -> Option<String> {
+    let requested = std::env::var(VERIFY_GRID_OBSERVATION_ENV).ok()?;
+    if !is_verify_switch_on(&requested) {
+        log::warn!(
+            "{} の値を観測の指定に使えない（無視する）: {requested:?}",
+            VERIFY_GRID_OBSERVATION_ENV,
+        );
+        return None;
+    }
+    log::info!("検証用のグリッドの観測を要求した: {VERIFY_GRID_OBSERVATION_ENV}=1");
+    Some(format!("window.{} = true;", VERIFY_GRID_OBSERVATION_GLOBAL))
+}
+
+/// 検証専用: グリッドの面が**塗られない条件**を要求する初期化スクリプト（9.2。要件 12.2）。
+///
+/// 指定が無い・`1` でないときは `None` を返し、**通常の移植口（Glide）が使われる**。観測の
+/// 画面はこのグローバルが真のときだけ「描かない移植口」を選ぶ。
+#[cfg(feature = "verification-triggers")]
+fn grid_paint_failure_script() -> Option<String> {
+    let requested = std::env::var(VERIFY_GRID_PAINT_FAILURE_ENV).ok()?;
+    if !is_verify_switch_on(&requested) {
+        log::warn!(
+            "{} の値を描画の不成立の指定に使えない（無視する）: {requested:?}",
+            VERIFY_GRID_PAINT_FAILURE_ENV,
+        );
+        return None;
+    }
+    log::info!("検証用の描画の不成立を要求した: {VERIFY_GRID_PAINT_FAILURE_ENV}=1");
+    Some(format!(
+        "window.{} = true;",
+        VERIFY_GRID_PAINT_FAILURE_GLOBAL
+    ))
+}
+
 /// 検証専用: 初期化スクリプトを 1 本にまとめる。
 ///
 /// `WebviewWindowBuilder::initialization_script` は複数回呼べるが、**呼び出しを 1 箇所に保つ**
-/// ためここで連結する（初期画面の指定と一括転送の指定は独立であり、どちらか片方だけでも
-/// 有効でなければならない）。どちらも指定が無ければ `None`（**無条件に初期化スクリプトを
-/// 足さない**）。
+/// ためここで連結する（初期画面の指定・一括転送の指定・グリッドの観測の指定は独立であり、
+/// どれか 1 つだけでも有効でなければならない）。どれも指定が無ければ `None`（**無条件に
+/// 初期化スクリプトを足さない**）。
 #[cfg(feature = "verification-triggers")]
 fn verification_init_script() -> Option<String> {
-    let parts: Vec<String> = [initial_screen_script(), bulk_rows_script()]
-        .into_iter()
-        .flatten()
-        .collect();
+    let parts: Vec<String> = [
+        initial_screen_script(),
+        bulk_rows_script(),
+        grid_observation_script(),
+        grid_paint_failure_script(),
+        grid_paste_script(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     if parts.is_empty() {
         None
     } else {
@@ -1056,5 +1177,25 @@ mod tests {
         assert_eq!(parse_bulk_rows("100,1000001"), None);
         assert_eq!(parse_bulk_rows("100,100000];alert(1);//"), None);
         assert_eq!(parse_bulk_rows("100,1e5"), None);
+    }
+
+    // **feature の下の検査である** — 引き金の綴りの受理は `verification-triggers` の下にしか
+    // 無い（既定のビルドには環境変数の読み取り自体が入らない）。同じ module の
+    // `only_a_plain_row_list_can_be_embedded_in_the_initialization_script` と同じ形にする。
+    #[cfg(feature = "verification-triggers")]
+    #[test]
+    fn only_the_exact_switch_value_turns_a_verification_trigger_on() {
+        use super::is_verify_switch_on;
+        // 9.2 の 2 つの引き金（グリッドの観測と、面が塗られない条件）は**真偽だけ**を運ぶ。
+        // 値は初期化スクリプトのソースへ埋め込まれるので、受理する綴りは `1` ただ 1 つであり、
+        // 式を混ぜられる余地を残さない（`is_embeddable_screen_id` と同じ理由である）。
+        assert!(is_verify_switch_on("1"));
+        assert!(is_verify_switch_on(" 1 "), "前後の空白は許す");
+        for rejected in ["", "0", "true", "1+1", "1;alert(1)", "01", "１"] {
+            assert!(
+                !is_verify_switch_on(rejected),
+                "受理してはならない値: {rejected:?}"
+            );
+        }
     }
 }

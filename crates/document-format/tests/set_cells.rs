@@ -168,13 +168,13 @@ fn unknown_sheet_changes_no_cell() {
     // 先に妥当な変更を並べる: 事前検査を怠ればこれが適用されてしまう。
     let result = document.set_cells(
         ghost,
-        &[(ids[0], 0, CellValue::Int(99)), (ids[1], 1, CellValue::Int(98))],
+        &[
+            (ids[0], 0, CellValue::Int(99)),
+            (ids[1], 1, CellValue::Int(98)),
+        ],
     );
 
-    assert_eq!(
-        Err(CellWriteError::UnknownSheet { sheet: ghost }),
-        result
-    );
+    assert_eq!(Err(CellWriteError::UnknownSheet { sheet: ghost }), result);
     assert_eq!(before, values_of(&document, sheet), "どのセルも変わらない");
 }
 
@@ -188,7 +188,10 @@ fn unknown_row_changes_no_cell() {
 
     let result = document.set_cells(
         sheet,
-        &[(ids[0], 0, CellValue::Int(99)), (ghost, 0, CellValue::Int(1))],
+        &[
+            (ids[0], 0, CellValue::Int(99)),
+            (ghost, 0, CellValue::Int(1)),
+        ],
     );
 
     assert_eq!(Err(CellWriteError::UnknownRow { row: ghost }), result);

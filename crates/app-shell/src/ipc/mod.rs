@@ -79,20 +79,20 @@ pub mod grid;
 
 pub use command_names::COMMAND_NAMES;
 pub use document::{
-    DOCUMENT_SESSION_CHANGED_EVENT, DocumentDiscardResponse, DocumentNewOutcome,
-    DocumentNewResponse, DocumentOrigin, DocumentSaveOutcome, DocumentSaveResponse,
-    DocumentSessionStatus, DocumentSheet, DocumentStateResponse, DocumentSummary,
+    DocumentDiscardResponse, DocumentNewOutcome, DocumentNewResponse, DocumentOrigin,
+    DocumentSaveOutcome, DocumentSaveResponse, DocumentSessionStatus, DocumentSheet,
+    DocumentStateResponse, DocumentSummary, DOCUMENT_SESSION_CHANGED_EVENT,
 };
 pub use error::IpcError;
 pub use grid::{
     ColumnChoice, ColumnDescriptor, ColumnElementCount, ColumnExpandability,
-    ColumnMemberDescriptor, GRID_REFERENCE_PAGE_LIMIT, GridCellAddress, GridCellEdit,
-    GridCoercionNotice, GridEditCommand, GridEditOutcome, GridEditRequest, GridEditResponse,
-    GridExpansionState, GridFilterSpec, GridHistoryDirection, GridHistoryRequest, GridOpenRequest,
-    GridOpenResponse, GridPathSegment, GridReferenceRequest, GridReferenceResponse,
-    GridReferenceRow, GridRowAnchor, GridRowTarget, GridSearchDirection, GridSheetSummary,
-    GridSortKey, GridViewRequest, GridViewResponse, GridViewSpec, GridViolation,
-    GridViolationLocation, GridViolationRequest, GridViolationResponse, TypeKindTag,
+    ColumnMemberDescriptor, GridCellAddress, GridCellEdit, GridCoercionNotice, GridEditCommand,
+    GridEditOutcome, GridEditRequest, GridEditResponse, GridExpansionState, GridFilterSpec,
+    GridHistoryDirection, GridHistoryRequest, GridOpenRequest, GridOpenResponse, GridPathSegment,
+    GridReferenceRequest, GridReferenceResponse, GridReferenceRow, GridRowAnchor, GridRowTarget,
+    GridSearchDirection, GridSheetSummary, GridSortKey, GridViewRequest, GridViewResponse,
+    GridViewSpec, GridViolation, GridViolationLocation, GridViolationRequest,
+    GridViolationResponse, TypeKindTag, GRID_REFERENCE_PAGE_LIMIT,
 };
 
 /// 境界を越えるすべてのコマンドが返す封筒（要件 4.2、4.4）。
@@ -707,11 +707,15 @@ pub struct GridHistoryRequestedEvent {
 
 /// 描画の健全性の報告（タスク 9.3。要件 12.2、12.3）。**札と数値だけを運ぶ閉じた合併型である。**
 ///
-/// 2 つの腕は**互いに素**であり、それぞれが要る数値だけを持つ。同じ事実を平たい欄の集まりで
+/// 3 つの腕は**互いに素**であり、それぞれが要る数値だけを持つ。同じ事実を平たい欄の集まりで
 /// 表すと「走査の劣化なのに理由の種別が載っている」ような状態が型の上で作れてしまうため、
 /// ここでは**作れない形**にしてある（6.1 の [`GridEditCommand`] と同じ規律）。
 ///
-/// **任意の文字列は運べない。**記録へ流せるのはこの 2 つの事実と数値だけであり、記録の 1 行を
+/// 3 つ目の腕（[`RenderHealthReport::Observation`]）だけは**検証専用**である — 書くのは検証用の
+/// 観測画面（tasks.md 9.2。既定のビルドでは登録が定数畳み込みで消える）だけであり、要件の合否を
+/// 判定するのは検査器の側である（記録は「測った事実」だけを運ぶ）。
+///
+/// **任意の文字列は運べない。**記録へ流せるのはこの 3 つの事実と数値だけであり、記録の 1 行を
 /// 組み立てるのは器の側である — 記録の注入面を広げないためである（10.8 がクリップボードから
 /// 読んだ文字を記録へ出さず文字数だけを写したのと同じ規律）。
 ///
@@ -722,7 +726,7 @@ pub struct GridHistoryRequestedEvent {
 ///
 /// 直列化の札は小文字の綴りであり、画面側の記録の口
 /// （`src/features/grid/renderHealth.ts` の `RenderHealthReport.fact`）と同じ綴りである。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "fact", rename_all = "snake_case")]
 pub enum RenderHealthReport {
     /// 表の描画が成立しなかった（要件 12.2）。
@@ -746,6 +750,112 @@ pub enum RenderHealthReport {
         /// 要件 11.1 の予算（**マイクロ秒**。16670）。
         budget_us: u32,
     },
+    /// **グリッドの観測**（tasks.md 9.2。要件 11.1、11.2、11.3、12.1、12.2）。**検証専用である。**
+    ///
+    /// 9.2 の受け入れは「10 万行のシートを開き、末尾へ移動し、セルを編集し、取り消して戻すまでを
+    /// **実際に起動して観測する**」ことと、**3 つの OS のそれぞれで観測が成功すること**である。
+    /// 観測するのは検証用の初期画面（`src/features/grid/gridObservation.tsx`。製品の
+    /// [`GridScreen`] そのものを描く）であり、**その実測を 3 OS の検査器が同じ形で読める場所へ
+    /// 残す**必要がある。Linux には AT-SPI（アクセシビリティの木）があるが、macOS の WKWebView と
+    /// Windows の WebView2 には無く（それぞれ別の API であり、CI のランナーでは権限も無い）、
+    /// **3 OS で同じものを読める唯一の場所が診断の記録である**（5.2 / 5.3 の段と同じ理由。
+    /// `.kiro/steering/verification.md`「ログと記録を一次証拠にする」）。
+    ///
+    /// **観測できなかった項目は `None` である**（推測で埋めない。9.2 の段は「観測が成功し、
+    /// 失敗したときに何が起きたかが記録から分かる」ことを求める）。
+    Observation {
+        /// 表示の指示（画面がドキュメントを持つことを知った瞬間）から、表が現れて面が描かれる
+        /// までの経過（**ミリ秒**。要件 11.2 の予算は 1000）。
+        first_screen_ms: Option<u32>,
+        /// 末端までの走査のフレーム時間の中央値（**マイクロ秒**。要件 11.1 の予算は 16670）。
+        scan_median_us: Option<u32>,
+        /// 走査が到達した表示の序数（0 起点）。
+        reached_row: Option<u32>,
+        /// 表示の行数。
+        row_count: Option<u32>,
+        /// セルの編集の確定から反映までの経過（**ミリ秒**。要件 11.3 の予算は 100）。
+        edit_ms: Option<u32>,
+        /// 編集の取り消しの成否。
+        undo: ObservationUndo,
+        /// 描画が成立しなかったか（要件 12.2 の不成立条件の起動での観測）。
+        paint_failed: bool,
+        /// 面（canvas）から読めた色数（**読めなかったときは `None`**。`Some(0)` は「読めたが
+        /// 一様である」ではなく、読めない状態を写した値である — 観測の画面は `None` を読めずに
+        /// 使う）。
+        colors: Option<u32>,
+        /// **9.2 の筋書きの項目ごとの結果**（[`ObservationItemResult`]）。**観測しなかった項目は
+        /// 載せない**（`Skipped` のような値を作らない — 「走らせなかった」と「走らせて駄目だった」を
+        /// 記録の読み手が混同しないためである。段は自分が要求する項目を引数で名乗る）。
+        items: Vec<ObservationItemResult>,
+    },
+}
+
+/// 9.2 の筋書きの項目（[`RenderHealthReport::Observation`]）。**閉じた列挙である。**
+///
+/// tasks.md 9.2 は「群 10 が閉じた経路を筋書きに含める」ことを求める（`10.1` 入れ子の展開のあとの
+/// 走査、`10.5` 行の追加と取り消し・やり直し、`10.4` 並べ替えた表示での位置指定の追加と範囲の削除、
+/// `10.6` 違反の理由、`10.3` 参照の一覧、`10.8` 貼り付けの往復、`10.2` シートを切り替えても
+/// 取り消しが効く、`10.7` 文書の差し替えへの追随）。**単体テストが観測しない結線であり、実起動で
+/// しか確かめられない。**項目の識別子を閉じた列挙にするのは、記録から読む段が綴りで分岐できる
+/// ようにするためである（任意の文字列を運ばない規律は [`RenderHealthReport`] と同じ）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationItem {
+    /// 入れ子の列を展開したあとに走査する（10.1）。
+    NestedExpansion,
+    /// 行を追加して取り消し・やり直しをし、現在位置が対象の行へ移る（10.5）。
+    InsertRow,
+    /// 並べ替えた表示で位置を指定して行を追加し、範囲を選んで削除する（10.4）。
+    SortThenDelete,
+    /// 違反しているセルの理由を読む（10.6）。
+    ViolationReason,
+    /// 参照の列の面が行を一覧する（10.3）。
+    ReferenceRows,
+    /// 貼り付けがメニューの項目を経由して戻る（10.8。**ネイティブのメニューの活性化が要るため、
+    /// 活性化できる段だけが要求する**）。
+    PasteThroughMenu,
+    /// シートを切り替えても取り消しが効く（10.2）。
+    SheetSwitchUndo,
+    /// 文書を差し替えたとき、表が古い行を残さずに追随する（10.7）。
+    ReplaceDocument,
+}
+
+/// 筋書きの項目の結果（[`RenderHealthReport::Observation`]）。
+///
+/// **2 値である。**「観測しなかった」は結果ではなく**項目が載らないこと**で表す（項目の列挙に
+/// 「未観測」を混ぜると、段が要求した項目の欠落を記録の読み手が見分けられなくなる）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationItemOutcome {
+    /// 成立した。
+    Ok,
+    /// 成立しなかった。
+    Ng,
+}
+
+/// 筋書きの 1 項目の結果（[`RenderHealthReport::Observation`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct ObservationItemResult {
+    /// どの項目か。
+    pub item: ObservationItem,
+    /// その結果。
+    pub outcome: ObservationItemOutcome,
+}
+
+/// 編集の取り消しの成否（[`RenderHealthReport::Observation`]。要件 9.2 の往復）。
+///
+/// **3 値である。**「観測していない」は「成功した」でも「失敗した」でもない — 塗られない条件の
+/// 起動では走査と編集を観測しない（12.2 の陽性の観測がその起動の目的である）。`bool` に潰すと、
+/// 観測していないことを失敗として検査器へ見せることになる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationUndo {
+    /// 取り消しが成立した。
+    Ok,
+    /// 取り消しが成立しなかった。
+    Ng,
+    /// 観測していない。
+    NotObserved,
 }
 
 /// 表の描画が成立しなかった理由の種別（タスク 9.3。要件 12.2）。**閉じた列挙である。**
@@ -775,7 +885,7 @@ pub enum RenderPaintFailure {
 /// 運ぶのは [`RenderHealthReport`] 1 つである。ウィンドウは要求の型に現れない — 呼び出し元は
 /// 基盤が注入する `WebviewWindow` から取るため、フロントエンドが偽装する経路は存在しない
 /// （要件 4.6、`ipc-contract.md`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct RenderHealthRecordRequest {
     /// 記録する事実。
     pub report: RenderHealthReport,
@@ -1263,6 +1373,10 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<GridReferenceRow>(&cfg),
         declared::<GridReferenceResponse>(&cfg),
         declared::<RenderPaintFailure>(&cfg),
+        declared::<ObservationUndo>(&cfg),
+        declared::<ObservationItem>(&cfg),
+        declared::<ObservationItemOutcome>(&cfg),
+        declared::<ObservationItemResult>(&cfg),
         declared::<RenderHealthReport>(&cfg),
         declared::<RenderHealthRecordRequest>(&cfg),
         declared::<RenderHealthRecordResponse>(&cfg),
@@ -1948,16 +2062,14 @@ mod tests {
         assert_no_numeric_type(&ts);
         assert_no_any(&ts);
 
-        assert!(
-            serde_json::to_value(&DiagnosticsLogLocationResponse {
-                context: WindowContext {
-                    window: WindowLabel::new("doc-1"),
-                },
-                directory: "/home/user/.local/share/com.jxcel.app/logs".to_owned(),
-            })
-            .unwrap()["directory"]
-                .is_string()
-        );
+        assert!(serde_json::to_value(&DiagnosticsLogLocationResponse {
+            context: WindowContext {
+                window: WindowLabel::new("doc-1"),
+            },
+            directory: "/home/user/.local/share/com.jxcel.app/logs".to_owned(),
+        })
+        .unwrap()["directory"]
+            .is_string());
     }
 
     /// メニューの活性化の通知が**選ばれた導線だけ**を運ぶことを固定する（要件 3.5 の
@@ -3081,9 +3193,16 @@ mod tests {
         let ts = render_bindings().unwrap();
         for declaration in [
             "export type RenderPaintFailure = \"no_canvas\" | \"unpaintable\" | \"blank\";",
+            "export type ObservationUndo = \"ok\" | \"ng\" | \"not_observed\";",
+            "export type ObservationItem =",
+            "\"nested_expansion\" |",
+            "\"paste_through_menu\" |",
+            "export type ObservationItemOutcome = \"ok\" | \"ng\";",
+            "export type ObservationItemResult = {",
             "export type RenderHealthReport =",
             "{ \"fact\": \"paint_failed\"",
             "{ \"fact\": \"scan_below_budget\"",
+            "{ \"fact\": \"observation\"",
             "export type RenderHealthRecordRequest = {",
             "export type RenderHealthRecordResponse = {",
             "export type RenderHealthRecordResult = IpcResult<RenderHealthRecordResponse, IpcError>;",

@@ -21,7 +21,7 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use common::{sample, Scratch, SampleSpec};
+use common::{sample, SampleSpec, Scratch};
 use document_format::parts::RowsCodec;
 use document_format::{CellValue, DocumentFormatApi, EntryName};
 
@@ -85,9 +85,7 @@ fn sample_mixes_value_variants() {
         }
     }
 
-    for expected in [
-        "Null", "Bool", "Int", "Float", "Decimal", "Text", "Nested",
-    ] {
+    for expected in ["Null", "Bool", "Int", "Float", "Decimal", "Text", "Nested"] {
         assert!(
             seen.contains(expected),
             "標本に {expected} 変種が現れない（現れた変種: {seen:?}）"

@@ -1932,7 +1932,12 @@ fn the_row_count_of_an_undo_and_a_redo_is_the_count_after_the_inverse_applied() 
     let undone = session.undo();
     assert_count(&session, &undone, base, "挿入の取り消し（挿入前の行数）");
     let redone = session.redo();
-    assert_count(&session, &redone, base + 2, "挿入のやり直し（挿入後の行数）");
+    assert_count(
+        &session,
+        &redone,
+        base + 2,
+        "挿入のやり直し（挿入後の行数）",
+    );
 
     // --- 行の削除（逆命令は差し戻し、やり直しは取り除き） ---
     let mut session = Session::new(8, 13, 64);
@@ -1943,7 +1948,12 @@ fn the_row_count_of_an_undo_and_a_redo_is_the_count_after_the_inverse_applied() 
     });
     assert_count(&session, &applied, base - 2, "削除の適用");
     let undone = session.undo();
-    assert_count(&session, &undone, base, "削除の取り消し（差し戻した後の行数）");
+    assert_count(
+        &session,
+        &undone,
+        base,
+        "削除の取り消し（差し戻した後の行数）",
+    );
     let redone = session.redo();
     assert_count(
         &session,
@@ -1963,7 +1973,12 @@ fn the_row_count_of_an_undo_and_a_redo_is_the_count_after_the_inverse_applied() 
     let undone = session.undo();
     assert_count(&session, &undone, base, "複製の取り消し（複製の前の行数）");
     let redone = session.redo();
-    assert_count(&session, &redone, base + 2, "複製のやり直し（複製の後の行数）");
+    assert_count(
+        &session,
+        &redone,
+        base + 2,
+        "複製のやり直し（複製の後の行数）",
+    );
 }
 
 /// 行を増減しない編集（セルへの書き込み）の取り消し・やり直しが、**変わらない**行数を

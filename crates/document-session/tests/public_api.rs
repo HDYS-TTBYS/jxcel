@@ -119,7 +119,9 @@ fn edit_records_revision_and_save_writes_the_same_bytes_as_a_direct_write() {
 
     let sessions = DocumentSessions::new();
     let main = window("main");
-    sessions.resolve(&main, Some(&session_path)).expect("読み込める");
+    sessions
+        .resolve(&main, Some(&session_path))
+        .expect("読み込める");
 
     // 1 回の閉包が 1 回の適用である。上流の一括の書き換えを閉包の内側で呼ぶ。
     let edited = sessions
@@ -142,10 +144,15 @@ fn edit_records_revision_and_save_writes_the_same_bytes_as_a_direct_write() {
 
     // 保存のバイト列は、形式の側へ同じ変更を適用して直接書き出したバイト列と一致する。
     let direct = scratch.file("direct.jxcel");
-    let mut document = common::api().open(&pristine).expect("原本を開ける").document;
+    let mut document = common::api()
+        .open(&pristine)
+        .expect("原本を開ける")
+        .document;
     let mut apply = set_first_cell(CellValue::Int(42));
     apply(&mut document);
-    common::api().save(&document, &direct).expect("直接書き出せる");
+    common::api()
+        .save(&document, &direct)
+        .expect("直接書き出せる");
     assert_eq!(
         fs::read(&session_path).expect("保存したファイルを読める"),
         fs::read(&direct).expect("直接書き出したファイルを読める"),
@@ -243,7 +250,8 @@ fn create_makes_an_empty_document_and_discard_clears_the_unsaved_mark() {
 
     // 選ばれた位置へ保存すると、以後の出所はその位置になる（要件 5.8）。
     let chosen = scratch.file("chosen.jxcel");
-    let SaveReport::Saved { location } = sessions.save_to(&main, &chosen).expect("保存できる") else {
+    let SaveReport::Saved { location } = sessions.save_to(&main, &chosen).expect("保存できる")
+    else {
         panic!("選ばれた位置へ保存に成功するはず");
     };
     assert_eq!(location, chosen);
@@ -278,12 +286,18 @@ fn state_may_close_and_forget_leave_an_unresolved_window_absent() {
         sessions.edit(&untouched, &mut |_document| ()),
         Err(SessionError::NoDocument)
     ));
-    assert!(matches!(sessions.save(&untouched), Err(SessionError::NoDocument)));
+    assert!(matches!(
+        sessions.save(&untouched),
+        Err(SessionError::NoDocument)
+    ));
     assert!(matches!(
         sessions.save_to(&untouched, Path::new("/tmp/never-written.jxcel")),
         Err(SessionError::NoDocument)
     ));
-    assert!(matches!(sessions.discard(&untouched), Err(SessionError::NoDocument)));
+    assert!(matches!(
+        sessions.discard(&untouched),
+        Err(SessionError::NoDocument)
+    ));
 
     // 破棄されたウィンドウのセッションは忘れられる（他のウィンドウには触れない）。
     let scratch = common::Scratch::new("public-forget");

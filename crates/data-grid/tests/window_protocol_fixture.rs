@@ -323,8 +323,16 @@ fn the_committed_fixture_bytes_decode_into_the_documented_content() {
         );
         for (column_index, cell) in row.cells().iter().enumerate() {
             let (text, tag, violated, _unused) = expected_row[column_index];
-            assert_eq!(text, cell.text(), "行 {row_index} 列 {column_index} の表示文字列");
-            assert_eq!(tag, cell.tag().byte(), "行 {row_index} 列 {column_index} の変種の札");
+            assert_eq!(
+                text,
+                cell.text(),
+                "行 {row_index} 列 {column_index} の表示文字列"
+            );
+            assert_eq!(
+                tag,
+                cell.tag().byte(),
+                "行 {row_index} 列 {column_index} の変種の札"
+            );
             assert_eq!(
                 violated,
                 cell.violated(),
@@ -352,4 +360,3 @@ fn the_committed_fixture_bytes_decode_into_the_documented_content() {
         .count();
     assert_eq!(1, violated, "窓が運ぶ違反の数が違う");
 }
-

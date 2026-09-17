@@ -50,8 +50,8 @@
 //! （セル値やスキーマ）は決して記録へ流さない（要件 8.4）。
 
 use app_shell::ipc::command_names;
-use tauri::WebviewWindow;
 use tauri::ipc::{InvokeBody, Request, Response};
+use tauri::WebviewWindow;
 use tauri_plugin_log::log;
 
 /// 一括転送で受け付ける最大バイト数（64 MiB）。

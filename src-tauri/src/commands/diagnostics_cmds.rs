@@ -83,11 +83,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use app_shell::diagnostics::{self, DiagnosticsLevel as CoreLevel};
 use app_shell::ipc::{
-    DIAGNOSTICS_REQUESTED_EVENT, DiagnosticsExportRecords, DiagnosticsExportResponse,
-    DiagnosticsLevel, DiagnosticsLogLocationResponse, DiagnosticsRequestedEvent,
-    DiagnosticsSection, DiagnosticsVerbosityResponse, DiagnosticsVerbositySetRequest, IpcError,
-    IpcResult, RenderHealthRecordRequest, RenderHealthRecordResponse, RenderHealthReport,
-    RenderPaintFailure, WindowContext, WindowLabel,
+    DiagnosticsExportRecords, DiagnosticsExportResponse, DiagnosticsLevel,
+    DiagnosticsLogLocationResponse, DiagnosticsRequestedEvent, DiagnosticsSection,
+    DiagnosticsVerbosityResponse, DiagnosticsVerbositySetRequest, IpcError, IpcResult,
+    ObservationItem, ObservationItemOutcome, ObservationUndo, RenderHealthRecordRequest,
+    RenderHealthRecordResponse, RenderHealthReport, RenderPaintFailure, WindowContext, WindowLabel,
+    DIAGNOSTICS_REQUESTED_EVENT,
 };
 use app_shell::settings::FileSettingsStore;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
@@ -444,7 +445,10 @@ pub fn diagnostics_verbosity_set(
 /// 任意の文字列は境界を越えられない — 記録の注入面を広げないためである。ミリ秒への戻し
 /// （マイクロ秒の整数 ÷ 1000）もここで行う。
 ///
-/// **1 行は「測った事実」だけを述べ、結論（要件を満たしたか）を名乗らない。**記録の有無を決める
+/// **1 行は「測った事実」だけを述べ、結論（要件を満たしたか）を名乗らない。**観測の腕
+/// （[`RenderHealthReport::Observation`]。tasks.md 9.2）も同じであり、**要件の合否を判定するのは
+/// 検査器の側である**（3 OS の検査器が同じ形で読めるのはここだけである — macOS / Windows には
+/// AT-SPI が無い）。記録の有無を決める
 /// 閾値は画面側にあり（要件値 + 計測の刻みの許容。`src/features/grid/renderHealth.ts`）、
 /// **要件 11.1 の合否を判定するのは 9.2 の実画面の観測である** — ここで「予算を満たしていない」
 /// と書くと、記録が 1.6 の否定した読み方を事実として運ぶ。走査の腕の 1 行が運ぶのは
@@ -477,6 +481,52 @@ pub fn diagnostics_record_render(
                 },
             );
         }
+        RenderHealthReport::Observation {
+            first_screen_ms,
+            scan_median_us,
+            reached_row,
+            row_count,
+            edit_ms,
+            undo,
+            paint_failed,
+            colors,
+            items,
+        } => {
+            // **検証専用の 1 行である**（tasks.md 9.2）。3 OS の検査器が同じ形で読める場所は
+            // 診断の記録だけである（macOS / Windows には AT-SPI が無い）。**要件の合否は書かない**
+            // — 記録が運ぶのは実測であり、判定は検査器が要件値で行う（`ScanBelowBudget` と同じ規律）。
+            log::info!(
+                "{command}: グリッドの観測: 最初の画面ms={} 走査中央値us={} 到達行={} 行数={} \
+編集ms={} 取消={} 描画={} 色数={}",
+                measurement(first_screen_ms),
+                measurement(scan_median_us),
+                measurement(reached_row),
+                measurement(row_count),
+                measurement(edit_ms),
+                match undo {
+                    ObservationUndo::Ok => "ok".to_owned(),
+                    ObservationUndo::Ng => "ng".to_owned(),
+                    ObservationUndo::NotObserved => "未観測".to_owned(),
+                },
+                if paint_failed { "不成立" } else { "成立" },
+                match colors {
+                    Some(count) => count.to_string(),
+                    None => "読めず".to_owned(),
+                },
+            );
+            // **筋書きの項目は 1 行ずつ残す**（9.2 の段は「どの項目が成立しなかったか」を読む）。
+            // 1 つの行へまとめない — 記録の読み手が grep で項目を引けるようにする。
+            for result in items {
+                log::info!(
+                    "{command}: グリッドの観測の項目: {}={}",
+                    observation_item_name(result.item),
+                    match result.outcome {
+                        ObservationItemOutcome::Ok => "ok",
+                        ObservationItemOutcome::Ng => "ng",
+                    },
+                );
+            }
+        }
         RenderHealthReport::ScanBelowBudget {
             median_us,
             budget_us,
@@ -500,6 +550,32 @@ pub fn diagnostics_record_render(
     }
     IpcResult::Ok {
         data: RenderHealthRecordResponse { context },
+    }
+}
+
+/// 筋書きの項目の識別子を、記録の 1 行へ載せる短い名前にする（**閉じた列挙の綴り**）。
+///
+/// 綴りは画面側（`src/features/grid/gridObservation.tsx`）と検査器（`scripts/`）が同じものを見る。
+/// **どちらか片方だけを改名してもコンパイルは通る**ので、`app-shell` の
+/// `bindings_declare_the_render_health_surface` が生成物の綴りを名指しで固定している。
+fn observation_item_name(item: ObservationItem) -> &'static str {
+    match item {
+        ObservationItem::NestedExpansion => "nested_expansion",
+        ObservationItem::InsertRow => "insert_row",
+        ObservationItem::SortThenDelete => "sort_then_delete",
+        ObservationItem::ViolationReason => "violation_reason",
+        ObservationItem::ReferenceRows => "reference_rows",
+        ObservationItem::PasteThroughMenu => "paste_through_menu",
+        ObservationItem::SheetSwitchUndo => "sheet_switch_undo",
+        ObservationItem::ReplaceDocument => "replace_document",
+    }
+}
+
+/// 観測の 1 項目を記録の 1 行へ載せる形にする（**数値か「未観測」**。推測で埋めない）。
+fn measurement(value: Option<u32>) -> String {
+    match value {
+        Some(number) => number.to_string(),
+        None => "未観測".to_owned(),
     }
 }
 
@@ -628,9 +704,9 @@ mod tests {
     use app_shell::ipc::command_names;
 
     use super::{
-        DiagnosticsExportRecords, DiagnosticsLevel, DiagnosticsSection, EXPORT_ITEM_ID,
-        LOG_LOCATION_ITEM_ID, OWNER, VERBOSITY_ITEM_ID, diagnostics_item_spec, diagnostics_items,
-        diagnostics_menu_path, export_file_name, records_of, verbosity_response,
+        diagnostics_item_spec, diagnostics_items, diagnostics_menu_path, export_file_name,
+        records_of, verbosity_response, DiagnosticsExportRecords, DiagnosticsLevel,
+        DiagnosticsSection, EXPORT_ITEM_ID, LOG_LOCATION_ITEM_ID, OWNER, VERBOSITY_ITEM_ID,
     };
     use crate::menu::{MenuNode, MenuPath, MenuRegistry};
 

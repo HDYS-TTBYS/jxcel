@@ -1414,6 +1414,44 @@ export type IpcError = { "kind": "Settings", "detail": { message: string, } } | 
  */
 export type IpcResult<T, E> = { "status": "ok", data: T, } | { "status": "error", error: E, };
 /**
+ * 9.2 の筋書きの項目（[`RenderHealthReport::Observation`]）。**閉じた列挙である。**
+ *
+ * tasks.md 9.2 は「群 10 が閉じた経路を筋書きに含める」ことを求める（`10.1` 入れ子の展開のあとの
+ * 走査、`10.5` 行の追加と取り消し・やり直し、`10.4` 並べ替えた表示での位置指定の追加と範囲の削除、
+ * `10.6` 違反の理由、`10.3` 参照の一覧、`10.8` 貼り付けの往復、`10.2` シートを切り替えても
+ * 取り消しが効く、`10.7` 文書の差し替えへの追随）。**単体テストが観測しない結線であり、実起動で
+ * しか確かめられない。**項目の識別子を閉じた列挙にするのは、記録から読む段が綴りで分岐できる
+ * ようにするためである（任意の文字列を運ばない規律は [`RenderHealthReport`] と同じ）。
+ */
+export type ObservationItem = "nested_expansion" | "insert_row" | "sort_then_delete" | "violation_reason" | "reference_rows" | "paste_through_menu" | "sheet_switch_undo" | "replace_document";
+/**
+ * 筋書きの項目の結果（[`RenderHealthReport::Observation`]）。
+ *
+ * **2 値である。**「観測しなかった」は結果ではなく**項目が載らないこと**で表す（項目の列挙に
+ * 「未観測」を混ぜると、段が要求した項目の欠落を記録の読み手が見分けられなくなる）。
+ */
+export type ObservationItemOutcome = "ok" | "ng";
+/**
+ * 筋書きの 1 項目の結果（[`RenderHealthReport::Observation`]）。
+ */
+export type ObservationItemResult = { 
+/**
+ * どの項目か。
+ */
+item: ObservationItem, 
+/**
+ * その結果。
+ */
+outcome: ObservationItemOutcome, };
+/**
+ * 編集の取り消しの成否（[`RenderHealthReport::Observation`]。要件 9.2 の往復）。
+ *
+ * **3 値である。**「観測していない」は「成功した」でも「失敗した」でもない — 塗られない条件の
+ * 起動では走査と編集を観測しない（12.2 の陽性の観測がその起動の目的である）。`bool` に潰すと、
+ * 観測していないことを失敗として検査器へ見せることになる。
+ */
+export type ObservationUndo = "ok" | "ng" | "not_observed";
+/**
  * ファイル選択の応答（タスク 7.7。要件 2.4、4.6）。
  *
  * **呼び出し元ウィンドウの文脈を必ず含む。**呼び出し元は Tauri が注入する `WebviewWindow`
@@ -1465,11 +1503,15 @@ export type RenderHealthRecordResult = IpcResult<RenderHealthRecordResponse, Ipc
 /**
  * 描画の健全性の報告（タスク 9.3。要件 12.2、12.3）。**札と数値だけを運ぶ閉じた合併型である。**
  *
- * 2 つの腕は**互いに素**であり、それぞれが要る数値だけを持つ。同じ事実を平たい欄の集まりで
+ * 3 つの腕は**互いに素**であり、それぞれが要る数値だけを持つ。同じ事実を平たい欄の集まりで
  * 表すと「走査の劣化なのに理由の種別が載っている」ような状態が型の上で作れてしまうため、
  * ここでは**作れない形**にしてある（6.1 の [`GridEditCommand`] と同じ規律）。
  *
- * **任意の文字列は運べない。**記録へ流せるのはこの 2 つの事実と数値だけであり、記録の 1 行を
+ * 3 つ目の腕（[`RenderHealthReport::Observation`]）だけは**検証専用**である — 書くのは検証用の
+ * 観測画面（tasks.md 9.2。既定のビルドでは登録が定数畳み込みで消える）だけであり、要件の合否を
+ * 判定するのは検査器の側である（記録は「測った事実」だけを運ぶ）。
+ *
+ * **任意の文字列は運べない。**記録へ流せるのはこの 3 つの事実と数値だけであり、記録の 1 行を
  * 組み立てるのは器の側である — 記録の注入面を広げないためである（10.8 がクリップボードから
  * 読んだ文字を記録へ出さず文字数だけを写したのと同じ規律）。
  *
@@ -1497,7 +1539,48 @@ median_us: number,
 /**
  * 要件 11.1 の予算（**マイクロ秒**。16670）。
  */
-budget_us: number, };
+budget_us: number, } | { "fact": "observation", 
+/**
+ * 表示の指示（画面がドキュメントを持つことを知った瞬間）から、表が現れて面が描かれる
+ * までの経過（**ミリ秒**。要件 11.2 の予算は 1000）。
+ */
+first_screen_ms: number | null, 
+/**
+ * 末端までの走査のフレーム時間の中央値（**マイクロ秒**。要件 11.1 の予算は 16670）。
+ */
+scan_median_us: number | null, 
+/**
+ * 走査が到達した表示の序数（0 起点）。
+ */
+reached_row: number | null, 
+/**
+ * 表示の行数。
+ */
+row_count: number | null, 
+/**
+ * セルの編集の確定から反映までの経過（**ミリ秒**。要件 11.3 の予算は 100）。
+ */
+edit_ms: number | null, 
+/**
+ * 編集の取り消しの成否。
+ */
+undo: ObservationUndo, 
+/**
+ * 描画が成立しなかったか（要件 12.2 の不成立条件の起動での観測）。
+ */
+paint_failed: boolean, 
+/**
+ * 面（canvas）から読めた色数（**読めなかったときは `None`**。`Some(0)` は「読めたが
+ * 一様である」ではなく、読めない状態を写した値である — 観測の画面は `None` を読めずに
+ * 使う）。
+ */
+colors: number | null, 
+/**
+ * **9.2 の筋書きの項目ごとの結果**（[`ObservationItemResult`]）。**観測しなかった項目は
+ * 載せない**（`Skipped` のような値を作らない — 「走らせなかった」と「走らせて駄目だった」を
+ * 記録の読み手が混同しないためである。段は自分が要求する項目を引数で名乗る）。
+ */
+items: Array<ObservationItemResult>, };
 /**
  * 初回描画の通知の要求（タスク 8.2。要件 10.1、10.2）。
  *

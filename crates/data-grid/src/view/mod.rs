@@ -460,7 +460,7 @@ pub use violations::{CellViolations, ColumnViolations, RowViolations, ViolationI
 // `reference → mod` の一方向である。
 mod reference;
 
-pub use reference::{ReferencePage, ReferenceRow, reference_page};
+pub use reference::{reference_page, ReferencePage, ReferenceRow};
 
 use core::cmp::Ordering;
 use core::fmt::Write as _;
@@ -1822,7 +1822,11 @@ const fn variant_rank(value: &CellValue) -> VariantRank {
 fn compare_floats(left: f64, right: f64) -> Ordering {
     /// `-0.0` を `0.0` へ畳む（`PartialEq` が `-0.0 == 0.0` であることに合わせる）。
     fn fold_zero(value: f64) -> f64 {
-        if value == 0.0 { 0.0 } else { value }
+        if value == 0.0 {
+            0.0
+        } else {
+            value
+        }
     }
     fold_zero(left).total_cmp(&fold_zero(right))
 }

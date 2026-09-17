@@ -911,52 +911,53 @@ jobs:
         run: pwsh -NoProfile -File scripts/ci/windows/verify-bulk-transfer.ps1
 
       # ---------------------------------------------------------------------
-      # 10 万行 × 30 列の走査の実測（**tasks.md 1.6** / 要件 11.1, 12.1, 12.2）
+      # 10 万行 × 30 列の観測（**tasks.md 9.2** / 要件 11.1, 11.2, 11.3, 12.1, 12.2, 12.3, 12.4）
       #
-      # 1.6 は判断点である: 使い捨ての画面（`smoke-glide-probe`）で 10 万行を走査し、
-      # **フレーム時間の中央値**を測る。毎秒 60 回（中央値 16.67 ms 以下）に届かなければ、
-      # 7.2 の実装を移植口の背後で自前 canvas へ切り替える判断を `research.md` に記録する。
+      # 9.2 の受け入れは「10 万行のシートを開き、末尾へ移動し、セルを編集し、取り消して戻すまでを
+      # **実際に起動して観測する**」ことと、**3 つの OS のそれぞれで観測が成功すること**である。
+      # **判定は要件値で行う** — 最初の画面 1 秒（11.2）・編集の反映 100 ミリ秒（11.3）・走査の
+      # 中央値 16.67 ミリ秒（11.1）・末尾への到達（12.1）。走査の中央値だけは**計測の時計の
+      # 刻み（1.0 ms）**を踏まえる（健全な走査の中央値が 17.00 ms であることは `research.md`
+      # 「中央値 17.00 ms の読み方」）。**ランナーが遅いことを理由に閾値を緩めない。**
       #
-      # ## 3 OS の既存マトリクスに段を足すだけである（新しい系統を作らない）
+      # ## 各段の実体（実装は段の側に置き、ここは 1 行で呼ぶ）
       #
-      # 実体は `scripts/ci/{linux,macos,windows}/verify-render-traversal.*` である。
-      # `verification.md`「既存の 3 OS マトリクスに段を足す。プラットフォーム別に独立した検証
-      # 系統やジョブを新設しない」に従う。
+      # - Linux:  `scripts/ci/linux/verify-grid-observation.sh`
+      # - macOS:  `scripts/ci/macos/verify-grid-observation.sh`
+      # - Windows: `scripts/ci/windows/verify-grid-observation.ps1`（Git Bash から同じ検査器を呼ぶ）
       #
-      # ## Linux だけが数値を出す（1.6 の明文）
+      # 各段は 3 つのことを行う（3 OS で同じ）:
       #
-      # 「**Linux の結果を判断の拘束条件とする。**最も危険な環境であり、ここが通らなければ
-      # 他の 2 つを測る意味がない。Windows と macOS の数値は 9.2 の観測で確かめる」。
-      # 計測の行は**アクセシビリティの木**（AT-SPI。`busctl` で読む）から取るため、
-      # **AT-SPI を持つのは Linux のランナーだけである**（macOS の WKWebView と Windows の
-      # WebView2 は別のアクセシビリティ API を使う）。したがって Linux の段は 4 条件
-      # （回避の環境変数の有無それぞれ。研究の順序で累積）を実測し、macOS / Windows の段は
-      # **走査の画面が描画されること**だけを確かめて数値を 9.2 へ送る。
+      # 1. **正例**: 10 万行 × 30 列の標本を作り、検証用の形の実行ファイルを 2 回起動して観測する
+      #    （走査・編集・取り消し・描画の成立と、**群 10 が閉じた経路の筋書き**）。
+      # 2. **描画不成立の陽性の観測**: 面を成立させない条件で起動し、告知と `paint_failed` の
+      #    記録の双方を要求する（12.2 / 12.3）。
+      # 3. **反証**: 配布物を渡すと検査器が非 0 で落ちること（配布物は検証専用の初期画面を
+      #    読まない = 観測の行が現れない）。
       #
-      # ## この段は一時的である（9.2 が取り除く）
+      # ## 判定はランナーごとに閉じる
       #
-      # 恒久の 3 OS の観測は **9.2**（走査と編集の成立）と **9.3**（走査の劣化の検出と診断への
-      # 記録）が担う。**9.2 / 9.3 が入った時点でこの 3 段は取り除く** — それまでは
-      # `research.md` の追記（1.6 の成果）の裏付けとして走らせる。
+      # **3 OS の値を 1 か所へ持ち寄らない**（`verification.md`「判定はランナーごとに閉じる」）。
+      # 全体としての合否は、各段が自分の担当分で落ちることで成立する。
       # ---------------------------------------------------------------------
 
-      # 実体は `scripts/ci/linux/verify-render-traversal.sh`（理由・証拠が何を覆うかはその冒頭）。
-      - name: Measure 100k-row traversal frame times (Linux / Xvfb)
+      # 実体は `scripts/ci/linux/verify-grid-observation.sh`（理由・証拠が何を覆うかはその冒頭）。
+      - name: Observe the 100k-row grid (Linux / Xvfb)
         if: runner.os == 'Linux'
         shell: bash
-        run: bash scripts/ci/linux/verify-render-traversal.sh
+        run: bash scripts/ci/linux/verify-grid-observation.sh
 
-      # 実体は `scripts/ci/macos/verify-render-traversal.sh`（理由・証拠が何を覆うかはその冒頭）。
-      - name: Measure 100k-row traversal frame times (macOS)
+      # 実体は `scripts/ci/macos/verify-grid-observation.sh`（理由・証拠が何を覆うかはその冒頭）。
+      - name: Observe the 100k-row grid (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        run: bash scripts/ci/macos/verify-render-traversal.sh
+        run: bash scripts/ci/macos/verify-grid-observation.sh
 
-      # 実体は `scripts/ci/windows/verify-render-traversal.ps1`（理由・証拠が何を覆うかはその冒頭）。
-      - name: Measure 100k-row traversal frame times (Windows)
+      # 実体は `scripts/ci/windows/verify-grid-observation.ps1`（理由・証拠が何を覆うかはその冒頭）。
+      - name: Observe the 100k-row grid (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: pwsh -NoProfile -File scripts/ci/windows/verify-render-traversal.ps1
+        run: pwsh -NoProfile -File scripts/ci/windows/verify-grid-observation.ps1
 
       # ---------------------------------------------------------------------
       # 描画層の移植口の操作（**tasks.md 7.2** / 要件 1.2, 1.3, 2.4, 7.1, 7.2）

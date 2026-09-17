@@ -67,3 +67,15 @@ bench = false
 [[bench]]
 name = "large_grid"
 harness = false
+
+# 9.2（3 OS の観測）が起動の引数へ渡す標本の文書を書き出す例。**検証専用である** —
+# `examples/` は出荷物のバイナリにも配布物にも入らないが、それに加えて**非既定の feature を
+# 要求する**ので、既定のビルドではコンパイルすらされない（`verification.md`「検証専用の
+# コードの置き場」の Rust 側の規約と同じ形）。標本の生成器は 1.4 の `tests/common/sample.rs`
+# 1 つであり、本ターゲットはそれを `#[path]` で取り込んで保存するだけである。
+[features]
+verification-samples = []
+
+[[example]]
+name = "make-large-sheet"
+required-features = ["verification-samples"]
