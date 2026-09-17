@@ -1457,6 +1457,67 @@ outcome: ObservationItemOutcome,
  */
 reason: ObservationItemReason | null, };
 /**
+ * 面（canvas）の国勢調査（[`RenderHealthReport::Observation`]）。**検証専用である。**
+ *
+ * **要件の合否には使わない。** 12.2 の判定は「面に内容が描かれているか」であり、その実測が
+ * [`RenderHealthReport::Observation::colors`] である。本型が運ぶのは、その数値が
+ * **なぜその値になったか**を段の側で切り分けるための材料である:
+ *
+ * - `container_width` / `container_height` が 0 なら、**表の器が寸法を持っていない**
+ * - `pixel_ratio_milli` が 0 なら、**移植口が面へ大きさを与えられない**（画素比を掛けて実寸を
+ *   決める実装では、比が 0 だと面が 0 画素のまま残る）
+ * - `canvas_count` が 0 なら、**面そのものが無い**（移植口の破綻）
+ * - `first_width` / `first_height` が 0 なら、**製品の検査が読む面が大きさを持っていない**
+ *   （最も大きい面が 0 でなければ、**読む面を間違えている** — `largest_*` と比べる）
+ * - `first_colors` / `largest_colors` が `Some(0)` なら**読めなかった**、`Some(1)` なら
+ *   **一様**、2 以上なら**内容が描かれている**
+ *
+ * **画素比は 1000 倍の整数で運ぶ**（境界は 32 ビット以下の整数だけで構成する。
+ * `ipc-contract.md`。比は 1.25 / 2 のような小数を取り得るため、マイクロ秒と同じ規律で整数へ
+ * 持ち上げる — 丸めの経路を境界へ持ち込まない）。
+ */
+export type ObservationSurface = { 
+/**
+ * 表の器（`jxcel-grid-table` の親）の見た目の幅（**CSS 画素**）。
+ */
+container_width: number, 
+/**
+ * 表の器の見た目の高さ（**CSS 画素**）。
+ */
+container_height: number, 
+/**
+ * 器等の画素比（**1000 倍**。`window.devicePixelRatio` が 2 なら 2000）。
+ */
+pixel_ratio_milli: number, 
+/**
+ * 表の器の内側にある面（canvas）の数。
+ */
+canvas_count: number, 
+/**
+ * **先頭**の面（`querySelector("canvas")` が返す面 = 製品の検査が読む面）の実寸の幅（**画素**）。
+ */
+first_width: number, 
+/**
+ * 先頭の面の実寸の高さ（**画素**）。
+ */
+first_height: number, 
+/**
+ * 先頭の面から読めた色数（読めなかったときは `None`）。
+ */
+first_colors: number | null, 
+/**
+ * **最も大きい**面の実寸の幅（**画素**）。
+ */
+largest_width: number, 
+/**
+ * 最も大きい面の実寸の高さ（**画素**）。
+ */
+largest_height: number, 
+/**
+ * 最も大きい面から読めた色数（読めなかったときは `None`）。
+ */
+largest_colors: number | null, };
+/**
  * 編集の取り消しの成否（[`RenderHealthReport::Observation`]。要件 9.2 の往復）。
  *
  * **3 値である。**「観測していない」は「成功した」でも「失敗した」でもない — 塗られない条件の
@@ -1593,7 +1654,14 @@ colors: number | null,
  * 載せない**（`Skipped` のような値を作らない — 「走らせなかった」と「走らせて駄目だった」を
  * 記録の読み手が混同しないためである。段は自分が要求する項目を引数で名乗る）。
  */
-items: Array<ObservationItemResult>, };
+items: Array<ObservationItemResult>, 
+/**
+ * **面（canvas）の国勢調査**（[`ObservationSurface`]）。`colors` が 0 のとき、
+ * **面が小さいのか、塗られていないのか、読めないのか**を 3 OS で切り分けるための実測で
+ * ある（CI の実測: macOS と Windows のランナーは `色数=0` を記録し、Linux は 2 以上を
+ * 記録した。切り分けの材料が無いと、原因の特定に CI の往復が要る）。
+ */
+surface: ObservationSurface, };
 /**
  * 初回描画の通知の要求（タスク 8.2。要件 10.1、10.2）。
  *

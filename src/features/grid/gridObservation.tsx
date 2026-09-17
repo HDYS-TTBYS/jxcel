@@ -105,6 +105,9 @@ function recordObservation(observation: Observation): void {
           : "ng",
       paint_failed: observation.paintFailed,
       colors: observation.surfaceColors,
+      // **国勢調査は観測が面を読んだその瞬間のものである**（`surfaceCensus` の doc。ここで
+      // 読み直すと、観測が終わって表が消えた後を写す — 実測でそうなった）。
+      surface: observation.surface,
       items: observation.items.map((result) => ({
         item: result.item,
         outcome: result.outcome,
@@ -291,28 +294,95 @@ function blankTheCanvasFor(ms: number): void {
  * 記録していた**（検査は面の組み立ての直後に走るため、移植口が面を用意する前に読んでいた）。
  * 本観測は**表が現れた後の色数**を実測として残し、その誤検知を検査器から見えるようにする。
  */
-async function waitForSurfaceColors(deadlineMs: number): Promise<number | null> {
+/**
+ * **面（canvas）の国勢調査**（`ObservationSurface`。契約の型の doc を参照）。
+ *
+ * **要件の合否には使わない。**12.2 の判定は「面に内容が描かれているか」であり、その実測は
+ * `colors` である。本関数が返すのは、その数値が**なぜその値になったか**を 3 OS の段で
+ * 切り分けるための材料である — CI の実測で macOS と Windows のランナーが `色数=0` を記録し、
+ * Linux が 2 以上を記録したとき、**面が小さいのか・塗られていないのか・読む面を間違えている
+ * のか**を切り分ける材料が無く、CI の往復（1 回 30 分）が要った。
+ *
+ * **引数は読んだその瞬間の面である**（記録を書く時点で読み直してはならない。実測: 記録の直前に
+ * 読むと、観測が終わって表が消えた後を写し、`面の数=0 器=0x0` になった — 何も分からない）。
+ *
+ * **画素比は 1000 倍の整数で運ぶ**（境界は 32 ビット以下の整数だけ。`window.devicePixelRatio` は
+ * 1.25 / 2 のような小数を取り得る）。**この 1 箇所だけが `devicePixelRatio` を読む** — 製品の
+ * 検査（`./renderProbe`）は素性を問わない規律を持ち、ここは**検証専用の観測**である。
+ */
+function surfaceCensus(
+  table: HTMLElement | null,
+  first: Element | null,
+  colors: number | null,
+): SurfaceCensus {
+  const container: HTMLElement | null = table?.parentElement ?? table ?? null;
+  const canvases: HTMLCanvasElement[] =
+    table === null
+      ? []
+      : Array.from(table.querySelectorAll("canvas")).filter(
+          (element): element is HTMLCanvasElement => element instanceof HTMLCanvasElement,
+        );
+  const firstCanvas = first instanceof HTMLCanvasElement ? first : canvases[0] ?? null;
+  // 最大は本来塗られているべき面である（先頭と同じなら色数は既に読んだ値である）。
+  let largest: HTMLCanvasElement | null = null;
+  for (const canvas of canvases) {
+    if (largest === null || canvas.width * canvas.height > largest.width * largest.height) {
+      largest = canvas;
+    }
+  }
+  return {
+    container_width: Math.round(container?.clientWidth ?? 0),
+    container_height: Math.round(container?.clientHeight ?? 0),
+    pixel_ratio_milli: Math.round((window.devicePixelRatio ?? 0) * 1000),
+    canvas_count: canvases.length,
+    first_width: firstCanvas?.width ?? 0,
+    first_height: firstCanvas?.height ?? 0,
+    first_colors: firstCanvas === null ? null : colors,
+    largest_width: largest?.width ?? 0,
+    largest_height: largest?.height ?? 0,
+    largest_colors:
+      largest === null
+        ? null
+        : largest === firstCanvas
+          ? colors
+          : countDistinctColors(largest),
+  };
+}
+
+/** 面を 1 回読み、**記録の 2 つの欄へそのまま写せる形**で返す。 */
+function surfaceFields(): { surfaceColors: number | null; surface: SurfaceCensus } {
+  const reading = surfaceNow();
+  return { surfaceColors: reading.colors, surface: reading.census };
+}
+
+/** 面を 1 回読んだ結果（色数と、その瞬間の国勢調査）。 */
+interface SurfaceReading {
+  readonly colors: number | null;
+  readonly census: SurfaceCensus;
+}
+
+async function waitForSurfaceColors(deadlineMs: number): Promise<SurfaceReading> {
   const deadline = performance.now() + deadlineMs;
-  let last: number | null = surfaceColorsNow();
+  let last: SurfaceReading = surfaceNow();
   // **製品の検査（9.3）と同じく、面は非同期に現れる。**1 回読んで 0 だったことを「描かれていない」
   // と読むと、健全な起動を不成立と読む（実測: この待ちを入れないと 306 ms の時点で 0 であった）。
   // 2 色以上になった時点で確定し、ならなければ期限まで読み続けた最後の値を返す。
-  while ((last ?? 0) < 2 && performance.now() < deadline) {
+  while ((last.colors ?? 0) < 2 && performance.now() < deadline) {
     await nextFrame();
-    last = surfaceColorsNow();
+    last = surfaceNow();
   }
   return last;
 }
 
-function surfaceColorsNow(): number | null {
+function surfaceNow(): SurfaceReading {
   // **表の器の中を先に見る**（描画成立の検査が読むのと同じ面である。`./GridScreen` の
   // `health.checkPaint(container)`）。器の外の面は別の面であり得る。
-  const root: ParentNode = tableOf() ?? document;
+  const table = tableOf();
+  const root: ParentNode = table ?? document;
   const canvas = root.querySelector("canvas");
-  if (!(canvas instanceof HTMLCanvasElement)) {
-    return null;
-  }
-  return countDistinctColors(canvas);
+  const colors =
+    canvas instanceof HTMLCanvasElement ? countDistinctColors(canvas) : null;
+  return { colors, census: surfaceCensus(table, canvas, colors) };
 }
 
 /** 描画の不成立の告知（12.2）が画面に出ているか。**表の面の失敗ではなく、告知 1 行**である。 */
@@ -524,6 +594,15 @@ const ITEM_WAIT_MS = 10_000;
  * あとに段が探し続けた）。**この待ちの間、画面は静かである**（他の項目は走らない）。
  */
 const PASTE_WAIT_MS = 150_000;
+
+/**
+ * **到着の増加が続くことを確かめる長さ**（ミリ秒）。
+ *
+ * 前の項目の描き直しの残りは過渡であり、`PASTE_WAIT_MS` の窓の中で消える。本当の貼り付けは
+ * 表の内容と行数を変えるので、増加は残る。実測: この確かめを入れないと、健全な起動でも
+ * 15 秒で「貼り付けが届いた」と結論していた（器は貼り付けの要求を 1 件も記録していない）。
+ */
+const PASTE_SUSTAIN_MS = 700;
 
 /** 検証用の要素を 1 つ引く（`data-testid` の綴りは製品のものを使う）。 */
 function elementOf(testid: string): HTMLElement | null {
@@ -770,7 +849,7 @@ async function driveNestedExpansion(): Promise<ItemOutcome> {
     scroller.scrollTop = Math.min(top, step * stepPixels);
     await nextFrame();
   }
-  const colors = await waitForSurfaceColors(ITEM_WAIT_MS);
+  const colors = (await waitForSurfaceColors(ITEM_WAIT_MS)).colors;
   const after = arrivalsOf();
   if (colors === null || colors < 2) {
     return NG("surface_uniform", `展開のあとの面が一様である（色数=${String(colors)}）`);
@@ -975,18 +1054,33 @@ async function drivePasteThroughMenu(): Promise<ItemOutcome> {
   }
   canvas.dispatchEvent(new ClipboardEvent("copy", { bubbles: true, cancelable: true }));
   await nextFrame();
-  // **印は観測の行の要素へ置く**（器の `aria-label` は木に現れない — 実測: 段の走査が
-  // 見つけられず、活性化の機会を失った。観測の行の要素は段が既に読める唯一の要素である）。
+  // **印は専用の要素へ置く**（観測の行の要素の `aria-label` は画面が書くため、観測が終わると
+  // 書き換わって印が消える — 実測: 段の走査が印を見つけられなかった。器の `aria-label` も
+  // 木に現れない）。`jxcel-grid-paste-ready` の要素は画面が `aria-label` を書かない。
   const ready = "貼り付けの準備=できた";
-  const marker = elementOf("jxcel-grid-observation");
+  const marker = elementOf("jxcel-grid-paste-ready");
   marker?.setAttribute("aria-label", ready);
   // **待ちは長く取る。**活性化するのは段であり、段はアクセシビリティの木を 1 節ずつ busctl で
   // たどって印を探す（10 万行の表を描いている最中は 1 巡に数十秒かかることがある。実測: 30 秒では
   // 足りず、印が消えたあとに段が探し続けて「見つからない」になった）。
-  const pasted = await waitFor(() => {
+  //
+  // **増加が続くことを確かめてから結論する。**1 回の増加は貼り付けの証明ではない — 前の項目の
+  // 描き直しの残りでも数は増える（実測: この項目が 15 秒で成立と結論した起動で、器は貼り付けの
+  // 要求を 1 件も記録していなかった）。**過渡で結論すると印が早く消え、段が活性化の機会を失う**
+  // — 印の寿命は「段が活性化するまで」でなければならない（段は活性化の直後に貼り付けが届くので、
+  // 本当の貼り付けが届いた時点で印を外してよい）。
+  const pasteDeadline = performance.now() + PASTE_WAIT_MS;
+  let pasted: boolean | null = null;
+  while (pasted === null && performance.now() < pasteDeadline) {
+    await nextFrame();
     const now = arrivalsOf();
-    return now !== null && before !== null && now > before ? true : null;
-  }, PASTE_WAIT_MS);
+    if (now === null || before === null || now <= before) {
+      continue;
+    }
+    await new Promise((resolve) => setTimeout(resolve, PASTE_SUSTAIN_MS));
+    const again = arrivalsOf();
+    pasted = again !== null && before !== null && again > before;
+  }
   marker?.removeAttribute("aria-label");
   const arrived = arrivalsOf();
   if (pasted === null) {
@@ -1036,7 +1130,26 @@ interface Observation {
    * （段は自分が要求する項目を引数で名乗る。`--expect-items`）。
    */
   items: readonly ItemResult[];
+  /**
+   * 面の国勢調査（`surfaceCensus`）。**面を読んだその瞬間のものである** — 各腕が
+   * `...surfaceFields()` / `waitForSurfaceColors` の結果から写す。
+   */
+  surface: SurfaceCensus;
   reason: string | null;
+}
+
+/** 面の国勢調査（境界の `ObservationSurface` と同じ形）。 */
+interface SurfaceCensus {
+  container_width: number;
+  container_height: number;
+  pixel_ratio_milli: number;
+  canvas_count: number;
+  first_width: number;
+  first_height: number;
+  first_colors: number | null;
+  largest_width: number;
+  largest_height: number;
+  largest_colors: number | null;
 }
 
 /** 観測の結果を 1 行にする（**入力に対して純粋**。欠けた値は理由を書く）。 */
@@ -1137,7 +1250,7 @@ async function observe(): Promise<Observation> {
       },
       edit: { appliedMs: null, undone: "ng:文書が保持されなかった" },
       paintFailed: false,
-      surfaceColors: surfaceColorsNow(),
+      ...surfaceFields(),
       items: [],
       reason:
         held.kind === "unavailable"
@@ -1156,7 +1269,7 @@ async function observe(): Promise<Observation> {
       traversal: { medianMs: null, reachedRow: null, rowCount: rowCountOf(), reason: "表が現れなかった" },
       edit: { appliedMs: null, undone: "ng:表が現れなかった" },
       paintFailed: false,
-      surfaceColors: surfaceColorsNow(),
+      ...surfaceFields(),
       items: [],
       reason: "表が現れなかった（待ちの上限を超えた）",
     };
@@ -1169,9 +1282,10 @@ async function observe(): Promise<Observation> {
   // **描かれた面の色数**（12.2 の成立側の実測）。**器が現れた瞬間ではなく、面が描かれてから
   // 読む** — 器（`jxcel-grid-table`）は React の最初の描画で現れるが、移植口の面（canvas）と
   // その中身はその後に組み立てられ、塗られる（実測: 器が現れた時点で読むと面が無い）。
-  const surfaceColors = paintFailure
-    ? surfaceColorsNow()
+  const surfaceReading: SurfaceReading = paintFailure
+    ? surfaceNow()
     : await waitForSurfaceColors(TABLE_WAIT_MS);
+  const surfaceColors = surfaceReading.colors;
 
   // 描画成立の検査（9.3）は面の組み立ての効果が走る。**告知 1 行が出ているかどうか**を読む
   // （`jxcel-grid-failure` はシートを開けなかったときの面であり、描画の不成立ではない）。
@@ -1200,7 +1314,7 @@ async function observe(): Promise<Observation> {
       },
       edit: { appliedMs: null, undone: "ok:塗られない条件の起動では観測しない" },
       paintFailed: failed,
-      surfaceColors: surfaceColorsNow(),
+      ...surfaceFields(),
       // **塗られない条件の起動では筋書きを走らせない**（面が空であり、走査の標本も編集の反映も
       // 意味を持たない。12.2 の陽性の観測がこの起動の目的である）。
       items: [],
@@ -1215,7 +1329,16 @@ async function observe(): Promise<Observation> {
   // **筋書き（群 10 が閉じた経路）を走らせる。**計測が済んだ後に走らせるのは、走査の標本が
   // 100,000 行の標本そのものを測るためである（表示を変えると前提が変わる）。
   const items = await runScenario();
-  return { firstScreenMs, traversal, edit, paintFailed, surfaceColors, items, reason };
+  return {
+    firstScreenMs,
+    traversal,
+    edit,
+    paintFailed,
+    surfaceColors,
+    items,
+    surface: surfaceReading.census,
+    reason,
+  };
 }
 
 /** 検証専用の観測の画面。**製品の画面をそのまま描く**（自前の表を組まない）。 */
@@ -1239,7 +1362,7 @@ export function GridObservation(): ReactElement {
         traversal: { medianMs: null, reachedRow: null, rowCount: null, reason: "観測が例外で止まった" },
         edit: { appliedMs: null, undone: "ng:観測が例外で止まった" },
         paintFailed: false,
-        surfaceColors: null,
+        ...surfaceFields(),
         items: [],
         reason: `観測が例外で止まった: ${String(error)}`,
       });
@@ -1251,7 +1374,7 @@ export function GridObservation(): ReactElement {
         traversal: { medianMs: null, reachedRow: null, rowCount: rowCountOf(), reason: "期限を超えた" },
         edit: { appliedMs: null, undone: "ng:期限を超えた" },
         paintFailed: false,
-        surfaceColors: surfaceColorsNow(),
+        ...surfaceFields(),
         items: [],
         reason: `観測が ${String(OBSERVATION_DEADLINE_MS)} ms で終わらなかった`,
       });
@@ -1283,6 +1406,23 @@ export function GridObservation(): ReactElement {
       >
         {line}
       </div>
+      {/*
+        **貼り付けの準備の印を置く専用の要素である。**印を観測の行の要素へ置いてはならない —
+        あちらの `aria-label` は画面が書く（観測が終わると書き換わり、**段が活性化の機会を
+        失う**。実測: 段の走査が印を見つけられず、貼り付けの項目が成立しなかった）。ここは
+        **React が `aria-label` を書かない要素**であり、印は観測の画面の側が置き、外す。
+      */}
+      <div
+        data-testid="jxcel-grid-paste-ready"
+        style={{
+          position: "absolute",
+          width: "1px",
+          height: "1px",
+          overflow: "hidden",
+          clipPath: "inset(50%)",
+          whiteSpace: "nowrap",
+        }}
+      />
       <GridScreen />
     </div>
   );

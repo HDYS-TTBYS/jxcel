@@ -491,13 +491,15 @@ pub fn diagnostics_record_render(
             paint_failed,
             colors,
             items,
+            surface,
         } => {
             // **検証専用の 1 行である**（tasks.md 9.2）。3 OS の検査器が同じ形で読める場所は
             // 診断の記録だけである（macOS / Windows には AT-SPI が無い）。**要件の合否は書かない**
             // — 記録が運ぶのは実測であり、判定は検査器が要件値で行う（`ScanBelowBudget` と同じ規律）。
             log::info!(
                 "{command}: グリッドの観測: 最初の画面ms={} 走査中央値us={} 到達行={} 行数={} \
-編集ms={} 取消={} 描画={} 色数={}",
+編集ms={} 取消={} 描画={} 色数={} 器={}x{} 画素比={} 面の数={} 先頭={}x{} 先頭の色数={} \
+最大={}x{} 最大の色数={}",
                 measurement(first_screen_ms),
                 measurement(scan_median_us),
                 measurement(reached_row),
@@ -510,6 +512,29 @@ pub fn diagnostics_record_render(
                 },
                 if paint_failed { "不成立" } else { "成立" },
                 match colors {
+                    Some(count) => count.to_string(),
+                    None => "読めず".to_owned(),
+                },
+                // **国勢調査は末尾に置く**（`色数=` は要件 12.2 の実測であり、段の読み手が
+                // 先頭から読む形を変えない。`ObservationSurface` の doc を参照）。
+                surface.container_width,
+                surface.container_height,
+                // 画素比は 1000 倍の整数である（境界の規律。`ObservationSurface` の doc）。
+                format!(
+                    "{}.{:03}",
+                    surface.pixel_ratio_milli / 1000,
+                    surface.pixel_ratio_milli % 1000
+                ),
+                surface.canvas_count,
+                surface.first_width,
+                surface.first_height,
+                match surface.first_colors {
+                    Some(count) => count.to_string(),
+                    None => "読めず".to_owned(),
+                },
+                surface.largest_width,
+                surface.largest_height,
+                match surface.largest_colors {
                     Some(count) => count.to_string(),
                     None => "読めず".to_owned(),
                 },
