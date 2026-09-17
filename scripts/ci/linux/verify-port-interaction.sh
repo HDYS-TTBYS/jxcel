@@ -44,13 +44,21 @@ fi
 # 使うのは 1.6 の段と同じ退避である（アクセシビリティの橋は D-Bus を要する）。
 run_check() {
   _app=$1
+  # **頁の中の節を木に載せるために、WebKit のサンドボックスを切る。**ウェブプロセスの
+  # アクセシビリティは、サンドボックス越しに AT-SPI のバスを渡せる場合にだけ有効になる
+  # （CI の Linux ランナーの実測: GTK の側の節 — メニュー・窓 — は読めるのに、頁の中の節
+  # （観測の行の `aria-label`）だけが現れず、この段が「観測の行を読めませんでした」で落ちる。
+  # 開発機はログイン時に支援技術が居るので起きない）。**検証専用の段である**ため、
+  # サンドボックスを切る範囲はこの段のプロセスに閉じる（製品の経路も製品の設定も変えない）。
   if command -v dbus-run-session >/dev/null 2>&1; then
     xvfb-run -a --server-args="-screen 0 1280x1024x24" \
       dbus-run-session -- env GTK_MODULES=gail:atk-bridge \
+      WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 \
       sh scripts/check-port-interaction.sh "$_app" jxcel 60 "$record"
   else
     xvfb-run -a --server-args="-screen 0 1280x1024x24" \
       env GTK_MODULES=gail:atk-bridge \
+      WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 \
       sh scripts/check-port-interaction.sh "$_app" jxcel 60 "$record"
   fi
 }
