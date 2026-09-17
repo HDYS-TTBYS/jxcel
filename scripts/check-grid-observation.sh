@@ -111,9 +111,14 @@ fi
 
 # **X11 のウィンドウ一覧は共有の置き場から読む**（`scripts/lib/x11-window.sh`。他の検査器と
 # 同じ解析を使う — ウィンドウの一覧を 2 つの書き方で持たない）。
-_script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-# shellcheck source=scripts/lib/x11-window.sh
-. "$_script_dir/lib/x11-window.sh"
+#
+# SC1091 / SC2154: 置き場は**同じリポジトリのファイル**であり、`x11_collect_windows` などは
+# そこで定義される。qlty は検査対象を一時ディレクトリへ写してから shellcheck にかけるため、
+# 検査器は置き場をたどれない（実際の実行では `$0` からの相対で解決する。
+# `scripts/check-bulk-transfer.sh` と同じ形である）。
+# shellcheck disable=SC1091,SC2154
+_x11_lib_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+. "$_x11_lib_dir/lib/x11-window.sh"
 
 work=$(mktemp -d)
 app_log="$work/app.log"
