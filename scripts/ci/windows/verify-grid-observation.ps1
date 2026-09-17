@@ -183,6 +183,24 @@ function Invoke-GridObservationCheck {
   return @{ Output = $output; Code = $code }
 }
 
+# **WebView2 の補助プロセスが消えるまで待つ。** WebView2 は利用者データのフォルダを、その
+# 補助プロセス（`msedgewebview2.exe`）が閉じるまで握る。前の走行の直後に次の走行を始めると
+# `wry` が WebView2 の生成に失敗し（`0x800700AA`「要求されたリソースは使用中です」）、
+# **観測の行が 1 行も出ない走行**になる（CI の実測: 観測 2/2 がこれで落ち、記録に観測の行が
+# 無かった）。検査器は自分の走行の木しか片付けない（Windows では `pgrep` を持たないので
+# 補助プロセスの列挙が効かない）ため、**段がここで待つ**。待つだけで殺さない — 同じ名前の
+# プロセスは他の WebView2 のアプリのものでもありうる。
+function Wait-WebView2Idle {
+  param([int]$TimeoutSeconds = 30)
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    $helpers = @(Get-Process -Name "msedgewebview2" -ErrorAction SilentlyContinue)
+    if ($helpers.Count -eq 0) { return }
+    Start-Sleep -Milliseconds 500
+  }
+  Write-Warning "WebView2 の補助プロセスが $TimeoutSeconds 秒以内に消えませんでした（次の走行が失敗しうる）"
+}
+
 # **標本はリポジトリの中（`target\observation\`）へ書く。** 生成器は `cargo` の側で走るので、
 # **リポジトリの外のファイルシステムはアプリと共有されない**環境がある（Linux の段が実測した）。
 # `target\` はリポジトリの中で、かつ配布物に入らない（`.gitignore`）。**必ず片付ける**（後続の段へ
@@ -205,6 +223,7 @@ try {
   }
   Write-Host "OK: 観測 1/2: 通常の起動で走査・編集・取り消しが成立した"
 
+  Wait-WebView2Idle
   Write-Host "観測 2/2: 描画を成立させない条件の起動（要件 12.2 / 12.3）"
   $result = Invoke-GridObservationCheck -Exe $verify -TimeoutSeconds 120 -ExpectPaint "不成立"
   Write-Host $result.Output
@@ -213,6 +232,7 @@ try {
   }
   Write-Host "OK: 観測 2/2: 描画を成立させない条件で提示と記録が成立した"
 
+  Wait-WebView2Idle
   # 反証: **配布物は検証専用の初期画面を読まない**（9.7 の片付けの規約）ので、観測の画面は
   # 現れず観測の行は読めない。検査器は非 0 で落ちなければならない（落ちなければ、検査器が観測の
   # 行を本当に見ていないことになる）。
