@@ -258,7 +258,7 @@ fn rejection_of(scratch: &Scratch, tag: &str, container: &[u8]) -> String {
 /// 許可リスト外のエントリ名は、原文の名前を含む `InvalidContainer` で拒否される（要件 2.5）。
 ///
 /// 観測する形は次の 8 種（design「EntryLayout / Responsibilities & Constraints」が列挙する
-/// 攻撃面と、許可リストの 6 形に当たらない未知・大文字の名前）。いずれも**サニタイズされず、
+/// 攻撃面と、許可リストの 7 形に当たらない未知・大文字の名前）。いずれも**サニタイズされず、
 /// 原文のまま `entry` に載る**（正規化に依存しないことの担保でもある）:
 ///
 /// * ルート外を指すパス（`../evil.json`）

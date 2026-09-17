@@ -13,7 +13,7 @@
 //!    一致しなければ、その名前を含む [`DocumentError::InvalidContainer`] で中止する
 //!    （要件 2.5）。`zip` の `enclosed_name()` のような**名前の正規化に依存しない**:
 //!    絶対パス・`..` 成分・ドライブレター・バックスラッシュ区切り・NUL・ディレクトリ
-//!    エントリ（末尾 `/`）は、いずれも 6 形の完全一致に当たらないため自動的に拒否される。
+//!    エントリ（末尾 `/`）は、いずれも 7 形の完全一致に当たらないため自動的に拒否される。
 //! 2. **重複検出**: 生の名前の**バイト単位完全一致**で同一パスの重複を探す（要件 2.6）。
 //!    比較は名前だけで行い、内容（展開後バイト列）は見ない。したがって**展開より前に
 //!    判定が終わる**。
@@ -92,12 +92,13 @@ mod tests {
     /// 標本の添付ダイジェスト（正準小文字 hex 64 文字）。
     const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    /// 受理する 6 形（design「Container Entry Layout」）。
+    /// 受理する 7 形（design「Container Entry Layout」 + `macros.json`）。
     fn allowed_names() -> Vec<(String, EntryName)> {
         vec![
             ("jxcel".to_owned(), EntryName::Marker),
             ("manifest.json".to_owned(), EntryName::Manifest),
             ("document.json".to_owned(), EntryName::Document),
+            ("macros.json".to_owned(), EntryName::Macros),
             (
                 format!("schemas/{SHEET}.json"),
                 EntryName::Schema {
@@ -127,12 +128,12 @@ mod tests {
         }
     }
 
-    /// 受理する 6 形をすべて受け入れる（要件 2.5 の許可リスト）。
+    /// 受理する 7 形をすべて受け入れる（要件 2.5 の許可リスト）。
     #[test]
     fn admit_accepts_every_allowed_form() {
         let allowed = allowed_names();
         let names: Vec<&str> = allowed.iter().map(|(name, _)| name.as_str()).collect();
-        let admitted = admit(&names).expect("6 形はすべて受理される");
+        let admitted = admit(&names).expect("7 形はすべて受理される");
         let expected: Vec<EntryName> = allowed.iter().map(|(_, name)| *name).collect();
         assert_eq!(
             expected, admitted,

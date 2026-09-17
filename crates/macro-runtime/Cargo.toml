@@ -1,0 +1,75 @@
+[package]
+name = "macro-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "jxcel マクロ実行エンジン: TypeScript / JavaScript のマクロを隔離して実行し、結果と失敗を返す（Tauri 非依存のドメインクレート）"
+
+# ---------------------------------------------------------------------------
+# 依存方針（design.md「Allowed Dependencies」・steering structure.md / tech.md 準拠）
+#
+# 1. tauri 禁止: この Cargo.toml に tauri を追加してはならない。推移的依存も不可であり、
+#    `cargo tree -p macro-runtime` のどこにも tauri（および `tauri-*` / `tauri_*`）が
+#    現れてはならない。GUI を起動せずにテストできることが層の分離の前提である
+#    （structure.md「Rust ドメインクレート」）。機械検査は CI の
+#    `sh scripts/check-core-deps.sh`（引数なしで `crates/*/Cargo.toml` を全部列挙する）が行う。
+# 2. **data-grid / document-session を持たない**: マクロが集めた変更を文書へ適用するのは
+#    アダプタ（`src-tauri`）の仕事であり、エンジンは変更集合を返すだけである
+#    （design.md 決定 2 / 3・「Allowed Dependencies」の依存の向きの制約）。この 2 つを
+#    依存に足した時点で、エンジンが適用経路と取り消し履歴を知ることになり、
+#    「エンジンと UI の分離」が崩れる。`UndoLabel::MacroRun` の 1 対を積むのもアダプタである。
+# 3. 依存してよい兄弟ドメインクレートは上流の 2 つだけ: `document-format`（値と識別子の型。
+#    依存グラフの根）と `schema-engine`（列の宣言と型情報）。下流（`formula-engine` /
+#    `macro-editor-lsp` / `custom-types`）は本クレートに依存する側であり、本クレートは
+#    それらを知らない。依存の向きは `document-format → schema-engine → macro-runtime` の
+#    一方向である（design.md「Architecture Integration」）。
+# 4. 実行基盤の版は tech.md「Known Risks」1 の実測と同じものに固定する:
+#    `deno_core` **0.412**（`v8` 150.4）。isolate の生成・打ち切り・`#[op2]` の形は
+#    すべてこの版で実測済みであり、版を動かすと実測のやり直しが要る
+#    （design.md「Revalidation Triggers」）。`serde_v8` は `deno_core` の既定 feature
+#    （`v8`）が引き込む別クレート（0.321.0）であり、`deno_core::serde_v8` として使う —
+#    直接依存には置かない（版の二重管理を避ける）。
+# 5. `deno_ast` は **0.53.3 の `transpiling`** だけを有効にする（既定 feature は無い）。
+#    TypeScript の型注釈の除去とソースマップの生成に必要な最小の束である
+#    （design.md「Technology Stack」）。`bundler` / `cjs` は使わない。
+# 6. `ts-rs` はマクロ向けの型定義（`types/macro-host.d.ts`）の生成に使う。**手書きしない**
+#    （structure.md「マクロ向け型定義」）。`crates/app-shell` と同じ版・同じ feature を使う
+#    （`src/ipc/bindings.ts` と同じ運用。design.md「Components and Interfaces」の `types.rs`）。
+# ---------------------------------------------------------------------------
+[dependencies]
+# 上流のドメインクレート（依存グラフの根）。`CellValue` / `SheetId` / `RowId` などの値と
+# 識別子の型を、ホスト API の値の写像（`host/value.rs`）と変更集合（`host/changes.rs`）で使う。
+document-format = { path = "../document-format" }
+# 列の宣言と型情報（`ColumnTypeInfo`）を、マクロから読める列の宣言として供給する
+# （design.md「Components and Interfaces」の `HostPort`）。
+schema-engine = { path = "../schema-engine" }
+# 実行基盤（V8 isolate。design.md 決定 1）。既定 feature が `v8` を含み、その中で
+# `serde_v8`（0.321.0）も入る（上記依存方針 4）。
+deno_core = "0.412.0"
+# TypeScript → JavaScript の変換とソースマップ（要件 3.1, 3.4。design.md「Transpiler」）。
+# `transpiling` だけを有効にする（上記依存方針 5）。
+deno_ast = { version = "0.53.3", features = ["transpiling"] }
+# マクロへ公開する型定義の生成（要件 10.1–10.3）。
+ts-rs = { version = "12.0.1", features = ["serde-compat"] }
+
+[dev-dependencies]
+# 一括処理の予算（10 万行の読み+集計 10 秒 / 1 万行の書き換え 5 秒。要件 11.1, 11.2）を
+# 計測するベンチハーネス。実ベンチはタスク 5.3 が `benches/bulk.rs` に置く。
+criterion = "0.8"
+
+[lib]
+name = "macro_runtime"
+path = "src/lib.rs"
+# libtest 自動ベンチターゲットを無効化し、criterion のフラグが cargo bench に
+# ファンアウトしても壊れないようにする（crates/document-format/Cargo.toml と同じ形）。
+# **`bench = false` だけでは足りない** — 以下の [[bench]] とベンチファイルが対で要る
+# （片方だけでは `cargo bench --no-run` が落ちる）。
+bench = false
+
+# criterion ベンチターゲット（harness 直結）。tasks.md 5.3 の実ベンチ（10 万行 × 30 列の
+# 読み+集計 / 1 万行の書き換え）は `benches/bulk.rs` として追加する。ここはハーネスの
+# 動作確認用の最小スケフォールドであり、予算の判定には使わない。
+[[bench]]
+name = "scaffold"
+harness = false

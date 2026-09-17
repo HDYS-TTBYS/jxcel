@@ -19,6 +19,7 @@
 //! |------------|------|------|
 //! | `manifest.json` | 形式バージョン + パート索引（エントリ名 → BLAKE3 ダイジェスト） | [`ManifestPart`]（タスク 4.2） |
 //! | `document.json` | ドキュメント識別子・シート順序・シートのメタデータ（列名を含む） | [`DocumentPart`]（タスク 4.3 / 4.8） |
+//! | `macros.json` | マクロの記録の並び（名前・種別・ソース。**省略可能**） | [`MacrosPart`]（タスク 1.2） |
 //! | `schemas/<sheet-ulid>.json` | ルートスキーマ + ネスト型定義（不透明ペイロード） | [`SchemaCodec`]（タスク 4.4） |
 //! | `sheets/<sheet-ulid>.jsonl` | 行データ（1 行 1 オブジェクトの NDJSON） | [`RowsCodec`]（タスク 4.5） |
 //! | `attachments/<hex64>.bin` | 添付（content-addressed 命名、内容は不透明） | 本モジュール（バイト列をそのまま運ぶ） |
@@ -28,6 +29,17 @@
 //! 依存しない完全な目録になり、読み側の分岐も減る。0 行のシートの列名は rows エントリから
 //! 復元できない（列順を書く行が無い）ため、`document.json` の `columns` が唯一の永続先である
 //! （[`SheetMeta`] の docs）。
+//!
+//! ## 省略可能なパート（`macros.json`）
+//!
+//! `macros.json` だけは**省略可能**である: マクロを 1 件も持たない文書ではエントリ自体を
+//! 書かない（読み込みでは空の並びになる）。シートに一様な形を強制したのと同じ理由
+//! （読み側の分岐と索引の完全性）はここでは働かない: マクロはシートのように「0 件でも
+//! 列名を永続化する必要がある」対象ではなく、空の並びは省略と同じ意味である。逆に
+//! **常に書くと、マクロを使わない文書の出力がこのパートの追加前とバイト単位で変わり**、
+//! コミット済みのゴールデン fixture と固定バイト列（[`crate::container`] の
+//! `golden_container.zip` を含む）が総崩れになる。省略はその代償を払わないための決定で
+//! あり、形式バージョンを進めない判断と対をなす（[`MacrosPart`] のモジュール docs）。
 //!
 //! ## 型マーカー `jxcel` はこの集合に含めない
 //!
@@ -111,11 +123,16 @@
 //!    （不一致は [`DocumentError::IntegrityMismatch`]）を確かめる。**移行する場合は、移行の
 //!    前に記録されたままの集合を照合し、移行後にもう一度この照合を通す**（下記
 //!    「移行とダイジェスト照合の順序」）
-//! 4. 各パートの復号（[`DocumentPart`] / [`SchemaCodec`] / [`RowsCodec`]。添付は
-//!    バイト列のまま。content-addressed の再計算照合もここで行う）
+//! 4. 各パートの復号（[`DocumentPart`] / [`MacrosPart`] / [`SchemaCodec`] / [`RowsCodec`]。
+//!    添付はバイト列のまま。content-addressed の再計算照合もここで行う）
 //! 5. 構造検証（[`StructuralValidator`]。識別子の一意性・スキーマの存在・参照の実在性）
 //! 6. 行エントリの列順序が `document.json` の列名一覧と一致することの検証
-//! 7. モデル構築（[`Document`] の識別子・シート順序・名前・列名・ルートスキーマ・行・添付）
+//! 7. モデル構築（[`Document`] の識別子・シート順序・名前・列名・ルートスキーマ・行・添付・
+//!    マクロの記録）
+//!
+//! マクロの記録は段 4 の復号（型式の検査。未知の種別テキストの拒否を含む）だけを通り、
+//! 段 5 の構造検証には掛からない: 識別子も参照も持たないため、目録 [`PartInventory`] に
+//! 載せるものが無い（**形だけ**の中身であり、意味の検証は下流が行う。design 決定 4）。
 //!
 //! 1〜6 のいずれかで失敗した場合、モデルは 1 つも構築されず [`Err`] が返る。7 の構築は
 //! 検証済みの内容だけを移す（行は行ごとの探索をしない一括経路で入れる。要件 8.1）。
@@ -188,6 +205,7 @@
 //! | 実体のダイジェストが索引の記録と一致しない | [`DocumentError::IntegrityMismatch`]（`entry` = そのエントリ名） |
 //! | メタデータ（`document.json`）が無い | [`DocumentError::MissingPart`]（`name` = `document.json`） |
 //! | パートが復号できない（破損・形違い） | [`DocumentError::InvalidContainer`]（`entry` = そのエントリ名 + 理由） |
+//! | マクロのパートが復号できない（形違い・未知の種別テキスト） | 同上（`entry` = `macros.json` + 理由。[`MacrosPart::from_json_bytes`]） |
 //! | 添付の実バイト列が content-addressed 識別子と一致しない | 同上（`entry` = そのエントリ名 + 理由） |
 //! | 識別子の重複 / スキーマ欠落 / 宙吊り参照 / 未知シート参照 | 構造検証の各変種（[`StructuralValidator`]）。シート参照破れは [`DocumentError::InvalidContainer`] |
 //! | 行エントリの列順が `document.json` の列名一覧と違う | [`DocumentError::InvalidContainer`]（`entry` = その行エントリ名 + 理由） |
@@ -204,6 +222,7 @@ use crate::migration::steps::{MigrationStep, STEPS};
 use crate::migration::{FormatVersion, MigrationChain, VersionVerdict, CURRENT_FORMAT_VERSION};
 use crate::model::{Document, Row, SchemaPart, Sheet};
 use crate::parts::document_part::{DocumentPart, SheetMeta};
+use crate::parts::macros_part::MacrosPart;
 use crate::parts::manifest::{resolve_manifest, ManifestEntry, ManifestPart};
 use crate::parts::rows_codec::{RowsCodec, RowsEncodeError, SheetRows};
 use crate::parts::schema_codec::SchemaCodec;
@@ -222,7 +241,7 @@ use crate::parts::validate::{
 /// [`DocumentParts::get`]）か、必要なら [`crate::parts::to_parts`] で組み立て直す。
 #[derive(Debug)]
 pub struct Part {
-    /// エントリ名（許可リストの 6 形のいずれか。コンテナ内の相対パスそのもの）。
+    /// エントリ名（許可リストの 7 形のいずれか。コンテナ内の相対パスそのもの）。
     pub name: EntryName,
     /// エントリの実バイト列（**展開後・非圧縮**の内容。ZIP の知識を持たない）。
     pub bytes: Vec<u8>,
@@ -366,10 +385,13 @@ impl DocumentParts {
 /// `sheets/<sheet-ulid>.jsonl`（**全シート分**。0 行のシートも空の行エントリを持つ）/
 /// `attachments/<hex64>.bin`（登録済みの全添付。参照の有無を問わない。要件 7.6）と、
 /// それら全部を索引として載せた `manifest.json` である（モジュール docs「エントリ構成」）。
+/// マクロの記録を 1 件以上持つ文書は `macros.json` を**追加で**持ち、0 件の文書では書かない
+/// （モジュール docs「省略可能なパート（`macros.json`）」）。
 ///
 /// 行エントリの列名はシートが保持する列名（[`Sheet::columns`]）をそのまま使う
 /// （本クレートはスキーマを解釈しないため、列順の供給はモデル側の責務である）。
-/// 添付のバイト列は解釈・再圧縮せずそのまま運ぶ（要件 7.5）。
+/// 添付のバイト列は解釈・再圧縮せずそのまま運ぶ（要件 7.5）。マクロの記録も同じであり、
+/// 名前・種別・ソースを解釈・整形せずにそのまま運ぶ（**形だけ**の中身。design 決定 4）。
 ///
 /// 失敗は保存の中止であり、部分的な集合を返さない。行の値の個数と列数の不一致、
 /// 列名の重複のような**呼び出し元の programming error** は、design のエラー表に変種が
@@ -390,6 +412,16 @@ pub fn to_parts(document: &Document) -> Result<DocumentParts, DocumentError> {
     let document_part = DocumentPart::new(document.document_id(), metas)?
         .with_preserved(document.preserved_fields().clone());
     entries.push((EntryName::Document, document_part.to_json_bytes()?));
+
+    // macros.json: マクロの記録の並び。**省略可能なパート**であり、1 件も持たない文書では
+    // 書かない（空の並びを書くと、マクロを使わない文書の出力がこのパートの追加前と
+    // バイト単位で変わり、既存のゴールデン・固定フィクスチャが総崩れになる。形式版を
+    // 進めない判断と対をなす。macros_part.rs のモジュール docs）。
+    if !document.macros().is_empty() {
+        let macros = MacrosPart::new(document.macros().to_vec())
+            .with_preserved(document.macros_preserved_fields().clone());
+        entries.push((EntryName::Macros, macros.to_json_bytes()?));
+    }
 
     // 全シートが schema エントリと rows エントリを持つ（一様な形）。
     for sheet in document.sheets() {
@@ -487,6 +519,7 @@ pub(crate) fn from_parts_with(
     // 4. 各パートの復号（検証はまだ行わない: すべての復号結果が揃ってから検証する）。
     let DecodedParts {
         document_part,
+        macros,
         schemas,
         row_sets,
         attachments,
@@ -511,6 +544,7 @@ pub(crate) fn from_parts_with(
     // 7. モデル構築（検証済みの内容だけを移す）。
     build_document(
         document_part,
+        macros,
         schemas,
         row_sets,
         attachments,
@@ -525,6 +559,8 @@ pub(crate) fn from_parts_with(
 /// 段の本体から切り離せるようにするためである。
 struct DecodedParts {
     document_part: DocumentPart,
+    /// マクロの記録の並び（`macros.json`。**省略可能**: 無ければ `None`）。
+    macros: Option<MacrosPart>,
     schemas: Vec<(EntryName, SheetId, SchemaPart)>,
     row_sets: Vec<(EntryName, SheetRows)>,
     attachments: Vec<(EntryName, Vec<u8>)>,
@@ -539,6 +575,7 @@ struct DecodedParts {
 /// 識別子を再計算し、エントリ名と一致しなければならない（要件 7.2。不一致は中止）。
 fn decode_parts(parts: &DocumentParts) -> Result<DecodedParts, DocumentError> {
     let mut document_part: Option<DocumentPart> = None;
+    let mut macros: Option<MacrosPart> = None;
     let mut schemas: Vec<(EntryName, SheetId, SchemaPart)> = Vec::new();
     let mut row_sets: Vec<(EntryName, SheetRows)> = Vec::new();
     let mut attachments: Vec<(EntryName, Vec<u8>)> = Vec::new();
@@ -547,6 +584,12 @@ fn decode_parts(parts: &DocumentParts) -> Result<DecodedParts, DocumentError> {
             EntryName::Manifest => {}
             EntryName::Document => {
                 document_part = Some(DocumentPart::from_json_bytes(&part.bytes)?);
+            }
+            EntryName::Macros => {
+                // 省略可能なパートである（無ければ空の並び。`to_parts` は空の並びを
+                // 書かない）。エントリ名は一意（構築時の正準化）なので、ここへ来るのは
+                // 高々 1 回である。
+                macros = Some(MacrosPart::from_json_bytes(&part.bytes)?);
             }
             EntryName::Schema { .. } => {
                 let (sheet, schema) = SchemaCodec::decode(&part.name, &part.bytes)?;
@@ -581,6 +624,7 @@ fn decode_parts(parts: &DocumentParts) -> Result<DecodedParts, DocumentError> {
     })?;
     Ok(DecodedParts {
         document_part,
+        macros,
         schemas,
         row_sets,
         attachments,
@@ -595,8 +639,13 @@ fn decode_parts(parts: &DocumentParts) -> Result<DecodedParts, DocumentError> {
 /// 失敗しうるのは [`take_schema`] だけであり、それは「スキーマの無いシート」＝段 5 が
 /// 検出済みのはずの状態である（段 5 と段 7 の間で集合は変わらないため、実際には
 /// 到達しない。それでも `panic` せず報告する）。
+///
+/// マクロの記録は検証の対象ではない（識別子も参照も持たない**形だけ**の中身であり、
+/// 目録 [`PartInventory`] に載せるものが無い）。復号済みの並びとトップレベルの保持内容を
+/// そのままモデルへ移す。
 fn build_document(
     document_part: DocumentPart,
+    macros: Option<MacrosPart>,
     mut schemas: Vec<(EntryName, SheetId, SchemaPart)>,
     mut row_sets: Vec<(EntryName, SheetRows)>,
     attachments: Vec<(EntryName, Vec<u8>)>,
@@ -618,6 +667,10 @@ fn build_document(
     for (_, bytes) in attachments {
         // content-addressed で冪等（識別子の再計算は段 4 の照合で確認済み）。
         document.add_attachment(bytes);
+    }
+    if let Some(macros) = macros {
+        document.set_macros_preserved_fields(macros.preserved_fields().clone());
+        document.set_macros(macros.records().to_vec());
     }
     document.set_preserved_fields(document_part.preserved_fields().clone());
     // 読み込み時に形式変換が適用されたことをモデルへ記録する（要件 6.4）。設定の唯一の
@@ -798,6 +851,10 @@ fn inventory_of<'a>(
 /// 行の値の個数と列数の一致・列名の重複は**ワイヤ形**の問題であり、この関数ではなく
 /// [`to_parts`] が遮断する（呼び出し元の programming error として
 /// [`DocumentError::InvalidContainer`]）。
+///
+/// **マクロの記録（[`crate::model::MacroRecord`]）はこの目録に載らない**: 識別子も参照も
+/// 持たない**形だけ**の中身であり（design 決定 4）、ここで検査できる構造的な性質が無い。
+/// このため `macros.json` の型式の検査は復号（[`MacrosPart::from_json_bytes`]）だけが行う。
 pub fn validate_document(document: &Document) -> Result<(), DocumentError> {
     let inventory = inventory_of(
         document.sheets().iter().map(Sheet::id),

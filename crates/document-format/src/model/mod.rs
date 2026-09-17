@@ -17,6 +17,17 @@
 //! 返す**読み取り専用**の操作で、添付を削除も書き換えもしない(削除の API は存在しない)。
 //! 集計の詳細と不透明バイト列の扱いは model/attachment.rs のモジュール docs 参照。
 //!
+//! # マクロの記録(タスク 1.2。要件 1.1, 1.2, 1.5)
+//!
+//! マクロの記録(名前・種別・ソース)[`MacroRecord`] の並びも [`Document`] が保持し
+//! (design「Logical Data Model」の `macros.json`)、読み書きの口は [`Document::macros`] /
+//! [`Document::set_macros`] である。**本クレートは形だけを持ち、意味を持たない**:
+//! ソースの検証・能力宣言の読み取り・名前の一意性と置き換えの規則は下流
+//! (`crates/macro-runtime`)が所有する(design 決定 4。model/macro_record.rs の
+//! モジュール docs)。並びは保存順のままであり、**並べ替えも重複の検査もしない**。
+//! 未知フィールドの保持は `macros.json` のトップレベルとマクロ 1 件のそれぞれで行う
+//! (前者は `macros_preserved`、後者は [`MacroRecord`] の中。要件 6.2 / 6.3)。
+//!
 //! # ドキュメント識別子を保持する(タスク 4.8 の親の裁定)
 //!
 //! [`Document`] は自分の [`DocumentId`] を持つ([`Document::document_id`])。
@@ -118,6 +129,7 @@
 //!   方針が未定。model/sheet.rs の「Clone を実装しない理由」参照)。
 
 mod attachment;
+mod macro_record;
 mod schema_part;
 mod sheet;
 
@@ -130,6 +142,7 @@ use crate::json::PreservedFields;
 use crate::value::CellValue;
 
 pub use attachment::{Attachment, AttachmentRegistry};
+pub use macro_record::{MacroKind, MacroRecord};
 pub use schema_part::{RawJson, SchemaPart, TypeDef, TypeRef};
 // エンベロープ文法のキーは parse(本モジュール)と符号化(タスク 4.4 の `SchemaCodec`)が
 // 共有する。文字列リテラルを両実装へ散在させないため、`parts` 層へ同じ定数を渡す。
@@ -292,7 +305,9 @@ pub enum RowInsertionError {
 /// 0 個以上のシートを保持し(要件 1.1)、シート順序は [`Document::sheets`] の順である。
 /// 添付も [`Document`] が保持し(design ER 図 `Document ||--o{ Attachment : holds`)、
 /// 行のセル値からの参照は [`Document::unreferenced_attachments`] で集計される
-/// (要件 7.1, 7.5, 7.6。モジュール docs の「添付の集約」参照)。すべての変更はこの型
+/// (要件 7.1, 7.5, 7.6。モジュール docs の「添付の集約」参照)。マクロの記録の並びも
+/// [`Document`] が保持する([`Document::macros`]。`macros.json` が永続化する**形だけ**で、
+/// 解釈は下流が持つ)。すべての変更はこの型
 /// 経由であり、識別子は所有する [`IdFactory`] から発行される
 /// (一意性が構築で保証される所以。モジュール docs 参照)。
 ///
@@ -310,6 +325,13 @@ pub struct Document {
     sheets: Vec<Sheet>,
     /// 添付の保持と参照集計(要件 7.1, 7.5, 7.6)。
     attachments: AttachmentRegistry,
+    /// マクロの記録の並び(`macros.json`。保存順が一覧の提示順。タスク 1.2)。
+    ///
+    /// **形だけを保持する**: ソースの検証・能力宣言の読み取り・名前の一意性は本クレートでは
+    /// 行わない(model/macro_record.rs のモジュール docs。design 決定 4)。
+    macros: Vec<MacroRecord>,
+    /// `macros.json` のトップレベルで保持した未知フィールド(要件 6.2 / 6.3)。
+    macros_preserved: PreservedFields,
     /// 解釈しない `document.json` トップレベルのフィールド(前方互換。要件 6.2 / 6.3)。
     preserved: PreservedFields,
     /// 読み込み時に形式変換(移行)が適用されたか(要件 6.4)。
@@ -336,6 +358,8 @@ impl Document {
             ids,
             sheets: Vec::new(),
             attachments: AttachmentRegistry::new(),
+            macros: Vec::new(),
+            macros_preserved: PreservedFields::new(),
             preserved: PreservedFields::new(),
             converted_from_an_older_format: false,
         }
@@ -352,6 +376,8 @@ impl Document {
             ids: IdFactory::new(),
             sheets: Vec::new(),
             attachments: AttachmentRegistry::new(),
+            macros: Vec::new(),
+            macros_preserved: PreservedFields::new(),
             preserved: PreservedFields::new(),
             converted_from_an_older_format: false,
         }
@@ -549,6 +575,43 @@ impl Document {
     #[inline]
     pub fn attachments(&self) -> &AttachmentRegistry {
         &self.attachments
+    }
+
+    /// マクロの記録の並び(保存順。`macros.json` が永続化する。タスク 1.2)。
+    ///
+    /// 並びは**与えられた順のまま**であり(保存順が一覧の提示順)、本クレートは内容を
+    /// 解釈しない: ソースの検証・能力宣言の読み取り・名前の一意性は下流
+    /// (`crates/macro-runtime`)の規則である(model/macro_record.rs のモジュール docs)。
+    /// マクロを 1 件も持たない文書は空のスライスを返す。
+    #[inline]
+    pub fn macros(&self) -> &[MacroRecord] {
+        &self.macros
+    }
+
+    /// マクロの記録の並びを**置き換える**(要件 1.2 の保存・削除の経路)。
+    ///
+    /// 並びは与えられた順序のまま保持し(並べ替えない)、内容の検査も正規化もしない
+    /// (「同じ名前の保存は置き換え」という規則は下流が適用し、その結果の並びを受け取る)。
+    /// 保存経路([`crate::parts::to_parts`])は空の並びのとき `macros.json` を書かない
+    /// (省略可能なパート)。
+    #[inline]
+    pub fn set_macros(&mut self, macros: Vec<MacroRecord>) {
+        self.macros = macros;
+    }
+
+    /// `macros.json` のトップレベルで保持した未知キー(要件 6.2 / 6.3)。
+    ///
+    /// 読み込み経路(`parts::from_parts`)が復号済みの保持内容をここへ移し、保存経路
+    /// (`parts::to_parts`)が `parts::MacrosPart` へ戻す。
+    #[inline]
+    pub(crate) fn macros_preserved_fields(&self) -> &PreservedFields {
+        &self.macros_preserved
+    }
+
+    /// 保持すべき未知フィールドを据える経路(`parts::from_parts` が呼ぶ)。
+    #[inline]
+    pub(crate) fn set_macros_preserved_fields(&mut self, preserved: PreservedFields) {
+        self.macros_preserved = preserved;
     }
 
     /// どの行のどのセル値からも参照されていない添付の識別子を昇順で返す(要件 7.6)。

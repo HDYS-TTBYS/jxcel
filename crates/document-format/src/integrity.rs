@@ -147,10 +147,10 @@ mod tests {
         (0..len).map(|i| (i % 251) as u8).collect()
     }
 
-    /// 照合の標本: 受理 6 形のうち内容を持つ 5 形（マーカー以外）を 1 形 1 個。
+    /// 照合の標本: 受理 7 形のうち内容を持つ 6 形（マーカー以外）を 1 形 1 個。
     ///
     /// 横断的な性質（どの形でも `entry` に自分の名前が入る・不一致を検出する）は
-    /// 対象を 2 つ以上に分散させないと回帰を検出できないため、5 形すべてを回す。
+    /// 対象を 2 つ以上に分散させないと回帰を検出できないため、6 形すべてを回す。
     /// バイト列は長さも内容も形ごとに異なる（定数や先頭数バイトだけを見る実装、
     /// エントリ名を固定する実装を落とす）。
     fn samples() -> Vec<(EntryName, Vec<u8>)> {
@@ -160,6 +160,7 @@ mod tests {
                 "document.json",
                 b"{\"document_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}".to_vec(),
             ),
+            ("macros.json", b"{\"macros\":[]}".to_vec()),
             (
                 "schemas/01ARZ3NDEKTSV4RRFFQ69G5FAV.json",
                 b"{\"root\":{}}".to_vec(),
@@ -253,7 +254,7 @@ mod tests {
         );
     }
 
-    /// 要件 5.2: 記録値と実際の内容が一致すれば通る（5 形すべて）。
+    /// 要件 5.2: 記録値と実際の内容が一致すれば通る（6 形すべて）。
     #[test]
     fn verify_accepts_matching_digest() {
         for (entry, bytes) in samples() {
@@ -267,7 +268,7 @@ mod tests {
     }
 
     /// 要件 5.3: 不一致の `entry` には**照合した対象のエントリ名**（テキスト形）が入る。
-    /// 5 形を回し、固定名・空文字・別エントリ名を返す実装を落とす。
+    /// 6 形を回し、固定名・空文字・別エントリ名を返す実装を落とす。
     #[test]
     fn verify_reports_the_verified_entry_name_on_mismatch() {
         let samples = samples();

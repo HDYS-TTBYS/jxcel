@@ -6,14 +6,15 @@
 //!
 //! 現在あるのは **manifest パート**（`manifest.json`）と **document パート**
 //! （`document.json`）、**シート別スキーマパート**（`schemas/<sheet-ulid>.json`）、
-//! **シート別行データパート**（`sheets/<sheet-ulid>.jsonl`）、復号済みパート群に
-//! 対する**構造検証**（[`validate`]）、そして**論理エントリ集合そのもの**
-//! （[`document_parts`]。タスク 4.8）である:
+//! **シート別行データパート**（`sheets/<sheet-ulid>.jsonl`）、**マクロパート**
+//! （`macros.json`。タスク 1.2）、復号済みパート群に対する**構造検証**（[`validate`]）、
+//! そして**論理エントリ集合そのもの**（[`document_parts`]。タスク 4.8）である:
 //!
 //! | モジュール | エントリ | 責務 |
 //! |------------|----------|------|
 //! | [`manifest`] | `manifest.json` | 形式バージョン、パート索引、パートごとのダイジェスト（唯一の権威ある索引） |
 //! | [`document_part`] | `document.json` | ドキュメント識別子、シート順序、シートのメタデータ（列名を含む） |
+//! | [`macros_part`] | `macros.json` | マクロの記録（名前・種別・ソース）の並び。**形だけ**を運び、意味は下流が持つ（design 決定 4） |
 //! | [`schema_codec`] | `schemas/<sheet-ulid>.json` | シートごとのスキーマ（ルートスキーマ + ネスト型定義）の符号化・復号 |
 //! | [`rows_codec`] | `sheets/<sheet-ulid>.jsonl` | シートごとの行データ（1 行 1 オブジェクトの NDJSON）の符号化・復号 |
 //! | [`validate`] | — | 復号済みパート群の目録に対する構造検証（識別子の一意性、スキーマの存在、参照の実在性） |
@@ -22,6 +23,8 @@
 //! 論理エントリ集合は**エントリ名の昇順で決定的に反復**し（[`DocumentParts::iter`]）、
 //! ZIP の知識も圧縮も持たない。`manifest.json` が他の全パートを索引し、全シートが
 //! schema エントリと rows エントリを持つ（0 行のシートも空の行エントリを持つ）。
+//! `macros.json` は**省略可能**であり、マクロを 1 件も持たない文書では書かれない
+//! （[`to_parts`] の docs「省略可能なパート」）。
 //!
 //! # パートごとの順序規則
 //!
@@ -34,6 +37,7 @@
 //! そのまま書く（[`schema_codec`]）。`sheets/<sheet-ulid>.jsonl` も同じ側であり、
 //! **行順は与えられた順序のまま**（シートの行順序そのものがデータ。ULID 昇順にも辞書順にも
 //! ソートしない）で、列順は呼び出し元が与えた順序のままである（[`rows_codec`]）。
+//! `macros.json` の並びも同じ側である（保存順が一覧の提示順。[`macros_part`]）。
 //!
 //! # 依存方向
 //!
@@ -49,6 +53,7 @@
 
 pub mod document_part;
 pub mod document_parts;
+pub mod macros_part;
 pub mod manifest;
 pub mod rows_codec;
 pub mod schema_codec;
@@ -56,6 +61,7 @@ pub mod validate;
 
 pub use document_part::{DocumentPart, SheetMeta};
 pub use document_parts::{from_parts, to_parts, validate_document, DocumentParts, Part};
+pub use macros_part::MacrosPart;
 pub use manifest::{resolve_manifest, ManifestEntry, ManifestPart};
 pub use rows_codec::{RowsCodec, RowsEncodeError, SheetRows};
 pub use schema_codec::SchemaCodec;

@@ -57,6 +57,7 @@
 ### Revalidation Triggers
 
 - **`document-format` のパートを 1 形足したとき**: 符号化の決定性・マニフェスト索引・形式版のゲート・フィクスチャ（`window_protocol_fixture` を含む）を `document-format` が再検証する。**形式版を進めるかは `document-format` が決める**（本スペックは「古いビルドで開いたときにどうなるか」を所有しない）
+  - **決定（タスク 1.2 の実装時）: 形式版は進めない（`1.0` のまま）**。理由は 3 点。(1) `macros.json` を**省略可能なパート**とし、マクロを 1 件も持たない文書では書かないため、そのような文書の出力はパートの追加前と**バイト単位で同一**であり、既存のゴールデン fixture・固定バイト列（`crates/document-format/tests/fixtures/bytes/golden_container.zip` と `v1/anchored.jxcel`）・`window_protocol_fixture` を 1 つも動かさない。(2) 版を進めても読む側の観測は変わらない: ゲートは major しか見ないため minor を上げても差が現れず、major を上げるなら既存の 1.0 のファイルを読むための移行段（1.0 → 2.0）と新バージョンのゴールデン fixture が要る（形式側の作業であり、本スペックの範囲外。移行段を伴わない major の引き上げは既存文書を読めなくする）。(3) この形を知らない実装は `macros.json` を許可リスト外のエントリ名として**拒否**する（許可リストは完全一致照合であり、黙って読み飛ばす経路が無い）ため、古いビルドで開いたときに**静かに壊れる**ことはない（拒否の理由にエントリ名が現れる）。記録は `crates/document-format/src/entry_name.rs`（許可リストの節）と `src/parts/macros_part.rs` / `src/parts/document_parts.rs`（省略可能なパートの節）にある
 - **`data-grid` の `UndoStack` / `EditCommand` の形が変わったとき**: アダプタの写し（変更集合 → `EditCommand`）と、`UndoLabel::MacroRun` の 1 対の積み方が影響を受ける
 - **`document-session` の `edit` の閉包の形が変わったとき**: 変更の適用の単位（1 回の `edit` で全部適用する前提）が影響を受ける
 - **ホスト API の宣言表を変えたとき**: `types/` の生成物・ドリフト検査・`macro-editor-lsp` の補完の入力が影響を受ける
@@ -620,6 +621,7 @@ pub fn apply_macro_changes(
 - 並びの順序は**保存された順**であり、一覧の提示順に使う
 - 名前は一意である（同じ名前の保存は置き換え。要件 1.6）
 - ソースはテキストのまま保持する（整形しない。要件 1.5）
+- **wire 形（タスク 1.2 の実装で確定）**: `{"macros":[{"name":<文字列>,"kind":"typescript"|"javascript","source":<文字列>}]}`。キー順はこの順、`kind` は 2 つのテキストのいずれか（未知のテキストは拒否）、`source` は JSON 文字列としてのみエスケープする。**パートは省略可能**であり、マクロを 1 件も持たない文書では `macros.json` を書かない（形式版を進めない判断と対。`crates/document-format/src/parts/macros_part.rs`）。一意性の検査は上流では行わない（下流の規則。タスク 1.6）
 
 ### Data Contracts & Integration
 

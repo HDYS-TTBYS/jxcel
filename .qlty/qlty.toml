@@ -138,3 +138,17 @@ match.rules = [
   "osv-scanner:RUSTSEC-2025-0100",
 ]
 set.ignored = true
+
+# マクロ実行エンジン（`deno_core` → `v8` / `deno_ast` → swc）が引き込む依存の勧告。
+# **どちらも unmaintained であり、脆弱性ではない**（修正版は存在しない — 全版が対象）。
+# 代替（`compact_str` / `smol_str` / `pastey`）へ移るには `deno_core` / `deno_ast` 側の差し替えが要り、
+# jxcel 側の依存更新では解消できない。CI の cargo audit も警告扱いで失敗にしないので判断を揃える。
+# - smartstring 1.0.1（RUSTSEC-2026-0249, unmaintained）: `deno_ast` → `swc_ecma_parser` / `swc_ecma_lexer`
+# - paste 1.0.15（RUSTSEC-2024-0436, unmaintained）: `deno_core` → `v8`
+# **`deno_core` / `deno_ast` を上げたら見直す**（tech.md「Known Risks」1 の再検証の契機）。
+[[triage]]
+match.rules = [
+  "osv-scanner:RUSTSEC-2026-0249",
+  "osv-scanner:RUSTSEC-2024-0436",
+]
+set.ignored = true

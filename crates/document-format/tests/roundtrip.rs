@@ -36,7 +36,7 @@ use document_format::{CellValue, Document, DocumentFormatApi, EntryName, RowId, 
 
 use common::{
     api, assert_same_document, document_view, document_with_sheet, entries_of,
-    entries_with_preserved_fields, fixture_path, sample, sample_minimal,
+    entries_with_preserved_fields, fixture_path, sample, sample_minimal, sample_with_macros,
     sample_with_unknown_fields, sample_with_unreferenced_attachment, sample_with_values,
     with_rebuilt_manifest, Scratch, SCHEMA_EMPTY, SCHEMA_WITH_REF,
 };
@@ -49,6 +49,7 @@ fn samples() -> Vec<(&'static str, Document)> {
         ("minimal", sample_minimal()),
         ("multi_sheet", sample()),
         ("values", sample_with_values()),
+        ("macros", sample_with_macros()),
         (
             "unreferenced_attachment",
             sample_with_unreferenced_attachment(),
@@ -134,6 +135,65 @@ fn saving_and_reopening_restores_every_sample_exactly() {
             "{name}: 保証対象外とされた"
         );
     }
+}
+
+/// マクロを 1 件持つ文書を保存し、開き直すと**ソースがバイト単位で一致する**（タスク 1.2 の
+/// 観測。要件 1.5）。
+///
+/// 固定する事実は 4 つである:
+///
+/// 1. 保存したファイルを開き直すと、マクロの（名前・種別・ソース）が保存前と同じである
+///    （[`assert_same_document`] は射影の全項目を比較する。ソースはバイト列で比較される）。
+/// 2. ソースが**バイト単位**で一致する（文字列の等値ではなくバイト列で確かめる）。
+/// 3. 開いたモデルを書き戻すと、**保存したファイルと同一のバイト列**になる（同一内容 →
+///    同一バイト列。要件 3.1。`macros.json` を含む集合全体の決定性）。
+/// 4. マクロを 1 件も持たない文書では `macros.json` を**書かない**（省略可能なパート。
+///    これによりマクロを使わない文書の出力は、このパートの追加前とバイト単位で変わらない）。
+#[test]
+fn a_macro_survives_save_and_reopen_byte_for_byte() {
+    let scratch = Scratch::new("roundtrip_macros");
+    let path = scratch.file("macros.jxcel");
+    let before = sample_with_macros();
+    let source_before = before.macros()[0].source().to_owned();
+
+    api().save(&before, &path).expect("標本は保存できる");
+    let stored = fs::read(&path).expect("保存したファイルが読める");
+    let outcome = api().open(&path).expect("保存したファイルは開ける");
+
+    // 1. モデルとして一致する（射影の全項目。ソースはバイト列で比較される）。
+    assert_same_document(&before, &outcome.document);
+
+    // 2. ソースがバイト単位で一致し、`macros.json` のエントリとして集合に現れる。
+    let macros = outcome.document.macros();
+    assert_eq!(1, macros.len(), "マクロの件数が変わった");
+    assert_eq!(
+        source_before.as_bytes(),
+        macros[0].source().as_bytes(),
+        "ソースがバイト単位で一致しない"
+    );
+    let restored = api()
+        .to_parts(&outcome.document)
+        .expect("開いたモデルはパート集合へ取り出せる");
+    assert!(
+        restored.get(&EntryName::Macros).is_some(),
+        "マクロを持つ文書に macros.json が無い"
+    );
+
+    // 3. 書き戻しが保存したファイルとバイト単位で一致する（決定性）。
+    let reencoded = ContainerCodec::encode(&restored).expect("符号化できる");
+    assert_eq!(
+        stored, reencoded,
+        "マクロを持つ文書の往復がバイト単位で一致しない"
+    );
+
+    // 4. マクロ 0 件の文書は `macros.json` を持たない（省略可能なパート）。
+    let plain = api()
+        .to_parts(&sample_minimal())
+        .expect("標本はパート集合へ取り出せる");
+    assert!(
+        plain.get(&EntryName::Macros).is_none(),
+        "マクロ 0 件の文書に macros.json が書かれた"
+    );
 }
 
 /// コミット済みゴールデンを開き、両経路のモデルが一致する（実ファイルの経路も通す）。
@@ -337,6 +397,7 @@ fn the_comparison_view_separates_every_observable_aspect() {
         view_a.attachments, view_b.attachments,
         "対照が添付まで変えている"
     );
+    assert_eq!(view_a.macros, view_b.macros, "対照がマクロまで変えている");
     assert_ne!(
         view_a.parts, view_b.parts,
         "保持フィールドの差を捉えていない"

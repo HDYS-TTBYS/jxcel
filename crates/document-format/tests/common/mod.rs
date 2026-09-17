@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use document_format::parts::{to_parts, DocumentParts, ManifestEntry, ManifestPart};
 use document_format::{
     AttachmentId, CellValue, Document, DocumentFormat, DocumentFormatApi, EntryName, FormatVersion,
-    NestedValue, SchemaPart, SheetId,
+    MacroKind, MacroRecord, NestedValue, SchemaPart, SheetId,
 };
 
 /// 標本のルートスキーマ（型参照 1 個と型定義 1 個を持つ）。
@@ -266,6 +266,24 @@ pub fn attachments(document: &Document) -> Vec<(String, Vec<u8>)> {
         .collect()
 }
 
+/// マクロの（名前, 種別, ソース）を**保存順**に写す（要件 1.2, 1.5）。
+///
+/// ソースはバイト列で写す: 往復でソースがバイト単位で変わらないことが要件 1.5 の観測で
+/// あり、`String` の等値に任せずバイト列として比較できる形にしておく。
+pub fn macros(document: &Document) -> Vec<(String, MacroKind, Vec<u8>)> {
+    document
+        .macros()
+        .iter()
+        .map(|record| {
+            (
+                record.name().to_owned(),
+                record.kind(),
+                record.source().as_bytes().to_vec(),
+            )
+        })
+        .collect()
+}
+
 /// モデルを公開面から余さず写し取った比較用の射影。
 ///
 /// 往復の同一性判定（「完全に同一のモデル」）はこの型の等値で行う。項目の対応は:
@@ -276,6 +294,7 @@ pub fn attachments(document: &Document) -> Vec<(String, Vec<u8>)> {
 /// * [`Self::schemas`]: ルートの**バイト列**（決定性の確認を兼ねる）・型定義の
 ///   `TypeDefId` と `definition` の**バイト列**・型参照の（元, 先）。
 /// * [`Self::attachments`]: 添付の識別子とバイト列（全件、識別子の昇順）。
+/// * [`Self::macros`]: マクロの（名前・種別・ソース）の**保存順**の一覧（ソースはバイト列）。
 /// * [`Self::unreferenced_attachments`]: 未参照添付の一覧（往復で落ちていないこと）。
 /// * [`Self::parts`]: モデルの wire 射影（`to_parts` のエントリ名とバイト列）。
 ///   未知フィールド（保持フィールド）に公開アクセサが無いため、その保持は
@@ -288,6 +307,7 @@ pub struct DocumentView {
     pub rows: Vec<Vec<(String, Vec<CellValue>)>>,
     pub schemas: Vec<(Vec<u8>, Vec<(String, Vec<u8>)>, Vec<(String, String)>)>,
     pub attachments: Vec<(String, Vec<u8>)>,
+    pub macros: Vec<(String, MacroKind, Vec<u8>)>,
     pub unreferenced_attachments: Vec<String>,
     pub parts: Vec<(EntryName, Vec<u8>)>,
 }
@@ -304,6 +324,7 @@ pub fn document_view(document: &Document) -> DocumentView {
         rows: rows(document),
         schemas: schemas(document),
         attachments: attachments(document),
+        macros: macros(document),
         unreferenced_attachments: document
             .unreferenced_attachments()
             .iter()
@@ -340,6 +361,10 @@ pub fn assert_same_document(expected: &Document, actual: &Document) {
     assert_eq!(
         expected.attachments, actual.attachments,
         "添付（識別子・バイト列）が変わった"
+    );
+    assert_eq!(
+        expected.macros, actual.macros,
+        "マクロ（名前・種別・ソースのバイト列）が変わった"
     );
     assert_eq!(
         expected.unreferenced_attachments, actual.unreferenced_attachments,
@@ -401,6 +426,31 @@ pub fn sample() -> Document {
 /// 最小の標本: 0 シート・0 添付（要件 1.1 が認める下限）。
 pub fn sample_minimal() -> Document {
     Document::new()
+}
+
+/// 標本のマクロのソース: エスケープを要する文字（引用符・逆斜体・タブ・CRLF・非 ASCII・
+/// 絵文字）と末尾改行を含む（ソースがバイト単位で往復することの観測に使う。要件 1.5）。
+///
+/// 種別は TypeScript であるが、**本クレートはソースを解釈しない**（構文の正しさは問わない。
+/// 意味の検証は下流の規則である）。
+pub const MACRO_SOURCE: &str = concat!(
+    "// 棚卸し\r\n",
+    "const xs = readRows(0, 0, 10);\t// \"引用符\" と \\ 逆斜体\n",
+    "console.log(\"🍎\", xs.length);\n",
+);
+
+/// マクロを 1 件持つ標本（`macros.json` の往復。タスク 1.2）。
+///
+/// マクロはシートに依存しないため、シートは 0 枚のままにする（標本ごとに 1 つの性質を
+/// 担わせる規約。往復の比較は [`assert_same_document`] が余さず行う）。
+pub fn sample_with_macros() -> Document {
+    let mut document = Document::new();
+    document.set_macros(vec![MacroRecord::new(
+        "棚卸し",
+        MacroKind::TypeScript,
+        MACRO_SOURCE,
+    )]);
+    document
 }
 
 /// 添付参照・入れ子・数値・文字列（脱出口が要る値を含む）を持つ 1 シート 3 行の標本。
@@ -517,10 +567,11 @@ pub fn sample_with_unreferenced_attachment() -> Document {
 
 /// 未知フィールド（保持フィールド）を含むエントリ集合を組み立てる。
 ///
-/// `document.json` のトップレベルとシート要素、`schemas/<sheet>.json` のトップレベルと
-/// 型定義要素のそれぞれに、`marker` を値に埋めた未知キーを差し込む（要件 6.2 / 6.3 の
-/// 前方互換。トップレベルと要素内の両方を踏む）。差し込む位置は既知キーの宣言順に対する
-/// 位置（先頭 / 末尾）で変え、差し戻し位置の検証を兼ねる。索引は実体から組み直す。
+/// `document.json` のトップレベルとシート要素、`macros.json` のトップレベルとマクロ要素、
+/// `schemas/<sheet>.json` のトップレベルと型定義要素のそれぞれに、`marker` を値に埋めた
+/// 未知キーを差し込む（要件 6.2 / 6.3 の前方互換。トップレベルと要素内の両方を踏む）。
+/// 差し込む位置は既知キーの宣言順に対する位置（先頭 / 末尾）で変え、差し戻し位置の検証を
+/// 兼ねる。索引は実体から組み直す。
 pub fn entries_with_preserved_fields(marker: &str) -> Vec<(EntryName, Vec<u8>)> {
     let mut base = Document::new();
     let sheet = base.add_sheet("保持");
@@ -534,6 +585,13 @@ pub fn entries_with_preserved_fields(marker: &str) -> Vec<(EntryName, Vec<u8>)> 
     let row = base.add_row(sheet).expect("標本のシートは実在する");
     base.set_row_values(sheet, row, vec![CellValue::Int(7)])
         .expect("標本の行は実在する");
+    // マクロも 1 件持たせる（`macros.json` は省略可能なパートであるため、1 件も持たない
+    // 標本ではこのエントリ自体が現れず、保持の経路を踏めない）。
+    base.set_macros(vec![MacroRecord::new(
+        "保持",
+        MacroKind::JavaScript,
+        "1 + 1",
+    )]);
 
     let parts = to_parts(&base).expect("標本はパート集合へ取り出せる");
     let version = parts.format_version();
@@ -548,6 +606,18 @@ pub fn entries_with_preserved_fields(marker: &str) -> Vec<(EntryName, Vec<u8>)> 
         with_top.replacen(
             "\"columns\":[\"c\"]",
             &format!("\"columns\":[\"c\"],\"future_sheet\":[1,\"{marker}\"]"),
+            1,
+        )
+    });
+    replace_entry(&mut entries, EntryName::Macros, |text| {
+        let with_top = text.replacen(
+            "\"macros\"",
+            &format!("\"future_macros\":{{\"marker\":\"{marker}\"}},\"macros\""),
+            1,
+        );
+        with_top.replacen(
+            "\"kind\":\"javascript\"",
+            &format!("\"kind\":\"javascript\",\"future_macro\":[1,\"{marker}\"]"),
             1,
         )
     });

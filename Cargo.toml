@@ -21,6 +21,7 @@ members = [
     "crates/app-shell",
     "crates/document-session",
     "crates/data-grid",
+    "crates/macro-runtime",
     "crates/sidecar-smoke",
     "src-tauri",
 ]

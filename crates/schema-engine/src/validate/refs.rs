@@ -102,10 +102,12 @@ where
     // 渡すと**黙って取りこぼす** — 本番の経路は常に整列済みだが、crate の外からこの関数を
     // 直接呼ぶ経路（下流の spec）のために、テストの下では落ちるようにしておく。
     debug_assert!(
-        selected.map_or(true, |selected| selected.windows(2).all(|pair| match pair {
-            [left, right] => left < right,
-            _ => true,
-        })),
+        selected.map_or(true, |selected| selected.windows(2).all(
+            |pair| match pair {
+                [left, right] => left < right,
+                _ => true,
+            }
+        )),
         "selected は昇順・重複除去済みでなければならない（validate_columns が正規化する）"
     );
     // 列ごとの参照の形を 1 回だけ組み立てる（入れ子の内側の参照も含む）。

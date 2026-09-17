@@ -14,7 +14,7 @@
   - **観測**: `cargo test -p macro-runtime` と `cargo bench --no-run -p macro-runtime` が通り、`cargo tree -p macro-runtime` に `tauri` / `data-grid` / `document-session` が現れない
   - _Requirements: 2.1, 11.3_
 
-- [ ] 1.2 上流 `document-format` にマクロのパートを 1 形足す（形だけ。意味は持たせない）
+- [x] 1.2 上流 `document-format` にマクロのパートを 1 形足す（形だけ。意味は持たせない）
   - エントリ名の閉じた列挙に 1 形（`macros.json`）を足し、マニフェスト索引・`Parts` の列挙・往復に通す
   - **`Document` にマクロの並びの読み書き口を足す**（`to_parts` / `from_parts` / 構築時の検証を追随させる。`model/` にも触れる）
   - 中身は**マクロの記録の並び**（名前・種別・ソース）とし、**解釈（ソースの検証・能力宣言の読み取り）は本クレートが行う**。上流は形だけを知る（design.md 決定 4）

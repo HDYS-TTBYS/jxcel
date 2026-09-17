@@ -80,7 +80,7 @@
 //! - **自己参照の拒否**: 索引が `manifest.json` 自身を含むことはできない。マニフェストの
 //!   ダイジェストは自分の内容に依存するため記録できず（記録すれば自己参照）、
 //!   **マニフェストが信頼の根である**（design「Container Entry Layout」の唯一の索引という
-//!   決定の帰結）。他の 5 形は内容を持つパートであり索引に載せられる（形式マーカー
+//!   決定の帰結）。他の 6 形は内容を持つパートであり索引に載せられる（形式マーカー
 //!   `jxcel` も内容を持つので載せられる）。
 //!
 //! # ダイジェストは integrity 層の 1 経路で算出する
@@ -131,7 +131,7 @@ const DIGEST_KEY: &str = "blake3";
 
 /// パート索引の 1 件: エントリ名と、そのパートの内容から算出した BLAKE3 ダイジェスト。
 ///
-/// エントリ名は [`EntryName`]（許可リストの 6 形のいずれか）であり、自由な文字列を
+/// エントリ名は [`EntryName`]（許可リストの 7 形のいずれか）であり、自由な文字列を
 /// 持てない。ダイジェストは [`crate::integrity::digest_part`] が算出した値そのものである
 /// （[`ManifestEntry::of_bytes`]）。
 ///
@@ -624,16 +624,18 @@ mod tests {
 
     /// パートの実バイト列の標本（パートごとに長さも内容も異なる）。
     const DOCUMENT_BYTES: &[u8] = b"{\"document_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}";
+    const MACROS_BYTES: &[u8] = b"{\"macros\":[]}";
     const SCHEMA_BYTES: &[u8] = b"{\"root\":{}}";
     const ROWS_A_BYTES: &[u8] = b"{\"a\":1}\n{\"a\":2}\n";
     const ROWS_B_BYTES: &[u8] = b"{\"b\":1}\n";
     const ATTACHMENT_BYTES: &[u8] = &[0xff, 0x00, 0x80, 0x01];
 
-    /// 6 形すべての標本（名前, 実バイト列）。索引に載せられる形を 1 形 1 個ずつ。
+    /// 7 形すべての標本（名前, 実バイト列）。索引に載せられる形を 1 形 1 個ずつ。
     fn sample_cases() -> Vec<(String, &'static [u8])> {
         vec![
             ("jxcel".to_owned(), b"jxcel"),
             ("document.json".to_owned(), DOCUMENT_BYTES),
+            ("macros.json".to_owned(), MACROS_BYTES),
             (format!("sheets/{SHEET_B}.jsonl"), ROWS_B_BYTES),
             (format!("schemas/{SHEET_A}.json"), SCHEMA_BYTES),
             (format!("sheets/{SHEET_A}.jsonl"), ROWS_A_BYTES),
@@ -654,7 +656,7 @@ mod tests {
         ManifestEntry::of_bytes(EntryName::parse(name).expect("標本は許可リスト内"), bytes)
     }
 
-    /// 標本 6 件の昇順（表示テキストの辞書順）。`samples()` の並びとは異なる。
+    /// 標本 7 件の昇順（表示テキストの辞書順）。`samples()` の並びとは異なる。
     ///
     /// 期待値を [`EntryName`] の `Ord` で計算せず**文字列で固定する**のは、並びの定義
     /// （辞書順）そのものを回帰対象にするためである。
@@ -663,6 +665,7 @@ mod tests {
             format!("attachments/{HEX_B}.bin"),
             "document.json".to_owned(),
             "jxcel".to_owned(),
+            "macros.json".to_owned(),
             format!("schemas/{SHEET_A}.json"),
             format!("sheets/{SHEET_A}.jsonl"),
             format!("sheets/{SHEET_B}.jsonl"),

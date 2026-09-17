@@ -123,6 +123,14 @@ tsserver は C-ABI を持たない JS プログラムであり、ライブラリ
    - op は JS から **`Deno.core.ops.<name>()`** で呼ぶ。**`op_panic` は `deno_core` が持つ組込**であり、同じ名前の op を登録すると `Found ops with duplicate names` で isolate の生成に失敗する
    - **残る未確認は実際のアプリへの結線だけ**（`src-tauri` のコマンド層から await する形と capability）。本スパイクが確かめたのは Tauri と同じ形のランタイム共存であり、結線は `macro-runtime` の設計で確かめる
    - 副次的な費用: 実行ファイルが **68 MB** 増える（V8 + `deno_core` の静的リンク。`deno_ast` + `swc` の TS トランスパイルを足すとさらに増える）。**起動時に isolate を作る必要は無い** — 生成は 5.5 ms であり、初回のマクロ実行まで遅らせれば常駐 +24 MB も後ろへ送れる（単一実行ファイルの要求は静的な埋め込みで満たされる）
+   - **依存の勧告 2 件（2026-09-18 の実測。クレートを実装へ入れて初めて見えた）**: `deno_core` 0.412 →
+     `v8` → `paste 1.0.15`（RUSTSEC-2024-0436）と `deno_ast 0.53.3` → `swc_ecma_parser` /
+     `swc_ecma_lexer` → `smartstring 1.0.1`（RUSTSEC-2026-0249）が **unmaintained の勧告**を出す。
+     **どちらも全版が対象であり、修正版は存在しない**（脆弱性ではない — 助言の種類が
+     `unmaintained`）。代替（`compact_str` / `smol_str` / `pastey`）へ移るには上流 2 つの差し替えが要る。
+     したがって **CI の `cargo audit` は警告として扱い**（失敗にしない）、qlty の表示も
+     `.qlty/qlty.toml` の triage で揃えた（判断の理由はその場に書いてある）。
+     **`deno_core` / `deno_ast` を上げたら見直す。**
 2. **AppImage + サイドカーバイナリ** — AppImage のバンドル処理が `usr/bin` 配下の ELF に無条件で rpath を書き込み、追記型ペイロードを持つ実行ファイル（Node SEA / pkg / Bun compile / PyInstaller / Nuitka）を破壊する。正典は `tauri-apps/tauri#5189`（2022 年から open、2026-01 に Tauri v2 で再現報告）であり、`#11898` は 2024-12 以降停止している。除外設定は存在せず `NO_STRIP=1` も効かない。**回避配置は `app-shell` の design で確定済み**（`usr/share/` へ置き走査対象の外に出す）
 3. **WebKitGTK 上の canvas グリッドと Monaco** — 白画面、ソフトウェアラスタライズへの無言のフォールバック、描画劣化。**Linux を最高リスクのターゲットとして扱う**。2026-09 の実測で現在 open なのは `#5143`（白画面）、`#15936`（ソフトウェア GL 下の白いウィンドウ。**検出手段がないこと自体が主題**）、`#14721`（NVIDIA 環境の SIGSEGV）、`#10702` / `#14924`（Wayland Error 71）。当初挙げていた `#5761` / `#7021` / `#13157` はいずれもクローズ済み（ただし `#13157` は NOT_PLANNED であり未修正。WebKitGTK 2.48.0 で発現）。**基盤側に描画失敗を検出する API は無く、Tauri も wry も回避策の環境変数を自動設定しない** — したがって検出は**アプリ側が自分で持つ**。実装済みの分: 起動の初回描画は `app-shell` の `RenderWatchdog`（`crates/app-shell/src/render.rs`）が**三値**（`Painted` / `SoftwareRaster` / `NoPaint`）で判定し、**通知が期限内に届かないことだけを不成立の根拠**にする（描画を検出する API が無いため）。不成立のときは設定に印（`render.fallback`）を残し、次の起動が代替経路を適用する。**グリッド自身が塗れたかは `data-grid` の `RenderProbe`（`probePaint` / `sampleFrameTimes`）が受け持つ**（要件 12.2 / 12.3）。**起動時の判定とグリッドの判定は別物である** — 前者は「シェルが描けたか」、後者は「canvas が実際に塗れたか」であり、両方を要する
 4. **docx テンプレート差し込み** — Rust に成熟したテンプレータが存在せず ZIP + OOXML の自前実装になる。Word がプレースホルダを複数の run に分割する問題への対処が必要

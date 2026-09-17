@@ -1,13 +1,15 @@
 //! エントリ名の文法と許可リスト（タスク 1.6。要件 2.2, 2.3, 2.5）。
 //!
-//! # 6 形のみを受理する許可リスト
+//! # 7 形のみを受理する許可リスト
 //!
-//! コンテナのエントリ名は design「Container Entry Layout」が定める 6 形だけでなければならない:
+//! コンテナのエントリ名は design「Container Entry Layout」が定める形と、マクロのパート
+//! （`macros.json`。タスク 1.2 で足した 7 形目）だけでなければならない:
 //!
 //! ```text
 //! jxcel                          # 形式マーカー（固定オフセット・スニッフ用）
 //! manifest.json                  # 権威あるパート索引
 //! document.json                  # 安定メタデータ
+//! macros.json                    # マクロの記録の並び（名前・種別・ソース。省略可能）
 //! schemas/<sheet-ulid>.json      # シート別スキーマ
 //! sheets/<sheet-ulid>.jsonl      # シート別行データ（NDJSON）
 //! attachments/<blake3-hex64>.bin # コンテンツアドレス指定添付
@@ -24,8 +26,8 @@
 //! # 大文字小文字と ID 構成要素の正準形
 //!
 //! - キーワード・ディレクトリ名（`jxcel` / `manifest.json` / `document.json` /
-//!   `schemas/` / `sheets/` / `attachments/`）はバイト単位完全一致で、大文字小文字の
-//!   変種は拒否する。エントリ名は本クレートが正準形で書く唯一の命名であり、
+//!   `macros.json` / `schemas/` / `sheets/` / `attachments/`）はバイト単位完全一致で、
+//!   大文字小文字の変種は拒否する。エントリ名は本クレートが正準形で書く唯一の命名であり、
 //!   別名を認めると同一のパートに 2 つの名前が生まれて重複検出（要件 2.6）と
 //!   ソート決定性が壊れる。
 //! - ULID 構成要素（`schemas/` と `sheets/` の ID 部分）: [`crate::ids::SheetId`] の
@@ -39,9 +41,14 @@
 //!
 //! # 形式バージョンと同じ場所で管理する許可リスト
 //!
-//! 受理する 6 形の集合は形式バージョン [`crate::migration::FormatVersion`] と同じ審査で
+//! 受理する 7 形の集合は形式バージョン [`crate::migration::FormatVersion`] と同じ審査で
 //! 管理する（[`crate::migration`] が現行版とゲートを所有する）。[`LAYOUT_FORMS`] が
-//! その単一審査可能集合であり、集合の変更は形式バージョンの変更として扱う。
+//! その単一審査可能集合であり、集合の変更は形式バージョンの審査に掛ける。
+//! **`macros.json` の追加は、その審査の結果として形式バージョンを進めていない**
+//! （1.0 のまま）: 本パートは省略可能であり、マクロを 1 件も持たない文書の出力は追加前と
+//! バイト単位で同一である。また、この形を知らない実装は `macros.json` を許可リスト外の
+//! 名前として**拒否**する（黙って読み飛ばす経路が無い）ため、版を進めても観測できる差が
+//! 無い（判断と理由は `macros_part.rs` と `.kiro/specs/macro-runtime/design.md` にある）。
 //!
 //! # 順序
 //!
@@ -64,6 +71,7 @@ pub const LAYOUT_FORMS: &[&str] = &[
     "jxcel",
     "manifest.json",
     "document.json",
+    "macros.json",
     "schemas/",
     "sheets/",
     "attachments/",
@@ -73,6 +81,7 @@ pub const LAYOUT_FORMS: &[&str] = &[
 const MARKER_TEXT: &str = "jxcel";
 const MANIFEST_TEXT: &str = "manifest.json";
 const DOCUMENT_TEXT: &str = "document.json";
+const MACROS_TEXT: &str = "macros.json";
 
 const SCHEMAS_PREFIX: &str = "schemas/";
 const SCHEMAS_SUFFIX: &str = ".json";
@@ -88,7 +97,8 @@ const HEX_LEN: usize = crate::ids::Blake3Digest::LEN * 2;
 /// [`EntryName`] の表示・比較はヒープ確保なしの固定バッファで行う。
 const MAX_DISPLAY_LEN: usize = ATTACHMENTS_PREFIX.len() + HEX_LEN + ".bin".len();
 
-/// コンテナ エントリ名の許可リスト型（design「Container Entry Layout」の 6 形）。
+/// コンテナ エントリ名の許可リスト型（design「Container Entry Layout」の 6 形と、
+/// タスク 1.2 で足したマクロのパートを合わせた 7 形）。
 ///
 /// 値は [`EntryName::parse`] による正準テキストからの解析（または同じ文法を
 /// 満たす変種直接構築）でのみ得られる。自由な文字列からのサニタイズや正規化の
@@ -106,6 +116,8 @@ pub enum EntryName {
     Manifest,
     /// 安定メタデータ `document.json`。
     Document,
+    /// マクロの記録の並び `macros.json`（名前・種別・ソース。省略可能なパート）。
+    Macros,
     /// シート別スキーマ `schemas/<sheet-ulid>.json`。
     Schema {
         /// 対象シートの識別子（正準 Crockford base32 大文字）。
@@ -161,6 +173,7 @@ impl EntryName {
             EntryName::Marker => fixed_copy(buf, MARKER_TEXT.as_bytes(), MARKER_TEXT.len()),
             EntryName::Manifest => fixed_copy(buf, MANIFEST_TEXT.as_bytes(), MANIFEST_TEXT.len()),
             EntryName::Document => fixed_copy(buf, DOCUMENT_TEXT.as_bytes(), DOCUMENT_TEXT.len()),
+            EntryName::Macros => fixed_copy(buf, MACROS_TEXT.as_bytes(), MACROS_TEXT.len()),
             EntryName::Schema { sheet } => {
                 let mut id_buf = [0u8; ulid::ULID_LEN];
                 let id = sheet.as_str(&mut id_buf);
@@ -198,15 +211,16 @@ fn fixed_copy<'buf>(buf: &'buf mut [u8; MAX_DISPLAY_LEN], text: &[u8], len: usiz
     ascii(&buf[..len])
 }
 
-/// キーワード形（ID を持たない 3 形）の完全一致。
+/// キーワード形（ID を持たない 4 形）の完全一致。
 ///
-/// 表示と解析が同じ定数を読む（[`MARKER_TEXT`] / [`MANIFEST_TEXT`] / [`DOCUMENT_TEXT`]。
-/// 正規化の余地が無い）。相違は `None`。
+/// 表示と解析が同じ定数を読む（[`MARKER_TEXT`] / [`MANIFEST_TEXT`] / [`DOCUMENT_TEXT`] /
+/// [`MACROS_TEXT`]。正規化の余地が無い）。相違は `None`。
 fn keyword_form(text: &str) -> Option<EntryName> {
     match text {
         MARKER_TEXT => Some(EntryName::Marker),
         MANIFEST_TEXT => Some(EntryName::Manifest),
         DOCUMENT_TEXT => Some(EntryName::Document),
+        MACROS_TEXT => Some(EntryName::Macros),
         _ => None,
     }
 }
@@ -353,6 +367,7 @@ mod tests {
             ("jxcel".to_owned(), EntryName::Marker),
             ("manifest.json".to_owned(), EntryName::Manifest),
             ("document.json".to_owned(), EntryName::Document),
+            ("macros.json".to_owned(), EntryName::Macros),
             (
                 format!("schemas/{SHEET}.json"),
                 EntryName::Schema { sheet: sheet() },
@@ -380,9 +395,9 @@ mod tests {
         }
     }
 
-    /// 受理: 6 形すべてが正準形で通り、期待する変種（ID 値込み）になる。
+    /// 受理: 7 形すべてが正準形で通り、期待する変種（ID 値込み）になる。
     #[test]
-    fn accepts_the_six_canonical_forms() {
+    fn accepts_the_seven_canonical_forms() {
         for (text, expected) in canonical_forms() {
             assert_eq!(
                 EntryName::parse(&text).unwrap(),
@@ -473,12 +488,15 @@ mod tests {
             "\u{FF4D}anifest.json",
             "d\u{43E}cument.json",
             "jxc\u{435}l",
+            "\u{FF4D}acros.json",
             // 大文字小文字変種（キーワード・ディレクトリ側は正準形のみ受理）
             "Manifest.json",
             "MANIFEST.json",
             "MANIFEST.JSON",
             "Document.json",
             "DOCUMENT.JSON",
+            "Macros.json",
+            "MACROS.JSON",
             "Jxcel",
             "JXCEL",
             "jxCel",
@@ -502,6 +520,11 @@ mod tests {
             "manifest.json5",
             "document",
             "document.json5",
+            "macros",
+            "macros.json5",
+            "macros.jsonl",
+            "macros.json/",
+            "macros/macros.json",
             "jxcel.json",
             "jxcel.bin",
             "schemas/01ARZ3NDEKTSV4RRFFQ69G5FAV.jsonl",
@@ -514,6 +537,7 @@ mod tests {
             // 余分な経路成分
             "manifest.json/extra",
             "document.json/extra",
+            "macros.json/extra",
             "jxcel/",
             "jxcel2",
             "jxcels",
@@ -530,14 +554,20 @@ mod tests {
             // ドットファイル・末尾の点・終端改行
             ".gitignore",
             ".manifest.json",
+            ".macros.json",
             "..manifest.json",
             "manifest.json.",
+            "macros.json.",
             "jxcel.",
             "manifest.json\n",
+            "macros.json\n",
             "jxcel\n",
             // 空白（前後・構成要素内）
             " manifest.json",
             "manifest.json ",
+            " macros.json",
+            "macros.json ",
+            "\tmacros.json",
             " jxcel",
             "jxcel ",
             "\tmanifest.json",
@@ -607,8 +637,8 @@ mod tests {
         }
     }
 
-    /// golden ソート順: 6 形を構築順（列挙順）からソートした結果の表示列。
-    /// parts 反復の昇順（`attachments/` < `document.json` < `jxcel` <
+    /// golden ソート順: 7 形を構築順（列挙順）からソートした結果の表示列。
+    /// parts 反復の昇順（`attachments/` < `document.json` < `jxcel` < `macros.json` <
     /// `manifest.json` < `schemas/` < `sheets/`）が仕様上の固定順であることを
     /// 文書化する golden。
     #[test]
@@ -617,6 +647,7 @@ mod tests {
             EntryName::Marker,
             EntryName::Manifest,
             EntryName::Document,
+            EntryName::Macros,
             EntryName::Schema { sheet: sheet() },
             EntryName::Rows { sheet: sheet() },
             EntryName::Attachment {
@@ -632,6 +663,7 @@ mod tests {
                 format!("attachments/{HEX}.bin"),
                 "document.json".to_owned(),
                 "jxcel".to_owned(),
+                "macros.json".to_owned(),
                 "manifest.json".to_owned(),
                 format!("schemas/{SHEET}.json"),
                 format!("sheets/{SHEET}.jsonl"),
@@ -641,15 +673,16 @@ mod tests {
         );
     }
 
-    /// 許可リストとパーサの連動: LAYOUT_FORMS は 6 形そのものであり、
+    /// 許可リストとパーサの連動: LAYOUT_FORMS は 7 形そのものであり、
     /// 各形に対しパーサが受理する正準サンプルが 1 個以上存在する
     /// （パーサを足し込んでも定数との乖離はテストを壊す）。
     #[test]
     fn layout_forms_is_the_reviewable_set() {
-        const EXPECTED: [&str; 6] = [
+        const EXPECTED: [&str; 7] = [
             "jxcel",
             "manifest.json",
             "document.json",
+            "macros.json",
             "schemas/",
             "sheets/",
             "attachments/",
@@ -657,7 +690,7 @@ mod tests {
         assert_eq!(
             LAYOUT_FORMS,
             EXPECTED.as_slice(),
-            "許可リストは 6 形そのもの"
+            "許可リストは 7 形そのもの"
         );
         for form in LAYOUT_FORMS {
             assert!(
