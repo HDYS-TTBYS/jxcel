@@ -481,6 +481,15 @@ pub fn diagnostics_record_render(
                 },
             );
         }
+        RenderHealthReport::ItemWaiting { item } => {
+            // **段が外から活性化する項目の待ちである**（9.2 の貼り付けの往復）。段は記録の
+            // 追記を読んで「今が活性化の機会である」と知る — 人が読む行を読めるのは Linux の
+            // アクセシビリティの木だけであり、しかも深く歩くと答えなくなる（実測）。
+            log::info!(
+                "{command}: グリッドの観測の項目の待ち: {}",
+                observation_item_name(item),
+            );
+        }
         RenderHealthReport::Observation {
             first_screen_ms,
             scan_median_us,

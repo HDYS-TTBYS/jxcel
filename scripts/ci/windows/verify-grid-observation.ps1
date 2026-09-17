@@ -225,7 +225,27 @@ try {
 
   Wait-WebView2Idle
   Write-Host "観測 2/2: 描画を成立させない条件の起動（要件 12.2 / 12.3）"
+  # **走行ごとに WebView2 の利用者データのフォルダを分ける。**前の走行の終わりは Git Bash の
+  # `kill` であり、Windows では `TerminateProcess` である（穏やかな終了ではない）ため、
+  # WebView2 が利用者データのフォルダを握ったまま残り、次の走行が
+  # `HRESULT(0x800700AA)`「要求されたリソースは使用中です」で **WebView2 の生成に失敗する**
+  # （CI の実測: 観測の行が 1 行も出ない走行になった）。別のフォルダなら前の走行の状態に
+  # 依存しない。**この環境変数を読むかどうかは移植口の実装に依る**ので、効かなければ下の
+  # 再試行が受け止める（どちらも判定を弱めない — 観測の行が出ることは変わらず要求する）。
+  $webviewData = Join-Path $env:RUNNER_TEMP "jxcel-webview-run2"
+  New-Item -ItemType Directory -Force -Path $webviewData | Out-Null
+  $env:WEBVIEW2_USER_DATA_FOLDER = $webviewData
   $result = Invoke-GridObservationCheck -Exe $verify -TimeoutSeconds 120 -ExpectPaint "不成立"
+  # **「観測の行が出なかった」ときだけ 1 回やり直す。**前の走行の後始末（上記）が間に合わず
+  # 移植口の生成に失敗した走行は、**何も観測していない**（製品の欠陥ではない）。やり直しても
+  # 観測の行が出なければ、そのまま下の判定で落ちる — **判定は弱めない**（下の 2 つの時点で
+  # 観測が成立していることを要求し続ける）。
+  if ($result.Code -ne 0 -and $result.Output -match '記録から観測の行') {
+    Write-Host "注意: 観測の行が出なかったため、20 秒待って 1 回だけやり直します（前の走行の後始末）"
+    Start-Sleep -Seconds 20
+    Wait-WebView2Idle
+    $result = Invoke-GridObservationCheck -Exe $verify -TimeoutSeconds 120 -ExpectPaint "不成立"
+  }
   Write-Host $result.Output
   if ($result.Code -ne 0) {
     throw "観測 2/2: 検査器が $($result.Code) で落ちました（描画不成立の提示と記録が観測できていません）"

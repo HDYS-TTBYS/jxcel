@@ -129,6 +129,23 @@ function recordObservation(observation: Observation): void {
   })();
 }
 
+/**
+ * **項目が待ちに入ったことを記録へ出す**（`RenderHealthReport::ItemWaiting`。tasks.md 9.2）。
+ *
+ * 段（検査器）は記録の追記を読んで「今が活性化の機会である」と知る。**投げない**（記録できない
+ * ことは観測の失敗ではない）。
+ */
+export function recordItemWaiting(item: ObservationItem): void {
+  const request: RenderHealthRecordRequest = { report: { fact: "item_waiting", item } };
+  void (async () => {
+    try {
+      await invokeCommand<unknown>(DIAGNOSTICS_RECORD_RENDER, { request });
+    } catch (error: unknown) {
+      console.warn("観測の項目の待ちを記録へ送れなかった", error);
+    }
+  })();
+}
+
 /** 検証専用の初期画面の識別子（`JXCEL_VERIFICATION_INITIAL_SCREEN=grid-observation`）。 */
 export const GRID_OBSERVATION_SCREEN_ID = "grid-observation";
 
@@ -1064,12 +1081,11 @@ async function drivePasteThroughMenu(): Promise<ItemOutcome> {
   }
   canvas.dispatchEvent(new ClipboardEvent("copy", { bubbles: true, cancelable: true }));
   await nextFrame();
-  // **印は専用の要素へ置く**（観測の行の要素の `aria-label` は画面が書くため、観測が終わると
-  // 書き換わって印が消える — 実測: 段の走査が印を見つけられなかった。器の `aria-label` も
-  // 木に現れない）。`jxcel-grid-paste-ready` の要素は画面が `aria-label` を書かない。
-  const ready = "貼り付けの準備=できた";
-  const marker = elementOf("jxcel-grid-paste-ready");
-  marker?.setAttribute("aria-label", ready);
+  // **印は記録へ出す**（「今が活性化の機会である」）。段が印を読む道は記録しか無い —
+  // アクセシビリティの木を深く歩くと WebKit のアクセシビリティが答えなくなり（実測: 565 節の
+  // 直後に 14 節へ落ち、以後 300 秒以上戻らなかった）、ウィンドウの題名も反映されない
+  // （実測: `document.title` を変えても `frame` の名前は `jxcel` のまま）。
+  recordItemWaiting("paste_through_menu");
   // **待ちは長く取る。**活性化するのは段であり、段はアクセシビリティの木を 1 節ずつ busctl で
   // たどって印を探す（10 万行の表を描いている最中は 1 巡に数十秒かかることがある。実測: 30 秒では
   // 足りず、印が消えたあとに段が探し続けて「見つからない」になった）。
@@ -1091,10 +1107,6 @@ async function drivePasteThroughMenu(): Promise<ItemOutcome> {
     const again = arrivalsOf();
     pasted = again !== null && before !== null && again > before;
   }
-  // **印はここでは外さない。**外すのは観測の最後である（`runScenario` の末尾）— 段の走査は
-  // 1 節ずつ `busctl` を呼ぶので数十秒かかることがあり、**この項目が早く結論した瞬間に外すと
-  // 段が活性化の機会を失う**（実測: CI の Linux ランナーで印が見つからず、貼り付けの要求が
-  // 1 件も記録されなかった）。印の要素は画面が `aria-label` を書かない専用のものである。
   const arrived = arrivalsOf();
   if (pasted === null) {
     return NG("paste_not_delivered", `貼り付けが表へ届かなかった（到着 ${String(before)} → ${String(arrived)}）`);
@@ -1228,10 +1240,16 @@ async function runScenario(): Promise<ItemResult[]> {
   await run("reference_rows", driveReferenceRows);
   await run("nested_expansion", driveNestedExpansion);
   await run("sort_then_delete", driveSortThenDelete);
+  await run("sheet_switch_undo", driveSheetSwitchUndo);
+  // **貼り付けは文書を差し替える項目の直前に走らせる。**この項目だけは**外からの活性化を待つ**
+  // ので、貼り付けが届く時刻を選べない（待っている間は他の項目が走らないので、**貼り付けが
+  // 別の項目の最中に文書を変えることはない**）。後ろに残すのは**文書を差し替える項目だけ**に
+  // する — あれは未保存の変更を破棄してから作り直すので、行が増えていても成立する
+  // （実測: 貼り付けを中間に置くと `sheet_switch_undo` が行数の不一致で落ち、先頭に置くと
+  // `violation_reason` が落ち、最後に置くと `replace_document` が先に表を消していた）。
   if (pasteRequested()) {
     await run("paste_through_menu", drivePasteThroughMenu);
   }
-  await run("sheet_switch_undo", driveSheetSwitchUndo);
   await run("replace_document", driveReplaceDocument);
   return results;
 }
@@ -1342,8 +1360,6 @@ async function observe(): Promise<Observation> {
   // **筋書き（群 10 が閉じた経路）を走らせる。**計測が済んだ後に走らせるのは、走査の標本が
   // 100,000 行の標本そのものを測るためである（表示を変えると前提が変わる）。
   const items = await runScenario();
-  // **貼り付けの準備の印を外す**（観測の最後。上で述べた理由により、ここまでは残す）。
-  elementOf("jxcel-grid-paste-ready")?.removeAttribute("aria-label");
   return {
     firstScreenMs,
     traversal,

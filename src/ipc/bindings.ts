@@ -1613,7 +1613,11 @@ median_us: number,
 /**
  * 要件 11.1 の予算（**マイクロ秒**。16670）。
  */
-budget_us: number, } | { "fact": "observation", 
+budget_us: number, } | { "fact": "item_waiting", 
+/**
+ * 待ちに入った項目。
+ */
+item: ObservationItem, } | { "fact": "observation", 
 /**
  * 表示の指示（画面がドキュメントを持つことを知った瞬間）から、表が現れて面が描かれる
  * までの経過（**ミリ秒**。要件 11.2 の予算は 1000）。

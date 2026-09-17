@@ -204,7 +204,7 @@ item_record() {
 # 待ち、`編集 > 貼り付け` を `DoAction` で活性化する（`scripts/check-menu-shortcut.sh` の
 # `atspi-activate` と同じ手順。**`GetActions` は呼ばない** — あの応答は基盤を abort させる）。
 atspi_activate_paste_when_ready() {
-  python3 - "jxcel" "貼り付けの準備=できた" "貼り付け" "$1" <<'PY'
+  python3 - "jxcel" "グリッドの観測の項目の待ち: paste_through_menu" "貼り付け" "$1" "$record" <<'PY'
 import json
 import subprocess
 import sys
@@ -223,7 +223,11 @@ ACCESSIBLE = "org.a11y.atspi.Accessible"
 ACTION = "org.a11y.atspi.Action"
 REGISTRY = "org.a11y.atspi.Registry"
 ROOT_PATH = "/org/a11y/atspi/accessible/root"
-PRUNE_ROLES = {"scroll pane", "document web", "document frame", "table", "grid", "tree table"}
+# **刈るのは表の内部だけである**（他の役割を刈ると、印の祖先である差し込みの節ごと
+# 見えなくなる。印の探索の側の doc を参照）。
+PRUNE_ROLES = {"table", "grid", "tree table"}
+# 走査の側（メニューの項目を探す段）は従来どおり広く刈る — あちらは表の外だけを見る。
+SCAN_PRUNE_ROLES = PRUNE_ROLES | {"scroll pane", "document web", "document frame"}
 MAX_DEPTH = 18
 # **印の探索の深さは木の上限に合わせる。**浅く打ち切ると印に届かない（実測: 深さ 8 では
 # 見つからず、18（木の上限）で見つかった — 印は DOM の深い位置にある）。1 巡の費用は
@@ -264,6 +268,7 @@ app_name = sys.argv[1]
 ready_needle = sys.argv[2]
 item_label = sys.argv[3]
 deadline = time.monotonic() + float(sys.argv[4])
+record_file = sys.argv[5]
 
 atspi = Atspi()
 app = None
@@ -280,38 +285,43 @@ if app is None:
     print("NG: アプリの根がアクセシビリティの木に見つからない")
     sys.exit(3)
 
+# **印は記録の追記にある**（観測の画面が「項目の待ちに入った」を 1 行書く）。段は記録を読み続け、
+# その行が現れた時点でメニューの項目を活性化する。**アクセシビリティの木を歩かない** —
+# 深く歩くと WebKit のアクセシビリティが答えなくなり（実測: 565 節の直後に 14 節へ落ち、
+# 300 秒以上戻らなかった）、後から置かれる印は誰にも読めない。ウィンドウの題名も反映されない
+# （実測）。記録は 3 OS で同じものを読める唯一の場所である。
 ready = False
+attempts = 0
 while not ready and time.monotonic() < deadline:
-    stack = [(app[0], app[1], 0)]
-    while stack:
-        dest, path, depth = stack.pop()
-        if depth > MAX_DEPTH:
-            continue
-        try:
-            role = atspi.call(dest, path, ACCESSIBLE, "GetRoleName")
-            name = atspi.name(dest, path)
-            children = atspi.children(dest, path)
-        except (RuntimeError, ValueError, json.JSONDecodeError):
-            # **過渡の失敗で歩みを止めない**（木は走行中に変わる — 消えたパスを読むと
-            # `オブジェクトが存在しません` が返る。実測: これで活性化の機会を失った）。
-            continue
-        if ready_needle in name:
+    attempts += 1
+    try:
+        with open(record_file, encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+        if lines[-1:] and ready_needle in lines[-1]:
             ready = True
             break
-        if role in PRUNE_ROLES:
-            continue
-        for child_name, child_path in children:
-            stack.append((child_name, child_path, depth + 1))
+        # **印は待ちに入った直後に書かれる**ので、末尾の数行だけを見れば足りる（記録は
+        # 8 MB で回転する。全部を読み直すと無駄が大きい）。
+        tail = "".join(lines[-40:])
+        if ready_needle in tail:
+            ready = True
+            break
+    except OSError:
+        pass
     if not ready:
         time.sleep(1)
 if not ready:
-    print("NG: 貼り付けの準備の印がアクセシビリティの木に見つからない")
+    print(
+        f"NG: 貼り付けの準備の印（記録の行）が現れなかった"
+        f"（読み={attempts} 回 / 待ちの行={ready_needle!r}）"
+    )
     sys.exit(4)
+print(f"OK: 記録に貼り付けの準備の行が現れた（{attempts} 回目の読み）")
 
 found = None
-attempts = 0
-while found is None and attempts < 10:
-    attempts += 1
+menu_attempts = 0
+while found is None and menu_attempts < 10:
+    menu_attempts += 1
     stack = deque([(app[0], app[1], 0)])
     while stack:
         dest, path, depth = stack.popleft()
