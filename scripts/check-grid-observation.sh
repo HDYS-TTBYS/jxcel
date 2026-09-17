@@ -380,10 +380,8 @@ if not ready:
     sys.exit(4)
 print(f"OK: 記録に貼り付けの準備の行が現れた（{attempts} 回目の読み）")
 
-found = None
-menu_attempts = 0
-while found is None and menu_attempts < 10:
-    menu_attempts += 1
+def find_paste_item():
+    """メニューの項目を探す。**活性化の直前に呼び、見つけた場で名前を確かめる。**"""
     stack = deque([(app[0], app[1], 0)])
     while stack:
         dest, path, depth = stack.popleft()
@@ -396,17 +394,41 @@ while found is None and menu_attempts < 10:
         except (RuntimeError, ValueError, json.JSONDecodeError):
             continue
         if role == "menu item" and name == item_label:
-            found = (dest, path)
-            break
+            return (dest, path)
         for child_name, child_path in children:
             stack.append((child_name, child_path, depth + 1))
-    if found is None:
+    return None
+
+
+# **名前を確かめてから活性化する。**AT-SPI の宛先は経路（索引）であり、画面は文書の状態が
+# 変わるたびにメニューを作り直すため、**同じ経路が別の項目を指しうる**。歩いた時点の経路を
+# そのまま使うと別の項目を活性化する（実測: CI の Linux ランナーで、活性化は成功として返るのに
+# 器は貼り付けの要求を 1 件も記録しなかった）。
+found = None
+verify_attempts = 0
+while verify_attempts < 10:
+    verify_attempts += 1
+    candidate = find_paste_item()
+    if candidate is None:
         time.sleep(1)
+        continue
+    try:
+        # 直前にもう一度読む（読めなければ次の巡で歩き直す）。
+        if (
+            atspi.call(candidate[0], candidate[1], ACCESSIBLE, "GetRoleName") == "menu item"
+            and atspi.name(candidate[0], candidate[1]) == item_label
+        ):
+            found = candidate
+            break
+    except (RuntimeError, ValueError, json.JSONDecodeError):
+        pass
+    time.sleep(1)
 if found is None:
-    print("NG: 貼り付けのメニューの項目が見つからない")
+    print("NG: 貼り付けのメニューの項目が見つからない（名前を確かめたうえで）")
     sys.exit(5)
 atspi.call(found[0], found[1], ACTION, "DoAction", "i", "0")
 print("活性化した: " + item_label)
+
 PY
 }
 
