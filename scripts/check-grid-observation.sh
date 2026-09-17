@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC1091,SC2154 # 置き場（scripts/lib/x11-window.sh）をたどれない・その変数である
 # check-grid-observation.sh — 実用のグリッド画面の起動観測（tasks.md 9.2）
 #
 # 根拠（tasks.md 9.2 / 要件 11.1, 11.2, 11.3, 12.1, 12.2, 12.3, 12.4）:
@@ -112,13 +113,14 @@ fi
 # **X11 のウィンドウ一覧は共有の置き場から読む**（`scripts/lib/x11-window.sh`。他の検査器と
 # 同じ解析を使う — ウィンドウの一覧を 2 つの書き方で持たない）。
 #
-# SC1091 / SC2154: 置き場は**同じリポジトリのファイル**であり、`x11_collect_windows` などは
-# そこで定義される。qlty は検査対象を一時ディレクトリへ写してから shellcheck にかけるため、
-# 検査器は置き場をたどれない（実際の実行では `$0` からの相対で解決する。
+# SC1091: 置き場は**同じリポジトリのファイル**であり、`x11_collect_windows` などはそこで
+# 定義される。qlty は検査対象を一時ディレクトリへ写してから shellcheck にかけるため、検査器は
+# 置き場をたどれない（実際の実行では `$0` からの相対で解決する。
 # `scripts/check-bulk-transfer.sh` と同じ形である）。
-# shellcheck disable=SC1091,SC2154
+# shellcheck disable=SC1091
 _x11_lib_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 . "$_x11_lib_dir/lib/x11-window.sh"
+
 
 work=$(mktemp -d)
 app_log="$work/app.log"
