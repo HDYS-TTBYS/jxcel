@@ -97,3 +97,80 @@ impl MacroRecord {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 名前で一意な並び（tasks.md 1.6。要件 1.6, 1.7）
+// ---------------------------------------------------------------------------
+
+/// 並びの中から名前で 1 件を引く（無ければ `None`）。
+pub fn find<'a>(records: &'a [MacroRecord], name: &MacroName) -> Option<&'a MacroRecord> {
+    records.iter().find(|record| &record.name == name)
+}
+
+/// **同じ名前の保存は置き換えである**（要件 1.6）。
+///
+/// **位置を保つ**（並びの順序は保存された順であり、一覧の提示順に使う。design.md
+/// 「Logical Data Model」）。同じ名前が無ければ末尾へ足す。置き換えたときは `false` を返す
+/// （新しく足したときは `true`）— 利用者へ「上書きした」と伝える材料である。
+pub fn upsert(records: &mut Vec<MacroRecord>, record: MacroRecord) -> bool {
+    match records
+        .iter_mut()
+        .find(|existing| existing.name == record.name)
+    {
+        Some(existing) => {
+            *existing = record;
+            false
+        }
+        None => {
+            records.push(record);
+            true
+        }
+    }
+}
+
+/// 名前で 1 件を取り除く（要件 1.7）。取り除いた記録を返す（無ければ `None`）。
+pub fn remove(records: &mut Vec<MacroRecord>, name: &MacroName) -> Option<MacroRecord> {
+    let position = records.iter().position(|record| &record.name == name)?;
+    Some(records.remove(position))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(name: &str, source: &str) -> MacroRecord {
+        MacroRecord::new(MacroName::new(name), MacroKind::TypeScript, source)
+    }
+
+    #[test]
+    fn saving_the_same_name_replaces_in_place_and_keeps_the_saved_order() {
+        let mut records = vec![record("棚卸し", "旧"), record("集計", "そのまま")];
+        let added = upsert(&mut records, record("棚卸し", "新"));
+        assert!(!added, "置き換えを「新しく足した」と報告した");
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| (record.name.as_str(), record.source.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("棚卸し", "新"), ("集計", "そのまま")],
+            "置き換えで位置が動いた、または別の記録が変わった"
+        );
+
+        let added = upsert(&mut records, record("検算", "足した"));
+        assert!(added, "新しい名前を「置き換えた」と報告した");
+        assert_eq!(records.len(), 3);
+    }
+
+    #[test]
+    fn a_record_is_found_and_removed_by_name() {
+        let mut records = vec![record("棚卸し", "x"), record("集計", "y")];
+        assert_eq!(
+            find(&records, &MacroName::new("集計")).map(|record| record.source.as_str()),
+            Some("y")
+        );
+        let removed = remove(&mut records, &MacroName::new("棚卸し")).expect("取り除ける");
+        assert_eq!(removed.source, "x");
+        assert_eq!(records.len(), 1);
+        assert!(remove(&mut records, &MacroName::new("無い")).is_none());
+    }
+}

@@ -53,4 +53,7 @@ pub use engine::outcome::{
     ChangeSummary, FailureKind, Frame, LimitKind, Limits, MacroFailure, OutputLevel, OutputLine,
     RunOutcome, RunRequest, WindowLabel,
 };
+pub use source::capability::{
+    parse as parse_capabilities, Capability, CapabilitySet, DeclarationError,
+};
 pub use source::record::{MacroKind, MacroName, MacroRecord};

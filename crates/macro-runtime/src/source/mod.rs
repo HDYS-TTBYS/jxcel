@@ -10,11 +10,15 @@
 //! 上流（`document-format` の値と識別子の型）と `std` だけを参照する。**下流の層
 //! （`surface` / `host` / `engine`）を参照しない。**
 //!
-//! # いまあるもの（tasks.md 1.3）
+//! # いまあるもの（tasks.md 1.3 と 1.6）
 //!
-//! [`record`] の型（`MacroRecord` / `MacroKind` / `MacroName`）だけである。実行の要求
-//! （`engine::outcome::RunRequest`）がマクロの記録を運ぶため、その**形**を 1 箇所に置いた。
-//! 名前の一意性と置き換えの規則・能力宣言の解析・上流のパートとの往復は**タスク 1.6** が
-//! 同じモジュールへ足す。
+//! - [`record`]: マクロの記録（`MacroRecord` / `MacroKind` / `MacroName`）と、**名前で一意な
+//!   並び**の操作（`find` / `upsert` / `remove`。要件 1.6, 1.7）
+//! - [`capability`]: ソース先頭の**能力宣言**の解析（`Capability` / `CapabilitySet` /
+//!   `parse`。要件 8.1–8.5。design 決定 6）
+//!
+//! 上流のパート（`document-format` の `macros.json`）との往復は、クレートの外の
+//! 結合テスト（`tests/macro_part_roundtrip.rs`）が実ファイルで固定している。
 
+pub mod capability;
 pub mod record;
