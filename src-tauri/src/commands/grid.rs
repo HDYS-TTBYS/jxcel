@@ -289,6 +289,7 @@ use data_grid::{
     RowTarget, SearchDirection, SortKey, UndoStack, ViewSpec, WindowCodec, WindowRequest,
     DEFAULT_UNDO_LIMIT, EMPTY_WINDOW,
 };
+use document_format::SheetId;
 use document_session::{DocumentSessions, DocumentSessionsApi, SessionError};
 use schema_engine::compile::plan::ColumnValidator;
 use schema_engine::{
@@ -392,6 +393,52 @@ impl GridSessions {
         lock(&self.entries).get(label).cloned()
     }
 
+    /// **マクロの実行（`crate::commands::macro`。`macro-runtime` のタスク 4.3）へ、表示中の
+    /// シート・計画・履歴を貸す。**
+    ///
+    /// マクロの実行が文書へ加えた変更は、画面の編集と同じ経路（1 回の `edit` と 1 対の履歴）で
+    /// 適用される（`macro-runtime` の design.md 決定 2 / 3）。その適用（`macro_apply` の
+    /// [`apply_macro_changes`](crate::macro_apply::apply_macro_changes)）が要るのはこの 3 つで
+    /// あり、**いずれも本モジュールの保持が所有している**:
+    ///
+    /// - 表示中のシート（どのシートへ書くか。要件 2.1 の「そのウィンドウが開いている文書」）
+    /// - その計画（適用の前にシートを照合し、列の数と型を判定へ渡すため）
+    /// - **その履歴**（マクロの変更が画面の取り消し 1 回で戻るため。要件 7.1）
+    ///
+    /// # なぜ本モジュールが口を持つのか（API が足りないと感じたときの判断）
+    ///
+    /// 履歴の所有者はこの保持であり（モジュール doc「履歴の所有者はこの保持である」）、
+    /// `macro-runtime` 側が自前の履歴を作ると**画面の取り消しがマクロの変更を戻せない**
+    /// （要件 7.1 が満たせない）。したがって口はここに 1 つだけ置く。
+    ///
+    /// # 呼び出しの形（**実行の間、ロックを保持しない**）
+    ///
+    /// 本口は**閉包を 1 回呼ぶだけ**であり、マクロの実行そのもの（秒単位かかりうる）は
+    /// 閉包の外で終わっている。マクロの実行中に保持のロックを握ると、表を描く
+    /// `grid_rows_window` がそのロックを待ち、**要件 2.2 の「表の操作を止めない」が破れる**。
+    /// 閉包の中で行われるのは**変更の適用（1 回の `edit`）だけ**であり、これは画面の編集が
+    /// 保持のロックを握る時間と同じである。
+    ///
+    /// 保持しているシートの識別子が読めないときは `None`（到達しない見込み — 識別子は
+    /// [`GridOpenRequest`] の文字列そのものであり、`GridSession` が文書の中で照合済みである）。
+    pub(crate) fn with_displayed<T>(
+        &self,
+        label: &WindowLabel,
+        run: impl FnOnce(SheetId, &CompiledSchema, &mut UndoStack) -> T,
+    ) -> Option<T> {
+        let entry = self.entry(label)?;
+        let mut entry = lock(&entry);
+        // 保持を分解して借りる（セッションは使わない。マクロの変更は `edit` の閉包の中で
+        // `data-grid` の `EditApply` を通って適用されるため、`GridSession` の表示の状態は
+        // 触らない — 適用の後の表示は画面が `grid_open_sheet` を呼び直して作り直す。
+        // design.md「System Flows」の「実行の流れ」）。
+        let SheetEntry {
+            history, schema, sheet, ..
+        } = &mut *entry;
+        let sheet = sheet.parse::<SheetId>().ok()?;
+        Some(run(sheet, schema, history))
+    }
+
     /// セッションを置き（同じウィンドウの前の保持は置き換える）、破棄の購読を登録する。
     ///
     /// 戻り値は「置けたか」。`false` のときは**何も置いていない**（ウィンドウを引けない、
@@ -481,7 +528,10 @@ static GRID_STATE_CREATION: Mutex<()> = Mutex::new(());
 /// 履歴を所有し、寿命も破棄の購読も別である。
 ///
 /// **検証専用の分岐は無い。** 表は常にこの 1 経路で作られる。
-fn grid_state(app: &AppHandle) -> State<'_, GridSessions> {
+///
+/// `pub(crate)`: マクロの実行（`commands::macro`。`macro-runtime` のタスク 4.3）が
+/// **同じ保持の履歴を借りる**ために読む（[`GridSessions::with_displayed`]）。
+pub(crate) fn grid_state(app: &AppHandle) -> State<'_, GridSessions> {
     if app.try_state::<GridSessions>().is_none() {
         let _guard = lock(&GRID_STATE_CREATION);
         if app.try_state::<GridSessions>().is_none() {
@@ -498,7 +548,10 @@ fn grid_state(app: &AppHandle) -> State<'_, GridSessions> {
 ///
 /// **セッションと同じ実体**を使う（別に作ると「開いているドキュメント」の真実が 2 つに割れる。
 /// `session/mod.rs` の module doc）。
-fn documents_of(app: &AppHandle) -> Arc<DocumentSessions> {
+///
+/// `pub(crate)`: マクロの 4 つのコマンド（`commands::macro`。`macro-runtime` のタスク 4.3）も
+/// **同じ 1 つの表**を読む（マクロが読む文書と、表が表示している文書を分けない）。
+pub(crate) fn documents_of(app: &AppHandle) -> Arc<DocumentSessions> {
     Arc::clone(
         app.state::<Arc<crate::session::watch::WindowDestroyWatch>>()
             .sessions(),

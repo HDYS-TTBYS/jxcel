@@ -147,7 +147,27 @@ identifier = "allow-diagnostics-record-render"
 description = "グリッドの描画の健全性（描画の不成立と、走査の滑らかさの劣化）を診断の記録へ 1 件残すコマンド（diagnostics_record_render）を許可する。運べるのは閉じた札と数値だけで、任意の文字列は境界を越えられない。呼び出し元ウィンドウは基盤が注入する引数から取るため偽装できない（要件 12.2、12.3、4.6）。"
 commands.allow = ["diagnostics_record_render"]
 
+[[permission]]
+identifier = "allow-macro-list"
+description = "呼び出し元ウィンドウのドキュメントが持つマクロの一覧を返すコマンド（macro_list）を許可する。実行はせず、解釈できなかったマクロも理由つきで一覧に残す（マクロ実行の要件 1.3、1.4）。呼び出し元ウィンドウは基盤が注入する引数から取るため偽装できない（要件 4.6）。"
+commands.allow = ["macro_list"]
+
+[[permission]]
+identifier = "allow-macro-store"
+description = "呼び出し元ウィンドウのドキュメントへマクロを 1 件保存するコマンド（macro_store）を許可する。同じ名前のマクロは置き換えであり、保存は document-session の edit の閉包 1 回で行う（未保存の印と版が立つ。要件 1.1、1.5、1.6）。"
+commands.allow = ["macro_store"]
+
+[[permission]]
+identifier = "allow-macro-delete"
+description = "呼び出し元ウィンドウのドキュメントからマクロを 1 件削除するコマンド（macro_delete）を許可する。取り除く相手が無ければ edit を呼ばず、一覧をそのまま返す（版と未保存の印を動かさない。要件 1.7）。"
+commands.allow = ["macro_delete"]
+
+[[permission]]
+identifier = "allow-macro-run"
+description = "呼び出し元ウィンドウのドキュメントに対してマクロを 1 件実行するコマンド（macro_run）を許可する。ソースは文書の中の記録であり、上限は設定から適応層が解決する（要求に載らない）。失敗と打ち切りは成功の応答が 3 値として運び、ファイルとネットワークの利用は宣言された能力の門を通る（要件 2.1〜2.6、6.5、8.1、8.3）。"
+commands.allow = ["macro_run"]
+
 [[set]]
 identifier = "app-shell"
 description = "app-shell が登録する自前コマンドの集合。capability はこの集合名だけを参照する。ファイルシステム系・シェル系の権限はここにも含めない（要件 4.7）。"
-permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file", "allow-render-heartbeat", "allow-diagnostics-log-location", "allow-diagnostics-export", "allow-diagnostics-verbosity-get", "allow-diagnostics-verbosity-set", "allow-window-document-state", "allow-document-state", "allow-document-save", "allow-document-new", "allow-document-discard", "allow-grid-open-sheet", "allow-grid-set-view", "allow-grid-apply-edit", "allow-grid-history", "allow-grid-find-violation", "allow-grid-rows-window", "allow-grid-reference-rows", "allow-diagnostics-record-render"]
+permissions = ["allow-settings-get", "allow-settings-set", "allow-bulk-echo", "allow-can-close-window", "allow-pick-document-file", "allow-render-heartbeat", "allow-diagnostics-log-location", "allow-diagnostics-export", "allow-diagnostics-verbosity-get", "allow-diagnostics-verbosity-set", "allow-window-document-state", "allow-document-state", "allow-document-save", "allow-document-new", "allow-document-discard", "allow-grid-open-sheet", "allow-grid-set-view", "allow-grid-apply-edit", "allow-grid-history", "allow-grid-find-violation", "allow-grid-rows-window", "allow-grid-reference-rows", "allow-diagnostics-record-render", "allow-macro-list", "allow-macro-store", "allow-macro-delete", "allow-macro-run"]

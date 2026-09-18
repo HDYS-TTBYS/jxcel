@@ -595,9 +595,8 @@ mod tests {
         IntegrityVerifier, SidecarKind, SidecarSpec, SidecarSupervisor, SpawnError, Supervisor,
     };
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Barrier, LazyLock, Mutex, MutexGuard};
-    use std::time::{Duration, Instant};
-    use tauri_plugin_log::log;
+    use std::sync::{Arc, Barrier, Mutex, MutexGuard};
+    use std::time::Duration;
 
     /// 補助プロセスを実際に起動する試験を直列化する。
     ///
@@ -1041,65 +1040,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 記録の捕獲（`log` の面へ取り付ける最小の記録器）
+    // 記録の捕獲（**受け皿は全テストが共有する**）
     // -----------------------------------------------------------------------
+    //
+    // `log` の面に取り付けられる記録器は 1 プロセスに 1 つだけであるため、受け皿は
+    // `crate::test_log` に 1 つだけ置く（`macro-runtime` のタスク 4.3 が同じ受け皿を読む。
+    // 2 つ取り付けようとすると、先に取った方が勝ち、後から取った方は空を読む）。
+    use crate::test_log::{captured, install as install_capture_logger, wait_for_record};
 
-    /// 捕獲した記録の行（`[対象名][水準] 本文`）。試験の間だけの控えである。
-    static CAPTURED: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
-
-    fn captured() -> Vec<String> {
-        CAPTURED
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
-    /// `log` の面へ取り付ける捕獲用の記録器。
-    struct CaptureLogger;
-
-    impl log::Log for CaptureLogger {
-        fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn log(&self, record: &log::Record<'_>) {
-            let line = format!(
-                "[{}][{}] {}",
-                record.target(),
-                record.level(),
-                record.args()
-            );
-            CAPTURED
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(line);
-        }
-
-        fn flush(&self) {}
-    }
-
-    /// 捕獲用の記録器を取り付ける。**`log` の面に取り付けられる記録器は 1 プロセスに 1 つだけ**
-    /// なので、2 度目以降の呼び出しは何もしない。
-    fn install_capture_logger() {
-        static INSTALLED: LazyLock<()> = LazyLock::new(|| {
-            static LOGGER: CaptureLogger = CaptureLogger;
-            log::set_logger(&LOGGER).expect("この試験ではまだ記録器が取り付いていない");
-            log::set_max_level(log::LevelFilter::Trace);
-        });
-        LazyLock::force(&INSTALLED);
-    }
-
-    /// 記録に条件を満たす行が現れるまで待つ（現れなければ期限で偽を返す）。
-    fn wait_for_record(predicate: impl Fn(&str) -> bool, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if captured().iter().any(|line| predicate(line)) {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
 }

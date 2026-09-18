@@ -69,6 +69,13 @@
 //!   [`RenderPaintFailure`]）。**運ぶのは閉じた札と数値だけであり、任意の文字列を記録へ流す口は
 //!   作らない** — 記録の 1 行を組み立てるのは適応層である（10.8 がクリップボードの文字を記録へ
 //!   出さなかったのと同じ規律）。要求はウィンドウを運ばない（要件 4.6）
+//! - 4.3（`macro-runtime`）: マクロの面（要求 [`MacroStoreRequest`] / [`MacroDeleteRequest`] /
+//!   [`MacroRunRequest`] と、応答 [`MacroListResponse`] / [`MacroStoreResponse`] /
+//!   [`MacroDeleteResponse`] / [`MacroRunResponse`]、一覧の 1 件 [`MacroSummary`]、実行の 3 値
+//!   [`MacroRunOutcome`] と失敗 [`MacroFailureReport`] / [`MacroFrame`]、および種別・能力・
+//!   出力・打ち切りの閉じた札）。**実体は `macro-runtime` にあり、ここは境界の形だけを持つ。**
+//!   要求はどれもウィンドウを運ばず（要件 4.6）、**上限も運ばない**（設定から適応層が解決する。
+//!   要件 6.5）。一覧は**解釈できなかったマクロとその理由**を運ぶ（要件 1.4）
 
 use serde::{Deserialize, Serialize};
 
@@ -1027,6 +1034,358 @@ pub struct RenderHealthRecordResponse {
     pub context: WindowContext,
 }
 
+// ---------------------------------------------------------------------------
+// マクロの面（タスク 4.3。マクロ実行の要件 1.3, 1.4, 1.6, 1.7, 2.1–2.6, 6.5, 8.2, 9.1–9.3）
+// ---------------------------------------------------------------------------
+//
+// design.md「Data Contracts & Integration」の表が定める 4 つのコマンド（`macro_list` /
+// `macro_store` / `macro_delete` / `macro_run`）の要求と応答を置く。**文字列と 32 ビット以下の
+// 整数と真偽だけで構成し、他のドメインクレートの型を参照しない**（境界の型の規約。
+// `crate::ipc::grid` のモジュール doc と同じ）。写すのは `src-tauri/src/commands/macro.rs` の
+// 適応層である。
+//
+// 要求の型はどれも**ウィンドウを運ばない** — 呼び出し元は基盤が注入する `WebviewWindow` から
+// 取る（偽装できない。要件 4.6、`ipc-contract.md`）。**上限（時間とメモリ）も運ばない** —
+// 設定から適応層が解決する（要件 6.5。design.md「Data Contracts & Integration」）。
+
+/// マクロの種別の札（要件 1.3, 3.1, 3.3）。
+///
+/// 綴りは**文書の中の形と同じ小文字**（`document-format` の `macros.json` の `kind` は
+/// `typescript` / `javascript` の 2 つだけである。`crates/document-format/src/parts/macros_part.rs`）
+/// であり、`macro_runtime::MacroKind::as_str`（診断の記録が使う安定トークン）とも同じである。
+/// 3 つの綴りを揃えるのは、記録と文書と境界を突き合わせる検査を 1 つの語で書けるようにするため。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+pub enum MacroKindTag {
+    /// TypeScript。実行の前に型注釈を落とす（要件 3.1）。
+    TypeScript,
+    /// JavaScript。そのまま実行する（要件 3.3）。
+    JavaScript,
+}
+
+/// 宣言できる能力の札（要件 8.2, 8.4）。
+///
+/// **閉じた集合である**（`macro_runtime::Capability` の 3 値）。綴りは宣言に書く正準の綴り
+/// そのままであり（`file.read` / `file.write` / `net`）、**そのまま利用者へ見せられる**
+/// （要件 8.2 の「宣言している能力を提示する」は文言の組み立てを要さない）。
+/// ファイルの読み込み・書き込み・ネットワークは**それぞれ別の能力**である（要件 8.4。
+/// まとめて 1 つにしない — 読むだけのマクロに書く権利を与えない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ts_rs::TS)]
+pub enum MacroCapabilityTag {
+    /// ファイルの読み込み。
+    #[serde(rename = "file.read")]
+    FileRead,
+    /// ファイルの書き込み。
+    #[serde(rename = "file.write")]
+    FileWrite,
+    /// ネットワークの利用。
+    #[serde(rename = "net")]
+    Net,
+}
+
+impl MacroCapabilityTag {
+    /// 札の全体（**閉じた集合の唯一の源**）。並びは綴りの辞書順であり、
+    /// `macro_runtime::Capability` の集合の提示順（`CapabilitySet` の順序）と同じである。
+    ///
+    /// 綴りと順序が一致することは `src-tauri` のテストが写像（`to_boundary`）を通して固定する
+    /// （本クレートは `macro-runtime` に依存できないため、ここから数え合わせることはできない）。
+    pub const ALL: [MacroCapabilityTag; 3] = [
+        MacroCapabilityTag::FileRead,
+        MacroCapabilityTag::FileWrite,
+        MacroCapabilityTag::Net,
+    ];
+}
+
+/// 失敗の種別の札（要件 2.4, 3.4, 8.3, 9.1, 9.2）。
+///
+/// `macro_runtime::FailureKind` の 4 層（ソースの解釈 / 変換 / 実行 / ホスト API の拒否）を
+/// そのまま写す。**どの層で失敗したかによって提示と対処が変わる**ため、文字列を混ぜずに
+/// 判別できる形で運ぶ。ホスト API の拒否だけが**拒んだ API の名前**を運ぶ（要件 9.2）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MacroFailureTag {
+    /// ソースの解釈（種別とソースの不一致・能力宣言の誤り）。**実行そのものを行わない**。
+    Source,
+    /// 変換（TypeScript / JavaScript の構文誤り。要件 3.4）。
+    Transpile,
+    /// 実行（マクロが投げた例外。要件 9.1）。
+    Execution,
+    /// ホスト API の拒否（能力の宣言漏れ・存在しない行や列・読み取り専用の要求。要件 8.3, 9.2）。
+    HostRejected {
+        /// 拒んだ API の名前（宣言表の名前。例 `host.readRows`）。
+        api: String,
+    },
+}
+
+/// 失敗に至る呼び出しの 1 段（要件 9.1, 9.3）。
+///
+/// 行と列は **1 起点**であり、**TypeScript（保存されたソース）の原位置**である（要件 9.1 の
+/// 「マクロのソースの行と列」。写しを通すのはエンジンである）。`function` は無名の位置では
+/// **空文字**である（`Option` を境界へ出さない — 生成物の型が `string | null` になり、
+/// 分岐を書く側に不要な場合分けが増える）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct MacroFrame {
+    /// どのマクロの位置か（実行した 1 件の名前。失敗が複数のモジュールに跨ることはない）。
+    pub macro_name: String,
+    /// 関数名（無名の位置では空文字）。
+    pub function: String,
+    /// 行（1 起点。保存されたソースの位置）。
+    pub line: u32,
+    /// 列（1 起点。保存されたソースの位置）。
+    pub column: u32,
+}
+
+/// 失敗（要件 2.4, 9.1, 9.2, 9.3）。
+///
+/// **理由の文言は運ぶが、見せ方を決めない**（`structure.md` の「表示の文言を持たない」規約は
+/// ドメインの型についてのものであり、境界は利用者に見せる材料を運ぶ）。`frames` は**内側
+/// （投げた位置）から外側へ**並ぶ（要件 9.3 の呼び出しの並び）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct MacroFailureReport {
+    /// どの層で失敗したか（要件 9.2 の「失敗した API の名前」もここが運ぶ）。
+    pub kind: MacroFailureTag,
+    /// 失敗の理由（例外のメッセージ、拒否の理由、構文の診断）。
+    pub reason: String,
+    /// 失敗に至る呼び出しの並び（内側から外側へ。空でありうる）。
+    pub frames: Vec<MacroFrame>,
+}
+
+/// `console` の出力の種別（要件 2.3）。
+///
+/// どの呼び出しだったかで提示の重みが変わる（`error` は警告として見せる等）ため、種別を持つ。
+/// `macro_runtime::OutputLevel` の 5 値をそのまま写す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+pub enum MacroOutputLevel {
+    /// `console.log`。
+    Log,
+    /// `console.info`。
+    Info,
+    /// `console.warn`。
+    Warn,
+    /// `console.error`。
+    Error,
+    /// `console.debug`。
+    Debug,
+}
+
+/// マクロが出した出力の 1 行（要件 2.3）。
+///
+/// 並びが**順序を保つ**（マクロが出した順に読める）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct MacroOutputLine {
+    /// 呼び出しの種別。
+    pub level: MacroOutputLevel,
+    /// 出力の本文。
+    pub text: String,
+}
+
+/// 変更の件数（種別ごと。要件 2.5, 2.6, 5.5）。
+///
+/// **件数は `u32` で運ぶ**（境界は 64 ビット整数を出さない。`ipc-contract.md`）。実行 1 回の
+/// 変更が 40 億件を超えることは無い（超える場合は飽和させる — 件数は「何件変わったか」の
+/// 提示であり、飽和しても「非常に多い」という意味は保たれる）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct MacroChangeCounts {
+    /// セルへ書き込んだ件数。
+    pub set_cells: u32,
+    /// 追加した行数。
+    pub inserted_rows: u32,
+    /// 削除した行数。
+    pub removed_rows: u32,
+    /// 複製した行数。
+    pub duplicated_rows: u32,
+}
+
+impl MacroChangeCounts {
+    /// 変更が 1 件も無いか（要件 2.6 の「変更の有無」）。
+    pub const fn is_empty(&self) -> bool {
+        self.set_cells == 0
+            && self.inserted_rows == 0
+            && self.removed_rows == 0
+            && self.duplicated_rows == 0
+    }
+
+    /// 変更の合計（要件 5.5 の「書き込みの合計」）。
+    pub const fn total(&self) -> u32 {
+        self.set_cells + self.inserted_rows + self.removed_rows + self.duplicated_rows
+    }
+}
+
+/// 打ち切りの種類（要件 6.1, 6.2）。
+///
+/// **どちらの上限に当たったか**が提示で変わるため、種別として運ぶ。綴りは
+/// `macro_runtime::LimitKind::as_str`（診断の記録の語）と同じである。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+pub enum MacroAbortKind {
+    /// 時間の上限（既定 30 秒。要件 6.1）。
+    Time,
+    /// メモリの上限（既定 512 MB。要件 6.2）。
+    Memory,
+}
+
+/// 実行がどう終わったか（**3 値**。要件 2.3, 2.4, 6.1, 6.2）。
+///
+/// **打ち切りは失敗の一種ではなく別の値**である（要件 6.1 / 6.2 の提示が失敗と異なるため）。
+/// `outcome` を判別子とする判別可能な合併型であり、フロントエンドは `switch` で網羅的に
+/// 分岐できる（`src/ipc/client.ts` の `assertNever` が新しい変種をコンパイルエラーにする）。
+///
+/// **`Failed` / `Aborted` のとき、ドキュメントは変わっていない**（要件 6.3, 7.3）。変更の件数を
+/// `Ran` だけが運ぶのは、その事実を型で表すためである（`macro_runtime::RunOutcome` と同じ）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(tag = "outcome")]
+pub enum MacroRunOutcome {
+    /// 最後まで走り切った（要件 2.3, 2.5）。
+    Ran {
+        /// 戻り値の提示用の表現（**オブジェクトは JSON**）。
+        value: String,
+        /// `console` の出力（順序を保つ）。
+        output: Vec<MacroOutputLine>,
+        /// 変更の件数（種別ごと。要件 2.5）。
+        changes: MacroChangeCounts,
+        /// 実行の所要（ミリ秒。要件 11.3）。
+        elapsed_ms: u32,
+    },
+    /// 失敗して終わった（要件 2.4, 9.1）。
+    Failed {
+        /// 理由・種別・フレーム。
+        failure: MacroFailureReport,
+    },
+    /// 上限で打ち切られた（要件 6.1, 6.2）。
+    Aborted {
+        /// どちらの上限に当たったか。
+        limit: MacroAbortKind,
+        /// 打ち切りまでの所要（ミリ秒）。
+        elapsed_ms: u32,
+        /// 打ち切りの理由とフレーム。
+        failure: MacroFailureReport,
+    },
+}
+
+/// 一覧に載る 1 件（要件 1.3, 1.4, 8.2）。
+///
+/// **解釈できなかったマクロも 1 件として載る**（要件 1.4）。そのとき `failure` が理由を持ち、
+/// `capabilities` は空である。解釈できたマクロは `failure` が `None` であり、`capabilities` は
+/// **宣言が 1 つも無ければ空**である（「解釈できたが何も宣言していない」と「解釈できなかった」は
+/// `failure` の有無で区別できる）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct MacroSummary {
+    /// マクロの名前（要件 1.3）。
+    pub name: String,
+    /// マクロの種別（要件 1.3）。
+    pub kind: MacroKindTag,
+    /// 宣言されている能力（要件 8.2）。解釈できなかったときは空。
+    pub capabilities: Vec<MacroCapabilityTag>,
+    /// 解釈できなかった理由（要件 1.4）。解釈できたときは `None`。
+    pub failure: Option<MacroFailureReport>,
+}
+
+/// マクロの一覧の応答（要件 1.3, 1.4）。
+///
+/// **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。要求の型は無い — 必要な入力は
+/// 対象ウィンドウだけで、それは基盤が注入する（[`CanCloseWindowResponse`] と同じ形）。
+/// 並びは**保存された順**である（一覧の提示順。`design.md`「Logical Data Model」）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct MacroListResponse {
+    /// 呼び出し元ウィンドウの文脈（要件 4.6）。
+    pub context: WindowContext,
+    /// そのウィンドウのドキュメントが持つマクロ（保存順）。
+    pub macros: Vec<MacroSummary>,
+}
+
+/// マクロの保存の要求（要件 1.1, 1.5, 1.6）。
+///
+/// `source` は**保存されたままのテキスト**である（整形しない。要件 1.5）。種別は閉じた札で
+/// 運ぶため、`macros.json` の `kind` の綴り（`typescript` / `javascript`）以外は境界で弾かれる。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct MacroStoreRequest {
+    /// マクロの名前（ドキュメントの中で一意。同じ名前は置き換えである。要件 1.6）。
+    pub name: String,
+    /// マクロの種別。
+    pub kind: MacroKindTag,
+    /// 保存するソース（整形しない）。
+    pub source: String,
+}
+
+/// マクロの保存の応答（要件 1.1, 1.6）。
+///
+/// `stored` は**この保存で書いた 1 件の要約**であり、`macros` は**保存後の一覧**である
+/// （要件 1.3 の提示を、面が 2 度目の往復なしに差し替えられるようにする。保存が置き換えで
+/// あったか追加であったかは `macros` の並びで分かる）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct MacroStoreResponse {
+    /// 呼び出し元ウィンドウの文脈（要件 4.6）。
+    pub context: WindowContext,
+    /// この保存で書いた 1 件の要約。
+    pub stored: MacroSummary,
+    /// 保存後の一覧（保存順）。
+    pub macros: Vec<MacroSummary>,
+}
+
+/// マクロの削除の要求（要件 1.7）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct MacroDeleteRequest {
+    /// 削除するマクロの名前。
+    pub name: String,
+}
+
+/// マクロの削除の応答（要件 1.7）。
+///
+/// `removed` は**取り除いたか**である。無い名前を指定した場合は**失敗ではなく `false`** で
+/// あり、一覧は削除前のまま返る（要件 1.7 は削除の結果についてだけ定めており、存在しない名前を
+/// 誤りとする要求を持たない。押しても何も起きないことを面が区別できるようにする）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct MacroDeleteResponse {
+    /// 呼び出し元ウィンドウの文脈（要件 4.6）。
+    pub context: WindowContext,
+    /// 取り除いたかどうか。
+    pub removed: bool,
+    /// 削除後の一覧（保存順）。
+    pub macros: Vec<MacroSummary>,
+}
+
+/// マクロの実行の要求（要件 2.1）。
+///
+/// 運ぶのは名前だけである。**ソースも上限も運ばない** — ソースはドキュメントの中の記録であり
+/// （要件 1.1）、上限は設定から適応層が解決する（要件 6.5）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct MacroRunRequest {
+    /// 実行するマクロの名前（そのウィンドウのドキュメントに保存されているもの）。
+    pub name: String,
+}
+
+/// マクロの実行の応答（要件 2.3, 2.4, 2.5, 6.1, 6.2）。
+///
+/// **失敗と打ち切りも成功の腕で運ぶ**（封筒の失敗腕は経路の失敗だけである — 実行できなかった
+/// ことと、実行したが失敗したことは別である。`design.md`「Error Handling」の表）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct MacroRunResponse {
+    /// 呼び出し元ウィンドウの文脈（要件 4.6）。
+    pub context: WindowContext,
+    /// 実行の結果（3 値）。
+    pub outcome: MacroRunOutcome,
+}
+
+/// マクロの実行がメニューから要求されたことを伝える Tauri イベントの名前（要件 2.1）。
+///
+/// `invoke` の宛先を持たないためコマンド名の配列（[`COMMAND_NAMES`]）には現れない。他のイベント
+/// と同じく、**生成物（`src/ipc/bindings.ts`）へ定数として出す**ことで、フロントエンドが
+/// 文字列リテラルを綴り間違える経路を塞ぐ。
+///
+/// **ペイロード型を持たない。** メニューの項目は引数を取らず（対象は「そのときのウィンドウの
+/// ドキュメント」であり、選ばれたマクロは面が一覧から選ばせる。要件 2.1）、境界を越える値が
+/// 1 つも無い（[`GRID_COPY_REQUESTED_EVENT`] と同じ形）。送り先は**活性化の対象ウィンドウ**
+/// 1 つだけである。
+///
+/// **実行できるマクロが 1 つも無いときに項目を無効化しない**（要件 2.7 は面が担う）。
+/// 有効・無効の述語はフォーカスが移るたびに評価されるが、その時点でドキュメントを読むと
+/// **イベントループのスレッドが文書のロックを待つ**（実行中のマクロが 10 万行を書いていれば
+/// 秒単位で待つ）— 要件 2.2 の「表の操作を止めない」に反する。面は一覧を既に持っているので、
+/// 導線を出すかどうかは面が決める（`src-tauri/src/session/menu.rs` が同じ理由で述語を与えて
+/// いない）。
+pub const MACRO_RUN_REQUESTED_EVENT: &str = "macro_run_requested";
+
 /// TypeScript の生成物を再生成する、唯一の文書化されたコマンド（タスク 2.2）。
 ///
 /// 生成物のヘッダにもこの文字列を埋め込むため、定数として一箇所に持つ。実行ファイルは
@@ -1103,6 +1462,7 @@ fn event_names_constant() -> String {
         ("GRID_COPY_REQUESTED_EVENT", GRID_COPY_REQUESTED_EVENT),
         ("GRID_HISTORY_REQUESTED_EVENT", GRID_HISTORY_REQUESTED_EVENT),
         ("GRID_PASTE_REQUESTED_EVENT", GRID_PASTE_REQUESTED_EVENT),
+        ("MACRO_RUN_REQUESTED_EVENT", MACRO_RUN_REQUESTED_EVENT),
     ] {
         out.push_str(&format!("export const {constant} = \"{event}\";\n"));
     }
@@ -1413,6 +1773,43 @@ fn concrete_grid_reference_result(cfg: &ts_rs::Config) -> (String, String) {
     (NAME.to_owned(), text)
 }
 
+/// マクロの 4 つのコマンドの封筒の具体形（タスク 4.3）。
+///
+/// [`concrete_window_context_result`] と同じ理由で置く（ジェネリックな `IpcResult` の宣言は
+/// ペイロード型を名指ししないため、境界が名指しできる具体形を明示的に置く）。4 本を 1 つの
+/// 関数にまとめるのは、写しが 4 つ並ぶ同じ形の繰り返しであり、**その形が 4 本とも同じである
+/// こと**が読み取れるようにするためである。
+fn concrete_macro_results(cfg: &ts_rs::Config) -> [(String, String); 4] {
+    [
+        (
+            "MacroListResult".to_owned(),
+            concrete_result::<MacroListResponse>(cfg, "MacroListResult"),
+        ),
+        (
+            "MacroStoreResult".to_owned(),
+            concrete_result::<MacroStoreResponse>(cfg, "MacroStoreResult"),
+        ),
+        (
+            "MacroDeleteResult".to_owned(),
+            concrete_result::<MacroDeleteResponse>(cfg, "MacroDeleteResult"),
+        ),
+        (
+            "MacroRunResult".to_owned(),
+            concrete_result::<MacroRunResponse>(cfg, "MacroRunResult"),
+        ),
+    ]
+}
+
+/// ペイロード型 `T` のコマンドの封筒の具体形を組み立てる（上の 4 本が共有する実体）。
+fn concrete_result<T: ts_rs::TS>(cfg: &ts_rs::Config, name: &str) -> String {
+    format!(
+        "// マクロのコマンド（{name}）の封筒の具体形。ジェネリックな `IpcResult` の宣言は\n\
+         // ペイロード型を名指ししないため、境界が名指しできる具体形を明示的に置く。\n\
+         export type {name} = {};\n",
+        <IpcResult<T, IpcError> as ts_rs::TS>::name(cfg)
+    )
+}
+
 /// 境界を越える型とコマンド名から、追跡対象の TypeScript（`src/ipc/bindings.ts`）を生成する
 /// （tasks.md 2.2、design.md「IpcContract」の Service Interface）。
 ///
@@ -1507,6 +1904,24 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         declared::<RenderHealthReport>(&cfg),
         declared::<RenderHealthRecordRequest>(&cfg),
         declared::<RenderHealthRecordResponse>(&cfg),
+        declared::<MacroKindTag>(&cfg),
+        declared::<MacroCapabilityTag>(&cfg),
+        declared::<MacroFailureTag>(&cfg),
+        declared::<MacroFrame>(&cfg),
+        declared::<MacroFailureReport>(&cfg),
+        declared::<MacroOutputLevel>(&cfg),
+        declared::<MacroOutputLine>(&cfg),
+        declared::<MacroChangeCounts>(&cfg),
+        declared::<MacroAbortKind>(&cfg),
+        declared::<MacroRunOutcome>(&cfg),
+        declared::<MacroSummary>(&cfg),
+        declared::<MacroListResponse>(&cfg),
+        declared::<MacroStoreRequest>(&cfg),
+        declared::<MacroStoreResponse>(&cfg),
+        declared::<MacroDeleteRequest>(&cfg),
+        declared::<MacroDeleteResponse>(&cfg),
+        declared::<MacroRunRequest>(&cfg),
+        declared::<MacroRunResponse>(&cfg),
         declared::<IpcError>(&cfg),
         declared::<IpcResult<WindowContext, IpcError>>(&cfg),
         concrete_window_context_result(&cfg),
@@ -1529,6 +1944,7 @@ pub fn render_bindings() -> Result<String, ts_rs::ExportError> {
         concrete_grid_reference_result(&cfg),
         concrete_render_health_record_result(&cfg),
     ];
+    declarations.extend(concrete_macro_results(&cfg));
     declarations.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut out = generated_header();
@@ -2011,6 +2427,209 @@ mod tests {
             serde_json::Value::String("window.geometry".into())
         );
         assert_eq!(encoded["value"]["width"], serde_json::json!(3));
+    }
+
+    /// マクロの面の境界の型が契約どおりであることを固定する（タスク 4.3。要件 1.4, 2.3, 9.1）。
+    ///
+    /// 見るのは 3 点である: **解釈できなかった理由が一覧に載る**こと（要件 1.4）、**3 値が
+    /// 判別子で区別できる**こと（要件 2.3, 2.4, 6.1, 6.2）、**フレームが位置を運ぶ**こと
+    /// （要件 9.1, 9.3）。閉じた札の綴り（種別・能力・打ち切り）も同時に固定する — 綴りは
+    /// 文書の中の形（`macros.json` の `kind`）と診断の記録の語に一致していなければならない。
+    #[test]
+    fn macro_boundary_types_carry_the_reason_and_the_three_outcomes() {
+        // 種別と能力の綴り（文書の中の形と同じ）。
+        assert_eq!(
+            serde_json::to_value(MacroKindTag::TypeScript).unwrap(),
+            serde_json::json!("typescript")
+        );
+        assert_eq!(
+            serde_json::to_value(MacroKindTag::JavaScript).unwrap(),
+            serde_json::json!("javascript")
+        );
+        assert_eq!(
+            MacroCapabilityTag::ALL
+                .iter()
+                .map(|tag| serde_json::to_value(tag).unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                serde_json::json!("file.read"),
+                serde_json::json!("file.write"),
+                serde_json::json!("net"),
+            ],
+            "能力の綴りが宣言の綴りと違う"
+        );
+
+        // 一覧: 解釈できなかった 1 件が理由つきで残る（要件 1.4）。
+        let response = MacroListResponse {
+            context: WindowContext {
+                window: WindowLabel::new("doc-1"),
+            },
+            macros: vec![
+                MacroSummary {
+                    name: "棚卸し".to_owned(),
+                    kind: MacroKindTag::TypeScript,
+                    capabilities: vec![MacroCapabilityTag::FileRead, MacroCapabilityTag::Net],
+                    failure: None,
+                },
+                MacroSummary {
+                    name: "書きかけ".to_owned(),
+                    kind: MacroKindTag::JavaScript,
+                    capabilities: Vec::new(),
+                    failure: Some(MacroFailureReport {
+                        kind: MacroFailureTag::Transpile,
+                        reason: "expected expression".to_owned(),
+                        frames: vec![MacroFrame {
+                            macro_name: "書きかけ".to_owned(),
+                            function: String::new(),
+                            line: 3,
+                            column: 7,
+                        }],
+                    }),
+                },
+            ],
+        };
+        let encoded = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            encoded["context"]["window"],
+            serde_json::Value::String("doc-1".into())
+        );
+        assert_eq!(
+            encoded["macros"][1]["failure"]["kind"]["kind"],
+            serde_json::json!("transpile")
+        );
+        assert_eq!(encoded["macros"][1]["failure"]["frames"][0]["line"], 3);
+        assert_eq!(
+            encoded["macros"][1]["capabilities"],
+            serde_json::json!([]),
+            "解釈できなかったマクロに能力が付いている"
+        );
+        // ホスト API の拒否は**拒んだ API の名前**を運ぶ（要件 9.2）。
+        assert_eq!(
+            serde_json::to_value(MacroFailureTag::HostRejected {
+                api: "host.readRows".to_owned()
+            })
+            .unwrap(),
+            serde_json::json!({ "kind": "host_rejected", "api": "host.readRows" })
+        );
+        let back: MacroListResponse = serde_json::from_value(encoded).unwrap();
+        assert_eq!(back, response);
+
+        // 実行: 3 値が `outcome` で区別でき、打ち切りの種類が読める（要件 2.3, 6.1, 6.2）。
+        let ran = MacroRunOutcome::Ran {
+            value: "42".to_owned(),
+            output: vec![MacroOutputLine {
+                level: MacroOutputLevel::Log,
+                text: "はじめます".to_owned(),
+            }],
+            changes: MacroChangeCounts {
+                set_cells: 3,
+                inserted_rows: 0,
+                removed_rows: 1,
+                duplicated_rows: 0,
+            },
+            elapsed_ms: 12,
+        };
+        let encoded = serde_json::to_value(&ran).unwrap();
+        assert_eq!(encoded["outcome"], serde_json::json!("Ran"));
+        assert_eq!(encoded["output"][0]["level"], serde_json::json!("log"));
+        assert_eq!(
+            encoded["changes"],
+            serde_json::json!({
+                "set_cells": 3,
+                "inserted_rows": 0,
+                "removed_rows": 1,
+                "duplicated_rows": 0,
+            }),
+            "件数の形が変わった（種別ごとの数である。要件 5.5）"
+        );
+        let counts = MacroChangeCounts {
+            set_cells: 3,
+            inserted_rows: 0,
+            removed_rows: 1,
+            duplicated_rows: 0,
+        };
+        assert_eq!(counts.total(), 4, "変更の合計が件数と食い違う");
+        assert!(!counts.is_empty());
+        assert!(MacroChangeCounts {
+            set_cells: 0,
+            inserted_rows: 0,
+            removed_rows: 0,
+            duplicated_rows: 0,
+        }
+        .is_empty());
+
+        let aborted = MacroRunOutcome::Aborted {
+            limit: MacroAbortKind::Memory,
+            elapsed_ms: 900,
+            failure: MacroFailureReport {
+                kind: MacroFailureTag::Execution,
+                reason: "execution terminated".to_owned(),
+                frames: Vec::new(),
+            },
+        };
+        let encoded = serde_json::to_value(&aborted).unwrap();
+        assert_eq!(encoded["outcome"], serde_json::json!("Aborted"));
+        assert_eq!(encoded["limit"], serde_json::json!("memory"));
+        let back: MacroRunOutcome = serde_json::from_value(encoded).unwrap();
+        assert_eq!(back, aborted);
+
+        let failed = MacroRunOutcome::Failed {
+            failure: MacroFailureReport {
+                kind: MacroFailureTag::Execution,
+                reason: "TypeError: undefined は関数ではありません".to_owned(),
+                frames: vec![MacroFrame {
+                    macro_name: "集計".to_owned(),
+                    function: "合計".to_owned(),
+                    line: 12,
+                    column: 5,
+                }],
+            },
+        };
+        let encoded = serde_json::to_value(&failed).unwrap();
+        assert_eq!(encoded["outcome"], serde_json::json!("Failed"));
+        assert_ne!(
+            serde_json::to_value(&failed).unwrap()["outcome"],
+            serde_json::to_value(&ran).unwrap()["outcome"],
+            "失敗と成功が同じ値になっている"
+        );
+
+        // 要求は名前だけを運ぶ（ソースも上限も運ばない。要件 6.5）。
+        let run = MacroRunRequest {
+            name: "集計".to_owned(),
+        };
+        let request = serde_json::to_value(&run).unwrap();
+        assert_eq!(
+            request
+                .as_object()
+                .map(|object| object.keys().cloned().collect::<Vec<_>>()),
+            Some(vec!["name".to_owned()]),
+            "実行の要求が名前以外を運んでいる: {request}"
+        );
+
+        // 保存はソースを**そのまま**運び、種別は閉じた札である（要件 1.5, 3.1）。
+        let source = "// @grant net\n\nconst xs = await host.readRange(0, 3);\n";
+        let store = MacroStoreRequest {
+            name: "棚卸し".to_owned(),
+            kind: MacroKindTag::TypeScript,
+            source: source.to_owned(),
+        };
+        let encoded = serde_json::to_value(&store).unwrap();
+        assert_eq!(
+            encoded["source"],
+            serde_json::Value::String(source.to_owned()),
+            "保存の要求でソースが変わった"
+        );
+        assert_eq!(
+            serde_json::from_value::<MacroStoreRequest>(encoded).unwrap(),
+            store
+        );
+        // 種別の札に無い綴りは復元できない（境界で弾かれる）。
+        assert!(serde_json::from_value::<MacroStoreRequest>(serde_json::json!({
+            "name": "x",
+            "kind": "typescript5",
+            "source": ""
+        }))
+        .is_err());
     }
 
     /// イベント名の定数が生成物に出ることを固定する（フロントエンドが綴りを間違えないため）。

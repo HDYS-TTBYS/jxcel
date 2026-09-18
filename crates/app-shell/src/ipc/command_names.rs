@@ -158,6 +158,33 @@ pub const GRID_REFERENCE_ROWS: &str = "grid_reference_rows";
 /// 偽装できない（要件 4.6）。
 pub const DIAGNOSTICS_RECORD_RENDER: &str = "diagnostics_record_render";
 
+/// 呼び出し元ウィンドウのドキュメントのマクロの一覧を返す（タスク 4.3。マクロ実行の要件 1.3、1.4）。
+///
+/// **実行しない。**解釈（能力の宣言と、種別としての構文）だけを行い、解釈できなかったマクロも
+/// 一覧に残して理由を添える（要件 1.4 — ドキュメントは開ける）。呼び出し元ウィンドウは基盤が
+/// 注入する引数から取るため、フロントエンドはウィンドウを偽装できない。
+pub const MACRO_LIST: &str = "macro_list";
+
+/// 呼び出し元ウィンドウのドキュメントへマクロを 1 件保存する（タスク 4.3。要件 1.1、1.6）。
+///
+/// 同じ名前のマクロは**置き換え**である（要件 1.6）。保存は `document-session` の `edit` の
+/// 閉包 1 回で行うため、**未保存の印と版が立つ**（`structure.md`「セッションの所有の規約」）。
+pub const MACRO_STORE: &str = "macro_store";
+
+/// 呼び出し元ウィンドウのドキュメントからマクロを 1 件削除する（タスク 4.3。要件 1.7）。
+///
+/// 保存と同じく `edit` の閉包 1 回で行う。**取り除く相手が無ければ `edit` を呼ばない**
+/// （版と未保存の印を動かさない）。
+pub const MACRO_DELETE: &str = "macro_delete";
+
+/// 呼び出し元ウィンドウのドキュメントに対してマクロを 1 件実行する（タスク 4.3。要件 2.1–2.5）。
+///
+/// 上限（時間・メモリ）は**要求に載せない** — 設定から適応層が解決してエンジンへ渡す
+/// （要件 6.5。design.md「Data Contracts & Integration」）。実行の失敗（例外・構文誤り・
+/// 能力の拒否）と打ち切りは**成功の応答**が 3 値として運ぶ（要件 2.4、6.1、6.2 の提示が
+/// 失敗と同じ面に出るためである）。
+pub const MACRO_RUN: &str = "macro_run";
+
 /// フロントエンドから呼び出せるコマンド名の一覧（要件 4.1、4.2）。
 ///
 /// `src-tauri` のハンドラ登録（タスク 7.1）と TypeScript の生成物（タスク 2.2）の**両方**が
@@ -186,4 +213,8 @@ pub const COMMAND_NAMES: &[&str] = &[
     GRID_ROWS_WINDOW,
     GRID_REFERENCE_ROWS,
     DIAGNOSTICS_RECORD_RENDER,
+    MACRO_LIST,
+    MACRO_STORE,
+    MACRO_DELETE,
+    MACRO_RUN,
 ];

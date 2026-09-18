@@ -174,15 +174,29 @@ pub enum SettingsKey {
     AppearanceTheme,
     /// 記録の詳細度（要件 8.7）。値は詳細度を表す文字列。
     DiagnosticsLevel,
+    /// マクロの実行に許すメモリの量（バイト。`macro-runtime` 要件 6.2 / 6.5。tasks.md 4.3）。
+    ///
+    /// 値は整数である。**鍵が無いことは「既定を使う」ことを意味する** — 既定（512 MB）は
+    /// `macro_runtime::Limits::DEFAULT_MEMORY_BYTES` が唯一の源であり、本クレートは
+    /// その値を写し持たない（2 つ持てば片方だけが変わったときに黙って食い違う）。
+    MacroMemoryLimitBytes,
+    /// マクロの実行に許す時間（ミリ秒。`macro-runtime` 要件 6.1 / 6.5。tasks.md 4.3）。
+    ///
+    /// 値は整数である。**鍵が無いことは「既定を使う」ことを意味する**（既定 30 秒は
+    /// `macro_runtime::Limits::DEFAULT_TIME`）。適用はアダプタ（`src-tauri`）が実行のたびに
+    /// 行うため、**変更は次の実行から効く**（要件 6.5）。
+    MacroTimeLimitMs,
     /// 前回の起動で描画が成立しなかった印（要件 10.3）。値は真偽。
     RenderFallback,
 }
 
 impl SettingsKey {
     /// カタログの全体（閉じたキー空間）。並びはファイルに載る名前の昇順である。
-    pub const ALL: [SettingsKey; 5] = [
+    pub const ALL: [SettingsKey; 7] = [
         SettingsKey::AppearanceTheme,
         SettingsKey::DiagnosticsLevel,
+        SettingsKey::MacroMemoryLimitBytes,
+        SettingsKey::MacroTimeLimitMs,
         SettingsKey::RenderFallback,
         SettingsKey::SchemaVersion,
         SettingsKey::WindowGeometry,
@@ -195,6 +209,8 @@ impl SettingsKey {
             SettingsKey::WindowGeometry => "window.geometry",
             SettingsKey::AppearanceTheme => "appearance.theme",
             SettingsKey::DiagnosticsLevel => "diagnostics.level",
+            SettingsKey::MacroTimeLimitMs => "macro.time_limit_ms",
+            SettingsKey::MacroMemoryLimitBytes => "macro.memory_limit_bytes",
             SettingsKey::RenderFallback => "render.fallback",
         }
     }

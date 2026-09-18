@@ -22,12 +22,16 @@
 //! `Ids / Value / EntryName → Model → Json → Parts → Container → Api` と同じ規約）。
 //! 本ファイルは鎖の最右（`api`）であり、すべての層を参照して公開面を根へ再輸出する。
 //!
-//! 本タスク（tasks.md 1.1 / 1.3）が置いたのは次の 2 層である。残りの層は担当タスクが足す。
+//! 層ごとの担当は次のとおりである（tasks.md）。
 //!
 //! | 層 | モジュール | 担当 |
 //! |----|------------|------|
 //! | `source` | [`source`] | 1.3（型のみ）/ 1.6（規則と解釈） |
-//! | `engine` | [`engine`] | 1.3（型のみ）/ 1.4・1.5（actor・isolate・上限） |
+//! | `surface` | [`surface`] | 2.1（宣言表と門） |
+//! | `host` | [`host`] | 2.2–2.4（写像・変更集合・重ね合わせ） |
+//! | `engine` | [`engine`] | 1.3（型のみ）/ 1.4・1.5（actor・上限）/ 3.1・3.2（変換と isolate） |
+//! | `types` | [`types`] | 3.3（`.d.ts` の生成） |
+//! | `api` | [`api`] | 4.3（外から見える唯一の面。`MacroRuntimeApi`） |
 //!
 //! # 実行の結果と失敗の型（tasks.md 1.3。設計の正典は design.md「Components and
 //! Interfaces」の Service Interface）
@@ -43,15 +47,19 @@
 //!
 //! # 公開面（design.md「Public API Layer」）
 //!
-//! 対外的な入口は `MacroRuntimeApi`（`src/api.rs`。タスク 1.4 以降）である。本ファイルは
-//! 下位の各層の公開項目を根へ**再輸出**する（`document-format` / `schema-engine` と同じ形）。
+//! 対外的な入口は [`MacroRuntimeApi`]（`src/api.rs`。タスク 4.3 が置いた）であり、**本クレート
+//! の外から見える唯一の面**である（一覧・保存・削除・実行の 4 面）。本ファイルは下位の各層の
+//! 公開項目も根へ**再輸出**する（`document-format` / `schema-engine` と同じ形）—
+//! アダプタが縫い目（`HostPort`）や変更集合（`ChangeSet`）の型を綴るために要る。
 
+pub mod api;
 pub mod engine;
 pub mod host;
 pub mod source;
 pub mod surface;
 pub mod types;
 
+pub use api::{MacroError, MacroRuntime, MacroRuntimeApi, MacroSummary};
 pub use engine::actor::{ActorError, MacroActor};
 pub use engine::outcome::{
     ChangeSummary, FailureKind, Frame, LimitKind, Limits, MacroFailure, OutputLevel, OutputLine,

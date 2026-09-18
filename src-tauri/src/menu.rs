@@ -147,12 +147,33 @@ pub(crate) const FILE_MENU_LABEL: &str = "ファイル";
 /// **他のモジュールが位置を書き写さないよう公開する**（[`FILE_MENU_LABEL`] と同じ理由）。
 pub(crate) const EDIT_MENU_LABEL: &str = "編集";
 
+/// マクロメニューの部分メニュー名。**全プラットフォームで使う。**
+///
+/// **`macro-runtime` スペックのタスク 4.3 が足した**（要件 2.1 の「メニューからマクロの実行を
+/// 指示したとき」）。実行の導線（`macro-runtime.run`）がここに入る。
+///
+/// **専用の部分メニューを立てた理由**: マクロは「編集」の中の 1 操作ではなく、後続のスペック
+/// （`macro-editor-lsp` / `macro-stdlib`）が同じ場所へ項目を足す見込みがある。実行の項目を
+/// `編集` に混ぜると、その時点で位置の互換が壊れる。
+///
+/// **他のモジュールが位置を書き写さないよう公開する**（[`FILE_MENU_LABEL`] と同じ理由）。
+pub(crate) const MACRO_MENU_LABEL: &str = "マクロ";
+
 /// トップレベルの部分メニューの慣習的な並び（要件 3.6）。
 ///
 /// ここに無い名前の部分メニューは、この並びの後ろに**辞書順**で置かれる。並びを固定するのは、
 /// 登録の順序（実体は登録元の識別子の辞書順）が部分メニューの見え方に漏れないようにするため
 /// である。**macOS ではアプリケーションメニューが常に先頭**になる（[`top_level_sort_key`]）。
-const TOP_LEVEL_ORDER: &[&str] = &[FILE_MENU_LABEL, EDIT_MENU_LABEL, "表示", "ヘルプ"];
+///
+/// [`MACRO_MENU_LABEL`] は `macro-runtime` のタスク 4.3 が足した（要件 2.1）。`編集` の直後
+/// に置くのは**慣習に従うため**である（データを加工する操作は「編集」の隣にある）。
+const TOP_LEVEL_ORDER: &[&str] = &[
+    FILE_MENU_LABEL,
+    EDIT_MENU_LABEL,
+    MACRO_MENU_LABEL,
+    "表示",
+    "ヘルプ",
+];
 
 /// 組み込みの終了項目の表示名。
 const QUIT_LABEL: &str = "終了";

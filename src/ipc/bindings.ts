@@ -34,6 +34,10 @@ export const COMMAND_NAMES = [
   "grid_rows_window",
   "grid_reference_rows",
   "diagnostics_record_render",
+  "macro_list",
+  "macro_store",
+  "macro_delete",
+  "macro_run",
 ] as const;
 
 /**
@@ -46,6 +50,7 @@ export const DOCUMENT_SESSION_CHANGED_EVENT = "document_session_changed";
 export const GRID_COPY_REQUESTED_EVENT = "grid_copy_requested";
 export const GRID_HISTORY_REQUESTED_EVENT = "grid_history_requested";
 export const GRID_PASTE_REQUESTED_EVENT = "grid_paste_requested";
+export const MACRO_RUN_REQUESTED_EVENT = "macro_run_requested";
 
 // ---------------------------------------------------------------------------
 // 境界を越える型（crates/app-shell/src/ipc/ の定義から ts-rs が生成）
@@ -1423,6 +1428,323 @@ export type IpcError = { "kind": "Settings", "detail": { message: string, } } | 
  * （research.md 決定 1 が `tauri-specta` を却下した理由のひとつ）。
  */
 export type IpcResult<T, E> = { "status": "ok", data: T, } | { "status": "error", error: E, };
+/**
+ * 打ち切りの種類（要件 6.1, 6.2）。
+ *
+ * **どちらの上限に当たったか**が提示で変わるため、種別として運ぶ。綴りは
+ * `macro_runtime::LimitKind::as_str`（診断の記録の語）と同じである。
+ */
+export type MacroAbortKind = "time" | "memory";
+/**
+ * 宣言できる能力の札（要件 8.2, 8.4）。
+ *
+ * **閉じた集合である**（`macro_runtime::Capability` の 3 値）。綴りは宣言に書く正準の綴り
+ * そのままであり（`file.read` / `file.write` / `net`）、**そのまま利用者へ見せられる**
+ * （要件 8.2 の「宣言している能力を提示する」は文言の組み立てを要さない）。
+ * ファイルの読み込み・書き込み・ネットワークは**それぞれ別の能力**である（要件 8.4。
+ * まとめて 1 つにしない — 読むだけのマクロに書く権利を与えない）。
+ */
+export type MacroCapabilityTag = "file.read" | "file.write" | "net";
+/**
+ * 変更の件数（種別ごと。要件 2.5, 2.6, 5.5）。
+ *
+ * **件数は `u32` で運ぶ**（境界は 64 ビット整数を出さない。`ipc-contract.md`）。実行 1 回の
+ * 変更が 40 億件を超えることは無い（超える場合は飽和させる — 件数は「何件変わったか」の
+ * 提示であり、飽和しても「非常に多い」という意味は保たれる）。
+ */
+export type MacroChangeCounts = { 
+/**
+ * セルへ書き込んだ件数。
+ */
+set_cells: number, 
+/**
+ * 追加した行数。
+ */
+inserted_rows: number, 
+/**
+ * 削除した行数。
+ */
+removed_rows: number, 
+/**
+ * 複製した行数。
+ */
+duplicated_rows: number, };
+/**
+ * マクロの削除の要求（要件 1.7）。
+ */
+export type MacroDeleteRequest = { 
+/**
+ * 削除するマクロの名前。
+ */
+name: string, };
+/**
+ * マクロの削除の応答（要件 1.7）。
+ *
+ * `removed` は**取り除いたか**である。無い名前を指定した場合は**失敗ではなく `false`** で
+ * あり、一覧は削除前のまま返る（要件 1.7 は削除の結果についてだけ定めており、存在しない名前を
+ * 誤りとする要求を持たない。押しても何も起きないことを面が区別できるようにする）。
+ */
+export type MacroDeleteResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈（要件 4.6）。
+ */
+context: WindowContext, 
+/**
+ * 取り除いたかどうか。
+ */
+removed: boolean, 
+/**
+ * 削除後の一覧（保存順）。
+ */
+macros: Array<MacroSummary>, };
+// マクロのコマンド（MacroDeleteResult）の封筒の具体形。ジェネリックな `IpcResult` の宣言は
+// ペイロード型を名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type MacroDeleteResult = IpcResult<MacroDeleteResponse, IpcError>;
+/**
+ * 失敗（要件 2.4, 9.1, 9.2, 9.3）。
+ *
+ * **理由の文言は運ぶが、見せ方を決めない**（`structure.md` の「表示の文言を持たない」規約は
+ * ドメインの型についてのものであり、境界は利用者に見せる材料を運ぶ）。`frames` は**内側
+ * （投げた位置）から外側へ**並ぶ（要件 9.3 の呼び出しの並び）。
+ */
+export type MacroFailureReport = { 
+/**
+ * どの層で失敗したか（要件 9.2 の「失敗した API の名前」もここが運ぶ）。
+ */
+kind: MacroFailureTag, 
+/**
+ * 失敗の理由（例外のメッセージ、拒否の理由、構文の診断）。
+ */
+reason: string, 
+/**
+ * 失敗に至る呼び出しの並び（内側から外側へ。空でありうる）。
+ */
+frames: Array<MacroFrame>, };
+/**
+ * 失敗の種別の札（要件 2.4, 3.4, 8.3, 9.1, 9.2）。
+ *
+ * `macro_runtime::FailureKind` の 4 層（ソースの解釈 / 変換 / 実行 / ホスト API の拒否）を
+ * そのまま写す。**どの層で失敗したかによって提示と対処が変わる**ため、文字列を混ぜずに
+ * 判別できる形で運ぶ。ホスト API の拒否だけが**拒んだ API の名前**を運ぶ（要件 9.2）。
+ */
+export type MacroFailureTag = { "kind": "source" } | { "kind": "transpile" } | { "kind": "execution" } | { "kind": "host_rejected", 
+/**
+ * 拒んだ API の名前（宣言表の名前。例 `host.readRows`）。
+ */
+api: string, };
+/**
+ * 失敗に至る呼び出しの 1 段（要件 9.1, 9.3）。
+ *
+ * 行と列は **1 起点**であり、**TypeScript（保存されたソース）の原位置**である（要件 9.1 の
+ * 「マクロのソースの行と列」。写しを通すのはエンジンである）。`function` は無名の位置では
+ * **空文字**である（`Option` を境界へ出さない — 生成物の型が `string | null` になり、
+ * 分岐を書く側に不要な場合分けが増える）。
+ */
+export type MacroFrame = { 
+/**
+ * どのマクロの位置か（実行した 1 件の名前。失敗が複数のモジュールに跨ることはない）。
+ */
+macro_name: string, 
+/**
+ * 関数名（無名の位置では空文字）。
+ */
+function: string, 
+/**
+ * 行（1 起点。保存されたソースの位置）。
+ */
+line: number, 
+/**
+ * 列（1 起点。保存されたソースの位置）。
+ */
+column: number, };
+/**
+ * マクロの種別の札（要件 1.3, 3.1, 3.3）。
+ *
+ * 綴りは**文書の中の形と同じ小文字**（`document-format` の `macros.json` の `kind` は
+ * `typescript` / `javascript` の 2 つだけである。`crates/document-format/src/parts/macros_part.rs`）
+ * であり、`macro_runtime::MacroKind::as_str`（診断の記録が使う安定トークン）とも同じである。
+ * 3 つの綴りを揃えるのは、記録と文書と境界を突き合わせる検査を 1 つの語で書けるようにするため。
+ */
+export type MacroKindTag = "typescript" | "javascript";
+/**
+ * マクロの一覧の応答（要件 1.3, 1.4）。
+ *
+ * **呼び出し元ウィンドウの文脈を必ず含む**（要件 4.6）。要求の型は無い — 必要な入力は
+ * 対象ウィンドウだけで、それは基盤が注入する（[`CanCloseWindowResponse`] と同じ形）。
+ * 並びは**保存された順**である（一覧の提示順。`design.md`「Logical Data Model」）。
+ */
+export type MacroListResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈（要件 4.6）。
+ */
+context: WindowContext, 
+/**
+ * そのウィンドウのドキュメントが持つマクロ（保存順）。
+ */
+macros: Array<MacroSummary>, };
+// マクロのコマンド（MacroListResult）の封筒の具体形。ジェネリックな `IpcResult` の宣言は
+// ペイロード型を名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type MacroListResult = IpcResult<MacroListResponse, IpcError>;
+/**
+ * `console` の出力の種別（要件 2.3）。
+ *
+ * どの呼び出しだったかで提示の重みが変わる（`error` は警告として見せる等）ため、種別を持つ。
+ * `macro_runtime::OutputLevel` の 5 値をそのまま写す。
+ */
+export type MacroOutputLevel = "log" | "info" | "warn" | "error" | "debug";
+/**
+ * マクロが出した出力の 1 行（要件 2.3）。
+ *
+ * 並びが**順序を保つ**（マクロが出した順に読める）。
+ */
+export type MacroOutputLine = { 
+/**
+ * 呼び出しの種別。
+ */
+level: MacroOutputLevel, 
+/**
+ * 出力の本文。
+ */
+text: string, };
+/**
+ * 実行がどう終わったか（**3 値**。要件 2.3, 2.4, 6.1, 6.2）。
+ *
+ * **打ち切りは失敗の一種ではなく別の値**である（要件 6.1 / 6.2 の提示が失敗と異なるため）。
+ * `outcome` を判別子とする判別可能な合併型であり、フロントエンドは `switch` で網羅的に
+ * 分岐できる（`src/ipc/client.ts` の `assertNever` が新しい変種をコンパイルエラーにする）。
+ *
+ * **`Failed` / `Aborted` のとき、ドキュメントは変わっていない**（要件 6.3, 7.3）。変更の件数を
+ * `Ran` だけが運ぶのは、その事実を型で表すためである（`macro_runtime::RunOutcome` と同じ）。
+ */
+export type MacroRunOutcome = { "outcome": "Ran", 
+/**
+ * 戻り値の提示用の表現（**オブジェクトは JSON**）。
+ */
+value: string, 
+/**
+ * `console` の出力（順序を保つ）。
+ */
+output: Array<MacroOutputLine>, 
+/**
+ * 変更の件数（種別ごと。要件 2.5）。
+ */
+changes: MacroChangeCounts, 
+/**
+ * 実行の所要（ミリ秒。要件 11.3）。
+ */
+elapsed_ms: number, } | { "outcome": "Failed", 
+/**
+ * 理由・種別・フレーム。
+ */
+failure: MacroFailureReport, } | { "outcome": "Aborted", 
+/**
+ * どちらの上限に当たったか。
+ */
+limit: MacroAbortKind, 
+/**
+ * 打ち切りまでの所要（ミリ秒）。
+ */
+elapsed_ms: number, 
+/**
+ * 打ち切りの理由とフレーム。
+ */
+failure: MacroFailureReport, };
+/**
+ * マクロの実行の要求（要件 2.1）。
+ *
+ * 運ぶのは名前だけである。**ソースも上限も運ばない** — ソースはドキュメントの中の記録であり
+ * （要件 1.1）、上限は設定から適応層が解決する（要件 6.5）。
+ */
+export type MacroRunRequest = { 
+/**
+ * 実行するマクロの名前（そのウィンドウのドキュメントに保存されているもの）。
+ */
+name: string, };
+/**
+ * マクロの実行の応答（要件 2.3, 2.4, 2.5, 6.1, 6.2）。
+ *
+ * **失敗と打ち切りも成功の腕で運ぶ**（封筒の失敗腕は経路の失敗だけである — 実行できなかった
+ * ことと、実行したが失敗したことは別である。`design.md`「Error Handling」の表）。
+ */
+export type MacroRunResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈（要件 4.6）。
+ */
+context: WindowContext, 
+/**
+ * 実行の結果（3 値）。
+ */
+outcome: MacroRunOutcome, };
+// マクロのコマンド（MacroRunResult）の封筒の具体形。ジェネリックな `IpcResult` の宣言は
+// ペイロード型を名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type MacroRunResult = IpcResult<MacroRunResponse, IpcError>;
+/**
+ * マクロの保存の要求（要件 1.1, 1.5, 1.6）。
+ *
+ * `source` は**保存されたままのテキスト**である（整形しない。要件 1.5）。種別は閉じた札で
+ * 運ぶため、`macros.json` の `kind` の綴り（`typescript` / `javascript`）以外は境界で弾かれる。
+ */
+export type MacroStoreRequest = { 
+/**
+ * マクロの名前（ドキュメントの中で一意。同じ名前は置き換えである。要件 1.6）。
+ */
+name: string, 
+/**
+ * マクロの種別。
+ */
+kind: MacroKindTag, 
+/**
+ * 保存するソース（整形しない）。
+ */
+source: string, };
+/**
+ * マクロの保存の応答（要件 1.1, 1.6）。
+ *
+ * `stored` は**この保存で書いた 1 件の要約**であり、`macros` は**保存後の一覧**である
+ * （要件 1.3 の提示を、面が 2 度目の往復なしに差し替えられるようにする。保存が置き換えで
+ * あったか追加であったかは `macros` の並びで分かる）。
+ */
+export type MacroStoreResponse = { 
+/**
+ * 呼び出し元ウィンドウの文脈（要件 4.6）。
+ */
+context: WindowContext, 
+/**
+ * この保存で書いた 1 件の要約。
+ */
+stored: MacroSummary, 
+/**
+ * 保存後の一覧（保存順）。
+ */
+macros: Array<MacroSummary>, };
+// マクロのコマンド（MacroStoreResult）の封筒の具体形。ジェネリックな `IpcResult` の宣言は
+// ペイロード型を名指ししないため、境界が名指しできる具体形を明示的に置く。
+export type MacroStoreResult = IpcResult<MacroStoreResponse, IpcError>;
+/**
+ * 一覧に載る 1 件（要件 1.3, 1.4, 8.2）。
+ *
+ * **解釈できなかったマクロも 1 件として載る**（要件 1.4）。そのとき `failure` が理由を持ち、
+ * `capabilities` は空である。解釈できたマクロは `failure` が `None` であり、`capabilities` は
+ * **宣言が 1 つも無ければ空**である（「解釈できたが何も宣言していない」と「解釈できなかった」は
+ * `failure` の有無で区別できる）。
+ */
+export type MacroSummary = { 
+/**
+ * マクロの名前（要件 1.3）。
+ */
+name: string, 
+/**
+ * マクロの種別（要件 1.3）。
+ */
+kind: MacroKindTag, 
+/**
+ * 宣言されている能力（要件 8.2）。解釈できなかったときは空。
+ */
+capabilities: Array<MacroCapabilityTag>, 
+/**
+ * 解釈できなかった理由（要件 1.4）。解釈できたときは `None`。
+ */
+failure: MacroFailureReport | null, };
 /**
  * 9.2 の筋書きの項目（[`RenderHealthReport::Observation`]）。**閉じた列挙である。**
  *

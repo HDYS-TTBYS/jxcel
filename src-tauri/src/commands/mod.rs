@@ -76,12 +76,19 @@
 mod bulk;
 mod diagnostics_cmds;
 mod grid;
+// **`macro` は予約語であり、モジュール名にできない。** ファイルの位置は design.md の
+// File Structure Plan が定める `commands/macro.rs` のままにしたいので、`#[path]` で
+// 実ファイルを指し、モジュール名だけを `macro_commands` にする（名前は Rust の予約語と
+// 衝突するため、この 1 点だけ設計の綴りから動かす）。
+#[path = "macro.rs"]
+mod macro_commands;
 mod shell_cmds;
 
 use app_shell::ipc::command_names;
 
 pub use diagnostics_cmds::install as diagnostics_install;
 pub use grid::install as grid_install;
+pub use macro_commands::install as macro_install;
 pub use shell_cmds::start_settings_notifications;
 
 /// 登録一覧から、ハンドラの根と「登録された名前」の一覧を同時に作る。
@@ -143,6 +150,10 @@ command_root! {
     command_names::GRID_ROWS_WINDOW => grid::grid_rows_window,
     command_names::GRID_REFERENCE_ROWS => grid::grid_reference_rows,
     command_names::DIAGNOSTICS_RECORD_RENDER => diagnostics_cmds::diagnostics_record_render,
+    command_names::MACRO_LIST => macro_commands::macro_list,
+    command_names::MACRO_STORE => macro_commands::macro_store,
+    command_names::MACRO_DELETE => macro_commands::macro_delete,
+    command_names::MACRO_RUN => macro_commands::macro_run,
 }
 
 #[cfg(test)]

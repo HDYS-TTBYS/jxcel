@@ -74,8 +74,11 @@ const OBJECT_KEY: SettingsKey = SettingsKey::WindowGeometry;
 const MISSING_KEY: SettingsKey = SettingsKey::RenderFallback;
 const BLOCKER_KEY: SettingsKey = SettingsKey::RenderFallback;
 
-/// 並行書き込みテストでスレッドごとに固定するキー。カタログの非メタ鍵を使い切る（キー空間は
-/// 閉じているため、テスト専用の鍵を新しく作ることはできない。設計どおりである）。
+/// 並行書き込みテストでスレッドごとに固定するキー。カタログの非メタ鍵から 4 つを選ぶ
+/// （キー空間は閉じているため、テスト専用の鍵を新しく作ることはできない。設計どおりである）。
+/// **本テストが確かめるのは「別々の鍵への並行書き込みが互いを失わせないこと」であり、
+/// 鍵の網羅性ではない** — カタログの全鍵が往復することは
+/// `shell_key_catalog_round_trips_and_is_closed` が確かめる。
 const CONCURRENT_THREADS: usize = 4;
 const CONCURRENT_WRITES_PER_THREAD: usize = 64;
 const CONCURRENT_KEYS: [SettingsKey; CONCURRENT_THREADS] = [
@@ -697,14 +700,16 @@ fn shell_key_catalog_round_trips_and_is_closed() {
             SettingsKey::WindowGeometry => "window.geometry",
             SettingsKey::AppearanceTheme => "appearance.theme",
             SettingsKey::DiagnosticsLevel => "diagnostics.level",
+            SettingsKey::MacroTimeLimitMs => "macro.time_limit_ms",
+            SettingsKey::MacroMemoryLimitBytes => "macro.memory_limit_bytes",
             SettingsKey::RenderFallback => "render.fallback",
         }
     }
 
-    // カタログは重複の無い 5 鍵であり、名前と往復する。
+    // カタログは重複の無い 7 鍵であり、名前と往復する。
     assert_eq!(
         SettingsKey::ALL.len(),
-        5,
+        7,
         "カタログの数が design.md の表と違う"
     );
     for (index, key) in SettingsKey::ALL.iter().copied().enumerate() {
@@ -745,6 +750,8 @@ fn shell_key_catalog_round_trips_and_is_closed() {
             SettingsKey::WindowGeometry => store.set(&key, &geometry),
             SettingsKey::AppearanceTheme => store.set(&key, &"dark"),
             SettingsKey::DiagnosticsLevel => store.set(&key, &"debug"),
+            SettingsKey::MacroTimeLimitMs => store.set(&key, &30_000u64),
+            SettingsKey::MacroMemoryLimitBytes => store.set(&key, &536_870_912u64),
             SettingsKey::RenderFallback => store.set(&key, &true),
         };
         written.unwrap_or_else(|error| panic!("{key} を書けない: {error}"));
@@ -758,6 +765,8 @@ fn shell_key_catalog_round_trips_and_is_closed() {
             }
             SettingsKey::AppearanceTheme => store.get::<String>(&key).as_deref() == Some("dark"),
             SettingsKey::DiagnosticsLevel => store.get::<String>(&key).as_deref() == Some("debug"),
+            SettingsKey::MacroTimeLimitMs => store.get::<u64>(&key) == Some(30_000),
+            SettingsKey::MacroMemoryLimitBytes => store.get::<u64>(&key) == Some(536_870_912),
             SettingsKey::RenderFallback => store.get::<bool>(&key) == Some(true),
         };
         assert!(read, "{key} を読み戻せない");

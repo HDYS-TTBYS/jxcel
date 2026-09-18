@@ -31,6 +31,11 @@ mod sidecar_host;
 mod watchdog;
 mod window;
 
+/// テスト専用: `log` の面を捕まえる受け皿（`log` の面に取り付けられる記録器は 1 プロセスに
+/// 1 つだけであり、全テストがこの 1 つを共有する。`src-tauri/src/test_log.rs`）。
+#[cfg(test)]
+mod test_log;
+
 fn main() {
     // 起動の順序と単一インスタンス化は `lifecycle` が所有する。前提が満たされなかった場合は、
     // その事実を提示して非 0 で終了する（要件 1.4。**無言で終了しない**）。パニックに頼らないのは、
