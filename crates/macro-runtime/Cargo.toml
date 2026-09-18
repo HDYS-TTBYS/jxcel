@@ -100,8 +100,13 @@ bench = false
 # コードの置き場」の Rust 側の規約。`crates/data-grid/Cargo.toml` の同じ節と同じ形）。
 #
 # 本クレートには標本の生成器が無い（**1.4 の生成器は `document-format` と `data-grid` が
-# 持つ**）ので、例は文書を上流の公開面（`Document` のモデル API と `DocumentFormatApi::save`）
-# だけで組み立てる — 生の JSON も ZIP も書かない。
+# 持つ**）ので、例は文書を上流の公開面だけで組み立てる — 生の JSON も ZIP も書かない。
+# 内訳: 標準の種別（実行の観測に渡す標本）は `Document` のモデル API と
+# `DocumentFormatApi::save` だけを使う。**予算の種別（`--kind=budget`。要件 11.3 の実起動の
+# 判定に渡す 10 万行の標本）は `data-grid` の標本の生成器
+# （`crates/data-grid/tests/common/sample.rs`）を `#[path]` で取り込む** — ベンチ
+# （`benches/bulk.rs`）と同じ取込であり、**依存は増えていない**（`data-grid` は dev-dependency
+# として既にあり、テストとベンチのためだけに使う）。
 [features]
 verification-samples = []
 

@@ -107,13 +107,19 @@
 //!
 //! ```text
 //! macro_run: ウィンドウ = doc-1 / マクロ = 棚卸し / 種別 = typescript / 結果 = ran /
-//!            打ち切り = (なし) / 変更 = 1（セル 1 / 追加 0 / 削除 0 / 複製 0）/ 所要 = 12 ms
+//!            打ち切り = (なし) / 変更 = 1（セル 1 / 追加 0 / 削除 0 / 複製 0） /
+//!            出力 = 3 行 / 所要 = 12 ms
 //! ```
 //!
 //! **ソースと値は出さない**（要件 8.3 の通信内容保護と同じ規律）。出すのは名前・種別・結果・
-//! 打ち切りの種類・変更の件数・所要だけである。**ウィンドウのラベルを足した**のは、実起動の
-//! 観測（5.2）が複数のウィンドウを開くためであり、どのウィンドウの実行かを記録から読めなければ
-//! ならないからである。
+//! 打ち切りの種類・変更の件数・**出力の行数**・所要だけである。**ウィンドウのラベルを足した**
+//! のは、実起動の観測（5.2）が複数のウィンドウを開くためであり、どのウィンドウの実行かを記録から
+//! 読めなければならないからである。
+//!
+//! **出力は行数だけを写す**（要件 2.6 の「出力」の読み方。理由は [`describe_run`] の doc）:
+//! 本文は利用者のデータを含みうるので記録へ出さない。行が 0 のときは `出力 = (なし)`、
+//! 失敗・打ち切りでは `(失敗のため記録なし)` / `(打ち切りのため記録なし)` と書く
+//! （エンジンの結果が出力の並びを持たないためである。**「出力が無かった」とは書かない**）。
 //!
 //! 適用に失敗したときは、上の 1 行に加えて**適用の失敗**を `log::error!` で残す（実行は成立し、
 //! 適用だけが拒まれたという別の事実である。1 行に混ぜると「マクロが失敗した」と読めてしまう）。
@@ -506,9 +512,23 @@ fn apply_failure(command: &str, label: &WindowLabel, error: &MacroApplyError) ->
 
 /// 実行 1 回の記録の 1 行を組み立てる（要件 2.6）。
 ///
-/// **ソースと値は出さない**（名前・種別・結果・打ち切りの種類・変更の件数・所要だけである）。
-/// 純粋関数にしてあるのは、**記録の形そのものを検査できるようにする**ためである
-/// （実起動では行数を数えることしかできない。`verification.md` の「呼び出しの形を数える」）。
+/// **ソースと値は出さない**（名前・種別・結果・打ち切りの種類・変更の件数・出力の行数・所要
+/// だけである）。純粋関数にしてあるのは、**記録の形そのものを検査できるようにする**ためで
+/// ある（実起動では行数を数えることしかできない。`verification.md` の「呼び出しの形を数える」）。
+///
+/// # 出力を行数で写す理由（要件 2.6 の「出力」の読み方）
+///
+/// 要件 2.6 は成否・**出力**・変更の有無を 1 件残すことを求める。本関数は出力を
+/// **有無と行数**（`出力 = 3 行` / `出力 = (なし)`）で写し、**本文（値・文字列）は載せない** —
+/// 診断の記録は利用者のデータ（マクロが `console.log` へ渡した値そのもの）を含みうるうえ、
+/// **書き出して共有されうる**ためである（要件 8.3 の通信内容保護と同じ規律。design.md
+/// 「Monitoring」）。本文が要る利用者は同じ実行の面（要件 2.3）を見る — 記録は
+/// **実行が出力を生んだこと**を確かめるための 1 件である。
+///
+/// **失敗と打ち切りは行数を運べない**（エンジンの `RunOutcome::Failed` / `Aborted` は出力の
+/// 並びを持たない。`crates/macro-runtime/src/engine/isolate.rs` の `evaluate` が失敗の腕で
+/// 出力を落とす）。したがって `(なし)` と書かず、**記録へ書けなかった理由**を書く
+/// （「出力が無かった」という主張をしない）。
 ///
 /// `elapsed_ms` は**エンジンが所要を運ばない結果**（`Failed`）のときだけ使う値であり、
 /// [`macro_run`] が測った実行の所要である。成功と打ち切りはエンジンの値（isolate の生成から
@@ -521,13 +541,26 @@ fn describe_run(
     outcome: &RunOutcome,
     elapsed_ms: u64,
 ) -> String {
-    let (result, limit, changes, elapsed) = match outcome {
+    let (result, limit, changes, elapsed, output) = match outcome {
         RunOutcome::Ran {
             changes,
+            output,
             elapsed_ms,
             ..
-        } => ("ran", "(なし)", *changes, *elapsed_ms),
-        RunOutcome::Failed { .. } => ("failed", "(なし)", ChangeSummary::default(), elapsed_ms),
+        } => (
+            "ran",
+            "(なし)",
+            *changes,
+            *elapsed_ms,
+            output_line_count(output.len()),
+        ),
+        RunOutcome::Failed { .. } => (
+            "failed",
+            "(なし)",
+            ChangeSummary::default(),
+            elapsed_ms,
+            "(失敗のため記録なし)".to_owned(),
+        ),
         RunOutcome::Aborted {
             limit, elapsed_ms, ..
         } => (
@@ -535,11 +568,13 @@ fn describe_run(
             limit.as_str(),
             ChangeSummary::default(),
             *elapsed_ms,
+            "(打ち切りのため記録なし)".to_owned(),
         ),
     };
     format!(
         "macro_run: ウィンドウ = {} / マクロ = {name} / 種別 = {} / 結果 = {result} / \
-         打ち切り = {limit} / 変更 = {}（セル {} / 追加 {} / 削除 {} / 複製 {}）/ 所要 = {elapsed} ms",
+         打ち切り = {limit} / 変更 = {}（セル {} / 追加 {} / 削除 {} / 複製 {}） / \
+         出力 = {output} / 所要 = {elapsed} ms",
         label.as_str(),
         kind.as_str(),
         changes.total(),
@@ -548,6 +583,17 @@ fn describe_run(
         changes.removed_rows,
         changes.duplicated_rows,
     )
+}
+
+/// 出力の行数の欄（要件 2.6 の「出力の有無」）。0 行は**行数を書かず** `(なし)` とする
+/// （`打ち切り = (なし)` と同じ綴りであり、利用者が記録を読むときに「0 件」と「欄が無い」を
+/// 取り違えない）。
+fn output_line_count(lines: usize) -> String {
+    if lines == 0 {
+        "(なし)".to_owned()
+    } else {
+        format!("{lines} 行")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1599,6 +1645,8 @@ export default 行.cells[1];
             "結果 = ran",
             "打ち切り = (なし)",
             "変更 = 1",
+            // **出力の行数を写す**（要件 2.6 の「出力」。本文は記録へ出さない）。
+            "出力 = 1 行",
             "所要 = ",
         ] {
             assert!(line.contains(field), "記録の行に `{field}` が無い: {line}");
@@ -1641,6 +1689,81 @@ export default 行.cells[1];
             CellValue::Int(1),
             "取り消し 1 回でマクロの変更が戻っていない"
         );
+    }
+
+    /// **記録の行は出力の有無と行数を運ぶ**（要件 2.6 の「出力」）。
+    ///
+    /// 出力を出したマクロと出さないマクロの**両方**の行を固定する — 片方だけでは
+    /// 「常に `出力 = (なし)`」と「常に行数」のどちらの実装でも緑になる。本文（値・文字列）は
+    /// 記録へ出さないことも同じ材料で見る（要件 8.3 の通信内容保護と同じ規律）。
+    ///
+    /// 記録の受け皿はプロセスに 1 つであり、`macro_run:` の行を数える検査は
+    /// [`serialize_run_test`] のロックで直列化する（`実行が記録を1行残し…` と同じ理由）。
+    #[test]
+    fn 実行の記録は出力の有無と行数を残す() {
+        let (scratch, documents, grids, label, _sheet) = opened("output");
+        let runtime = runtime();
+        let settings = settings(&scratch);
+        crate::test_log::install();
+        let _serialized = serialize_run_test();
+
+        // 3 行を出すマクロと、1 行も出さないマクロを同じ文書へ置く（**出力の本文は
+        // 記録へ出ない**ことの材料にもする）。
+        let 出す = "console.log(\"一行目\");\nconsole.warn(\"二行目\");\nconsole.error(\"三行目\");\nexport default 1;\n";
+        data(answer_store(
+            &runtime,
+            &documents,
+            &label,
+            &MacroStoreRequest {
+                name: "三行出す".to_owned(),
+                kind: MacroKindTag::TypeScript,
+                source: 出す.to_owned(),
+            },
+        ));
+        data(answer_store(
+            &runtime,
+            &documents,
+            &label,
+            &MacroStoreRequest {
+                name: "黙る".to_owned(),
+                kind: MacroKindTag::TypeScript,
+                source: "export default 2;\n".to_owned(),
+            },
+        ));
+
+        for (name, expected) in [("三行出す", "出力 = 3 行"), ("黙る", "出力 = (なし)")] {
+            let response = data(answer_run(
+                &runtime,
+                &documents,
+                &grids,
+                &settings,
+                &label,
+                &MacroRunRequest {
+                    name: name.to_owned(),
+                },
+            ));
+            let line = record_lines().pop().expect("記録の行がある");
+            assert!(
+                line.contains(&format!("マクロ = {name}")),
+                "記録が実行したマクロを指していない: {line}"
+            );
+            assert!(
+                line.contains(expected),
+                "記録の出力の欄が `{expected}` でない: {line}"
+            );
+            match &response.outcome {
+                MacroRunOutcome::Ran { output, .. } => {
+                    let texts: Vec<&str> = output.iter().map(|line| line.text.as_str()).collect();
+                    for text in texts {
+                        assert!(
+                            !line.contains(text),
+                            "記録に出力の本文が出ている（要件 2.6 の読み方）: {line}"
+                        );
+                    }
+                }
+                other => panic!("成功を期待したが {other:?} を返した"),
+            }
+        }
     }
 
     /// 失敗したマクロは**何も適用せず**、記録には `failed` が残る（要件 2.4, 6.3, 7.3, 9.1）。
@@ -1705,6 +1828,12 @@ export default 行.cells[1];
         assert!(
             line.contains("結果 = failed"),
             "記録が失敗を運んでいない: {line}"
+        );
+        // **失敗は出力の並びを運ばない**（エンジンの `RunOutcome::Failed` は出力を持たない）。
+        // 記録は「出力が無かった」ではなく**書けなかった理由**を書く（要件 2.6 の「出力」）。
+        assert!(
+            line.contains("出力 = (失敗のため記録なし)"),
+            "記録の出力の欄が失敗の事情を運んでいない: {line}"
         );
     }
 

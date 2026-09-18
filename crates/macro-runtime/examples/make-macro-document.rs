@@ -20,7 +20,7 @@
 //! API で積み、保存は `DocumentFormatApi::save` に任せる。**書き出したあと開き直して確かめる**
 //! （マクロのソースがバイト単位で一致すること。要件 1.5 の往復）。
 //!
-//! 標本の中身:
+//! 標準の種別（`--kind=standard`。既定）の標本の中身:
 //!
 //! | 何 | 値 |
 //! |---|---|
@@ -59,21 +59,63 @@
 //! ```text
 //! cargo run -p macro-runtime --example make-macro-document --features verification-samples -- <出力先>
 //! ```
+
+//! # 種別（`--kind`）と、10 万行の標本（5.2 の予算の筋書き）
+//!
+//! 5.2 の検査器は**2 つの種別**の標本を使う:
+//!
+//! | 種別 | 中身 | 何のためか |
+//! |---|---|---|
+//! | `standard`（既定） | シート「在庫」（3 行 × 2 列）＋マクロ 5 件 | 実行の成功・失敗・拒否・打ち切り・往復の 5 つの筋書き |
+//! | `budget` | 10 万行 × 30 列のシート（1.4 の生成器）＋マクロ 2 件 | **予算を実起動の観測で判定する**（要件 11.1, 11.2, 11.3） |
+//!
+//! **予算の種別のシートは 1.4 の生成器（`crates/data-grid/tests/common/sample.rs`）を
+//! `#[path]` で取り込んで作る** — 写しを作らない（ベンチ `benches/bulk.rs` と同じ取り込みで
+//! あり、標本の定義が 2 つにならない）。取り込んだ生成器は `document-format` と
+//! `schema-engine` だけに依存するので、本クレートの依存の範囲でそのままコンパイルできる
+//! （**本クレートの依存は増えない** — 増やしてはならない。`Cargo.toml` の依存方針 2）。
+//!
+//! 本ファイルは取り込んだ文書の**形を変えない**（列・行・値・宣言は 1.4 の生成器が決める）。
+//! 足すのは**マクロ 2 件**だけである（読み + 集計と、1 万行の書き換え）。
+//!
+//! 使い方（種別を指定する）:
+//!
+//! ```text
+//! cargo run -p macro-runtime --example make-macro-document --features verification-samples -- \
+//!   --kind=budget <出力先>
+//! ```
 //!
 //! # 終了コード
 //!
-//! `0` = 書き出した／`2` = 入力が使えない（引数の不足。検査器の 3 値の使い方に合わせる）／
-//! `1` = 書き出し・開き直しの失敗（要求は成立したが操作が失敗した）。
+//! `0` = 書き出した／`2` = 入力が使えない（引数の不足・解釈できない種別。検査器の 3 値の
+//! 使い方に合わせる）／`1` = 書き出し・開き直しの失敗（要求は成立したが操作が失敗した）。
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use common::sample::{sample, SampleOptions};
 use document_format::{
     CellValue, Document, DocumentFormat, DocumentFormatApi, MacroKind, MacroRecord, SchemaPart,
 };
 use schema_engine::{
     schema_to_text, ColumnDecl, Constraints, DeclaredKind, Schema, TypeDecl, TypeKind,
 };
+
+/// 1.4 の生成器（`data-grid` のテストとベンチが共有する唯一の源）。
+///
+/// **相対パスで取り込む**（`tests/` のモジュールはクレートを越えてそのままは使えない。
+/// `benches/bulk.rs` と同じ形）。本クレートの `[dependencies]` は増えない。
+#[path = "../../data-grid/tests/common/mod.rs"]
+mod common;
+
+/// 予算の種別の行数（要件 11.1 の計測条件そのもの）。
+const BUDGET_ROWS: usize = 100_000;
+
+/// 予算の種別の列数（要件 11.1 の計測条件そのもの）。
+const BUDGET_COLUMNS: usize = 30;
+
+/// 予算の種別で書き換える行数（要件 11.2 の規模そのもの）。
+const BUDGET_REWRITE_ROWS: usize = 10_000;
 
 /// 標本のシート名。
 const SPECIMEN_SHEET: &str = "在庫";
@@ -118,12 +160,17 @@ const SPECIMEN_MACRO_NAMES: [&str; 5] = [
 /// ことの材料になる）。
 const SPECIMEN_MACRO_SOURCES: [&str; 5] = [
     // 1. 標本の記入（5.1 と同じ。**書くのは 1 セルだけ**である — 変更の件数を 5.2 が
-    //    要件値（1 セル）で読む）。
-    "// 検証専用: 実行の成功と変更の件数（tasks.md 5.2。要件 2.1, 5.1, 5.5）。\n\
+    //    要件値（1 セル）で読む）。**出力をちょうど 3 行出す** — 記録の行の `出力 = 3 行`
+    //    （要件 2.6 の「出力」）を検査器が要件値として読む（本文は記録へ出ないことも、
+    //    同じ入力で確かめられる）。
+    "// 検証専用: 実行の成功と変更の件数（tasks.md 5.2。要件 2.1, 5.1, 5.5, 2.6）。\n\
      const sheets: SheetInfo[] = host.sheets();\n\
      const page: RowPage = host.readRange(sheets[0].id, { from: 0, to: 0 });\n\
      const row: ReadRow = page.rows[0];\n\
      host.setCells(sheets[0].id, [{ row: row.id, column: 1, value: 100 }]);\n\
+     console.log(\"標本の記入: 1 行目\");\n\
+     console.info(\"標本の記入: 2 行目\");\n\
+     console.warn(\"標本の記入: 3 行目\");\n\
      export default row.cells[0];\n",
     // 2. 標本の往復（保存と開き直し。要件 1.2, 1.3, 1.5）。**条件つきの書き込み**である —
     //    引き金のセッションの経路（`open,edit,2,save`）が 2 行を回転させて保存するので、
@@ -171,6 +218,112 @@ fn specimen_macros() -> Vec<MacroRecord> {
         .zip(SPECIMEN_MACRO_SOURCES)
         .map(|(name, source)| MacroRecord::new(*name, MacroKind::TypeScript, source))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// 予算の種別（10 万行 × 30 列。要件 11.1, 11.2, 11.3）
+// ---------------------------------------------------------------------------
+
+/// 予算の種別のマクロの名前（**この並びが保存順であり、一覧の並びである**）。
+///
+/// 5.2 の検査器はこの並びを閉じた一覧として要求する — 名前を変えるときは
+/// `scripts/check-macro-observation.sh` の `EXPECTED_BUDGET_NAMES` を同じ作業で直す。
+const BUDGET_MACRO_NAMES: [&str; 2] = ["標本の予算の読み", "標本の予算の書き換え"];
+
+/// 予算の種別のマクロのソース（TypeScript）。**並びは [`BUDGET_MACRO_NAMES`] と 1 対 1**。
+///
+/// どちらも**標本の形を自分で確かめてから**本題へ入る — 標本を黙って縮めた変更は、
+/// 実行が失敗として終わる（＝検査器が「成功」を要求しているので落ちる）。予算の判定
+/// （経過時間）だけでは、**縮んだ標本を速く読んだこと**を見分けられないためである。
+///
+/// 集計は**すべてのセルを使う**（要件 11.1 の「その全部を使う集計」）。書き換えは
+/// 1 万行 × 30 列 = 30 万セルを 1 回の呼び出しで書く（要件 11.2 の規模そのもの）。
+/// どちらも出力を出さない（`出力 = (なし)` を検査器が読む材料にもなる）。
+///
+/// **規模の数値は要件値の定数から入れる**（`__行数__` / `__列数__` / `__書き換え行数__` を
+/// 埋める）— マクロの本文と、標本を組み立てる側の数値が食い違わないようにするためである。
+const BUDGET_READ_SOURCE: &str = "// 検証専用: 10 万行 × 30 列の全行読み + 集計（tasks.md 5.2。要件 11.1, 11.3）。\n\
+     const sheets: SheetInfo[] = host.sheets();\n\
+     const sheet: SheetInfo = sheets[0];\n\
+     if (sheet.row_count !== __行数__) {\n\
+     \x20 throw new Error(`標本の行数が 10 万行でない: ${sheet.row_count}`);\n\
+     }\n\
+     const page: RowPage = host.readRange(sheet.id, { from: 0, to: sheet.row_count - 1 });\n\
+     if (page.rows.length !== __行数__ || page.rows[0].cells.length !== __列数__) {\n\
+     \x20 throw new Error(`標本の形が 10 万行 × 30 列でない: ${page.rows.length} × ${page.rows[0].cells.length}`);\n\
+     }\n\
+     let 合計 = 0;\n\
+     for (const row of page.rows) {\n\
+     \x20 for (let column = 0; column < row.cells.length; column++) {\n\
+     \x20\x20 const value: CellValue = row.cells[column];\n\
+     \x20\x20 if (typeof value === \"number\") 合計 += value;\n\
+     \x20\x20 else if (typeof value === \"string\") 合計 += value.length;\n\
+     \x20\x20 else if (typeof value === \"boolean\") 合計 += value ? 1 : 0;\n\
+     \x20 }\n\
+     }\n\
+     export default `${page.rows.length}/${page.rows[0].cells.length}/${合計}`;\n";
+
+/// 1 万行 × 30 列の書き換えのソース（要件 11.2）。**読んだ行の全列を書き戻す**（1 行 1 セル
+/// では「1 万行の書き換え」の量が 30 分の 1 になり、予算の意味を失う。ベンチと同じ形）。
+const BUDGET_REWRITE_SOURCE: &str = "// 検証専用: 1 万行 × 30 列の書き換え（tasks.md 5.2。要件 11.2, 11.3）。\n\
+     const sheets: SheetInfo[] = host.sheets();\n\
+     const sheet: SheetInfo = sheets[0];\n\
+     if (sheet.row_count !== __行数__) {\n\
+     \x20 throw new Error(`標本の行数が 10 万行でない: ${sheet.row_count}`);\n\
+     }\n\
+     const page: RowPage = host.readRange(sheet.id, { from: 0, to: __書き換え行数__ });\n\
+     if (page.rows.length !== __書き換え件数__ || page.rows[0].cells.length !== __列数__) {\n\
+     \x20 throw new Error(`書き換える範囲の形が 1 万行 × 30 列でない: ${page.rows.length} × ${page.rows[0].cells.length}`);\n\
+     }\n\
+     const 書き込み: CellWrite[] = [];\n\
+     for (const row of page.rows) {\n\
+     \x20 for (let column = 0; column < row.cells.length; column++) {\n\
+     \x20\x20 const value: CellValue = row.cells[column];\n\
+     \x20\x20 書き込み.push({ row: row.id, column, value: typeof value === \"number\" ? value + 1 : value });\n\
+     \x20 }\n\
+     }\n\
+     host.setCells(sheet.id, 書き込み);\n\
+     export default `${page.rows.length}/${書き込み.length}`;\n";
+
+/// 予算の種別のマクロのソース（規模の数値は要件値の定数から埋める）。
+fn budget_macro_sources() -> [String; 2] {
+    [
+        BUDGET_READ_SOURCE
+            .replace("__行数__", &BUDGET_ROWS.to_string())
+            .replace("__列数__", &BUDGET_COLUMNS.to_string()),
+        BUDGET_REWRITE_SOURCE
+            .replace("__行数__", &BUDGET_ROWS.to_string())
+            .replace("__列数__", &BUDGET_COLUMNS.to_string())
+            .replace(
+                "__書き換え行数__",
+                &(BUDGET_REWRITE_ROWS - 1).to_string(),
+            )
+            .replace("__書き換え件数__", &BUDGET_REWRITE_ROWS.to_string()),
+    ]
+}
+
+/// 予算の種別の標本を組み立てる（**1.4 の生成器の文書にマクロだけを足す**）。
+///
+/// 文書の中身（列の宣言・行・値・違反）は 1.4 の生成器が決める — 本ファイルは形を変えない。
+/// データシートは**最初に追加されるシート**であり、`host.sheets()[0]` がそれを指す
+/// （`crates/data-grid/tests/common/sample.rs` の `sample`）。
+fn budget_document(sources: &[String]) -> Document {
+    let built = sample(&SampleOptions::new(BUDGET_ROWS, BUDGET_COLUMNS));
+    assert_eq!(built.rows(), BUDGET_ROWS, "標本の行数が要件 11.1 と違う");
+    assert_eq!(
+        built.column_count(),
+        BUDGET_COLUMNS,
+        "標本の列数が要件 11.1 と違う"
+    );
+    let mut document = built.into_edit_parts().document;
+    document.set_macros(
+        BUDGET_MACRO_NAMES
+            .iter()
+            .zip(sources)
+            .map(|(name, source)| MacroRecord::new(*name, MacroKind::TypeScript, source))
+            .collect(),
+    );
+    document
 }
 
 /// 標本の列の宣言を 1 本組み立てる（種別は組み込む列に合わせる）。
@@ -294,24 +447,76 @@ fn describe_content(document: &Document, source_bytes: usize) -> String {
     )
 }
 
+/// 標本の種別（`--kind`。モジュール doc「種別」）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpecimenKind {
+    /// シート「在庫」（3 行 × 2 列）＋マクロ 5 件（5 つの筋書き）。
+    Standard,
+    /// 10 万行 × 30 列（1.4 の生成器）＋マクロ 2 件（予算の筋書き。要件 11.1–11.3）。
+    Budget,
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() != 1 {
+    let mut kind = SpecimenKind::Standard;
+    let mut path: Option<PathBuf> = None;
+    for argument in &args {
+        match argument.as_str() {
+            "--kind=standard" => kind = SpecimenKind::Standard,
+            "--kind=budget" => kind = SpecimenKind::Budget,
+            other if other.starts_with("--kind=") => {
+                eprintln!(
+                    "NG: 解釈できない種別: {other}（standard / budget のいずれかであること）"
+                );
+                return ExitCode::from(2);
+            }
+            other if other.starts_with('-') => {
+                eprintln!("NG: 解釈できない引数: {other}");
+                return ExitCode::from(2);
+            }
+            other => {
+                if path.is_some() {
+                    eprintln!("NG: 出力先が 2 つ以上あります: {other}");
+                    return ExitCode::from(2);
+                }
+                path = Some(PathBuf::from(other));
+            }
+        }
+    }
+    let Some(path) = path else {
         eprintln!(
-            "使い方: make-macro-document <出力先>（例: target/observation/macro-sample.jxcel）"
+            "使い方: make-macro-document [--kind=standard|budget] <出力先>\
+             （例: --kind=budget target/observation/macro-budget.jxcel）"
         );
         return ExitCode::from(2);
-    }
-    let path = PathBuf::from(&args[0]);
+    };
+
+    // 種別ごとの名前・ソース・文書。**検証は同じ 1 本の道**を通る（写しを作らない）。
+    let (names, sources, document) = match kind {
+        SpecimenKind::Standard => (
+            SPECIMEN_MACRO_NAMES.to_vec(),
+            SPECIMEN_MACRO_SOURCES
+                .iter()
+                .map(|source| (*source).to_owned())
+                .collect::<Vec<_>>(),
+            specimen(),
+        ),
+        SpecimenKind::Budget => {
+            let sources = budget_macro_sources();
+            let document = budget_document(&sources);
+            (BUDGET_MACRO_NAMES.to_vec(), sources.to_vec(), document)
+        }
+    };
 
     let api = DocumentFormat::new();
-    if let Err(error) = api.save(&specimen(), &path) {
+    if let Err(error) = api.save(&document, &path) {
         eprintln!("NG: 標本の書き出しに失敗した: {error}");
         return ExitCode::from(1);
     }
 
     // **書けたことで終わらない。** 開き直し、標本が要求どおりの中身を持つことをここで確かめる
-    // （5.1 の標本は「マクロを 1 件持ち、実行が変更を 1 セル生む」ことが要件である）。
+    // （標準の種別は「マクロを 5 件持ち、実行が変更を 1 セル生む」、予算の種別は「10 万行 ×
+    // 30 列のシートを持つ」ことが要件である）。
     let reopened = match api.open(&path) {
         Ok(opened) => opened.document,
         Err(error) => {
@@ -319,20 +524,17 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    if reopened.macros().len() != SPECIMEN_MACRO_NAMES.len() {
+    if reopened.macros().len() != names.len() {
         eprintln!(
             "NG: 標本のマクロが {} 件ではない（{} 件）",
-            SPECIMEN_MACRO_NAMES.len(),
+            names.len(),
             reopened.macros().len()
         );
         return ExitCode::from(1);
     }
     // **1 件ずつ、名前・種別・ソースのバイト一致を確かめる**（要件 1.2, 1.5）。並びも
     // 保存順のままであることを見る（5.2 の検査器が一覧の並びを要件値として読む）。
-    for (index, (expected_name, expected_source)) in SPECIMEN_MACRO_NAMES
-        .iter()
-        .zip(SPECIMEN_MACRO_SOURCES)
-        .enumerate()
+    for (index, (expected_name, expected_source)) in names.iter().zip(sources).enumerate()
     {
         let Some(record) = reopened.macros().get(index) else {
             eprintln!("NG: 標本のマクロ {index} 番目を開き直せなかった");
@@ -352,6 +554,22 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     }
+
+    // **予算の種別はシートの形も確かめる**（要件 11.1 の計測条件そのもの）。標本を黙って
+    // 縮める変更はここで落ちる — 検査器が読むのは経過時間だけであり、縮んだ標本でも
+    // 予算の中に収まってしまうためである。
+    if kind == SpecimenKind::Budget {
+        let sheet = &reopened.sheets()[0];
+        if sheet.rows().len() != BUDGET_ROWS || sheet.columns().len() != BUDGET_COLUMNS {
+            eprintln!(
+                "NG: 標本のシートが 10 万行 × 30 列ではない（{} 行 × {} 列）",
+                sheet.rows().len(),
+                sheet.columns().len()
+            );
+            return ExitCode::from(1);
+        }
+    }
+
     let bytes = match std::fs::metadata(&path) {
         Ok(metadata) => metadata.len(),
         Err(error) => {

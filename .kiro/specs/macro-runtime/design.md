@@ -295,7 +295,7 @@ sequenceDiagram
 | 8.1, 8.2, 8.3, 8.4, 8.5 | 能力の宣言と拒否 | `capability.rs`, `gate.rs`, `HostSurface`, 実行の面 | `CapabilitySet`, `Capability` | 能力の門 |
 | 9.1, 9.2, 9.3, 9.4 | 失敗の提示（理由と位置） | `outcome.rs`, `isolate.rs`, `transpile.rs`, 実行の面 | `MacroFailure`, `Frame` | 実行の流れ |
 | 10.1, 10.2, 10.3 | ホスト API の型定義を公開する | `types.rs`, `HostSurface`, 生成器と生成物 `types/macro-host.d.ts` | `TypeSurface` | 生成とドリフト検査 |
-| 11.1, 11.2, 11.3 | 一括処理の性能 | `HostPort` の範囲の読み, `value.rs`, `benches/bulk.rs`, 検査器と予算の判定器 | `HostReadPort.read_rows` | 予算の判定 |
+| 11.1, 11.2, 11.3 | 一括処理の性能 | `HostPort` の範囲の読み, `value.rs`, `benches/bulk.rs`, 検査器と予算の判定器（**criterion と実起動の観測の 2 つの場**） | `HostReadPort.read_rows` | 予算の判定 |
 
 ## Components and Interfaces
 
@@ -314,7 +314,7 @@ sequenceDiagram
 | `MacroHost`（アダプタ） | src-tauri | `HostPort` の実装（文書・能力・出力） | 4.1–4.4, 5.1, 5.4, 8.1, 8.3 | `document-session` (P0), `schema-engine` (P0) | Service |
 | `macro_apply`（アダプタ） | src-tauri | 変更集合の適用と 1 対の履歴 | 5.1, 5.2, 5.3, 7.1, 7.2, 7.3, 7.4 | `data-grid` の `EditCommand` (P0), `UndoStack` (P0) | Service |
 | 実行の面（フロント） | Frontend | 一覧・実行・結果・失敗の提示 | 2.1, 2.3, 2.5, 2.7, 8.2, 9.1, 9.2, 9.3 | `macroClient` (P0) | API |
-| 記録（`macro_run` の 1 行） | src-tauri | 実行 1 回の事実を診断へ残す | 2.6 | `app-shell` の記録 (P0) | Event |
+| 記録（`macro_run` の 1 行） | src-tauri | 実行 1 回の事実（成否・出力の行数・変更の有無）を診断へ残す | 2.6 | `app-shell` の記録 (P0) | Event |
 
 ### Engine（`crates/macro-runtime`）
 
@@ -558,7 +558,7 @@ pub enum Change {
 - `HostPort` を `document-session` の読みと `schema-engine` の列の宣言で実装する
 - 変更の適用は `document-session::edit` の**閉包 1 回**の中で行い、`data-grid` の `EditCommand` へ写す。履歴へは `UndoLabel::MacroRun` の**1 対**を積む
 - 適用の前に**シートの照合**を行う（`Composite` の既存の規律に従う。1 つでも食い違えば何も書かない）
-- 記録（要件 2.6）: 実行 1 回につき `macro_run` の 1 行（マクロ名・種別・成否・打ち切りの種類・変更の件数・所要）
+- 記録（要件 2.6）: 実行 1 回につき `macro_run` の 1 行（マクロ名・種別・成否・打ち切りの種類・変更の件数・**出力の行数**・所要）。出力は行数だけを載せ、本文は載せない（理由は「Monitoring」）
 
 **Contracts**: Service [x]
 
@@ -676,8 +676,10 @@ pub fn apply_macro_changes(
 
 ### Monitoring
 
-- 実行 1 回につき診断の記録へ 1 行: `macro_run: マクロ名 / 種別 / 結果（成功・失敗・打ち切り）/ 打ち切りの種類 / 変更の件数 / 所要 ms`。**ソースと値は記録へ出さない**（要件 8.3 の通信内容保護と同じ規律）
-- 3 OS の検査器はこの 1 行を読んで判定する（`data-grid` の 9.2 が確立した形）
+- 実行 1 回につき診断の記録へ 1 行: `macro_run: マクロ名 / 種別 / 結果（成功・失敗・打ち切り）/ 打ち切りの種類 / 変更の件数 / 出力の行数 / 所要 ms`。**ソースと値は記録へ出さない**（要件 8.3 の通信内容保護と同じ規律）
+- **要件 2.6 の「出力」は行数で満たす**（`出力 = 3 行`。0 行は `(なし)`）。**本文（値・文字列）は記録へ出さない** — 記録はマクロが `console` へ渡した値そのものを含みうるうえ、**利用者が書き出して共有しうる**（`src-tauri/src/commands/macro.rs` の `describe_run` の doc が正本。本文が要る利用者は同じ実行の面（要件 2.3）を見る — 記録の役目は「実行が出力を生んだこと」を確かめられることに閉じる）。**エンジンの結果が出力の並びを運ばないとき**（`RunOutcome::Failed` / `Aborted`）は `(失敗のため記録なし)` / `(打ち切りのため記録なし)` を書き、**「出力が無かった」とは書かない**（失敗の腕で出力を落とす実装である。`engine/isolate.rs` の `evaluate`）
+- 3 OS の検査器は**2 つの読み口**を使う: この 1 行（要件 2.6 の成否・出力の行数・変更の有無）と、5.1 の検証専用の観測の 1 行（失敗の理由とフレーム・一覧・変更の件数・所要。`data-grid` の 9.2 が確立した形）。**どの欄がどの要件の材料かは検査器の冒頭の表に 1 つだけ書く**
+- **予算もこの 1 行の `所要` で判定する**（要件 11.3 の「実起動の観測で判定できるようにする」）: 検査器が予算の種別の標本（10 万行 × 30 列）でシナリオを 2 本走らせ、`elapsedMs` を要件値（10 秒 / 5 秒）で判定する（`Performance & Scalability` の実測を参照）
 
 ## Testing Strategy
 
@@ -724,7 +726,8 @@ pub fn apply_macro_changes(
 
 - **10 万行の読みは 1 回の往復**で行う（行ごとの呼び出しを要求しない。要件 4.4 / 11.3）。範囲の読みは借用で渡し、コピーを 1 回に抑える
 - 実行ごとの isolate 生成（5.5 ms / +24 MB）は予算に対して無視できる。**JIT の温まりを持ち越さない代償を 10 秒の予算が吸収する**ことを実測で確かめる
-- 実行中の表の描画は止めない（実行は別スレッド。要件 2.2）
+- **予算は 2 つの場で判定する**（要件 11.3）: criterion のベンチ（`crates/macro-runtime/benches/bulk.rs`。分布で見る）と、**実起動の観測**（`scripts/check-macro-observation.sh` のシナリオ 6 / 7。1 回の実行の `elapsedMs` を要件値で見る）。実測（2026-09-18。開発機）: 読み 10 万行 × 30 列 ＋ 集計 = **1.920 秒（ベンチ）/ 1.872〜1.947 秒（実起動。2 回）≤ 10 秒**、書き換え 1 万行 × 30 列 = **0.350 秒（ベンチ）/ 0.352〜0.360 秒（実起動。2 回）≤ 5 秒** — **2 つの場が同じ桁で一致する**（実起動の経路がベンチより軽くないことの裏取りでもある）
+- 実行中の表の描画は止めない（実行は別スレッド。要件 2.2）。**この規律の判定は決定的なテストで行う**（`src-tauri/src/commands/macro.rs` の `実行中でも表の窓は止まらない`）— この環境では実起動で UI を押して確かめられない（WebKitGTK が DOM をアクセシビリティの木へ露出しない。tasks.md 5.3 の `観測` の行）
 
 ## Open Questions / Risks
 
