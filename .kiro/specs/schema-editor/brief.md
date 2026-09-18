@@ -36,3 +36,9 @@ GUI 上でシートのスキーマを定義・変更でき、ネストした構�
 ## Constraints
 - 破壊的なスキーマ変更（型の縮小、必須化）は必ず影響プレビューを経由すること。個人利用でもデータ損失は許容しない
 - ネストの深さに実用上の上限を設け、UI が破綻しないようにする
+
+## Incoming Handovers（実装済みスペックからの申し送り。2026-09-18 の棚卸し）
+
+- **`Violation` / `ViolationReason` の形が直接の入力**: 印の表示と影響プレビューがこの形に依存する。形を変えるときは `schema-engine` の Revalidation Trigger（出典: `.kiro/specs/schema-engine/design.md:63`）
+- **型定義の本文の変更は `diff` では見えない**: `Schema` は名前付き型定義の集合を持たないため、本文の変更は `diff` の API 範囲では検出できない。必要になったら型定義集合も受け取る形を検討する（出典: `.kiro/specs/schema-engine/tasks.md:429`）
+- **一意列 1 本の再検証は design 概算の約 3 倍（実測 31〜35 ms）**: この経路に予算を課すなら `rustc-hash` への差し替えが候補（設計は「当面採らない」と判断済み。出典: `.kiro/specs/schema-engine/tasks.md:493`）

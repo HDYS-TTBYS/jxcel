@@ -120,7 +120,7 @@ graph TB
 
 **Architecture Integration**:
 - **ドメイン境界**: `Parts` 層が本スペックの対外的な顔である。`version-control` は `Container` 層を経由せず `Parts` に直接接続する
-- **依存方向**: `Ids / Value / EntryName → Model → Json → Parts → Container → Api`。各層は左方向にのみ依存する。逆流は実装レビューで誤りとして扱う
+- **依存方向**: `Ids / Value / EntryName → Model → Json → Parts → Container → Api`。各層は左方向にのみ依存する。逆流は実装レビューで誤りとして扱う。**唯一の例外は `model → json`**（`PreservedFields` を型として共有するため）であり、理由は `crates/document-format/src/model/sheet.rs` の doc と tasks.md の 4.8 の親裁定に記録されている（実装の裁定に追随して 2026-09-18 に本行へ反映した。`structure.md` の「層の鎖」にも同じ例外を記録した）
 - **共有プリミティブ**: `EntryName` は Parts 層と Container 層の双方が使うため、Container ではなく最下層に置く。Parts が Container に依存する形にしてはならない
 - **新規コンポーネントの根拠**: `Parts` 層は「git に ZIP を渡すとリポジトリが線形に肥大する」という調査結果への直接の対処であり、便宜的な抽象ではない
 - **steering 準拠**: `structure.md` の「Rust ドメインクレートは Tauri に依存しない」「性能はドメイン側で守る」に従う。行ごとに境界を越える API を持たず、シート単位の一括操作のみを公開する
@@ -202,7 +202,10 @@ document.json                  # ドキュメント ID、シート順序、シ�
 schemas/<sheet-ulid>.json      # ルートスキーマ + ネスト型定義（不透明ペイロード）
 sheets/<sheet-ulid>.jsonl      # 行データ。1 行 1 オブジェクトの NDJSON
 attachments/<blake3-hex>.bin   # 添付。content-addressed 命名
+macros.json                    # マクロのソース（**省略可能**。無い文書は「マクロが無い」とみなす）
 ```
+
+`macros.json` は `macro-runtime` のタスク 1.2 が **7 形目**として追加した（**形**は `document-format`、**意味**は `macro-runtime` が所有し、本機能は不透明なペイロードとして扱う）。**省略可能**であり、**形式バージョンは `1.0` のまま**（決定は `macro-runtime/design.md` の Revalidation Triggers）。**本節は実装の許可リスト（`crates/document-format/src/entry_name.rs`）と一致していなければならない** — 実装の追随が本節に入っていなかったため 2026-09-18 に反映した（`DocumentParts` の形の変更は `version-control` の再検証トリガであり、発火済みである）。
 
 `manifest.json` が唯一の権威ある索引である（ODF 方式）。OOXML の content-types と rels の二重帳簿は採らない。保存時刻のような揮発値を持つパートは存在しない（要件 3.6 が出力自体を禁じている）。
 

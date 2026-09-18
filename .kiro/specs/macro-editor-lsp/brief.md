@@ -47,3 +47,10 @@ webview 内で Monaco を動かし、`monaco-languageclient` + `vscode-ws-jsonrp
 - `monaco-languageclient` は WebSocket / インプロセス transport、言語サーバは stdio を話すため、**stdio ⇔ webview のブリッジ（プロキシ）が別途必要**
 - `monaco-languageclient` は 10.7.0 / 2026-02 以降リリースが止まっている（約7か月）。採用時にメンテナンス状況を再確認すること
 - Monaco は WebKitGTK 上で動作するが、Tauri に描画劣化の既知 issue が複数ある（`#7021` 描画の鈍化、`#13157` 描画の乱れ、`#14286` フォント太さ）。Linux を高リスク対象として早期検証すること
+
+## Incoming Handovers（実装済みスペックからの申し送り。2026-09-18 の棚卸し）
+
+- **ホスト API の `.d.ts` は生成物**: `types/macro-host.d.ts` は手書きしない。生成元は `crates/macro-runtime/src/types.rs` のカタログで、生成器は `cargo run -p macro-runtime --bin generate-macro-types`、ドリフトは `cargo test -p macro-runtime --test macro_host_dts_drift`（出典: `.kiro/specs/macro-runtime/design.md:63`、`crates/macro-runtime/src/types.rs:86-89`）
+- **宣言表を変えると補完の入力が変わる**: `HOST_APIS`（`crates/macro-runtime/src/surface/declaration.rs`）の変更は `.d.ts` とドリフト検査に影響する（出典: `.kiro/specs/macro-runtime/design.md:63`）
+- **サイドカーを増やすときの義務**: `scripts/stage-sidecars.sh` の macOS 事前署名と同じ扱いを用意し、`SidecarKind` を増やすなら `build.rs` の `KINDS` / `as_str` / `parse` / `ALL` を同時に更新する（忘れると `Unregistered` で起動中止側に倒れる。出典: `.kiro/specs/app-shell/design.md:66`、`.kiro/specs/app-shell/tasks.md:809`）
+- **実行基盤の依存を上げたら実測をやり直す**: `deno_core` / `deno_ast` を更新したら打ち切り・上限・変換・値の写像を再実測する（出典: `.kiro/specs/macro-runtime/design.md:64`）

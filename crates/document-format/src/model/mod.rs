@@ -667,6 +667,12 @@ impl Document {
     ///
     /// 書き込みが行の現在の値数より後ろに及ぶ場合は、間を [`CellValue::Null`] で埋める。
     /// **行の集合・並び・識別子は変えない**(置換であって追加ではない)。
+    ///
+    /// **同じ行・同じ列が 1 回の呼び出しに重複して現れた場合は、入力順の last-wins** で
+    /// ある(決定的であり、順序を入れ替えれば結果も変わる)。重複を弾くことはしない。
+    /// 下流の `data-grid` の貼り付けは**重複を畳んでから**渡すため、この腕に依存しない
+    /// (`crates/data-grid/src/edit/mod.rs` の doc)。この契約は 2026-09-18 の棚卸しで
+    /// 明記した(`document-session/tasks.md` の 1.x の Implementation Notes)。
     pub fn set_cells(
         &mut self,
         sheet: SheetId,

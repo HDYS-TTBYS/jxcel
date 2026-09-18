@@ -38,3 +38,10 @@ xlsx は `umya-spreadsheet`（既存ブックを開いてセルを書き換え�
 - **docx テンプレート差し込みが最大のリスク**。Rust に成熟したテンプレータが存在せず、zip + OOXML の自前実装になる。design フェーズで「自前実装」と「小さな外部ヘルパープロセス」を比較評価すること
 - OOXML のプレースホルダは Word によって複数の run に分割されることがあり、素朴な文字列置換では動かない。この問題への対処を設計に含める
 - 100 件規模の連続書き出しで UI が固まらないこと
+
+## Incoming Handovers（実装済みスペックからの申し送り。2026-09-18 の棚卸し）
+
+- **行データエントリは NDJSON**: 1 エントリ = 1 行の NDJSON であり、**単一の妥当な JSON ではない**。行エントリを直接読む経路はこの形式に依存する（出典: `.kiro/specs/document-format/tasks.md:330`、`.kiro/specs/document-format/research.md:234`）
+- **`CellValue` の変種が変換の入力**: セル値は閉じた 8 変種であり、変種の追加・削除・意味変更は書き出し変換の再検証を要する（出典: `.kiro/specs/document-format/design.md:60` の Revalidation Triggers）
+- **キー順は列の並び順の契約**: 行データのキー順は `document-format` の列順の契約が供給する（出典: `.kiro/specs/document-format/design.md:465`）
+- **移行版を足すときの fixture 規約**: 過去版のゴールデン fixture を足すときは、その版の**バイト往復検証**も足す（現行版のみ往復を検証している。出典: `.kiro/specs/document-format/tasks.md:415`）

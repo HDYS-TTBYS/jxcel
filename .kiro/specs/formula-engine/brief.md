@@ -38,3 +38,9 @@ macro-runtime が JS/TS を実行でき、macro-stdlib が関数群を提供し�
 - 任意の JS を式として許すため、依存関係は静的解析ではなく実行時アクセス追跡で得る。この判断の限界（動的アクセスの取りこぼし）を設計で明示する
 - 10 万行 × 計算列の再計算が実用時間で終わること。行ごとの JS 呼び出しを避ける一括評価経路が必須
 - 再計算中も UI が固まらないこと
+
+## Incoming Handovers（実装済みスペックからの申し送り。2026-09-18 の棚卸し）
+
+- **取り消し履歴の所有者**: 履歴は `GridSession` ではなく**ウィンドウの保持（`SheetEntry`）**が持つ（`data-grid` の 10.2 が降ろした）。`EditCommand` / `UndoStack` の形を変えると `macro-runtime` のアダプタの写しが壊れる（出典: `.kiro/specs/data-grid/design.md:69`、`.kiro/specs/macro-runtime/design.md:61`）
+- **外の経路から文書へ書くときの規律**: 再計算の結果は `DocumentSessionsApi::edit` の**閉包の内側**で適用し、取り消しの単位を `UndoLabel` の 1 対で積む（`macro-runtime` の 4.2 が同じ形。閉包の中でセッションを呼び返さない。出典: `.kiro/steering/structure.md` の「共有される継ぎ目」、`.kiro/specs/data-grid/design.md:71`）
+- **変更の版**: 境界の `document_state` は `DocumentSummary.revision`（`u32`）を運ぶ（2026-09-18 に `document-session` が追加）。内容だけの変化の検出に使える（出典: `.kiro/specs/document-session/design.md:77`）

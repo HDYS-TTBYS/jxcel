@@ -38,3 +38,9 @@ document-format が git 差分に適した決定的な JSON レイアウトで�
 - **`git2` は 0.21.0 以上を使うこと**。2026 年に unsoundness advisory が 3 件（RUSTSEC-2026-0008 / 0183 / 0184、`Blame::blame_buffer`・`Remote::list`・`Buf` の null ポインタ参照）出ており、いずれも 0.21.0 で修正済み。古いバージョンへのピン留めをしないこと
 - ドキュメントは 10 万行規模のため、1 回の保存で生じる差分が巨大にならないよう document-format のレイアウトと協調すること
 - 自動コミットがリポジトリを肥大させないための方針（squash、GC）を設計に含める
+
+## Incoming Handovers（実装済みスペックからの申し送り。2026-09-18 の棚卸し）
+
+- **`DocumentParts` の形が git に置くものの契約**: エントリ名の文法・ダイジェストの表現・集合の構成が変われば再検証。**`macros.json` が 7 形目として加わった**（省略可能。形式版は `1.0` のまま。出典: `.kiro/specs/document-format/design.md:59`、`.kiro/specs/macro-runtime/design.md:59-60`）
+- **決定的シリアライズが差分の品質を決める**: UTF-8、キー順は構造体のフィールド宣言順。`serde_json::Value` と `HashMap` を経由する経路を持たない（出典: `.kiro/specs/document-format/design.md` の DeterministicJson）
+- **保存の時機はセッションに相乗りする**: `document-session` の保存経路が唯一の書き出し点であり、本スペックはそれを観測する側である（出典: `.kiro/steering/structure.md` の「セッションの所有の規約」、`.kiro/specs/document-session/design.md:76`）

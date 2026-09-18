@@ -434,3 +434,11 @@
   - `MigrationChain::apply`（design が名付けた公開入口）と `PartInventory::declare_attachment_ref`（テストが使う builder）は**孤児ではない**（削除しない）
 - **検証の判定材料（再検証時点の実測）**: `cargo test --workspace` = **391 passed / 1 ignored / 0 failed**（既存テストの消失ゼロ。新規は `value.rs` の走査器テストと `tests/corruption.rs` の R1 テストの 2 本のみ）／`cargo build --workspace --all-targets` 警告 0／`cargo bench --workspace --no-run` 成功／要件カバレッジは **46/46 基準**に対応あり／層の逆流は上記の 1 件のみ（裁定済み）／`zip` の参照は `container/` の 2 ファイルのみ／エラー表の 10 変種が実在し新変種なし
 - **未解決の検証限界（受け入れ済み）**: ① 移行（6.2 / 6.3 / 6.4）の**実経路**は v1 のみの形式のため合成チェーンでのみ検証（実 `STEPS` は空）② OS 間バイト一致（3.2）は **CI の 3 OS マトリクス**でのみ検証（本環境は Linux のみ）③ 計測環境の規定（8.3）は**文書依存**（実行時検査なし）④ 原子性の**耐久性**（`sync_all` / 親 fsync）は電源断を模擬しない限り観測不能で、`tests/atomic_save.rs` は `#![cfg(unix)]`（**Windows では 0 テスト**）⑤ 性能予算は「速い偽計測」を原理的に検出できない（規模・経路の assertion が別層で担保）
+
+## 2026-09-18 の同期（下流の実装が触れた範囲への追随）
+
+`.kiro/specs/` 全体の棚卸し（残件・申し送りの抽出）で見つかった**本スペックの文書側の積み残し 2 件**を閉じた。**実装は変えていない**（design とコメントのみ）。
+
+- **`model → json` の例外を design 本文へ反映**: 上の最終検証の「記録のみ」の 1 件目は「design の記載と実装の例外を突き合わせるのは仕様オーナーの作業」としていた。`design.md` の「依存方向」の行に例外（`PreservedFields` を型として共有するため。逆向きは無い）と裁定の所在（`model/sheet.rs` の doc・タスク 4.8）を追記した。`structure.md`「ドメインクレートの内部構造」の層の鎖にも同じ例外を記録した
+- **Container Entry Layout に `macros.json`（7 形目）を追加**: `macro-runtime` のタスク 1.2 が実装へ足した形が design のエントリ一覧（6 形）に入っていなかった（`DocumentParts` の形の変更は `version-control` の再検証トリガであり、**発火済みなのに design 側が追随していなかった**）。design の一覧へ省略可能な 7 形目として追加し、**形式バージョンは `1.0` のまま**（決定は `macro-runtime/design.md`）であることを併記した。あわせて `crates/document-format/src/entry_name.rs` の doc の「design の 6 形 + マクロ」という表現を「design の 7 形」へ揃えた（**コメントのみ。`parse` の受理集合は不変**）
+- **検証**: `cargo test -p document-format`（上記 2 件は文書とコメントのみのため、挙動の証拠は既存のテストが担う）

@@ -37,3 +37,9 @@ schema-engine の拡張インターフェースを macro-runtime 上で実装す
 - 10 万行の検証で JS を行ごとに呼び出さないこと。バッチ経路が必須
 - 型定義が例外を投げてもアプリが落ちないこと。縮退動作を定義する
 - 型定義はドキュメントに保存され、ファイルを別マシンで開いても機能すること
+
+## Incoming Handovers（実装済みスペックからの申し送り。2026-09-18 の棚卸し）
+
+- **一括メソッドは本番経路から呼ばれていることを示す**: `CustomType` トレイトの一括判定（`validate_batch`）の契約は trait の doc が正典。**呼び出し回数を数える観測**で「列ごとに 1 回」を固定する（速度は証拠にならない。出典: `.kiro/steering/structure.md:89`、`.kiro/specs/schema-engine/tasks.md:354`）
+- **セルエディタの登録インターフェース**: 登録簿（`CellEditorRegistration` と `carrier: EditCarrier`）は `data-grid` が定義し本スペックが登録する。**確定の文字の運び手**を登録に足す設計改訂は `data-grid` 側で既に入っている（出典: `.kiro/specs/data-grid/design.md:73`）
+- **組込型との対照テストが積み残し**: 同一列で既定実装と拡張実装を差し替えた 2 つの台帳の `SheetReport` を突き合わせる対照が無い（出典: `.kiro/specs/schema-engine/tasks.md:513`）

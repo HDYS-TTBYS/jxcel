@@ -859,3 +859,14 @@
 - **1.1**: Linux の Tauri ビルドには Tauri 公式の文書化パッケージ一覧に加えて `libdbus-1-dev` が要る（既定 feature の `dbus` → `libdbus-sys` のビルドスクリプトが `dbus-1.pc` を要求する）。`libxdo-dev` / `libayatana-appindicator3-dev` は `tray-icon` feature を使うまで不要。
 - **1.1**: `src-tauri/build.rs` の `tauri_build::build()` と `main.rs` の `tauri::generate_context!()` はどちらも `tauri.conf.json` をコンパイル時に要求するため、同ファイルを追加するタスク 1.3 で結線する。
 - **環境**: このマシンの `cargo` は podman シムでリポジトリだけを bind-mount する。WebKitGTK/GTK の開発ファイルはリポジトリ直下 `.devsys/root`（git 除外済み）に展開し、`.cargo/config.toml` の `[env]` で pkg-config に指している。GUI の目視検証はホスト側で `GDK_BACKEND=x11` を強制して `xwininfo -root -tree` でウィンドウを確認する（Wayland に行くと X ツリーに現れない）。
+
+## 2026-09-18 の棚卸し（本スペックが所有する残件）
+
+`.kiro/specs/` 全体の棚卸し（残件・申し送りの抽出）で「**本スペックが所有すべき**」と判定されたものをここへ集める（他スペックの Implementation Notes に埋もれていたものを含む）。**いずれも受入を満たしたうえでの残件であり、差し戻しではない。**
+
+- **未保存のままのアプリ全体の終了（`request_exit`）でデータが失われる** — `document-session` はこれを自スペックの境界外とし、`design.md` の Risks と `requirements.md` の Out of scope に記録している。**解消する側は本スペック**であり、必要なのは**終了経路を拒否可能にする設計変更**（`document-session` の終了前の問い・`CloseDenied` の再試行と同じ扱い）。`design.md` の Revalidation Triggers に 1 行として入れた。**実装は未着手。**
+- **clippy の許容基準は決まったが、CI の段が無い** — 基準（`crates/app-shell` と `crates/document-format` に `-D warnings`、3 lint・6 箇所だけ名指しで許容）と**検証済みのゲートコマンド**は下の Implementation Notes（10.1）にあるが、`.github/workflows/ci.yml` には clippy の段が無く、**いまはローカルの善意に依存している**。段を足すのに要る作業: (1) 2 つの `dtolnay/rust-toolchain` の段に `components: clippy` を足す（**既定の profile は minimal で clippy が入らない**）、(2) `cargo clippy -p app-shell -p document-format --all-targets -- -D warnings -A clippy::assertions_on_constants -A clippy::result_large_err -A clippy::wrong_self_convention` を 1 段として走らせる。**CI の実行でしか検証できないため、本棚卸しでは段を足していない**（開発機の `cargo` はコンテナのシムで `cargo-clippy` を持たないので、ホストのツールチェーンを絶対パスで起動して確かめた）。
+- **名指しで許容している 3 lint・6 箇所**（`result_large_err` 1 / `wrong_self_convention` 1 / `assertions_on_constants` 4）と **`src-tauri` の既存 5 警告**（`dead_code` 1 / `format_in_format_args` 1 / `type_complexity` 2 / `bool_comparison` 1）は未着手のままである（前者を片付けたら `-A` を外せる）。
+- **ドリフト検査の失敗メッセージの抜粋がマルチバイトで壊れる**（`bindings_drift.rs` の抜粋の窓を char 境界へ寄せていない。**担当タスクが無いまま残っていた**）。小さいが未割当であり、次に `bindings_drift` を触る変更へ同乗させる。
+- **Windows では要件 3.5 が素の利用者に成立しない**（アクセラレータが WebView2 に消費される。上の Implementation Notes に実測つきで記録）。解消には webview の中でキーを扱い、メニューと同じ処理へ渡す経路（= 新しいコマンド。境界・capability・生成物に触れる）が要る。**受入の限定か後続スペックの起票のどちらかを選ぶ必要がある。**
+- **`ports.rs` / `request_exit` のコメント 2 件の訂正**（プラグインの setup の実行位置の記述）は、次に `src-tauri` を触る変更へ同乗させる（動作に影響しない）。

@@ -97,8 +97,11 @@ const HEX_LEN: usize = crate::ids::Blake3Digest::LEN * 2;
 /// [`EntryName`] の表示・比較はヒープ確保なしの固定バッファで行う。
 const MAX_DISPLAY_LEN: usize = ATTACHMENTS_PREFIX.len() + HEX_LEN + ".bin".len();
 
-/// コンテナ エントリ名の許可リスト型（design「Container Entry Layout」の 6 形と、
-/// タスク 1.2 で足したマクロのパートを合わせた 7 形）。
+/// コンテナ エントリ名の許可リスト型（design「Container Entry Layout」の 7 形）。
+///
+/// マクロのパート（`macros.json`）はタスク 1.2 が足したもので、**design 側も同じ 7 形を
+/// 列挙している**（2026-09-18 に追随させた。以前はこの doc が「design の 6 形 + マクロ」と
+/// 書いており、design と実装の対応が読み取りにくかった）。
 ///
 /// 値は [`EntryName::parse`] による正準テキストからの解析（または同じ文法を
 /// 満たす変種直接構築）でのみ得られる。自由な文字列からのサニタイズや正規化の
