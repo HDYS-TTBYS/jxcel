@@ -62,7 +62,7 @@ ts-rs = { version = "12.0.1", features = ["serde-compat"] }
 
 [dev-dependencies]
 # 一括処理の予算（10 万行の読み+集計 10 秒 / 1 万行の書き換え 5 秒。要件 11.1, 11.2）を
-# 計測するベンチハーネス。実ベンチはタスク 5.3 が `benches/bulk.rs` に置く。
+# 計測するベンチハーネス。実ベンチは `benches/bulk.rs`（tasks.md 5.3）。
 criterion = "0.8"
 
 [lib]
@@ -74,12 +74,24 @@ path = "src/lib.rs"
 # （片方だけでは `cargo bench --no-run` が落ちる）。
 bench = false
 
-# criterion ベンチターゲット（harness 直結）。tasks.md 5.3 の実ベンチ（10 万行 × 30 列の
-# 読み+集計 / 1 万行の書き換え）は `benches/bulk.rs` として追加する。ここはハーネスの
-# 動作確認用の最小スケフォールドであり、予算の判定には使わない。
+# criterion ベンチターゲット（harness 直結）。計測の対象は一括処理の予算であり
+# （tasks.md 5.3。要件 11.1, 11.2）、`scripts/check-bench-budget.sh` のゲートが `bulk/` の
+# 下の bench id（`read_100k_rows_x_30_columns` / `rewrite_10k_rows`）を読む。
+#
+# **1.1 が置いたスケフォールド（`benches/scaffold.rs`）は 5.3 が置き換えた**（本ベンチが
+# 予算の判定の場であり、`harness = false` の宣言と実体のファイルを対で持つ。上の注記）。
 [[bench]]
-name = "scaffold"
+name = "bulk"
 harness = false
+
+# マクロ向け型定義の生成器（tasks.md 3.3。`src/bin/generate-macro-types.rs` は自動発見で
+# バイナリターゲットになる）。**ベンチターゲットとしては走らせない** — `cargo bench` は
+# バイナリのベンチハーネスにも criterion の引数（`--save-baseline=main` など）を渡すため、
+# 除外しないと `cargo bench -p macro-runtime` がこの bin の引数の解釈で落ちる（上の
+# `[[bench]]` を harness 直結にしたことと対で要る）。テストのハーネスは残す。
+[[bin]]
+name = "generate-macro-types"
+bench = false
 
 # 5.1（実起動の観測の前提）が起動の引数へ渡す**標本の文書**（実行できるマクロを 1 件持ち、
 # そのマクロが書き込む先のシートと行を持つもの）を書き出す例。**検証専用である** —

@@ -1115,15 +1115,20 @@ mod tests {
     use std::future::Future;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
 
     use app_shell::ipc::{GridHistoryDirection, GridHistoryRequest, GridOpenRequest};
     use app_shell::settings::{open as open_settings, SettingsStore};
     use document_format::{CellValue, Document, DocumentFormat, DocumentFormatApi, SchemaPart};
     use document_session::SessionState;
     use schema_engine::{schema_to_text, ColumnDecl, Constraints, DeclaredKind, Schema, TypeDecl};
+    use tauri::ipc::{InvokeBody, InvokeResponseBody, IpcResponse};
 
     use super::*;
-    use crate::commands::grid::{answer_history, answer_open, GridSessions};
+    use crate::commands::grid::{
+        answer_history, answer_open, answer_rows_window, GridSessions, WINDOW_REQUEST_HEADER_LEN,
+        WINDOW_REQUEST_VERSION,
+    };
     use crate::session::watch::testing::AlwaysPresent;
 
     /// 一時ディレクトリ（`grid.rs` のテストと同じ規律。プロセスごとに一意）。
@@ -1786,6 +1791,191 @@ export default 行.cells[1];
             started.elapsed() < Duration::from_secs(20),
             "既定の 30 秒まで待っている（設定の上限が効いていない）"
         );
+    }
+
+    /// 表の窓の要求の引数を組み立てる（`grid_rows_window` の本体へ渡す生バイト）。
+    ///
+    /// **配置は `grid.rs` のモジュール docs「引数の配置」が唯一の源である**（ここにあるのは
+    /// 検査の材料であり、本番の符号化はフロントエンド（7.3）が持つ）。
+    fn window_argument(sheet: &str, generation: u64, start: u64, count: u64) -> Vec<u8> {
+        let mut argument = Vec::with_capacity(WINDOW_REQUEST_HEADER_LEN + sheet.len());
+        argument.push(WINDOW_REQUEST_VERSION);
+        argument.extend_from_slice(&generation.to_le_bytes());
+        argument.extend_from_slice(&start.to_le_bytes());
+        argument.extend_from_slice(&count.to_le_bytes());
+        argument.extend_from_slice(&(sheet.len() as u64).to_le_bytes());
+        argument.extend_from_slice(sheet.as_bytes());
+        argument
+    }
+
+    /// **実行中でも表の操作は止まらない**（要件 2.2）。
+    ///
+    /// 長いマクロを実行している間に、表の窓（`grid_rows_window` の本体。スクロールと描画が
+    /// 呼ぶ読み）と**文書の操作**（行の追加）が通ることを確かめる。通らなければ、実行の間ずっと
+    /// **保持のロック**（`GridSessions` のウィンドウごとの保持）が握られていることになり、
+    /// 要件 2.2 が破れている。
+    ///
+    /// # なぜこの検査が本モジュールにあるのか（探す人へ）
+    ///
+    /// 規律そのものは `commands::grid` の
+    /// [`GridSessions::with_displayed`](crate::commands::grid::GridSessions::with_displayed) が
+    /// 持つ（「実行の間は保持のロックを握らない」。あちらの doc に理由がある）が、**検査は
+    /// 実行の本体（[`answer_run`]）を駆動しなければならない** — 実行の最中に窓が返ることの
+    /// 観測は、実行と表の両方を呼ぶ側でしか作れない。
+    ///
+    /// 加えて、`answer_run` は実行 1 回につき `macro_run:` の記録を 1 行出す。同じ `mod tests`
+    /// の 3 本（記録の行数を数える・最後の行を見る）は**グローバルの受け皿の行数を数える**ため、
+    /// [`serialize_run_test`] のロックで直列化している。**そのロックを取れるのは本モジュールの
+    /// テストだけである**（`RUN_RECORD_LOCK` は `mod tests` の内側にある）。規律の検査を
+    /// `grid.rs` のテストへ置くと、実行の記録が兄弟の数える窓に落ちてまれに落ちる — 決定的で
+    /// あることを優先し、実行の隣に置く。
+    ///
+    /// # 待ち合わせは観測に基づく（時間に依存しない）
+    ///
+    /// * 実行が始まったことは [`MacroRuntime::is_running`] で観測する（実行の要求が受け取られ
+    ///   た時点で真になり、実行の終わりに偽へ戻る）。検査が要るのは「実行が進行中である」
+    ///   ことだけである
+    /// * マクロは**自分の期限まで**動き続ける（数秒。エンジンの打ち切りには掛からない長さで
+    ///   ある）。**マクロの側の合図で止める形は取らない** — 実行の開始の観測は isolate の
+    ///   生成より前に真になる（要求の受け取りが先である）ため、検査が「実行が始まった」と
+    ///   見てから文書を変えても、マクロの最初の読みより前になることがある（観測した: 最初の
+    ///   読みが編集の後に来て、マクロが編集を見ない）。検査は観測（進行中であること・窓が
+    ///   進行中に返ること）だけに基づかせ、端の競合を持ち込まない
+    ///
+    /// 表明は 3 つである: (1) 実行が進行中であること、(2) 窓が**進行中のまま**短い時間で
+    /// 返ること（保持のロックを握っていれば実行の終わりまで待たされる）、(3) 実行の最中に
+    /// 文書の操作が通ること。
+    #[test]
+    fn 実行中でも表の窓は止まらない() {
+        /// マクロが動き続ける長さ（ミリ秒）。**エンジンの打ち切り（既定 30 秒）より遥かに
+        /// 短く、検査が窓を要求するまでの時間（ミリ秒未満）より遥かに長い**。表明がこの値に
+        /// 依存しないことは上の doc のとおりである（値が変えるのは、規律が壊れているときに
+        /// 検査が待たされる長さだけである）。
+        const 動き続けるミリ秒: u64 = 2_000;
+
+        /// 実行の最中の窓の要求に許す時間。窓は数行を読むだけであり、実測は数十マイクロ秒で
+        /// ある（規律が壊れているときは実行の終わり＝上のミリ秒まで待たされる）。
+        const 窓の許容: Duration = Duration::from_millis(1_000);
+
+        let (scratch, documents, grids, label, sheet) = opened("lock");
+        let runtime = runtime();
+        let settings = settings(&scratch);
+        crate::test_log::install();
+        // 実行の記録を数える 3 本と直列化する（上記「なぜこの検査が本モジュールにあるのか」）。
+        let _serialized = serialize_run_test();
+
+        // 窓の要求は**いまの世代**を名乗らなければならない（古い世代には空の窓が返る）。世代の
+        // 源は `GridSession::generation()` 1 つであり、開いた応答がその 10 進表現を運ぶ。
+        let opened = data(answer_open(
+            &documents,
+            &grids,
+            &label,
+            &GridOpenRequest {
+                sheet: sheet.clone(),
+            },
+        ));
+        let generation: u64 = opened.generation.parse().expect("世代は 10 進の文字列である");
+
+        // 実行するマクロ: 標本のシートを 1 行読み、**数秒動き続けて**から結果を返す。
+        // 戻り値は標本から読んだ内容そのものであり、標本が読めたことの表明を兼ねる。
+        data(answer_store(
+            &runtime,
+            &documents,
+            &label,
+            &MacroStoreRequest {
+                name: "長く動く".to_owned(),
+                kind: MacroKindTag::TypeScript,
+                source: format!(
+                    "const sheet = (await host.sheets())[0];\n\
+                     const page = await host.readRange(sheet.id, {{ from: 0, to: 0 }});\n\
+                     const 期限 = Date.now() + {動き続けるミリ秒};\n\
+                     while (Date.now() < 期限) {{}}\n\
+                     export default `${{sheet.name}}/${{page.rows.length}}`;\n"
+                ),
+            },
+        ));
+
+        // 実行は別のスレッドで始める（本スレッドは表を操作し続ける側である）。
+        thread::scope(|scope| {
+            let running = scope.spawn(|| {
+                answer_run(
+                    &runtime,
+                    &documents,
+                    &grids,
+                    &settings,
+                    &label,
+                    &MacroRunRequest {
+                        name: "長く動く".to_owned(),
+                    },
+                )
+            });
+
+            // **実行が始まったことを観測する**（表を触るのはこの観測の後である）。
+            let waited = Instant::now();
+            while !runtime.is_running() {
+                assert!(
+                    waited.elapsed() < Duration::from_secs(10),
+                    "実行が始まったことを観測できない"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+
+            // (1)(2) 実行の最中に、表の窓を要求する（`grid_rows_window` の本体）。
+            let requested = Instant::now();
+            let response = answer_rows_window(
+                &documents,
+                &grids,
+                &label,
+                &InvokeBody::Raw(window_argument(&sheet, generation, 0, 3)),
+            );
+            let elapsed = requested.elapsed();
+            assert!(
+                runtime.is_running(),
+                "表の窓が返った時点で実行が終わっている（実行の間、保持のロックを握っている）"
+            );
+            assert!(
+                elapsed < 窓の許容,
+                "実行の最中の表の窓に {elapsed:?} かかった（実行の間、保持のロックを握っている）"
+            );
+            let bytes = match response.body().expect("生バイトの応答は常に作れる") {
+                InvokeResponseBody::Raw(bytes) => bytes,
+                InvokeResponseBody::Json(text) => panic!("封筒が返った: {text}"),
+            };
+            assert!(!bytes.is_empty(), "実行の最中に表の窓が空で返った");
+
+            // (3) 実行の最中に、文書の操作（行の追加）が通る（要件 2.2 の「操作を止めない」）。
+            let before = documents
+                .read(&label, &mut |document| document.sheets()[0].rows().len())
+                .expect("文書を読める");
+            let sheet_id = documents
+                .read(&label, &mut |document| document.sheets()[0].id())
+                .expect("文書を読める");
+            documents
+                .edit(&label, &mut |document| document.add_row(sheet_id))
+                .expect("標本のシートに行を足せる");
+            let after = documents
+                .read(&label, &mut |document| document.sheets()[0].rows().len())
+                .expect("文書を読める");
+            assert_eq!(
+                after,
+                before + 1,
+                "実行の最中に文書の操作が通っていない"
+            );
+
+            match running.join().expect("実行のスレッドは完走する") {
+                IpcResult::Ok { data } => match &data.outcome {
+                    MacroRunOutcome::Ran { value, .. } => {
+                        // 戻り値の提示は JSON である（要件 2.3）ため、文字列は引用符つきで返る。
+                        assert_eq!(
+                            value, "\"台帳/1\"",
+                            "マクロが標本のシートを読めていない"
+                        );
+                    }
+                    other => panic!("成功を期待したが {other:?} を返した"),
+                },
+                IpcResult::Err { error } => panic!("実行が失敗した: {error:?}"),
+            }
+        });
     }
 
     /// メニューの項目の登録内容（位置・表示名・識別子・アクセラレータ無し）。

@@ -60,7 +60,7 @@ CI に `cargo audit` を必須とする。本プロジェクトは advisory 履�
 ### Testing
 - ドメインコアは GUI を起動せずにテストできること。Tauri への依存がテストを妨げるなら、それは層の分離が壊れている兆候
 - 性能要件を持つ機能はベンチマークを伴うこと（例: 10 万行で開く 3 秒 / 保存 2 秒。`schema-engine` は 10 万行 × 30 列の全件検証 1 秒 / 1 セルの判定 16 ミリ秒。**後者は要件値であり、CI のゲートには載せない** — 予算に対して桁違いに小さく、ゲートにする価値がないためテスト内の計測に留める）
-- **性能予算は CI のゲートにすること。**計測して記録するだけでは回帰は止まらない。判定器は**計測が無いときに `0` を返してはならない**（fail-closed。`structure.md`「計測が存在しない状態で予算ゲートだけ先に結線しない」と対になる）。**計測が無い状態でゲートだけ先に結線すると CI が赤のままになるため、結線は計測を入れるタスクが行う**。現在の対象と予算: `document-format` の open 3 秒 / save 2 秒、`schema-engine` の全件検証 1 秒、`document-session` の open+hold 3 秒 / save 2 秒 / **一括の適用 1 秒**（10 万行 × 30 列の全 300 万セルを 1 回の `edit` で置き換える）。予算の既定値は判定器（`scripts/check-bench-budget.sh`）が持ち、**CI は引数なしで呼ぶ**（閾値を CI から渡さない）
+- **性能予算は CI のゲートにすること。**計測して記録するだけでは回帰は止まらない。判定器は**計測が無いときに `0` を返してはならない**（fail-closed。`structure.md`「計測が存在しない状態で予算ゲートだけ先に結線しない」と対になる）。**計測が無い状態でゲートだけ先に結線すると CI が赤のままになるため、結線は計測を入れるタスクが行う**。現在の対象と予算: `document-format` の open 3 秒 / save 2 秒、`schema-engine` の全件検証 1 秒、`document-session` の open+hold 3 秒 / save 2 秒 / **一括の適用 1 秒**（10 万行 × 30 列の全 300 万セルを 1 回の `edit` で置き換える）、`data-grid` の **1 万行の貼り付け 3 秒**、`macro-runtime` の**一括の読み + 集計 10 秒**（10 万行 × 30 列の全行を 1 回の呼び出しで読み、その全部を使う集計）と **1 万行の書き換え 5 秒**（1 万行 × 30 列。画面から 1 万行を貼り付ける予算と同じ桁）。予算の既定値は判定器（`scripts/check-bench-budget.sh`）が持ち、**CI は引数なしで呼ぶ**（閾値を CI から渡さない）
 - **不変条件は検査スクリプトにすること。**目視確認で守る規則は、いずれ守られなくなる（`scripts/` に置き CI から呼ぶ。structure.md 参照）
 - **GUI・配布物・プラットフォーム差を含む主張は、実物を起動して観測した結果で裏付けること。**単体テストは回帰の網であって受入の証明ではない
 - **観測できないことは未確認として書くこと。**「CI で確認する」は確認済みではない。残るリスクを明示する
@@ -79,7 +79,7 @@ Cargo ワークスペース（`crates/*` + `src-tauri`）とフロントエン�
 | 生成物のドリフト | `cargo test -p app-shell --test bindings_drift` |
 | 生成物の再生成 | `cargo run -p app-shell --bin generate-bindings` |
 | フロントエンドの型検査 / lint / ビルド | `npm run typecheck` / `npm run lint` / `npm run build` |
-| ベンチマーク | `cargo bench -p document-format -p schema-engine -p document-session -- --save-baseline=main` |
+| ベンチマーク | `cargo bench -p document-format -p schema-engine -p document-session -p data-grid -p macro-runtime -- --save-baseline=main` |
 | 性能予算の判定 | `bash scripts/check-bench-budget.sh` |
 | 起動時間予算の判定 | `bash scripts/check-startup-budget.sh` |
 | 依存下限の検査 | `bash scripts/check-zip-floor.sh Cargo.lock` |

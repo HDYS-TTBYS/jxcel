@@ -16,8 +16,14 @@
 #   tasks.md 9.1。判定の場は `benches/large_grid.rs` の `large_grid/paste_10k` ただ 1 つで
 #   あり、data-grid の他の計測（窓の符号化・順序の再計算）は要件に絶対値が無いため
 #   判定しない — 計測値は criterion のレポートに残る）。
+#   さらに、マクロの一括処理を **10 万行 × 30 列の全行読み + 集計は 10 秒以内**、
+#   **1 万行 × 30 列の書き換えは 5 秒以内**に完了する（.kiro/specs/macro-runtime/
+#   requirements.md 11.1・11.2・design.md「Performance / Load」・tasks.md 5.3。判定の場は
+#   `crates/macro-runtime/benches/bulk.rs` の 2 本であり、実行 1 回の全体（isolate の生成・
+#   変換・実行・値の往復・変更の集約）を測る）。
 #   `.github/workflows/bench.yml` の
-#   `cargo bench -p document-format -p schema-engine -p document-session -p data-grid` が
+#   `cargo bench -p document-format -p schema-engine -p document-session -p data-grid
+#   -p macro-runtime` が
 #   残す criterion の
 #   計測値（`target/criterion/**/new/estimates.json`）を読み、平均（mean）の点推定値が予算を
 #   超えていれば非 0 で終了し、CI を失敗させる。これにより予算超過を機能追加と同時に検出する。
@@ -37,7 +43,7 @@
 # POSIX sh 互換: `bash scripts/check-bench-budget.sh` が Linux / macOS /
 # Windows (Git Bash) のいずれでも動作すること（3 OS マトリクス共用）。
 #
-# 使い方: sh scripts/check-bench-budget.sh [criterion ディレクトリ] [開く予算 ns] [保存予算 ns] [検証予算 ns] [一括の適用の予算 ns] [1 万行の貼り付けの予算 ns]
+# 使い方: sh scripts/check-bench-budget.sh [criterion ディレクトリ] [開く予算 ns] [保存予算 ns] [検証予算 ns] [一括の適用の予算 ns] [1 万行の貼り付けの予算 ns] [10 万行の読みの予算 ns] [1 万行の書き換えの予算 ns]
 #   予算の引数は既定（要件値）を上書きする。CI は引数なしで呼ぶ
 #   （予算判定の閾値を CI から差し替えない）。
 # 終了コード: 0 = 全予算内 / 1 = 予算超過 / 2 = 計測値が無い・解釈できない
@@ -50,6 +56,12 @@ VALIDATE_BUDGET="${4:-1000000000}"
 BULK_BUDGET="${5:-1000000000}"
 # 1 万行の貼り付け（要件 7.7, 11.5、tasks.md 9.1）の予算。既定は要件値の 3 秒。
 PASTE_BUDGET="${6:-3000000000}"
+# 10 万行 × 30 列の全行読み + 集計（macro-runtime の要件 11.1、tasks.md 5.3）の予算。
+# 既定は要件値の 10 秒。
+READ_BUDGET="${7:-10000000000}"
+# 1 万行 × 30 列の書き換え（macro-runtime の要件 11.2、tasks.md 5.3）の予算。既定は要件値の
+# 5 秒。
+REWRITE_BUDGET="${8:-5000000000}"
 CRITERION="${1:-target/criterion}"
 
 # criterion の mean.point_estimate（ナノ秒, 浮動小数）を取り出す。
@@ -138,6 +150,13 @@ check_budget "save (10万行×30列, セッション経路)" "large_session/save
 # `paste_10k` が残す計測値であり、**計測が無ければ 2（fail-closed）**である — data-grid の
 # ベンチをワークフローの `cargo bench` から落とす変更は、この 2 で検出される。
 check_budget "paste (1万行×30列)" "large_grid/paste_10k" "$PASTE_BUDGET" ||
+  record_status $?
+# macro-runtime の一括処理（要件 11.1, 11.2。tasks.md 5.3）。`benches/bulk.rs` の 2 本が
+# 残す計測値であり、**計測が無ければ 2（fail-closed）**である — macro-runtime のベンチを
+# ワークフローの `cargo bench` から落とす変更は、この 2 で検出される。
+check_budget "read (10万行×30列, マクロの一括の読み+集計)" "bulk/read_100k_rows_x_30_columns" "$READ_BUDGET" ||
+  record_status $?
+check_budget "rewrite (1万行×30列, マクロの書き換え)" "bulk/rewrite_10k_rows" "$REWRITE_BUDGET" ||
   record_status $?
 
 exit "$status"
