@@ -27,11 +27,22 @@
 //! | シート | `在庫` 1 枚 |
 //! | 列 | `品名` / `数量` |
 //! | 行 | 3 行（りんご 3 / みかん 5 / ぶどう 8） |
-//! | マクロ | `標本の記入` 1 件（TypeScript。先頭行を読み、`数量` に 100 を書いて戻り値を返す） |
+//! | マクロ | 5 件（すべて TypeScript。並びは保存順である） |
 //!
-//! マクロは**能力を宣言しない**（セルの読みと書きは能力を要さない。要件 8.1）ので、能力の門に
-//! 阻まれず実行まで進む。**書き込みを 1 セルだけ行う**のは、実行の記録の変更の件数を 5.2 が
-//! 要件値（1 セル）で判定できるようにするためである（`crates/macro-runtime/src/host/changes.rs`
+//! マクロの 5 件は **5.2 の検査器が駆動するシナリオ**である（1 件ずつが 1 つの要件の観測を
+//! 生む。どれが何を観測させるかは [`SPECIMEN_MACRO_SOURCES`] の表を見ること）:
+//!
+//! | マクロ | 何を観測させるか |
+//! |---|---|
+//! | `標本の記入` | 実行の成功と変更の件数（1 セル。要件 2.1, 5.1, 5.5） |
+//! | `標本の往復` | 保存と開き直しの往復（引き金のセッションの経路が保存した文書を開き直したときだけ 1 セル書く。要件 1.2, 1.3, 1.5） |
+//! | `標本の拒否` | 宣言の無い能力の拒否（要件 8.3） |
+//! | `標本の失敗` | 失敗の理由とフレーム（3 行目で投げる。要件 9.1–9.3） |
+//! | `標本の打ち切り` | 時間の上限による打ち切り（終わらない繰り返し。要件 6.1, 6.4） |
+//!
+//! マクロは**どれも能力を宣言しない**（セルの読みと書きは能力を要さない。要件 8.1）ので、
+//! 能力の門に阻まれず実行まで進む。**書き込みを 1 セルだけ行う**のは、実行の記録の変更の件数を
+//! 5.2 が要件値（1 セル）で判定できるようにするためである（`crates/macro-runtime/src/host/changes.rs`
 //! の「空の並びは記録しない」と同じ規律で、書き込みは 1 件だけ置く）。
 //!
 //! # 決定性 — 何が同じで、何が同じでないか
@@ -73,22 +84,94 @@ const SPECIMEN_COLUMNS: [&str; 2] = ["品名", "数量"];
 /// 標本の行（品名, 数量）。
 const SPECIMEN_ROWS: [(&str, i64); 3] = [("りんご", 3), ("みかん", 5), ("ぶどう", 8)];
 
-/// 標本のマクロの名前。**5.1 の引き金（`JXCEL_VERIFICATION_MACRO_RUN`）はこの名前を指す。**
-const SPECIMEN_MACRO_NAME: &str = "標本の記入";
+/// 標本のマクロの名前（**この並びが保存順であり、一覧の並びである**）。
+///
+/// **5.1 の引き金（`JXCEL_VERIFICATION_MACRO_RUN`）はこの名前を指す。** 5.2 の検査器は
+/// **この並びを閉じた一覧として要求する** — 標本へマクロを足す／名前を変えるときは
+/// `scripts/check-macro-observation.sh` の `EXPECTED_NAMES` を同じ作業で直す（並びも含めて
+/// 一致しなければ検査器は落ちる。片方だけ直すと落ちるので、写しが黙って古くならない）。
+const SPECIMEN_MACRO_NAMES: [&str; 5] = [
+    "標本の記入",
+    "標本の往復",
+    "標本の拒否",
+    "標本の失敗",
+    "標本の打ち切り",
+];
 
-/// 標本のマクロのソース（TypeScript）。
+/// 標本のマクロのソース（TypeScript）。**並びは [`SPECIMEN_MACRO_NAMES`] と 1 対 1 である。**
 ///
-/// **型注釈をわざと書いてある** — 実行の経路が TypeScript の変換（型注釈の除去）を通ることまで
-/// 観測できる（1 行目のコメントではなく注釈そのものが、変換が走ったことの材料になる）。
-/// セルの読みと書きは能力を要さないので宣言（`// @grant …`）は無い。
+/// 5.2 は実起動の観測を**シナリオごとのマクロ**で駆動する（1 つのマクロで 5 つの要件を
+/// 見ようとすると、観測の行のどの欄がどの要件の材料かが言えなくなる）。各マクロの冒頭に
+/// **どの要件のための標本か**を書いてある:
 ///
-/// **書くのは 1 セルだけである**（変更の件数を 5.2 が要件値で読む）。
-const SPECIMEN_MACRO_SOURCE: &str = "// 検証専用の標本のマクロ（tasks.md 5.1）。能力の宣言は要らない。\n\
+/// | マクロ | 何を観測させるか |
+/// |---|---|
+/// | `標本の記入` | 実行の成功と変更の件数（要件 2.1, 5.1, 5.5）。**書くのは 1 セルだけ**である |
+/// | `標本の往復` | 保存と開き直しの往復（要件 1.2, 1.3, 1.5）。引き金のセッションの経路が 2 行を回転させて保存するので、開き直すと先頭行の数量は 5 になる |
+/// | `標本の拒否` | 宣言の無い能力の拒否（要件 8.3）。`@grant` を書かないので門が呼び出しの前に拒む |
+/// | `標本の失敗` | 失敗の理由とフレーム（要件 9.1–9.3）。関数の入れ子の内側で例外を投げる |
+/// | `標本の打ち切り` | 時間の上限による打ち切り（要件 6.1）。終わらない繰り返しに入る |
+///
+/// **どれも能力を宣言しない**（セルの読みと書きは能力を要さない。要件 8.1）ので、能力の門に
+/// 阻まれず実行まで進む。**型注釈をわざと書いてある** — 実行の経路が TypeScript の変換
+/// （型注釈の除去）を通ることまで観測できる（コメントではなく注釈そのものが、変換が走った
+/// ことの材料になる）。
+const SPECIMEN_MACRO_SOURCES: [&str; 5] = [
+    // 1. 標本の記入（5.1 と同じ。**書くのは 1 セルだけ**である — 変更の件数を 5.2 が
+    //    要件値（1 セル）で読む）。
+    "// 検証専用: 実行の成功と変更の件数（tasks.md 5.2。要件 2.1, 5.1, 5.5）。\n\
      const sheets: SheetInfo[] = host.sheets();\n\
      const page: RowPage = host.readRange(sheets[0].id, { from: 0, to: 0 });\n\
      const row: ReadRow = page.rows[0];\n\
      host.setCells(sheets[0].id, [{ row: row.id, column: 1, value: 100 }]);\n\
-     export default row.cells[0];\n";
+     export default row.cells[0];\n",
+    // 2. 標本の往復（保存と開き直し。要件 1.2, 1.3, 1.5）。**条件つきの書き込み**である —
+    //    引き金のセッションの経路（`open,edit,2,save`）が 2 行を回転させて保存するので、
+    //    開き直した文書の先頭行の数量は 5 である（初期値は 3）。3 のままなら（＝保存された
+    //    文書を開き直していないなら）**1 件も書かない**ので、変更の件数が 0 になり、検査器は
+    //    「往復していない」と判定できる。
+    "// 検証専用: 保存と開き直しの往復（tasks.md 5.2。要件 1.2, 1.3, 1.5）。\n\
+     const sheets: SheetInfo[] = host.sheets();\n\
+     const page: RowPage = host.readRange(sheets[0].id, { from: 0, to: 2 });\n\
+     const 先頭: CellValue = page.rows[0].cells[1];\n\
+     if (先頭 === 5) {\n\
+     \x20 host.setCells(sheets[0].id, [{ row: page.rows[2].id, column: 1, value: 200 }]);\n\
+     }\n\
+     export default 先頭;\n",
+    // 3. 標本の拒否（要件 8.3）。**`@grant file.read` を書かない**ので、門が呼び出しの前に
+    //    拒む（ファイルは 1 バイトも読まれない）。
+    "// 検証専用: 宣言の無い能力の拒否（tasks.md 5.2。要件 8.3）。\n\
+     const 本文: string = host.fileRead(\"/etc/hostname\");\n\
+     export default 本文;\n",
+    // 4. 標本の失敗（要件 9.1–9.3）。**投げる位置を 3 行目に固定する** — 検査器は
+    //    フレームが保存されたソースの原位置（3 行目）を指すことを要件値として要求する。
+    "// 検証専用: 失敗の理由とフレーム（tasks.md 5.2。要件 9.1–9.3）。\n\
+     function 内側(): number {\n\
+     \x20 throw new Error(\"検証用の失敗\");\n\
+     }\n\
+     function 外側(): number {\n\
+     \x20 return 内側();\n\
+     }\n\
+     export default 外側();\n",
+    // 5. 標本の打ち切り（要件 6.1）。**終わらない繰り返し**に入り、時間の上限（既定 30 秒）で
+    //    打ち切られる。検査器は同じ起動の続けて別のマクロを走らせ、**打ち切りの後も操作できる**
+    //    こと（要件 6.4）まで観測する。
+    "// 検証専用: 時間の上限による打ち切り（tasks.md 5.2。要件 6.1, 6.4）。\n\
+     let 合計 = 0;\n\
+     while (true) {\n\
+     \x20 合計 += 1;\n\
+     }\n\
+     export default 合計;\n",
+];
+
+/// 標本のマクロを上流の記録の型へ組む（並びは [`SPECIMEN_MACRO_NAMES`] と同じ）。
+fn specimen_macros() -> Vec<MacroRecord> {
+    SPECIMEN_MACRO_NAMES
+        .iter()
+        .zip(SPECIMEN_MACRO_SOURCES)
+        .map(|(name, source)| MacroRecord::new(*name, MacroKind::TypeScript, source))
+        .collect()
+}
 
 /// 標本の列の宣言を 1 本組み立てる（種別は組み込む列に合わせる）。
 fn column(name: &str, kind: TypeKind) -> ColumnDecl {
@@ -149,11 +232,7 @@ fn specimen() -> Document {
             )
             .expect("いま追加した行は実在する");
     }
-    document.set_macros(vec![MacroRecord::new(
-        SPECIMEN_MACRO_NAME,
-        MacroKind::TypeScript,
-        SPECIMEN_MACRO_SOURCE,
-    )]);
+    document.set_macros(specimen_macros());
     document
 }
 
@@ -236,20 +315,38 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    if reopened.macros().len() != 1 {
+    if reopened.macros().len() != SPECIMEN_MACRO_NAMES.len() {
         eprintln!(
-            "NG: 標本のマクロが 1 件ではない（{} 件）",
+            "NG: 標本のマクロが {} 件ではない（{} 件）",
+            SPECIMEN_MACRO_NAMES.len(),
             reopened.macros().len()
         );
         return ExitCode::from(1);
     }
-    let record = &reopened.macros()[0];
-    if record.name() != SPECIMEN_MACRO_NAME
-        || record.kind() != MacroKind::TypeScript
-        || record.source().as_bytes() != SPECIMEN_MACRO_SOURCE.as_bytes()
+    // **1 件ずつ、名前・種別・ソースのバイト一致を確かめる**（要件 1.2, 1.5）。並びも
+    // 保存順のままであることを見る（5.2 の検査器が一覧の並びを要件値として読む）。
+    for (index, (expected_name, expected_source)) in SPECIMEN_MACRO_NAMES
+        .iter()
+        .zip(SPECIMEN_MACRO_SOURCES)
+        .enumerate()
     {
-        eprintln!("NG: 保存と読み込みの間でマクロが変わった（名前・種別・ソース）");
-        return ExitCode::from(1);
+        let Some(record) = reopened.macros().get(index) else {
+            eprintln!("NG: 標本のマクロ {index} 番目を開き直せなかった");
+            return ExitCode::from(1);
+        };
+        if record.name() != *expected_name
+            || record.kind() != MacroKind::TypeScript
+            || record.source().as_bytes() != expected_source.as_bytes()
+        {
+            eprintln!(
+                "NG: 保存と読み込みの間でマクロが変わった（{index} 番目: 名前 = {} / 種別 = {:?} / \
+                 ソース = {} B）",
+                record.name(),
+                record.kind(),
+                record.source().len()
+            );
+            return ExitCode::from(1);
+        }
     }
     let bytes = match std::fs::metadata(&path) {
         Ok(metadata) => metadata.len(),
@@ -258,7 +355,12 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    println!("{}", describe_content(&reopened, record.source().len()));
+    let source_bytes: usize = reopened
+        .macros()
+        .iter()
+        .map(|record| record.source().len())
+        .sum();
+    println!("{}", describe_content(&reopened, source_bytes));
     println!(
         "標本を書き出した: パス={} バイト数={bytes}",
         path.display()

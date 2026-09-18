@@ -231,9 +231,11 @@ tauri-build = { version = "2.6.3", features = [] }
 # `cfg(debug_assertions)` では不十分である — 配布物としての実検証（release ビルド）が
 # できなくなるため、非既定の feature で括る。
 #
-# 本スペック（`macro-runtime`）が足したのは `JXCEL_VERIFICATION_MACRO_RUN=<マクロ名>` であり、
-# 起動時に「一覧 → 選択 → 実行」を仕込む（`window/mod.rs` の `macro_run_script` と
-# `src/shell/verificationMacroRun.ts`。tasks.md 5.1）。起動の引数へ標本の文書
+# 本スペック（`macro-runtime`）が足したのは `JXCEL_VERIFICATION_MACRO_RUN=<マクロ名>[,<マクロ名>…]`
+# であり、起動時に「一覧 → 選択 → 実行」を**並びの順に**仕込む（`window/mod.rs` の
+# `macro_run_script` と `src/shell/verificationMacroRun.ts`。tasks.md 5.1 / 5.2 — 5.2 が
+# **並び**へ広げたのは、打ち切りの後に**同じ起動で**続けて走らせたことを観測するためである。
+# 要件 6.4）。起動の引数へ標本の文書
 # （`crates/macro-runtime/examples/make-macro-document.rs` が書き出すもの）を渡し、
 # 併せて `JXCEL_VERIFICATION_INITIAL_SCREEN=grid` を指定する（変更の適用先のグリッドを
 # 開いておくため。`window/mod.rs` の `VERIFY_MACRO_RUN_ENV` の doc）。

@@ -623,11 +623,11 @@ fn is_verify_switch_on(value: &str) -> bool {
 // 検証専用: マクロの実行の観測（macro-runtime スペックの 5.1）の引き金
 // ---------------------------------------------------------------------------
 
-/// 検証専用: 起動時に実行するマクロの名前を指定する環境変数。
+/// 検証専用: 起動時に実行するマクロの名前を指定する環境変数。**`,` 区切りの並び**である。
 ///
 /// **`verification-triggers` feature の下にのみ存在する**（既定のビルドには環境変数の読み取り
 /// 自体が入らない）。`macro-runtime` スペックの 5.1 が、**「一覧 → 選択 → 実行」を起動時に
-/// 仕込む**ために置いた。
+/// 仕込む**ために置き、5.2 が**並び**へ広げた（下の「なぜ並びなのか」）。
 ///
 /// # なぜ画面の押下ではないのか（4.4 の申し送り）
 ///
@@ -637,10 +637,23 @@ fn is_verify_switch_on(value: &str) -> bool {
 /// 製品の経路（`macro_run` のコマンドとフロントエンドの面）を通る — 検証専用の実行経路を
 /// 別に持たない（`window/close.rs` の拒否と `session/verification.rs` と同じ規律）。
 ///
+/// # なぜ並びなのか（5.2 の要求）
+///
+/// 要件 6.4 は「**打ち切りの後も画面を操作できる状態に戻す**」ことを求める。これは
+/// **打ち切りが起きたのと同じ起動の中で、続けて別のマクロが走ること**でしか観測できない
+/// （別の起動で確かめると、確かめているのは「次の起動ができること」である）。したがって 5.2 は
+/// 1 回の仕込みで**順に実行する並び**を要求する — `JXCEL_VERIFICATION_MACRO_RUN=標本の打ち切り,標本の記入`
+/// は、打ち切りの後に同じウィンドウで `標本の記入` を走らせ、**観測の行を 2 行**残す。
+///
+/// **`,` は既存の一族と同じ区切りである**（`JXCEL_VERIFICATION_SESSION=open,edit,<行数>,save`、
+/// `JXCEL_VERIFICATION_BULK_ROWS=100,100000`）。したがって**名前そのものに `,` を含むマクロは
+/// この引き金では指せない**（`split_macro_names` が要素として読む）。
+///
 /// # 併せて要る指定（**この引き金だけでは実行まで進まない**）
 ///
 /// 1. **起動の引数に標本の文書を渡す**（`crates/macro-runtime/examples/make-macro-document.rs`
-///    が書き出す `.jxcel`。標本のマクロの名前は `標本の記入`）。
+///    が書き出す `.jxcel`。標本のマクロの名前は `標本の記入` / `標本の往復` / `標本の拒否` /
+///    `標本の失敗` / `標本の打ち切り`）。
 /// 2. `JXCEL_VERIFICATION_INITIAL_SCREEN=grid` — マクロの変更を適用するには、そのウィンドウで
 ///    **グリッドがシートを開いている**ことが要る（`crates/macro-runtime` の design.md
 ///    「System Flows → 実行の流れ」と `src-tauri/src/commands/macro.rs` の表）。初期画面が
@@ -652,16 +665,49 @@ fn is_verify_switch_on(value: &str) -> bool {
 /// 値は [`macro_run_script`] がウィンドウの初期化スクリプトとしてグローバルへ書き、
 /// フロントエンド（`src/shell/verificationMacroRun.ts`。`src/main.tsx` が
 /// `__JXCEL_VERIFICATION__` の下でだけ動的 import する）が読んで、製品の面の保持
-/// （`MACRO_SURFACE_STORE`）を通して「一覧 → 選択 → 実行」を駆動する。**コマンドも権限も
-/// 増やしていない**（使うのは製品の `macro_list` / `macro_run` だけである）。
+/// （`MACRO_SURFACE_STORE`）を通して**並びの順に**「一覧 → 選択 → 実行」を駆動する。
+/// **コマンドも権限も増やしていない**（使うのは製品の `macro_list` / `macro_run` だけである）。
 #[cfg(feature = "verification-triggers")]
 const VERIFY_MACRO_RUN_ENV: &str = "JXCEL_VERIFICATION_MACRO_RUN";
 
-/// 起動時に実行するマクロの名前を載せるグローバルの名前。**`src/shell/verificationMacroRun.ts`
-/// の `VERIFICATION_MACRO_RUN_GLOBAL` と同じ綴りでなければならない**（既定のビルドには
-/// どちらか一方しか存在しない検証専用の対の契約）。
+/// 起動時に実行するマクロの名前の**並び**を載せるグローバルの名前。
+/// **`src/shell/verificationMacroRun.ts` の `VERIFICATION_MACRO_RUN_GLOBAL` と同じ綴りでなければ
+/// ならない**（既定のビルドにはどちらか一方しか存在しない検証専用の対の契約）。
+///
+/// 載る値は**文字列の配列**である（5.1 は文字列 1 つを載せていた。5.2 が並びへ広げた —
+/// フロントエンドは配列だけを受け付け、文字列は受け付けない。**両方を受け付けると、
+/// どちらの形でも動くぶんだけ「仕込みが読まれていない」ことに気付きにくくなる**）。
 #[cfg(feature = "verification-triggers")]
 const VERIFY_MACRO_RUN_GLOBAL: &str = "__JXCEL_VERIFICATION_MACRO_RUN__";
+
+/// 検証専用: 実行するマクロの名前の上限。**初期化スクリプトと記録を無駄に大きくしない**ためと、
+/// 仕込みの誤り（長すぎる並び）を黙って通さないために置く（`is_embeddable_screen_id` の 64 と
+/// 同じ趣旨。標本の並びは 2 件である）。
+#[cfg(feature = "verification-triggers")]
+const MAX_VERIFY_MACRO_NAMES: usize = 8;
+
+/// 検証専用: [`VERIFY_MACRO_RUN_ENV`] の値を**名前の並び**へ解釈する。**純粋関数**であり、
+/// 文法をテストで固定する（`tests::the_macro_run_trigger_is_a_comma_separated_list`）。
+///
+/// 解釈できない値は `None`（呼び出し元は何も仕込まない）:
+///
+/// - 要素が 1 つも無い（空文字）
+/// - 空の要素がある（`,標本の記入` / `標本の記入,` / `標本の記入,,標本の失敗`）— 空の名前は
+///   一覧に必ず無いので、受け付けると「一覧に無い名前」の観測が 1 行増えるだけである
+/// - 要素が [`MAX_VERIFY_MACRO_NAMES`] を超える
+///
+/// 要素の前後の空白は無視する（既存の引き金の一族と同じ扱い）。
+#[cfg(feature = "verification-triggers")]
+fn split_macro_names(value: &str) -> Option<Vec<&str>> {
+    let names: Vec<&str> = value.split(',').map(str::trim).collect();
+    if names.is_empty() || names.len() > MAX_VERIFY_MACRO_NAMES {
+        return None;
+    }
+    if names.iter().any(|name| name.is_empty()) {
+        return None;
+    }
+    Some(names)
+}
 
 /// 検証専用: マクロの名前を初期化スクリプトの**文字列リテラル**へ埋め込める形にする。
 ///
@@ -675,7 +721,7 @@ const VERIFY_MACRO_RUN_GLOBAL: &str = "__JXCEL_VERIFICATION_MACRO_RUN__";
 ///   その名前を実行しない方がよい（エスケープして実行するより、拒んで記録に残す方がよい）。
 /// - `\` と `"` はエスケープする（名前として正当でありうる）。
 ///
-/// 返るのは**引用符を含むリテラルそのもの**である（呼び出し元はそのまま代入式へ置く）。
+/// 返るのは**引用符を含むリテラルそのもの**である（呼び出し元はそのまま配列の要素へ置く）。
 #[cfg(feature = "verification-triggers")]
 fn embeddable_macro_name(value: &str) -> Option<String> {
     // 名前の長さの上限。標本の名前は数文字であり、1000 文字を超える名前は初期化スクリプトと
@@ -699,27 +745,42 @@ fn embeddable_macro_name(value: &str) -> Option<String> {
     Some(literal)
 }
 
-/// 検証専用: 起動時のマクロの実行を要求する初期化スクリプト（5.1）。
+/// 検証専用: 起動時のマクロの実行を要求する初期化スクリプト（5.1 / 5.2）。
 ///
-/// 指定が無い・空・長すぎる・制御文字を含むときは `None` を返し、**仕込みは 1 つも起きない**
-/// （検査器は実行の記録が現れないので非 0 で落ちる — 黙って別のマクロを実行しない）。
-/// **どの名前を要求したかを記録に 1 行残す**（3 OS の段が起動の識別として読む。10.4 / 10.8 と
-/// 同じ規律）。
+/// 指定が無い・解釈できない（空の要素・多すぎる並び）・名前として使えない文字を含むときは
+/// `None` を返し、**仕込みは 1 つも起きない**（検査器は実行の記録が現れないので非 0 で落ちる —
+/// 黙って別のマクロを実行しない）。**どの名前を要求したかを記録に 1 行残す**（3 OS の段が
+/// 起動の識別として読む。10.4 / 10.8 と同じ規律）。
 #[cfg(feature = "verification-triggers")]
 fn macro_run_script() -> Option<String> {
     let requested = std::env::var(VERIFY_MACRO_RUN_ENV).ok()?;
-    let literal = match embeddable_macro_name(&requested) {
-        Some(literal) => literal,
-        None => {
+    let Some(names) = split_macro_names(&requested) else {
+        log::warn!(
+            "{} の値を実行するマクロの名前に使えない（無視する）: {requested:?}",
+            VERIFY_MACRO_RUN_ENV,
+        );
+        return None;
+    };
+    let mut literals = Vec::with_capacity(names.len());
+    for name in &names {
+        let Some(literal) = embeddable_macro_name(name) else {
             log::warn!(
-                "{} の値を実行するマクロの名前に使えない（無視する）: {requested:?}",
+                "{} の値のうち実行するマクロの名前に使えない要素がある（無視する）: {name:?}",
                 VERIFY_MACRO_RUN_ENV,
             );
             return None;
-        }
-    };
-    log::info!("検証用のマクロの実行を要求した: 名前={requested}");
-    Some(format!("window.{} = {literal};", VERIFY_MACRO_RUN_GLOBAL))
+        };
+        literals.push(literal);
+    }
+    log::info!(
+        "検証用のマクロの実行を要求した: 名前={}",
+        names.join(", "),
+    );
+    Some(format!(
+        "window.{} = [{}];",
+        VERIFY_MACRO_RUN_GLOBAL,
+        literals.join(", ")
+    ))
 }
 
 
@@ -1050,6 +1111,43 @@ fn describe_document(document: Option<&Path>) -> String {
 mod tests {
     use super::{LabelAllocator, WindowKind, WindowPhase, WindowRegistry, WindowRequest};
     use std::path::{Path, PathBuf};
+
+    /// 検証専用の引き金（5.1 / 5.2）の文法。**`,` 区切りの並び**だけを受け付け、
+    /// 空の要素・上限を超える並びは解釈できない（`macro_run_script` は何も仕込まない）。
+    ///
+    /// **破ると落ちる 2 つの性質**: 標本の 2 件の並び（打ち切りの後に続けて実行する形。
+    /// 要件 6.4 の観測がこれに依存する）が通ること、空の要素が 1 つも通らないこと。
+    #[cfg(feature = "verification-triggers")]
+    #[test]
+    fn the_macro_run_trigger_is_a_comma_separated_list() {
+        use super::{split_macro_names, MAX_VERIFY_MACRO_NAMES};
+
+        assert_eq!(
+            split_macro_names("標本の打ち切り,標本の記入"),
+            Some(vec!["標本の打ち切り", "標本の記入"]),
+            "5.2 の標本の並び（2 件）が通らなければ、打ち切りの後の実行を観測できない",
+        );
+        assert_eq!(
+            split_macro_names("標本の記入"),
+            Some(vec!["標本の記入"]),
+            "1 件の並びは 5.1 と同じ振る舞いである",
+        );
+        // 要素の前後の空白は無視する（既存の引き金の一族と同じ扱い）。
+        assert_eq!(
+            split_macro_names(" 標本の記入 , 標本の往復 "),
+            Some(vec!["標本の記入", "標本の往復"]),
+        );
+
+        // 解釈できない値。**空の要素を 1 つも通さない**（通すと「一覧に無い名前」の観測が
+        // 1 行増えるだけで、仕込みの誤りが見えなくなる）。
+        assert_eq!(split_macro_names(""), None);
+        assert_eq!(split_macro_names(","), None);
+        assert_eq!(split_macro_names("標本の記入,"), None);
+        assert_eq!(split_macro_names(",標本の記入"), None);
+        assert_eq!(split_macro_names("標本の記入,,標本の失敗"), None);
+        let too_many = vec!["標本の記入"; MAX_VERIFY_MACRO_NAMES + 1].join(",");
+        assert_eq!(split_macro_names(&too_many), None);
+    }
 
     #[test]
     fn the_label_convention_is_kind_prefixed_and_monotonic() {

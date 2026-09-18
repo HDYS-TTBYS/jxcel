@@ -960,6 +960,71 @@ jobs:
         run: pwsh -NoProfile -File scripts/ci/windows/verify-grid-observation.ps1
 
       # ---------------------------------------------------------------------
+      # 実起動のマクロの観測（**tasks.md 5.2** / 要件 1.2, 1.3, 1.5, 2.1, 2.3, 2.5, 5.1, 5.5,
+      # 6.1, 6.4, 8.2, 8.3, 9.1, 9.2, 9.3）
+      #
+      # 5.2 の受け入れは「実起動の観測を、**診断の記録を読み口にして要件値で判定する**」ことと、
+      # **3 つの OS のそれぞれで観測が成功すること**である（`data-grid` の 9.2 が確立した形に
+      # 乗る。2 つ目の流儀を作らない）。観測するのは 5 つの筋書きである:
+      #
+      #   1. **実行の成功と変更の件数** — 標本のマクロ `標本の記入` が 1 セル書く
+      #   2. **失敗の理由とフレーム** — `標本の失敗` が 3 行目で投げ、その**原位置**がフレームに出る
+      #   3. **能力の拒否** — `標本の拒否` が宣言の無い `host.fileRead` を呼び、能力の名前つきで拒まれる
+      #   4. **打ち切りと、その後の操作可能性** — `標本の打ち切り,標本の記入` を**同じ起動で**順に
+      #      走らせ、時間の上限（30 秒）で打ち切られたあとに続けて 1 セル書く
+      #   5. **保存と開き直しの往復** — 標本の写しを製品の保存の経路で保存させ、開き直す
+      #
+      # **判定は要件値で行う**（一覧 5 件・変更 1 セル・打ち切りは 30 秒以上・フレームの原位置・
+      # 保存の行が 1 行）。**どの記録の欄がどの要件の材料かは検査器の冒頭の表に 1 つだけ書いて
+      # ある**（`scripts/check-macro-observation.sh`。欄を増やすときはその表と同じ作業で直す）。
+      #
+      # ## 各段の実体（実装は段の側に置き、ここは 1 行で呼ぶ）
+      #
+      # - Linux:  `scripts/ci/linux/verify-macro-observation.sh`
+      # - macOS:  `scripts/ci/macos/verify-macro-observation.sh`
+      # - Windows: `scripts/ci/windows/verify-macro-observation.ps1`（Git Bash から同じ検査器を呼ぶ）
+      #
+      # 各段は 2 つのことを行う（3 OS で同じ）:
+      #
+      # 1. **正例**: マクロ入りの標本（5.1 の生成器）を作り、**1 回の起動で** 5 つの筋書きを
+      #    走らせる（検査器が 5 回起動する。うち 1 回は打ち切りのために 30 秒かかる）。
+      # 2. **反証**: 配布物を渡すと検査器が非 0 で落ちること（配布物は検証専用の引き金を読まない
+      #    = 観測の行が現れない）。**落ちた理由が「観測の行の不在」であること**と、**配布物が
+      #    実際に起動してウィンドウを開いたこと**の両方を要求する（起動しなかった実行も事実の
+      #    欠落で落ちるので、理由を見ないと錠前の実測にならない）。
+      #
+      # ## macOS / Windows の段はこの開発機では走らせていない
+      #
+      # 実測したのは **Linux の段だけ**である（開発機に macOS / Windows の実行環境が無い。
+      # `verification.md`「ローカルで閉じられないもの」）。macOS / Windows の段の冒頭にも同じ
+      # ことを書いてある — **走らせていないことを段そのものが明示する**。実行は CI の
+      # macOS / Windows のランナーでのみ確かめる。
+      #
+      # ## 判定はランナーごとに閉じる
+      #
+      # **3 OS の値を 1 か所へ持ち寄らない**（`verification.md`「判定はランナーごとに閉じる」）。
+      # 全体としての合否は、各段が自分の担当分で落ちることで成立する。
+      # ---------------------------------------------------------------------
+
+      # 実体は `scripts/ci/linux/verify-macro-observation.sh`（理由・証拠が何を覆うかはその冒頭）。
+      - name: Observe a macro run (Linux / Xvfb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/ci/linux/verify-macro-observation.sh
+
+      # 実体は `scripts/ci/macos/verify-macro-observation.sh`（理由・証拠が何を覆うかはその冒頭）。
+      - name: Observe a macro run (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash scripts/ci/macos/verify-macro-observation.sh
+
+      # 実体は `scripts/ci/windows/verify-macro-observation.ps1`（理由・証拠が何を覆うかはその冒頭）。
+      - name: Observe a macro run (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/ci/windows/verify-macro-observation.ps1
+
+      # ---------------------------------------------------------------------
       # 描画層の移植口の操作（**tasks.md 7.2** / 要件 1.2, 1.3, 2.4, 7.1, 7.2）
       #
       # 7.2 の受け入れは**見え方の主張**である: 10 万行のシートを走査でき、選択した範囲が視覚的に

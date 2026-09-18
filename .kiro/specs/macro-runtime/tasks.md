@@ -171,7 +171,7 @@
   - _Depends: 1.2, 4.3_
   - _Requirements: 1.2, 2.1_
 
-- [ ] 5.2 実起動の観測の検査器と 3 OS の段（反証を含む）
+- [x] 5.2 実起動の観測の検査器と 3 OS の段（反証を含む）
   - POSIX の検査器を置き、**診断の記録を読み口**にして要件値で判定する（`data-grid` の 9.2 が確立した形）
   - 見るもの: 実行の成功と変更の件数・失敗の理由とフレーム・打ち切りの提示とその後の操作可能性・能力の拒否・保存と開き直しの往復
   - 反証: 配布物を渡すと検査器が非 0 で落ちること（観測の行が現れない）
@@ -217,7 +217,7 @@
 
 ### 5.1 が置いたもの（引き金と標本。**5.2 が読む前提**）
 
-- **引き金**: `JXCEL_VERIFICATION_MACRO_RUN=<マクロ名>`（`verification-triggers` の下。
+- **引き金**: `JXCEL_VERIFICATION_MACRO_RUN=<マクロ名>`（`verification-triggers` の下。**5.2 で `,` 区切りの並びへ拡張** — 打ち切りの後も操作できることを**同じ起動の中で続けて別のマクロが走る**形で観測するため。既存の一族（`SESSION` / `BULK_ROWS`）と同じ区切り）。
   `src-tauri/src/window/mod.rs` の `macro_run_script`）＋ `JXCEL_VERIFICATION_INITIAL_SCREEN=grid`。
   起動時に `src/shell/verificationMacroRun.ts` が**製品の面の保持**（`MACRO_SURFACE_STORE`）を通して
   「一覧 → 選択 → 実行」を駆動する（**押下ではなく仕込み**である理由は 4.4 の申し送り: この機械の

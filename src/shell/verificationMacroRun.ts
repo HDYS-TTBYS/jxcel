@@ -1,6 +1,6 @@
 /**
- * 検証専用: **起動時に 1 件のマクロを「一覧 → 選択 → 実行」まで駆動する**（`macro-runtime`
- * スペックの tasks.md 5.1）。
+ * 検証専用: **起動時にマクロを「一覧 → 選択 → 実行」まで順に駆動する**（`macro-runtime`
+ * スペックの tasks.md 5.1 / 5.2）。
  *
  * 所有: 検証専用の起動時の駆動（`src/main.tsx` の `__JXCEL_VERIFICATION__` の分岐）と、
  * 実行の面の保持（`src/features/macro/`）。
@@ -14,17 +14,28 @@
  * **製品の実行経路をそのまま通す** — 使うのは製品の面の保持（`MACRO_SURFACE_STORE`）だけであり、
  * 検証専用の実行経路も検証専用のコマンドも持たない（`session/verification.rs` と同じ規律）。
  *
+ * # なぜ 1 件ではなく並びなのか（5.2）
+ *
+ * 要件 6.4（打ち切りの後も操作できる）は、**打ち切りが起きたのと同じ起動の中で続けて別の
+ * マクロが走ること**でしか観測できない（別の起動で見ると、確かめているのは「次の起動が
+ * できること」になる）。したがって 5.2 の引き金は `,` 区切りの**並び**を運び、本モジュールは
+ * **並びの順に 1 件ずつ**駆動して、**1 件につき観測の行を 1 行**送る。
+ *
  * # 経路（Rust とフロントエンドの対の契約）
  *
  * 1. 検証ビルド（`--features verification-triggers` かつ `JXCEL_VERIFICATION_BUILD=1`）を、
  *    **標本の文書を起動の引数に渡し**、環境変数
- *    `JXCEL_VERIFICATION_MACRO_RUN=<マクロ名>` と `JXCEL_VERIFICATION_INITIAL_SCREEN=grid` を
- *    付けて起動する（標本は `cargo run -p macro-runtime --example make-macro-document
- *    --features verification-samples -- <出力先>` が書き出す。マクロの名前は `標本の記入`）。
+ *    `JXCEL_VERIFICATION_MACRO_RUN=<マクロ名>[,<マクロ名>…]` と
+ *    `JXCEL_VERIFICATION_INITIAL_SCREEN=grid` を付けて起動する（標本は
+ *    `cargo run -p macro-runtime --example make-macro-document --features verification-samples -- <出力先>`
+ *    が書き出す。マクロの名前は `標本の記入` / `標本の往復` / `標本の拒否` / `標本の失敗` /
+ *    `標本の打ち切り`）。
  * 2. Rust（`src-tauri/src/window/mod.rs` の `macro_run_script`）がその値を**ウィンドウの初期化
- *    スクリプト**として書き、`window.__JXCEL_VERIFICATION_MACRO_RUN__` に載せる
- *    （**Webview はプロセスの環境変数を読めない**。`src/shell/verificationScreen.ts` と同じ理由）。
- * 3. 本モジュールがマウント時にそのグローバルを読み、**名前が文字列で空でないときだけ**駆動する。
+ *    スクリプト**として書き、`window.__JXCEL_VERIFICATION_MACRO_RUN__` に**文字列の配列**として
+ *    載せる（**Webview はプロセスの環境変数を読めない**。`src/shell/verificationScreen.ts` と
+ *    同じ理由）。配列だけを受け付け、文字列は受け付けない（`macro_run_script` の doc）。
+ * 3. 本モジュールがマウント時にそのグローバルを読み、**空でない文字列の並びであるときだけ**
+ *    駆動する。
  * 4. 結果は**イベントで Rust へ送り**、`src-tauri/src/lifecycle.rs` の
  *    `register_macro_observation_listener` が診断の記録へ 1 行（`マクロの観測: {…}`）で写す。
  *
@@ -32,8 +43,9 @@
  *
  * # なぜ記録へ送るのか（製品の記録だけでは足りない）
  *
- * 製品は実行 1 回につき `macro_run: …` の 1 行を残す（4.3）が、**その行は失敗の理由とフレームを
- * 持たない**（要件 8.3 の「ソースと値は出さない」の帰結）。5.2 は「失敗の理由とフレーム」
+ * 製品の記録（`macro_run` の 1 行）は**実行**の事実（名前・種別・結果・打ち切り・変更の件数・
+ * 所要）を持ち、**失敗の理由とフレームを持たない**（要件 8.3 の「ソースと値は出さない」の
+ * 帰結であり、4.3 の設計である）。5.2 は「失敗の理由とフレーム」
  * 「能力の拒否」をも**診断の記録**から判定するので、検証専用の観測の行が要る。本モジュールが
  * 運ぶのは**閉じた事実だけ**である — 一覧の件数と名前・選んだ名前・宣言されている能力・結果の
  * 3 値・変更の件数・打ち切りの種類・失敗の層と理由とフレーム。**戻り値と `console` の出力は
@@ -78,11 +90,11 @@ import type {
 } from "../ipc/bindings";
 
 /**
- * 実行するマクロの名前を載せるグローバルの名前。
+ * 実行するマクロの名前の**並び**を載せるグローバルの名前。
  *
  * **`src-tauri/src/window/mod.rs` の `VERIFY_MACRO_RUN_GLOBAL` と同じ綴りでなければならない**
  * （既定のビルドには Rust 側の定義が存在しないため、共有できる定数を持てない検証専用の対の
- * 契約である。`src/shell/verificationBulk.ts` と同じ形）。
+ * 契約である。`src/shell/verificationBulk.ts` と同じ形）。載る値は**文字列の配列**である。
  */
 const VERIFICATION_MACRO_RUN_GLOBAL = "__JXCEL_VERIFICATION_MACRO_RUN__" as const;
 
@@ -132,8 +144,8 @@ const LIST_RETRY_MS = 1_000;
 declare global {
   interface Window {
     /**
-     * 検証専用: 検証ビルドの初期化スクリプトが載せるマクロの名前。**既定のビルドでは決して
-     * 設定されない**（`undefined`）。値は文字列であることを実行時に検査する。
+     * 検証専用: 検証ビルドの初期化スクリプトが載せるマクロの名前の並び。**既定のビルドでは
+     * 決して設定されない**（`undefined`）。値は**文字列の配列**であることを実行時に検査する。
      */
     readonly __JXCEL_VERIFICATION_MACRO_RUN__?: unknown;
   }
@@ -184,12 +196,19 @@ export interface MacroObservation {
  * `src/shell/verificationBulk.ts` と同じ理由である）。
  */
 export function installVerificationMacroRun(): void {
-  // グローバルは**文字列で空でないときだけ**受け付ける（文字列でない値・空白だけの名前を
+  // グローバルは**空でない文字列の並びであるときだけ**受け付ける（配列でない値・空の要素を
   // 黙って受け付けない — 受け付ければ「一覧に無い名前」の観測が 1 行増えるだけで、仕込みの
-  // 誤りが見えなくなる）。
+  // 誤りが見えなくなる。Rust 側（`macro_run_script`）は同じ規則で弾いている）。
   const requested: unknown = window[VERIFICATION_MACRO_RUN_GLOBAL];
-  if (typeof requested !== "string" || requested.trim() === "") {
+  if (!Array.isArray(requested) || requested.length === 0) {
     return;
+  }
+  const names: string[] = [];
+  for (const entry of requested) {
+    if (typeof entry !== "string" || entry.trim() === "") {
+      return;
+    }
+    names.push(entry);
   }
   if (typeof requestAnimationFrame !== "function") {
     // 描画フレームを持たない環境では駆動しない — 検証は実アプリで行う。
@@ -197,7 +216,7 @@ export function installVerificationMacroRun(): void {
   }
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
-      void drive(requested, MACRO_SURFACE_STORE);
+      void drive(names, MACRO_SURFACE_STORE);
     });
   });
 }
@@ -215,9 +234,14 @@ function sleep(milliseconds: number): Promise<void> {
 }
 
 /**
- * 仕込みの本体。**1 行の観測を必ず送る**（途中で失敗してもそこまでの事実を送る）。
+ * 仕込みの本体。**並びの 1 件につき観測の行を 1 行必ず送る**（途中で失敗してもそこまでの事実を
+ * 送る）。**順に実行する** — 前の 1 件が終わってから次を選ぶ（実行は 1 つずつであり、
+ * 面の保持も実行中の 2 つ目を断る。要件 2.2 の裏返し）。
  */
-async function drive(requested: string, store: MacroSurfaceStore): Promise<void> {
+async function drive(
+  requested: readonly string[],
+  store: MacroSurfaceStore,
+): Promise<void> {
   // 1. **グリッドが表を描くまで待つ**（doc「待つもの」）。ここを待たないと、実行の記録は
   //    残るのに変更の適用だけが拒まれる。
   const gridReady = await waitUntil(
@@ -225,40 +249,48 @@ async function drive(requested: string, store: MacroSurfaceStore): Promise<void>
     START_DEADLINE_MS,
   );
   if (!gridReady) {
-    await report(observationFailure(requested, "no-grid", null, []));
+    for (const name of requested) {
+      await report(observationFailure(name, "no-grid", null, []));
+    }
     return;
   }
 
-  // 2. 一覧を読む（面の保持を通す。パネルに出るのと同じ一覧である）。
+  // 2. 一覧を読む（面の保持を通す。パネルに出るのと同じ一覧である）。**1 回だけ読む** —
+  //    仕込みの間に文書が差し替わることはなく、毎回読むと `macro_list` の行が増えるだけである。
   const macros = await waitForList(store);
   if (macros === null) {
-    await report(observationFailure(requested, "not-listed", null, []));
-    return;
-  }
-  const summary = macros.find((macro) => macro.name === requested) ?? null;
-  if (summary === null) {
-    await report(observationFailure(requested, "not-listed", null, macros));
-    return;
-  }
-  if (summary.failure !== null) {
-    // **解釈できなかった 1 件は実行しない**（要件 1.4。理由を記録へ残す）。面の提示と同じ写像を
-    // 通す（境界の `kind` と提示の `layer` の 2 つの形を本モジュールに持ち込まない）。
-    await report({
-      ...observationFailure(requested, "not-runnable", summary, macros),
-      ...flattenFailure(failurePresentation(summary.failure)),
-    });
+    for (const name of requested) {
+      await report(observationFailure(name, "not-listed", null, []));
+    }
     return;
   }
 
-  // 3. 選ぶ（要件 8.2 の能力の提示へ入る）→ 実行する（要件 2.1）。
-  store.choose(requested);
-  store.run();
-  const settled = await waitForRun(store, requested);
-  if (settled === null) {
-    await report(observationFailure(requested, "timed-out", summary, macros));
-    return;
+  for (const name of requested) {
+    const summary = macros.find((macro) => macro.name === name) ?? null;
+    if (summary === null) {
+      await report(observationFailure(name, "not-listed", null, macros));
+      continue;
+    }
+    if (summary.failure !== null) {
+      // **解釈できなかった 1 件は実行しない**（要件 1.4。理由を記録へ残す）。面の提示と同じ写像を
+      // 通す（境界の `kind` と提示の `layer` の 2 つの形を本モジュールに持ち込まない）。
+      await report({
+        ...observationFailure(name, "not-runnable", summary, macros),
+        ...flattenFailure(failurePresentation(summary.failure)),
+      });
+      continue;
+    }
+
+    // 3. 選ぶ（要件 8.2 の能力の提示へ入る）→ 実行する（要件 2.1）。
+    store.choose(name);
+    store.run();
+    const settled = await waitForRun(store, name);
+    if (settled === null) {
+      await report(observationFailure(name, "timed-out", summary, macros));
+      continue;
+    }
+    await report(observationOf(name, macros, summary, settled));
   }
-  await report(observationOf(requested, macros, summary, settled));
 }
 
 /** 条件が成り立つまで待つ（上限を過ぎたら `false`）。 */
