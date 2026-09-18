@@ -865,8 +865,17 @@
 `.kiro/specs/` 全体の棚卸し（残件・申し送りの抽出）で「**本スペックが所有すべき**」と判定されたものをここへ集める（他スペックの Implementation Notes に埋もれていたものを含む）。**いずれも受入を満たしたうえでの残件であり、差し戻しではない。**
 
 - **未保存のままのアプリ全体の終了（`request_exit`）でデータが失われる** — `document-session` はこれを自スペックの境界外とし、`design.md` の Risks と `requirements.md` の Out of scope に記録している。**解消する側は本スペック**であり、必要なのは**終了経路を拒否可能にする設計変更**（`document-session` の終了前の問い・`CloseDenied` の再試行と同じ扱い）。`design.md` の Revalidation Triggers に 1 行として入れた。**実装は未着手。**
-- **clippy の許容基準は決まったが、CI の段が無い** — 基準（`crates/app-shell` と `crates/document-format` に `-D warnings`、3 lint・6 箇所だけ名指しで許容）と**検証済みのゲートコマンド**は下の Implementation Notes（10.1）にあるが、`.github/workflows/ci.yml` には clippy の段が無く、**いまはローカルの善意に依存している**。段を足すのに要る作業: (1) 2 つの `dtolnay/rust-toolchain` の段に `components: clippy` を足す（**既定の profile は minimal で clippy が入らない**）、(2) `cargo clippy -p app-shell -p document-format --all-targets -- -D warnings -A clippy::assertions_on_constants -A clippy::result_large_err -A clippy::wrong_self_convention` を 1 段として走らせる。**CI の実行でしか検証できないため、本棚卸しでは段を足していない**（開発機の `cargo` はコンテナのシムで `cargo-clippy` を持たないので、ホストのツールチェーンを絶対パスで起動して確かめた）。
+- **clippy の許容基準は決まったが、CI の段が無い** — 基準（`crates/app-shell` と `crates/document-format` に `-D warnings`、3 lint・6 箇所だけ名指しで許容）と**検証済みのゲートコマンド**は下の Implementation Notes（10.1）にあるが、`.github/workflows/ci.yml` には clippy の段が無く、**いまはローカルの善意に依存している**。段を足すのに要る作業: (1) 2 つの `dtolnay/rust-toolchain` の段に `components: clippy` を足す（**既定の profile は minimal で clippy が入らない**）、(2) `cargo clippy -p app-shell -p document-format --all-targets -- -D warnings -A clippy::assertions_on_constants -A clippy::result_large_err -A clippy::wrong_self_convention` を 1 段として走らせる。**→ 2026-09-18 に段を足した**（下の「2026-09-18 の追加（clippy の段を CI へ入れた）」）。**CI ランナー上での実行だけが未確認**である（開発機の `cargo` はコンテナのシムで `cargo-clippy` を持たないので、ホストのツールチェーンを絶対パスで起動して確かめた）。
 - **名指しで許容している 3 lint・6 箇所**（`result_large_err` 1 / `wrong_self_convention` 1 / `assertions_on_constants` 4）と **`src-tauri` の既存 5 警告**（`dead_code` 1 / `format_in_format_args` 1 / `type_complexity` 2 / `bool_comparison` 1）は未着手のままである（前者を片付けたら `-A` を外せる）。
 - **ドリフト検査の失敗メッセージの抜粋がマルチバイトで壊れる**（`bindings_drift.rs` の抜粋の窓を char 境界へ寄せていない。**担当タスクが無いまま残っていた**）。小さいが未割当であり、次に `bindings_drift` を触る変更へ同乗させる。
 - **Windows では要件 3.5 が素の利用者に成立しない**（アクセラレータが WebView2 に消費される。上の Implementation Notes に実測つきで記録）。解消には webview の中でキーを扱い、メニューと同じ処理へ渡す経路（= 新しいコマンド。境界・capability・生成物に触れる）が要る。**受入の限定か後続スペックの起票のどちらかを選ぶ必要がある。**
 - **`ports.rs` / `request_exit` のコメント 2 件の訂正**（プラグインの setup の実行位置の記述）は、次に `src-tauri` を触る変更へ同乗させる（動作に影響しない）。
+
+## 2026-09-18 の追加（clippy の段を CI へ入れた）
+
+棚卸しで「基準は決まったが CI の段が無い」と記録した件を実装した。**`.github/workflows/ci.yml` の `test` ジョブ**に段を 1 つ足し、**`dtolnay/rust-toolchain` の段へ `components: clippy` を足した**（既定の profile は minimal で clippy が入らないため。**audit ジョブの toolchain の段には足していない** — あちらは `cargo audit` と `check-zip-floor.sh` しか走らせず clippy を呼ばない）。
+
+- 段は `if: runner.os == 'Linux'` で **Linux の 1 回だけ**走らせる（clippy の指摘はソースとツールチェーンで決まり OS に依存しない。**下の静的ゲートの群は逆に 3 OS すべてで走らせる** — あちらは「3 OS で同じく動くこと」と「`[target.'cfg(...)'.dependencies]` が他 OS から見えないこと」を確かめており、理由が違うので `if:` を揃えない）。
+- コマンドは 10.1 の**検証済みのゲートコマンドそのもの**: `cargo clippy -p app-shell -p document-format --all-targets -- -D warnings -A clippy::assertions_on_constants -A clippy::result_large_err -A clippy::wrong_self_convention`。段のコメントに、**なぜ 2 クレートだけか・なぜ 3 lint を名指しで許すか**（`assertions_on_constants` は**そのテストの主張そのもの**であり機械的に消してはならない / `result_large_err` と `wrong_self_convention` は**公開署名の変更**が要る）を書いた。
+- **開発機での実測**: ホストのツールチェーンを絶対パスで起動した同じコマンドが **exit 0**（2026-09-18。`document-format` に新しい公開 API を足した後にもう一度確認した）。
+- **未確認**: CI ランナー上での実行はこの開発機では確かめられない（**CI の実行が唯一の確認の場**）。YAML の構文検査は行ったが、`components: clippy` の段が実際に効くことは CI の 1 回目の実行で確かめること。

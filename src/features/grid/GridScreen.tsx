@@ -331,7 +331,7 @@
  * 観測する** — 9.3 のレビューが実測した「2 行を削る変異が生存する」は**この本体の 2 行**
  * （`ports.onVisibleSpanChange(span)` と `ports.onPaintFailed(notice)`）で閉じた（削ると 2 件落ちる）。
  * **効果の側の 3 行**（`installGridRenderHealth` を作る・移植口の 2 つの位置へ渡す・捨てる）は
- * **削っても生存する**（`createGridCopyEntry` や 10.7 の `installDocumentChangeRequests` と同じ
+ * **削っても生存する**（`createGridCopyEntry` や 10.7 の文書の変化の通知の設置と同じ
  * 切り出しの規約の残余であり、実起動の観測が受け取る）。
  *
  * # 8.3〜8.9 への申し送り（本 module が足す予定の場所）
@@ -402,6 +402,9 @@ import {
 
 import { APPEARANCE_VARS } from "../../shell/theme";
 import { assertNever, describeIpcError, type IpcClientResult } from "../../ipc/client";
+// 文書の差し替え・破棄の通知の購読（10.7）。**購読は 1 つである**（裁定により、同じ購読を
+// 写していたグリッド側の module を削ってここへ寄せた。取り直しも購読の側が行う）。
+import { installDocumentSessionChanged } from "../../ipc/documentSession";
 import type {
   ColumnDescriptor,
   DocumentStateResponse,
@@ -482,7 +485,6 @@ import {
   type CopyEntry,
   type PasteEntry,
 } from "./clipboardRequests";
-import { installDocumentChangeRequests } from "./documentRequests";
 import {
   clampSelection,
   followTarget,
@@ -761,21 +763,54 @@ export interface GridScreenModel {
    * 動かない** — どちらも文書を変えていないので、前の報告はまだ「直近の確定」のままである。
    */
   readonly editReport: CellEditReport | null;
+  /**
+   * **いまの提示を組むのに読んだ `document_state` の版**（要件 1.7 の残り。生成物の
+   * `DocumentSummary.revision`）。
+   *
+   * 同じシートのまま**内容だけが本機能の外の経路で変わった**ことを、文書の差し替えの通知で
+   * 見分けるための材料である（[`gridScreenSessionChanged`]）。版は**適用と差し替えのたびに
+   * 1 進む**（`src/ipc/bindings.ts` の `DocumentSummary.revision` の doc）ので、同じシートでも
+   * 版が進んでいれば内容が変わったと言える。
+   *
+   * `null` は「**版を知らない**」である — 提示を組んだ封筒が版を運ばなかった（旧い境界）か、
+   * まだ何も提示していないかである。知らないときは版による検出を**しない**（[`revisionOf`]）。
+   */
+  readonly presentedRevision: number | null;
 }
 
 /** 画面の初期状態（読み込みの前）。 */
 export function initialGridScreenModel(): GridScreenModel {
-  return { attempt: 0, state: { status: "loading" }, notice: null, editReport: null };
+  return {
+    attempt: 0,
+    state: { status: "loading" },
+    notice: null,
+    editReport: null,
+    presentedRevision: null,
+  };
 }
 
-/** 読み込みの結果を入れる。**試行の番号は動かさない**（番号が動くと読み込みが走り直す）。 */
+/**
+ * 読み込みの結果を入れる。**試行の番号は動かさない**（番号が動くと読み込みが走り直す）。
+ *
+ * `revision` は**その提示を組むのに読んだ `document_state` の版**である（要件 1.7 の残り。
+ * [`revisionOf`]）。省略できるのは、**版を知らない読み**（旧い境界）と、提示を組まない読み
+ * （文書なし・シートなしの失敗）があるためであり、そのときは `null` になる — `null` は
+ * 「版による変化の検出をしない」である。
+ */
 export function gridScreenLoaded(
   model: GridScreenModel,
   state: GridScreenState,
+  revision: number | null = null,
 ): GridScreenModel {
   // 開き直しの結果なので、前の告知と前の確定の報告は落とす（古い失敗・古い変換を新しい表示へ
   // 重ねない。開き直せば表の中身そのものが変わりうる）。
-  return { attempt: model.attempt, state, notice: null, editReport: null };
+  return {
+    attempt: model.attempt,
+    state,
+    notice: null,
+    editReport: null,
+    presentedRevision: revision,
+  };
 }
 
 /** 器が捕まえない失敗を告知として積む（**内容の領域と報告は変えない**）。 */
@@ -785,6 +820,7 @@ export function gridScreenFailed(model: GridScreenModel, message: string): GridS
     state: model.state,
     notice: message,
     editReport: model.editReport,
+    presentedRevision: model.presentedRevision,
   };
 }
 
@@ -822,6 +858,7 @@ export function gridScreenSelectionChanged(
     },
     notice: model.notice,
     editReport: model.editReport,
+    presentedRevision: model.presentedRevision,
   };
 }
 
@@ -850,12 +887,20 @@ export function gridScreenNoticeDismissed(model: GridScreenModel): GridScreenMod
     state: model.state,
     notice: null,
     editReport: model.editReport,
+    presentedRevision: model.presentedRevision,
   };
 }
 
 /** 再試行する（**番号を進め、読み込みの状態へ戻す**）。 */
 export function gridScreenRetried(model: GridScreenModel): GridScreenModel {
-  return { attempt: model.attempt + 1, state: { status: "loading" }, notice: null, editReport: null };
+  // **提示を捨てるので、覚えている版も捨てる**（読み込みの効果が新しい版を入れる）。
+  return {
+    attempt: model.attempt + 1,
+    state: { status: "loading" },
+    notice: null,
+    editReport: null,
+    presentedRevision: null,
+  };
 }
 
 /**
@@ -878,6 +923,7 @@ export function gridScreenEditStarted(
     state: { ...model.state, editing: { position, initialText } },
     notice: model.notice,
     editReport: model.editReport,
+    presentedRevision: model.presentedRevision,
   };
 }
 
@@ -923,6 +969,7 @@ export function gridScreenEditReportDismissed(model: GridScreenModel): GridScree
     state: model.state,
     notice: model.notice,
     editReport: null,
+    presentedRevision: model.presentedRevision,
   };
 }
 
@@ -1139,6 +1186,7 @@ export function gridScreenViewSettled(
         },
         notice: model.notice,
         editReport: model.editReport,
+        presentedRevision: model.presentedRevision,
       };
     }
     case "failed":
@@ -1170,6 +1218,7 @@ export function gridScreenDetailOpened(
     state: { ...model.state, detail: { position, edit } },
     notice: model.notice,
     editReport: model.editReport,
+    presentedRevision: model.presentedRevision,
   };
 }
 
@@ -1183,6 +1232,7 @@ export function gridScreenDetailClosed(model: GridScreenModel): GridScreenModel 
     state: { ...model.state, detail: null },
     notice: model.notice,
     editReport: model.editReport,
+    presentedRevision: model.presentedRevision,
   };
 }
 
@@ -1318,6 +1368,7 @@ function gridScreenEditClosed(model: GridScreenModel): GridScreenModel {
     state: { ...model.state, editing: null },
     notice: model.notice,
     editReport: model.editReport,
+    presentedRevision: model.presentedRevision,
   };
 }
 
@@ -1583,6 +1634,7 @@ function appliedRowOperation(
     },
     notice: model.notice,
     editReport: model.editReport,
+    presentedRevision: model.presentedRevision,
   };
 }
 
@@ -1849,21 +1901,54 @@ function presentedSheetOf(state: GridScreenState): string | null {
 }
 
 /**
- * 文書の差し替え・破棄の通知を、**提示へ反映する**（10.7。要件 1.7）。`answer` は通知を受けて
- * 画面が取り直した `document_state` の封筒である（`./documentRequests` の
- * [`installDocumentChangeRequests`]）。
+ * その封筒が運ぶ**文書の版**（要件 1.7 の残り。生成物の `DocumentSummary.revision`）。
  *
- * # 3 つの腕
+ * 版は**適用と差し替えのたびに 1 進む**（同定数の doc）ので、同じシートのまま版だけが進んだ
+ * ことは「**内容だけが本機能の外の経路で変わった**」の材料になる（[`gridScreenSessionChanged`]）。
+ *
+ * `null` は「**版を知らない**」である:
+ *
+ *   - 文書を保持していない（`Absent`）・読み込めなかった（`Unavailable`）・封筒そのものが
+ *     失敗している（経路の不達）
+ *   - **旧い境界が版を運んでいない**（実行時の値が `undefined`）。生成物の型は `number` を
+ *     要求するが、版を足す前の器と組み合わせれば欠けるので、**型ではなく値で見る**
+ *
+ * `null` を「版が変わった」と読んではならない — 変わったことを示す材料が無いのに窓の記憶を
+ * 捨てると、無事な表が消える（同関数の表）。
+ */
+export function revisionOf(answer: IpcClientResult<DocumentStateResponse>): number | null {
+  if (answer.status === "error" || answer.data.status.state !== "Open") {
+    return null;
+  }
+  const revision: unknown = answer.data.status.revision;
+  return typeof revision === "number" ? revision : null;
+}
+
+/**
+ * 文書の差し替え・破棄の通知を、**提示へ反映する**（10.7。要件 1.7）。`answer` は通知を受けて
+ * 購読の側が取り直した `document_state` の封筒である（`src/ipc/documentSession.ts` の
+ * [`installDocumentSessionChanged`]）。
+ *
+ * # 4 つの腕
  *
  * | 取り直した状態 | すること |
  * |---|---|
- * | **同じ文書の同じシート** | **何もしない**（渡された状態機械をそのまま返す）。`grid_open_sheet` も `grid_set_view` も呼ばない — 表をちらつかせない |
+ * | **同じ文書の同じシートで、版も同じ**（または版を知らない） | **何もしない**（渡された状態機械をそのまま返す）。`grid_open_sheet` も `grid_set_view` も呼ばない — 表をちらつかせない |
+ * | **同じ文書の同じシートで、版だけが進んだ** | **窓の記憶を捨てて開き直す**（下の「内容だけの変化」） |
  * | **違う**（文書が無い・シートが差し替わった・文書が現れた） | 提示を組み直し、**いまのセッションと窓の記憶を捨てる**（`state` そのものを差し替えるので、表の面は新しい `sheet` で組み直され、古い行を映す場所が無くなる） |
  * | **確認できなかった**（封筒の失敗） | **提示を動かさない**。何が変わったか分からない状態で表を捨てると、無事な文書の表が消える。告知に理由を出す |
  *
- * **内容だけが変わった場合は本機能では閉じられない。** `document_state` の応答は版を運ばない
- * ので、「同じシートのまま中身が変わった」ことを画面は知り得ない（design.md の Revalidation
- * Triggers を参照）。画面側の推測（定期的な再読・時間による再取得）で代用してはならない
+ * # 内容だけの変化（要件 1.7 の残り）
+ *
+ * 同じシートのまま**内容だけが本機能の外の経路で変わった**ことは、**版**（`DocumentSummary.
+ * revision`）で見分ける — 版は適用と差し替えのたびに 1 進むので、同じシートでも版が進んでいれば
+ * 内容が変わったと言える（[`revisionOf`]）。このときの扱いは**シートが差し替わったときと同じ**
+ * である: 開き直して、古い行を映す場所（窓の記憶）を捨てる。design.md の 10.7 の表が「同じ
+ * シートなら何もしない」と定めているのは**版が変わらない場合**である。
+ *
+ * **版を知らないとき（`null`）は何もしない。** 旧い境界（版を運ばない器）や、まだ何も提示して
+ * いない状態がこれにあたる。変わったことを示す材料が無いのに窓の記憶を捨てると、無事な表が
+ * 消える（[`revisionOf`]）。画面側の推測（定期的な再読・時間による再取得）で代用してはならない
  * （要件 11.6）。
  *
  * **投げない。** 境界の口は封筒の失敗を値で返すが、口そのものが拒否する場合（実装の失敗）も
@@ -1891,7 +1976,17 @@ export async function gridScreenSessionChanged(
     answer.data.status.state === "Open" &&
     answer.data.status.sheets[0]?.id === presented
   ) {
-    return model;
+    const revision = revisionOf(answer);
+    // **版が同じなら何もしない**（表をちらつかせない）。**どちらかの版を知らないときも何もしない**
+    // — 比べる材料が無いのに窓の記憶を捨てると、無事な表が消える（[`revisionOf`]）。知らない
+    // 場合があるのは旧い境界（版を運ばない器）と、版を運ばない封筒で組んだ提示である。
+    if (
+      revision === null ||
+      model.presentedRevision === null ||
+      revision === model.presentedRevision
+    ) {
+      return model;
+    }
   }
 
   try {
@@ -1902,6 +1997,8 @@ export async function gridScreenSessionChanged(
       // **前の文書についての告知と報告は残さない**（差し替わった文書の話では無くなる）。
       notice: null,
       editReport: null,
+      // 覚える版は**この組み直しを駆動した封筒のもの**である（次に届く通知の突き合わせの鍵）。
+      presentedRevision: revisionOf(answer),
     };
   } catch (error: unknown) {
     return gridScreenFailed(
@@ -1927,14 +2024,16 @@ export async function gridScreenSessionChanged(
  * `src-tauri/src/commands/grid.rs` の `with_displayed` の doc が定めるとおり、**適用の後の表示は
  * 画面が `grid_open_sheet` を呼び直して作り直す**。
  *
- * # なぜ文書の変化の通知では足りないのか
+ * # 文書の変化の通知との関係（**1 回の適用で両方が走りうる**）
  *
  * マクロの実行が変更を適用すると、適応層は `DOCUMENT_SESSION_CHANGED_EVENT` を 1 回送る
- * （`src/features/grid/documentRequests.ts` が購読する）。しかし
- * [`gridScreenSessionChanged`] は**同じ文書の同じシート**の通知では何もしない — あの関数の
- * 対象は文書の差し替えであり、内容だけが変わったことを `document_state` から知る手段が無い
- * ためである（同関数の doc）。**内容が変わったことを知っているのは実行の面だけ**であるから、
- * その通知がこの関数を呼ぶ。
+ * （`src/ipc/documentSession.ts` の [`installDocumentSessionChanged`]）。**版による「内容だけの
+ * 変化」の検出（要件 1.7 の残り。2026-09-18）が入った**ので、[`gridScreenSessionChanged`] も
+ * 同じ適用で開き直しを行う（同じシートでも版が進めば組み直す — 同関数の doc）。したがって
+ * 1 回の適用で**開き直しが 2 回**走りうる。本関数を残すのは、実行の面が先に知っていることを
+ * 反映するためである: 開くのは**いま表示しているシート**（先頭とは限らない）であり、**告知と
+ * 報告は残す**（下の 2 節）。二重の開き直しは同じシートを開くので提示は同じものへ収束するが、
+ * 余分な 1 往復は残る（2 つを統合するかは本機能の外の論点である）。
  *
  * # 何を開き直すか
  *
@@ -1970,6 +2069,9 @@ export async function gridScreenSheetReopened(
     // **告知と報告は残す**（文書は差し替わっていない。前の失敗・前の確定は同じ文書の話である）。
     notice: model.notice,
     editReport: model.editReport,
+    // 覚える版は**この開き直しで読んだ封筒のもの**である。進んだ版を覚えないと、同じ内容の
+    // 通知が届くたびに「版だけが進んだ」と読んで開き直し続ける（[`revisionOf`]）。
+    presentedRevision: revisionOf(read),
   };
 }
 
@@ -2629,7 +2731,7 @@ function GridSurface({
     //
     // **判断と結線は `./renderHealth` が持ち、ここは 3 つの口を渡すだけである** — 効果は
     // 走らせないと観測できず、この module の関数本体に結線を書くと**丸ごと削る変異がどの検査にも
-    // 掛からない**（9.3 のレビューが実測した。`createGridCopyEntry` / `./documentRequests` と
+    // 掛からない**（9.3 のレビューが実測した。`createGridCopyEntry` / 文書の変化の通知の設置と
     // 同じ切り出し方である）。
     //
     // 表を組み立て直す（列の構成や行の集合が変わる）たびに**新しい 1 つ**を作る。劣化の記録の
@@ -3982,12 +4084,16 @@ export function GridScreen(): ReactElement {
 
   useEffect(() => {
     let cancelled = false;
-    void loadGridScreenState(DEFAULT_CLIENT).then((state) => {
+    // **取り直した封筒をそのまま開く流れへ渡す**（同じ問い合わせを 2 回にしない）— 版を覚える
+    // ために画面が読むので、`loadGridScreenState` は読み直さない（要件 1.7 の残り）。
+    void (async () => {
+      const answer = await DEFAULT_CLIENT.readDocumentState();
+      const state = await loadGridScreenState(DEFAULT_CLIENT, answer);
       if (cancelled) {
         return;
       }
-      setModel((current) => gridScreenLoaded(current, state));
-    });
+      setModel((current) => gridScreenLoaded(current, state, revisionOf(answer)));
+    })();
     return () => {
       cancelled = true;
     };
@@ -4002,10 +4108,12 @@ export function GridScreen(): ReactElement {
    * `historyEntryRef` と同じ規律である。1 回だけ設置した購読が古い閉包を握ると、突き合わせる
    * 相手が古いままになる）。
    *
-   * 通知は状態を運ばないので、ここで `document_state` を取り直してから突き合わせる
-   * （状態の源は 1 つである。`./documentRequests` の doc）。**遅れて届いた答えは捨てる** —
-   * 2 つの通知が重なったとき、古いほうの組み直しが新しいほうの提示を上書きしないためである
-   * （`traversalRef` / `viewRef` と同じ規律）。
+   * **取り直しは購読の側が行う**（`src/ipc/documentSession.ts` の
+   * [`installDocumentSessionChanged`]。状態の源は 1 つであり、購読も 1 つである — 裁定により、
+   * 同じ購読を写していたグリッド側の module を削ってここへ寄せた）。入口は**取り直した封筒を
+   * 受け取る**ので、ここは「同じシートか・版が進んだか」の判定（`gridScreenSessionChanged`）と、
+   * **遅れて届いた答えを捨てる**勘定だけを持つ — 2 つの通知が重なったとき、古いほうの組み直しが
+   * 新しいほうの提示を上書きしないためである（`traversalRef` / `viewRef` と同じ規律）。
    *
    * **この処理は投げない。** 取り直しは封筒を返す（`invokeCommand` が拒否を封筒へ写す。
    * `src/ipc/client.ts`）ので、ここから上がる例外は無い — 封筒の失敗は「確認できなかった」の
@@ -4015,12 +4123,13 @@ export function GridScreen(): ReactElement {
    * 2 つの効果の**順序**は意味を持つ: 参照を差し替える効果を購読の効果より先に置くので、
    * 購読が設置される時点で入口は既に本物である（マウント時の初期値は 1 度も呼ばれない）。
    */
-  const documentChangeRef = useRef<() => Promise<void>>(async () => undefined);
+  const documentChangeRef = useRef<
+    (answer: IpcClientResult<DocumentStateResponse>) => Promise<void>
+  >(async () => undefined);
   const documentTokenRef = useRef(0);
   useEffect(() => {
-    documentChangeRef.current = async () => {
+    documentChangeRef.current = async (answer) => {
       const token = (documentTokenRef.current += 1);
-      const answer = await DEFAULT_CLIENT.readDocumentState();
       const next = await gridScreenSessionChanged(DEFAULT_CLIENT, model, answer);
       if (token !== documentTokenRef.current) {
         return;
@@ -4029,7 +4138,7 @@ export function GridScreen(): ReactElement {
     };
   });
   useEffect(
-    () => installDocumentChangeRequests(() => void documentChangeRef.current()),
+    () => installDocumentSessionChanged((answer) => void documentChangeRef.current(answer)),
     [],
   );
 

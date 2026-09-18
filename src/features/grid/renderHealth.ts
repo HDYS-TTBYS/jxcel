@@ -652,7 +652,7 @@ export interface GridRenderHealthConnection {
  * 正体は `GridSurface` の組み立ての効果である。効果は React の外から駆動できず、本 module は
  * `node` 環境の検査から組み立てられる（React を読み込まない）ので、**判断と結線の全部をこの
  * 関数へ寄せてある** — 効果の中に残るのは「作る・2 つの位置へ渡す・捨てる」だけである。
- * `createGridCopyEntry` / `createGridPasteEntry`（8.7）と `./documentRequests`（10.7）が同じ形で
+ * `createGridCopyEntry` / `createGridPasteEntry`（8.7）と文書の変化の通知の設置（10.7）が同じ形で
  * 切り出されている。**この形が無いと、2 つの結線（可視区間の知らせと組み立て後の検査）を
  * 丸ごと削る変異がどの検査にも掛からない**（9.3 のレビューが実測した）。
  *

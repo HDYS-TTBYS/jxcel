@@ -97,6 +97,7 @@ import {
   initialGridScreenModel,
   loadEditorReference,
   loadGridScreenState,
+  revisionOf,
   type CellDetail,
   type GridScreenModel,
   type GridScreenState,
@@ -157,7 +158,7 @@ function sheetOf(id: string, name: string, columns: number, rows: number): Docum
 }
 
 /** 開いたドキュメントの状態（`DocumentSessionStatus` の `Open` の腕）。 */
-function openDocument(sheets: readonly DocumentSheet[]): DocumentStateResponse {
+function openDocument(sheets: readonly DocumentSheet[], revision = 1): DocumentStateResponse {
   return {
     context: CONTEXT,
     status: {
@@ -165,10 +166,23 @@ function openDocument(sheets: readonly DocumentSheet[]): DocumentStateResponse {
       name: "標本",
       origin: "new",
       unsaved: false,
-      revision: 1,
+      revision,
       sheets: [...sheets],
     },
   };
+}
+
+/**
+ * **版を運ばない境界**の答え（要件 1.7 の残り。旧い器を相手にしても壊れないことの検査）。
+ *
+ * 生成物の型は `revision: number` を要求するので、写しで作る（実行時の値は `undefined` である）。
+ */
+function openDocumentWithoutRevision(sheets: readonly DocumentSheet[]): DocumentStateResponse {
+  const status = openDocument(sheets).status;
+  if (status.state !== "Open") {
+    throw new Error("`Open` の腕でない");
+  }
+  return { context: CONTEXT, status: { ...status, revision: undefined as unknown as number } };
 }
 
 /**
@@ -3862,12 +3876,20 @@ describe("文書の差し替えと破棄を画面が追随する（10.7。要件
     readonly client: FakeClient;
     readonly model: GridScreenModel;
   }> {
+    const answer = ok(openDocument([sheetOf("s1", "標本シート", 1, 3)]));
     const client = fakeClient({
-      state: ok(openDocument([sheetOf("s1", "標本シート", 1, 3)])),
+      state: answer,
       open: ok(openedSheet({ columns: [descriptor(0, "名前")], row_count: 3 })),
       view: ok(derivedView(3)),
     });
-    const model = gridScreenLoaded(initialGridScreenModel(), await loadGridScreenState(client));
+    // **画面と同じ道で組む** — 読みは境界の口から 1 回だけ行い、その封筒をそのまま開きの流れへ
+    // 渡し、その版を覚える（`GridScreen` の読み込みの効果と `gridScreenLoaded` の第 3 引数）。
+    const read = await client.readDocumentState();
+    const model = gridScreenLoaded(
+      initialGridScreenModel(),
+      await loadGridScreenState(client, read),
+      revisionOf(read),
+    );
     expect(markOf(model)).toContain("jxcel-grid-table");
     return { client, model };
   }
@@ -3939,6 +3961,7 @@ describe("文書の差し替えと破棄を画面が追随する（10.7。要件
   it("同じ文書の同じシートの通知では、開き直しも組み直しも起きない（表をちらつかせない）", async () => {
     const { client, model } = await readyScreen();
 
+    // **同じシートで版も同じ**（`readyScreen` は読みの封筒が運ぶ版を覚えている）通知である。
     const after = await gridScreenSessionChanged(
       client,
       model,
@@ -3955,10 +3978,92 @@ describe("文書の差し替えと破棄を画面が追随する（10.7。要件
     ]);
   });
 
+  it("同じシートのまま版だけが進んだら、窓の記憶を捨てて開き直す（内容だけの変化。要件 1.7 の残り）", async () => {
+    const answers: {
+      state: IpcResult<DocumentStateResponse, IpcClientError>;
+      open: IpcResult<GridOpenResponse, IpcClientError>;
+      view: IpcResult<GridViewResponse, IpcClientError>;
+    } = {
+      state: ok(openDocument([sheetOf("s1", "標本シート", 1, 3)])),
+      open: ok(openedSheet({ columns: [descriptor(0, "名前")], row_count: 3 })),
+      view: ok(derivedView(3)),
+    };
+    const client = fakeClient(answers);
+    const read = await client.readDocumentState();
+    const model = gridScreenLoaded(
+      initialGridScreenModel(),
+      await loadGridScreenState(client, read),
+      revisionOf(read),
+    );
+    expect(model.presentedRevision).toBe(1);
+
+    // **本機能の外の経路が内容だけを変えた**（シートは同じ `s1` のままで、版だけが 1 進む。
+    // 行数も変えて、古い行が残らないことを読めるようにする）。
+    answers.state = ok(openDocument([sheetOf("s1", "標本シート", 1, 1)], 2));
+    answers.open = ok(openedSheet({ columns: [descriptor(0, "名前")], row_count: 1 }, "1"));
+    answers.view = ok(derivedView(1, 0, [], "2"));
+
+    const after = await gridScreenSessionChanged(client, model, answers.state);
+
+    // **新しいシートへ差し替わったときと同じ扱いである** — 開き直して新しいセッションを作り、
+    // 窓の記憶は新しい面が組む（`GridSurface` の組み立ては `sheet` と要約を依存に持つ）ので、
+    // 古い行を映す場所が無い。読みの回数も 1 通知 1 回のままである。
+    expect(client.calls).toEqual([
+      "document_state",
+      "grid_open_sheet:s1",
+      "grid_set_view:000",
+      "grid_open_sheet:s1",
+      "grid_set_view:000",
+    ]);
+    if (after.state.status !== "ready") {
+      throw new Error("表を描く状態にならなかった");
+    }
+    expect(after.state.sheet).toBe("s1");
+    expect(after.state.summary.row_count).toBe(1);
+    // **応答が運ぶ世代をそのまま採用する**（タスク 10.1。数え直さない）。
+    expect(after.state.generation).toBe("2");
+    // 覚える版は**進んだほう**になる（同じ内容の通知でまた開き直さない）。
+    expect(after.presentedRevision).toBe(2);
+    const again = await gridScreenSessionChanged(client, after, answers.state);
+    expect(again).toBe(after);
+  });
+
+  it("版を知らないときは何もしない（旧い境界を相手にしても壊れない。要件 1.7 の残り）", async () => {
+    // ① **提示を組んだ答えが版を運ばない**とき（版を足す前の器との組み合わせ）。
+    const legacy = ok(openDocumentWithoutRevision([sheetOf("s1", "標本シート", 1, 3)]));
+    const client = fakeClient({
+      state: legacy,
+      open: ok(openedSheet({ columns: [descriptor(0, "名前")], row_count: 3 })),
+      view: ok(derivedView(3)),
+    });
+    const model = gridScreenLoaded(
+      initialGridScreenModel(),
+      await loadGridScreenState(client, await client.readDocumentState()),
+      revisionOf(legacy),
+    );
+    expect(model.presentedRevision).toBeNull();
+
+    // 版を運ぶ境界が「進んだ」と告げても、**比べる材料が無いので何もしない**（窓の記憶を
+    // 捨てると、無事な表が消える）。
+    const unknownAtLoad = await gridScreenSessionChanged(
+      client,
+      model,
+      ok(openDocument([sheetOf("s1", "標本シート", 1, 1)], 2)),
+    );
+    expect(unknownAtLoad).toBe(model);
+
+    // ② **取り直した答えが版を運ばない**とき。版を覚えていても、変わったことを示す材料が無い。
+    const known = gridScreenLoaded(initialGridScreenModel(), model.state, 1);
+    const unknownInAnswer = await gridScreenSessionChanged(client, known, legacy);
+    expect(unknownInAnswer).toBe(known);
+    expect(client.calls).toEqual(["document_state", "grid_open_sheet:s1", "grid_set_view:000"]);
+  });
+
   it("表の対象を持っていない提示（読み込み中）では、同じシートの通知でも組み直す", async () => {
-    // **`presentedSheetOf` が `null` を返す腕である**（`loading` / `failed`）。この腕では
-    // 「同じシートだから何もしない」と読んではならない — まだ表の対象を持っていないので、
-    // 通知を無視すると「ドキュメントがありません」のまま留まる（実起動で最も起きる形）。
+    // **`presentedSheetOf` が `null` を返す腕である**（`loading` / `failed`。本検査は `loading`
+    // の腕であり、`failed` の腕は次の検査である）。この腕では「同じシートだから何もしない」と
+    // 読んではならない — まだ表の対象を持っていないので、通知を無視すると「ドキュメントが
+    // ありません」のまま留まる（実起動で最も起きる形）。
     const client = fakeClient({
       state: ok(openDocument([sheetOf("s1", "標本シート", 1, 3)])),
       open: ok(openedSheet({ columns: [descriptor(0, "名前")], row_count: 3 })),
@@ -3975,6 +4080,35 @@ describe("文書の差し替えと破棄を画面が追随する（10.7。要件
     expect(after).not.toBe(model);
     expect(after.state.status).toBe("ready");
     // 組み直しは**渡された状態**から始める（取り直しの往復は増やさない）。
+    expect(client.calls).toEqual(["grid_open_sheet:s1", "grid_set_view:000"]);
+  });
+
+  it("表の対象を持っていない提示（失敗）でも、同じシートの通知で組み直す", async () => {
+    // **`presentedSheetOf` が `null` を返すもう一方の腕である**（`failed`）。開けなかった画面
+    // （文書が無い・読み込めなかった・開けなかった）も表の対象を持っていないので、通知を
+    // 無視すると失敗の提示のまま留まる — **通知が要るのはまさにこの場合である**。
+    const client = fakeClient({
+      state: ok(openDocument([sheetOf("s1", "標本シート", 1, 3)])),
+      open: ok(openedSheet({ columns: [descriptor(0, "名前")], row_count: 3 })),
+      view: ok(derivedView(3)),
+    });
+    const model = gridScreenLoaded(initialGridScreenModel(), {
+      status: "failed",
+      message: "このウィンドウにはドキュメントがありません",
+      canRetry: true,
+    });
+    expect(markOf(model)).toContain("jxcel-grid-failure");
+
+    const after = await gridScreenSessionChanged(
+      client,
+      model,
+      ok(openDocument([sheetOf("s1", "標本シート", 1, 3)])),
+    );
+
+    // **組み直す**（版の突き合わせは表の対象を持つ腕の話であり、この腕は無条件に組み直す）。
+    expect(after).not.toBe(model);
+    expect(after.state.status).toBe("ready");
+    expect(after.presentedRevision).toBe(1);
     expect(client.calls).toEqual(["grid_open_sheet:s1", "grid_set_view:000"]);
   });
 

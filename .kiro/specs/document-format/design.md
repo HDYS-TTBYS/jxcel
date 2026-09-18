@@ -145,7 +145,7 @@ graph TB
 crates/document-format/
 ├── Cargo.toml                    # miniz_oxide 固定、tauri 依存の禁止をコメントで明示
 ├── src/
-│   ├── lib.rs                    # DocumentFormatApi: open / save / parts の公開面
+│   ├── lib.rs                    # DocumentFormatApi: open / save / parts / set_cells / set_rows_values の公開面（set_cells は document-session、set_rows_values は data-grid の取り消しの O(n²) の是正で足した）
 │   ├── error.rs                  # DocumentError: 判別可能なエラー列挙型
 │   ├── ids.rs                    # IdFactory と各 ID 新型（ULID / content-hash）
 │   ├── value.rs                  # CellValue の wire 表現、NaN/Inf 遮断、-0.0 正規化

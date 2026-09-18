@@ -55,16 +55,17 @@ JSON をファイル実体とする、データベースとして運用可能な
 
 **製品から見える（優先して拾う）**
 
-- **大きなマクロの変更の取り消しが 35.2 秒**（適用は 259.9 ms）— 所有: `data-grid`（`write_material_rows` が行の索引を 1 度作る）/ `document-format`（位置で書く口）。両スペックに実測つきで記録済み
+- ~~**大きなマクロの変更の取り消しが 35.2 秒**~~ — **2026-09-18 に閉じた**: `document-format` に一括の口（`Document::set_rows_values`）を足し、`data-grid` の `write_material_rows` が 1 回で書く形にした。**実測 3.1295 s → 1.8534 s（−40.8%）。** 残る内訳は材料の clone 2 回・全列の再検証（下の「新しく見つかった性能」を参照）
 - **未保存のままアプリ全体を終了するとデータが失われる**（`request_exit` は未保存を問わない。ウィンドウを閉じる操作とは別経路）— 所有: `app-shell`（終了経路を拒否可能にする設計変更。`design.md` の Revalidation Triggers と `tasks.md` の棚卸しに記録）
 - **Windows では要件 3.5 が素の利用者に成立しない**（アクセラレータが WebView2 に消費される）— 所有: `app-shell`（受入の限定か後続スペックの起票を選ぶ。`tasks.md` に実測つきで記録）
-- **要件 1.7 の残り**（`document_state` の版で「内容だけの変化」を検出する画面の追随。上流は 2026-09-18 に材料を用意済み）— 所有: `data-grid`
+- ~~**要件 1.7 の残り**~~（`document_state` の版で「内容だけの変化」を検出する画面の追随）— **2026-09-18 に閉じた**（`presentedRevision` と版の比較。vitest 3 件 + 変異で拘束力を確認）
+- **新しく見つかった性能（取り消しの修正の副産物）**: `data-grid` の `ViolationIndex::relink` が変わる行ごとに可視行を線形走査するため、**違反が 10 万行に及ぶ編集では `settle` だけで 5.6 s（適用）/ 14.4 s（取り消し）**（実測）。**同じ形が `EditApply::insert_rows`（既定値の 1 行ずつ）と `duplicate_rows` にもある** — 所有: `data-grid`
 
 **規律・検査の穴（裁定済みか、担当が未割当だったもの）**
 
-- **CI に clippy の段が無い**（許容基準と検証済みのゲートコマンドは `app-shell` の 10.1 で確定済み）— 所有: `app-shell`（`components: clippy` の追加を含む手順を `tasks.md` に書いた）
+- ~~**CI に clippy の段が無い**~~ — **2026-09-18 に閉じた**（`test` ジョブに `if: runner.os == 'Linux'` の段 1 つ + toolchain の `components: clippy`。**CI ランナーでの実行だけが未確認**）
 - **7.2 の一時的な段（`verify-port-interaction.*`）が CI から外れたまま**（列幅と列の移動の観測が 3 OS で自動観測されない）— 所有: `data-grid`（裁定: 9.2 の記録へ移設してから取り除く）
-- **文書の差し替えの購読が二重**（`src/features/grid/documentRequests.ts` と `src/ipc/documentSession.ts` の `installDocumentSessionChanged`）— 所有: `data-grid`（裁定: 1 つへ寄せる）
+- ~~**文書の差し替えの購読が二重**~~（`documentRequests.ts` と `installDocumentSessionChanged`）— **2026-09-18 に閉じた**（写しの module と検査 3 件を削除し、契約は `documentSessionChange.test.ts` へ移した）
 - **`bindings_drift` の失敗メッセージの抜粋がマルチバイトで壊れる**（担当未割当のまま残っていた）— 所有: `app-shell`
 - **`cargo doc` の警告 16 件**（`schema-engine`。ビルドは通る）— 所有: `schema-engine`
 - **`set_cells` の重複セルの契約**（入力順の last-wins）は 2026-09-18 に doc へ明記して閉じた（`document-format`）

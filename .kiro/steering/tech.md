@@ -79,7 +79,7 @@ Cargo ワークスペース（`crates/*` + `src-tauri`）とフロントエン�
 | 生成物のドリフト | `cargo test -p app-shell --test bindings_drift` / `cargo test -p macro-runtime --test macro_host_dts_drift` |
 | 生成物の再生成 | `cargo run -p app-shell --bin generate-bindings`（`src/ipc/bindings.ts`） / `cargo run -p macro-runtime --bin generate-macro-types`（`types/macro-host.d.ts`） |
 | フロントエンドの型検査 / lint / ビルド | `npm run typecheck` / `npm run lint` / `npm run build` |
-| Rust の静的検査 | `cargo clippy --workspace --all-targets`（**qlty からは動かさない** — 指摘を捨てて「0 件」と表示するため `.qlty/qlty.toml` で外してある。理由はその場に書いてある。この開発機ではホストのツールチェーンを絶対パスで起動する — `~/.rustup/toolchains/<stable>/bin/cargo clippy`。シムのコンテナには `cargo-clippy` が無い） |
+| Rust の静的検査 | `cargo clippy --workspace --all-targets`（**qlty からは動かさない** — 指摘を捨てて「0 件」と表示するため `.qlty/qlty.toml` で外してある。理由はその場に書いてある。この開発機ではホストのツールチェーンを絶対パスで起動する — `~/.rustup/toolchains/<stable>/bin/cargo clippy`。シムのコンテナには `cargo-clippy` が無い）。**CI にも段がある**（`test` ジョブ、`if: runner.os == 'Linux'` で 1 回だけ。許容基準は `app-shell/tasks.md` の 10.1） |
 | 整形（Rust） | 触ったファイルへ `/home/hdys/.cargo/bin/rustfmt --edition 2021 <file>` を直接かけ、`--check` で差が無いことを確かめる。**`qlty fmt` は `mod` 宣言が兄弟ファイルを指すファイルで失敗する**（qlty がファイルだけを一時領域へ写すため、rustfmt がモジュール木を解決できず `failed to resolve mod …`。実測: `crates/document-format/src/model/mod.rs`） |
 | ベンチマーク | `cargo bench -p document-format -p schema-engine -p document-session -p data-grid -p macro-runtime -- --save-baseline=main` |
 | 性能予算の判定 | `bash scripts/check-bench-budget.sh` |

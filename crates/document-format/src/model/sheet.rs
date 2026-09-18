@@ -69,7 +69,9 @@ use crate::json::PreservedFields;
 use crate::value::CellValue;
 
 use super::schema_part::SchemaPart;
-use super::{CellWriteError, ReorderError, RowInsertionError, RowRemovalError, UnknownRow};
+use super::{
+    CellWriteError, ReorderError, RowInsertionError, RowRemovalError, RowValuesError, UnknownRow,
+};
 
 /// シート内の行。列順の [`CellValue`] を保持する(design「Domain Model」の
 /// `Row ||--o{ CellValue : holds`)。
@@ -326,6 +328,46 @@ impl Sheet {
         for (row, column, value) in cells {
             let position = index[row];
             self.rows[position].set_cell(*column, value.clone());
+        }
+        Ok(())
+    }
+
+    /// 複数の行の**値の並びをまとめて置き換える**(`Document::set_rows_values` が呼ぶ)。
+    ///
+    /// 各材料は(行識別子, その行の新しい値の並び)である。**事前検査を 1 パスで行う**:
+    /// 行の索引([`RowId`] → `rows` の位置)を 1 度だけ作り(O(行数))、各材料を O(1) で
+    /// 検証するため、合計は O(行数 + 材料数) になる(`Sheet::set_row_values` を材料数だけ
+    /// 繰り返すと対象行の線形探索が毎回走り O(行数 × 材料数) になる)。**検証を通過するまで
+    /// self を一切変更しない**: 未知のシートは呼び出し元([`super::Document`])が、未知の行
+    /// ([`RowValuesError::UnknownRow`])はここが判別可能な変種として返し、1 つでも不正なら
+    /// どの行の値も変更しない(部分適用なし)。
+    ///
+    /// 適用は事前検査で作った索引を再利用して材料ごとに O(1) で行の位置を引く(索引を
+    /// 2 度作らない)。値の並びは**丸ごと差し替える**([`Row::set_values`])ため、材料の幅が
+    /// そのまま行の幅になる — 列数への詰め物も切り詰めもしない(短い行・幅 0 の行も
+    /// そのまま書ける)。行の集合・並び・識別子は変えず、同じ材料の再適用は同じ結果になる
+    /// (置換であって追加ではない)。**同じ行が材料に重複して現れた場合は入力順の
+    /// last-wins** である(入力の並びの順に適用するため、後ろの値の並びが残る)。
+    pub(crate) fn set_rows_values(
+        &mut self,
+        rows: &[(RowId, Vec<CellValue>)],
+    ) -> Result<(), RowValuesError> {
+        // 事前検査フェーズ(失敗時は self を一切変更しない)。
+        let index: HashMap<RowId, usize> = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(position, row)| (row.id(), position))
+            .collect();
+        for (row, _) in rows {
+            if !index.contains_key(row) {
+                return Err(RowValuesError::UnknownRow { row: *row });
+            }
+        }
+        // ここを通ったら全材料が妥当である。索引は上のものを再利用するため、以降の
+        // 失敗経路は無く、行の探索は材料ごとに O(1) である。
+        for (row, values) in rows {
+            self.rows[index[row]].set_values(values.clone());
         }
         Ok(())
     }

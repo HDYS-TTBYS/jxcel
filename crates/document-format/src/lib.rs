@@ -182,8 +182,8 @@ pub use ids::{
 pub use migration::{FormatVersion, MigrationChain, VersionVerdict, CURRENT_FORMAT_VERSION};
 pub use model::{
     Attachment, AttachmentRegistry, CellWriteError, Document, MacroKind, MacroRecord, RawJson,
-    ReorderError, Row, RowInsertionError, RowRemovalError, SchemaPart, Sheet, TypeDef, UnknownRow,
-    UnknownSheet,
+    ReorderError, Row, RowInsertionError, RowRemovalError, RowValuesError, SchemaPart, Sheet,
+    TypeDef, UnknownRow, UnknownSheet,
 };
 pub use value::{from_json_bytes, to_json_bytes, CellValue, NestedValue};
 

@@ -516,7 +516,7 @@ use std::collections::{HashMap, HashSet};
 use document_format::parts::RowsCodec;
 use document_format::{
     from_json_bytes, to_json_bytes, CellValue, CellWriteError, Document, EntryName, Row, RowId,
-    RowInsertionError, RowRemovalError, Sheet, SheetId,
+    RowInsertionError, RowRemovalError, RowValuesError, Sheet, SheetId,
 };
 use schema_engine::{
     validate_columns, validate_sheet, validate_write, Coercion, ColumnIndex, CompiledSchema,
@@ -2311,7 +2311,7 @@ impl EditApply {
     /// 復元の材料を**行の値の並びごと**書く（`RestoreValues` と `RestoreRows` が共有する
     /// 唯一の書き手。要件 9.2 の往復）。
     ///
-    /// [`Document::set_row_values`] は行の値の並びを**置換**する（上流の `Row::set_values` が
+    /// [`Document::set_rows_values`] は行の値の並びを**置換**する（上流の `Row::set_values` が
     /// `self.values = values` である）。これは復元に要る 3 つの性質を同時に満たす唯一の口で
     /// ある:
     ///
@@ -2327,16 +2327,22 @@ impl EditApply {
     ///    キーを 1 つも持てないため幅 0 の行を運べないが、差し戻しの後にここで書けば戻る
     ///
     /// 行の識別子・集合・並びには触れない（置換であって追加でも移動でもない）。
+    ///
+    /// **1 回の呼び出しである。**材料ごとに [`Document::set_row_values`] を繰り返す形は、
+    /// 上流が材料ごとに対象行を線形探索するため O(行数 × 材料数) になる（10 万行の取り消しが
+    /// 要件 11.7 の規模そのものであり、材料も 10 万行になる）。一括の口は行の位置の索引を
+    /// 1 度だけ作り、材料ごとに O(1) で書く（上流の docs「行の探索は 1 度の走査で済ませる」）。
     fn write_material_rows(
         doc: &mut Document,
         sheet: SheetId,
         rows: &[RestoredRow],
     ) -> Result<(), GridError> {
-        for row in rows {
-            doc.set_row_values(sheet, row.id, row.values.clone())
-                .map_err(|error| GridError::UnknownRow { row: error.row })?;
-        }
-        Ok(())
+        let materials: Vec<(RowId, Vec<CellValue>)> = rows
+            .iter()
+            .map(|row| (row.id, row.values.clone()))
+            .collect();
+        doc.set_rows_values(sheet, &materials)
+            .map_err(row_values_error)
     }
 
     /// 復元の材料から [`Row`] を組み立てる（**復元用の内部経路**）。
@@ -2719,6 +2725,19 @@ fn write_error(error: CellWriteError) -> GridError {
             column: ColumnIndex::new(column),
             count: columns,
         },
+    }
+}
+
+/// `document-format` の行の値の並びの一括書き込みの誤りを本クレートの誤り型へ写す。
+///
+/// 2 変種とも本層の事前検査（[`EditApply::usable_columns_of`] の対象シートの存在と、
+/// 復元の材料が運ぶ行の所属）が先に判別する。それでも写しを置く理由は [`write_error`] と
+/// 同じである（上流の誤りを捨てる経路を作らない）。**列の添字を運ぶ腕は無い** —
+/// 行の値の並びの置換は列を名指さないためである。
+fn row_values_error(error: RowValuesError) -> GridError {
+    match error {
+        RowValuesError::UnknownSheet { sheet } => GridError::SchemaUnusable { sheet },
+        RowValuesError::UnknownRow { row } => GridError::UnknownRow { row },
     }
 }
 

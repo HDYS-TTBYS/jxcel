@@ -91,10 +91,15 @@ jobs:
         if: runner.os == 'Linux'
         run: bash scripts/ci/linux/install-system-deps.sh
 
+      # `components: clippy` が要る — `dtolnay/rust-toolchain` の既定 profile は minimal で
+      # clippy が入らないため、下の clippy ゲート（`cargo clippy`）がコマンド不在で落ちる。
+      # この段は 3 OS で走るが、clippy の実体が要るのは Linux の 1 回だけである（追加の
+      # 導入はこの段に `if:` を足すより単純で、matrix の toolchain を 1 箇所に保てる）。
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master (2026-09-03)
         with:
           toolchain: stable
+          components: clippy
 
       # フロントエンドのツールチェーン（React + Vite + TypeScript。tasks.md 1.4 / 1.5）。
       # 本スペックのフロントエンドは `src/` にあり、ビルドは Node 側で行う。Rust の
@@ -137,6 +142,45 @@ jobs:
       # ビルドする。Tauri の依存を加えた状態でこの段が通ることが、以降の検証の前提である。
       - name: Build
         run: cargo build --workspace --all-targets
+
+      # ---------------------------------------------------------------------
+      # clippy ゲート（tasks.md 10.1 の clippy 許容基準。要件 4.3）
+      #
+      # この段だけは **Linux の 1 回だけ**走らせる（`if: runner.os == 'Linux'`）。clippy の
+      # 指摘はソースとツールチェーンで決まり OS に依存しないため、3 OS で 3 倍に走らせる
+      # 価値がない。**下の静的ゲートの群は逆に 3 OS すべてで走らせる**（あちらは「検査
+      # スクリプトが 3 OS のランナーで同じく動くこと」と「`[target.'cfg(...)'.dependencies]`
+      # の依存が他 OS からは見えないこと」を確かめている。理由が違うので `if:` を揃えない）。
+      #
+      # **`-D warnings` を掛けるのは `crates/app-shell` と `crates/document-format` の 2
+      # クレートだけ**である（`--workspace` には掛けない）: `src-tauri` / `macro-runtime` /
+      # `document-session` / `schema-engine` / `data-grid` / `sidecar-smoke` には既存の警告が
+      # 残っており（`src-tauri` だけで `dead_code` 1・`format_in_format_args` 1・
+      # `type_complexity` 2・`bool_comparison` 1 の 5 箇所）、ワークスペース全体へ掛けると
+      # 最初から赤いゲートになる。**名指しで許容するのは残る 3 lint・6 箇所だけ**:
+      #   - `clippy::assertions_on_constants` 4 箇所（`crates/app-shell/src/diagnostics.rs`）。
+      #     **定数条件の `assert!` がそのテストの主張そのもの**であり、消すと「その値である」
+      #     という主張が消える（機械的に消してはならない）。
+      #   - `clippy::result_large_err` 1 箇所（`crates/app-shell/src/accelerator.rs` の
+      #     `AcceleratorRegistry::insert`。`Err` 変種が 168 バイト）。直すには
+      #     `Result<(), Box<AcceleratorConflict>>` への**公開署名の変更**が要り、
+      #     `src-tauri/src/menu.rs` の呼び出し・doctest・下流へ波及する。
+      #   - `clippy::wrong_self_convention` 1 箇所（`crates/document-format/src/lib.rs` の
+      #     トレイト `DocumentFormatApi::from_parts(&self, …)`）。直すには**公開メソッドの
+      #     改名**が要り、`crates/document-session`・`src-tauri` の呼び出しと design.md へ波及する。
+      # **この 3 lint を片付けたら `-A` を外し、2 クレートに `-D warnings` だけを掛ける**
+      # （そのとき `--workspace` へ広げるかは他クレートの残件次第）。許容を増やす変更は
+      # この一覧を更新すること（増えた lint を黙って飲むとゲートが意味を失う）。
+      #
+      # `--all-targets` は lib・bin・統合テスト・ベンチ・example のすべてを対象にする
+      # （`cargo clippy --workspace --all-targets` と同じ集合）。
+      # 前提: `dtolnay/rust-toolchain` の段の `components: clippy`（既定の profile は
+      # minimal で clippy が入らない）。位置は `Build` の直後（同じツールチェーンと
+      # rust-cache の成果をそのまま使う）。
+      # ---------------------------------------------------------------------
+      - name: Clippy (crates/app-shell, crates/document-format; deny warnings)
+        if: runner.os == 'Linux'
+        run: cargo clippy -p app-shell -p document-format --all-targets -- -D warnings -A clippy::assertions_on_constants -A clippy::result_large_err -A clippy::wrong_self_convention
 
       # ---------------------------------------------------------------------
       # 静的ゲート（tasks.md 10.1 / 要件 4.3, 4.7, 9.6）

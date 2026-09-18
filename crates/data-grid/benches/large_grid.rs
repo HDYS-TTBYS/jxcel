@@ -1,7 +1,7 @@
-//! 性能ベンチマーク: 10 万行 × 30 列のシートの窓の符号化・順序の再計算・1 万行の貼り付け
-//! （tasks.md 9.1。要件 11.5, 11.6, 11.7）。
+//! 性能ベンチマーク: 10 万行 × 30 列のシートの窓の符号化・順序の再計算・1 万行の貼り付け・
+//! 10 万行の変更の取り消し（tasks.md 9.1。要件 11.5, 11.6, 11.7）。
 //!
-//! # 計測する対象（design.md「Performance/Load」の 4 本。うち予算の判定は 1 本）
+//! # 計測する対象（design.md「Performance/Load」の 4 本 + 取り消しの 1 本。うち予算の判定は 1 本）
 //!
 //! | bench id | 計測 | 予算 |
 //! |---|---|---|
@@ -9,12 +9,15 @@
 //! | `large_grid/encode_window_10k` | 同じ符号化を**1 万行**の標本で測る（10 倍の行数との比較。要件 11.6） | 絶対値なし |
 //! | `large_grid/recompute_order` | 10 万行 × **2 基準列**の並べ替えと絞り込み（`GridSession::set_view` のフル経路） | 絶対値なし |
 //! | `large_grid/paste_10k` | **1 万行 × 30 列**の貼り付けの適用（`EditCommand::PasteRange`） | **3 秒**（要件 11.5） |
+//! | `large_grid/undo_100k` | **10 万行 × 30 列**の変更の**取り消し**（`GridSession::undo`。要件 11.7 の規模） | 絶対値なし |
 //!
 //! **予算として機械判定するのは `large_grid/paste_10k` だけである**（要件 11.5 が絶対値を
 //! 定める唯一の計測であり、`scripts/check-bench-budget.sh` がその平均を要件値と比較する）。
-//! 残る 3 本は**計測値を criterion のレポートに残す**ためのものであり、判定器へは足さない
+//! 残る 4 本は**計測値を criterion のレポートに残す**ためのものであり、判定器へは足さない
 //! （要件 11.1 / 11.2 / 11.3 の判定の場は**実画面の観測**であり、ベンチではない —
-//! design.md「Performance & Scalability」の表）。
+//! design.md「Performance & Scalability」の表）。`large_grid/undo_100k` は 10 万行の変更の
+//! 取り消しの費用を固定する（`edit` 層の `EditApply::write_material_rows` が材料ごとに行を
+//! 線形探索していた欠陥の再発を、値として見えるようにする）。
 //!
 //! # 要件 11.6（表示のための資源を行数に比例させない）の材料
 //!
@@ -43,12 +46,12 @@
 #[path = "../tests/common/mod.rs"]
 mod common;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use data_grid::{
-    decode_window, CellAddress, ColumnIndex, EditCommand, FilterSpec, GridSession, PasteCodec,
-    RowOrdinal, RowSpan, SortKey, UndoStack, ViewSpec,
+    decode_window, display_text, CellAddress, ColumnIndex, EditCommand, FilterSpec, GridSession,
+    PasteCodec, RowOrdinal, RowSpan, SortKey, UndoStack, ViewSpec,
 };
 
 use common::sample::{sample, SampleOptions};
@@ -77,6 +80,25 @@ const PASTE_SOURCE_ROW: usize = 1;
 
 /// 並べ替えの第 1 基準の列（`備考`。値の種類が少なく同値が多いため、第 2 基準が効く）。
 const SORT_PRIMARY: usize = 19;
+/// 標本で唯一の一意制約つきの列（`品番`。標本の宣言の並びの先頭である）。
+///
+/// 取り消しの計測（[`undo_100k`]）だけが使う — その列だけは**行ごとの値**を打つ。
+/// 1 行の値を全行へ写すと一意制約の違反が 10 万件生まれ、計測が取り消しの書き込みではなく
+/// **違反の索引の更新**になる（同ベンチの「標本」）。
+const UNIQUE_COLUMN: usize = 0;
+
+/// 取り消しの計測（[`undo_100k`]）が打つ列 — 標本の 30 列から、**表形式のテキストから値を
+/// 復元できない 4 列**を除いた 26 列。
+///
+/// 除くのは `添付`（列 9）と入れ子の 3 列（`届け先` 10・`明細` 11・`改訂履歴` 27）である。
+/// これらの列に打てる文字は値（添付の識別子・入れ子の構造）を復元できず、**書けば 1 列あたり
+/// 10 万件の違反が生まれる** — 計測が取り消しの書き込みではなく違反の索引の更新になる。
+/// 打つ列を絞っても**計測する経路は変わらない**: 取り消しの材料は触れた行の**値の並び全体**
+/// （30 列）であり、差し戻しは 10 万行 × 30 列を書く（同ベンチの assertion が
+/// `undone.revalidated_columns` で 30 列を見たことを確かめる）。
+const EDITED_COLUMNS: [usize; 26] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28, 29,
+];
 
 /// 並べ替えの第 2 基準の列（`ロット番号`。書式つきの文字列であり、ほぼ一意である）。
 const SORT_SECONDARY: usize = 21;
@@ -363,5 +385,156 @@ fn paste_10k(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, encode_window, recompute_order, paste_10k);
+/// 10 万行 × 30 列の変更の**取り消し**を計測する（要件 11.7 の規模そのもの）。
+///
+/// # 測るもの
+///
+/// [`GridSession::undo`] の費用**そのもの**である。適用（[`GridSession::apply`]）は計測の外に
+/// 置く — 取り消しの直後は適用前の状態へ戻っているため、反復ごとに「適用 → 取り消し」を
+/// 1 対で走らせ、**取り消しの側だけを時計で囲む**（`Bencher::iter_custom`。criterion は
+/// 返した合計を反復数で割るため、報告される mean は 1 回の取り消しの時間である）。適用を
+/// 計測に含めると、本計測の対象（取り消し）の費用が適用の費用に埋もれる。
+///
+/// # なぜこの計測が要るか
+///
+/// 取り消しの逆命令（`HistoryCommand::RestoreValues`）は、覆った行の**値の並び**を材料として
+/// 運ぶ（`edit` 層の `EditApply::write_material_rows`）。材料ごとに `Document::set_row_values`
+/// を呼ぶ形は、上流が材料ごとに対象行を線形探索するため O(行数 × 材料数) になり、10 万行の
+/// 取り消しが実測で 35 秒台に落ちる（材料も 10 万行である）。本計測はこの経路の費用を固定する。
+///
+/// # 標本（測定条件）
+///
+/// * **10 万行**の全行に `SetCells` を打つ。打つのは [`EDITED_COLUMNS`] の 26 列である
+///   （標本の 30 列から、表形式のテキストから値を復元できない 4 列を除く。理由は同定数の
+///   docs）。**取り消しの材料は触れた行の値の並び全体（30 列）である**ため、差し戻しは
+///   10 万行 × 30 列を書く — 本計測の対象はこの書き込みである。
+/// * 打つ文字は 2 つの源から作る（どちらも本ベンチは値の写しを作らない）:
+///   **一意な列**（[`UNIQUE_COLUMN`]）は**その行自身の値**の表示文字列（`display_text` が
+///   唯一の源）を打ち、**残りの列**は違反を 1 つも持たない行（[`PASTE_SOURCE_ROW`]）の値の
+///   表形式表現（[`PasteCodec`] が唯一の源）を打つ。行ごとに違う値を打つのは、標本の一意な列を
+///   一意なまま保つためである — 1 行の値を全行へ写すと 10 万件の重複の違反が生まれ、計測が
+///   **取り消しの書き込み**ではなく**違反の索引の更新**（`view` 層の差分）を測ってしまう。
+/// * 計測の外で 1 度適用し、**規模と経路**を確かめる — 適用が 10 万行を書き・打った列を
+///   再検証し・違反の総数が行数に対して小さいこと、取り消しが 10 万行を戻し・**30 列**を
+///   見ていること（材料が行の値の並び全体であること）。規模を黙って縮める変更・計測の対象を
+///   取り違える変更はここで失敗する。
+/// * 履歴の上限は 1 である（材料が 10 万行 × 30 列ぶんあるため、上限を既定の 1,000 のままに
+///   すると保持が積み上がる。取り消しの費用は保持する件数に依らない）。
+fn undo_100k(c: &mut Criterion) {
+    let sample = large_sample();
+    // 打つ文字の元にする行が**違反を 1 つも持たない**ことを確かめる（適合する値を打つという
+    // 測定条件そのもの。行 0 は平坦添字 0 の違反を持つ）。
+    assert!(
+        (0..COLUMNS).all(|column| !sample.violation_at(PASTE_SOURCE_ROW, column)),
+        "打つ文字の元にする行（行 {PASTE_SOURCE_ROW}）が違反を持っている"
+    );
+    let plan = sample.compiled();
+    let parts = sample.into_edit_parts();
+    assert_eq!(parts.row_ids.len(), ROWS, "標本の行数が 10 万行でない");
+    assert_eq!(parts.columns.len(), COLUMNS, "標本の列数が 30 列でない");
+
+    // 打つ文字（上の「標本」の 2 つの源。値の写しを作らない）。
+    let sheet = parts
+        .document
+        .sheet_by_id(parts.sheet)
+        .expect("標本のシートは文書にある");
+    let source = sheet.rows()[PASTE_SOURCE_ROW].values().to_vec();
+    let texts = PasteCodec::parse(&PasteCodec::write(&[source]));
+    assert_eq!(texts.len(), 1, "表形式の往復が 1 行を返さない");
+    assert_eq!(texts[0].len(), COLUMNS, "打つ文字の列数が 30 列でない");
+    let conforming = texts.into_iter().next().expect("1 行が返る");
+
+    // 10 万行 × [`EDITED_COLUMNS`] のセルを名指す命令（行の順に、列の昇順に並べる）。
+    let mut cells: Vec<(CellAddress, String)> = Vec::with_capacity(ROWS * EDITED_COLUMNS.len());
+    for row in sheet.rows() {
+        let key = display_text(&row.values()[UNIQUE_COLUMN]).into_owned();
+        for &column in &EDITED_COLUMNS {
+            let text = if column == UNIQUE_COLUMN {
+                key.clone()
+            } else {
+                conforming[column].clone()
+            };
+            cells.push((CellAddress::new(row.id(), ColumnIndex::new(column)), text));
+        }
+    }
+    assert_eq!(
+        cells.len(),
+        ROWS * EDITED_COLUMNS.len(),
+        "命令のセル数が 10 万行 × 26 列でない"
+    );
+    let command = EditCommand::SetCells { cells };
+
+    let mut doc = parts.document;
+    let mut session = GridSession::open(parts.sheet, plan).expect("セッションを開ける");
+    session
+        .set_view(&doc, ViewSpec::default())
+        .expect("表示を指定できる");
+    let mut history = UndoStack::new(1);
+
+    // 計測の外で 1 度適用し、**規模と経路**を確かめる（適用の行数・列数と、取り消しが戻す
+    // 行数）。取り消しの直後は適用前の状態であり、計測の反復の初期状態でもある。
+    let applied = session
+        .apply(&mut doc, &mut history, command.clone())
+        .expect("適用できる");
+    assert_eq!(applied.affected.len(), ROWS, "適用が 10 万行を書いていない");
+    assert_eq!(
+        applied.revalidated_columns.len(),
+        EDITED_COLUMNS.len(),
+        "適用が打った列を再検証していない"
+    );
+    assert!(
+        applied.violation_total < ROWS / 10,
+        "適用後の違反の総数が行数に対して大きすぎる（{} 件）— 計測が違反の索引の更新を測ってしまう",
+        applied.violation_total
+    );
+    assert_eq!(applied.row_count, ROWS, "適用で行数が変わった");
+    let undone = session
+        .undo(&mut doc, &mut history)
+        .expect("取り消せる")
+        .expect("履歴に対がある");
+    assert_eq!(
+        undone.affected.len(),
+        ROWS,
+        "取り消しが 10 万行を戻していない"
+    );
+    assert_eq!(
+        undone.revalidated_columns.len(),
+        COLUMNS,
+        "取り消しが 30 列を見ていない（材料が行の値の並び全体でない）"
+    );
+    assert_eq!(undone.row_count, ROWS, "取り消しで行数が変わった");
+
+    let mut group = c.benchmark_group("large_grid");
+    group.sample_size(SAMPLE_SIZE);
+    group.warm_up_time(Duration::from_secs(3));
+    group.measurement_time(PASTE_MEASUREMENT);
+
+    group.bench_function("undo_100k", |b| {
+        b.iter_custom(|iterations| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iterations {
+                // 適用は計測の外（取り消しの直後は適用前の状態である）。
+                session
+                    .apply(&mut doc, &mut history, command.clone())
+                    .expect("適用できる");
+                let started = Instant::now();
+                let outcome = session.undo(&mut doc, &mut history).expect("取り消せる");
+                elapsed += started.elapsed();
+                // 戻した行を実際に読ませる（取り消しが最適化で消えないようにする）。
+                std::hint::black_box(outcome.expect("履歴に対がある").affected.len());
+            }
+            elapsed
+        })
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    encode_window,
+    recompute_order,
+    paste_10k,
+    undo_100k
+);
 criterion_main!(benches);

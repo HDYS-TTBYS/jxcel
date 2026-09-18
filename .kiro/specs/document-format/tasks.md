@@ -442,3 +442,13 @@
 - **`model → json` の例外を design 本文へ反映**: 上の最終検証の「記録のみ」の 1 件目は「design の記載と実装の例外を突き合わせるのは仕様オーナーの作業」としていた。`design.md` の「依存方向」の行に例外（`PreservedFields` を型として共有するため。逆向きは無い）と裁定の所在（`model/sheet.rs` の doc・タスク 4.8）を追記した。`structure.md`「ドメインクレートの内部構造」の層の鎖にも同じ例外を記録した
 - **Container Entry Layout に `macros.json`（7 形目）を追加**: `macro-runtime` のタスク 1.2 が実装へ足した形が design のエントリ一覧（6 形）に入っていなかった（`DocumentParts` の形の変更は `version-control` の再検証トリガであり、**発火済みなのに design 側が追随していなかった**）。design の一覧へ省略可能な 7 形目として追加し、**形式バージョンは `1.0` のまま**（決定は `macro-runtime/design.md`）であることを併記した。あわせて `crates/document-format/src/entry_name.rs` の doc の「design の 6 形 + マクロ」という表現を「design の 7 形」へ揃えた（**コメントのみ。`parse` の受理集合は不変**）
 - **検証**: `cargo test -p document-format`（上記 2 件は文書とコメントのみのため、挙動の証拠は既存のテストが担う）
+
+## 2026-09-18 の追加（`data-grid` の取り消しの欠陥の是正に必要な口）
+
+`data-grid` の棚卸しで見つかった「10 万行の変更の取り消しが 35.2 秒」を直すため、**行の値の並びをまとめて置き換える公開 API** を 1 つ足した。**既存の API の振る舞いは変えていない**（追加のみ）。
+
+- **足したもの**: `Document::set_rows_values(sheet: SheetId, rows: &[(RowId, Vec<CellValue>)]) -> Result<(), RowValuesError>` と、誤り型 `RowValuesError { UnknownSheet, UnknownRow }`。根の再輸出（`lib.rs`）に `CellWriteError` と同じ位置で並べた。`CellWriteError` を拡張しなかったのは、行の値の並びの置換に列の概念が無く `UnknownColumn` が死んだ変種になるため（`RowRemovalError` と同じ 2 変種の形）。
+- **実装（`model/sheet.rs`）**: 行の位置の索引（`HashMap<RowId, usize>`）を**1 度だけ**作り（O(行数)）、**事前検査を 1 パスで行ってから**同じ索引で書く（合計 O(行数 + 材料数)）。**1 つでも未知の行があれば 1 行も書かない**（部分適用なし）。同じ行の重複は**入力順の last-wins**（`set_cells` と同じ契約。`model/mod.rs` の `set_cells` の doc に両方の契約が書いてある）。
+- **置換の意味論は `set_row_values` と同じ**: 材料の長さがそのまま行の幅になる（**短い行・列数超・幅 0 の並びをそのまま置換できる**）。これは `set_cells` では表せない（`Row::set_cell` は `resize` で伸びるだけで縮まない）ため、復元の経路がこの口を要する（`data-grid` の `write_material_rows` の doc の 3 つの性質）。
+- **検査**: `tests/set_rows_values.rs`（6 件）= 1 回で全部置換・幅 0 の材料で行が空になる・**同じ行の重複は入力順の last-wins**・**未知シート/未知行では 1 行も変えない**・`RowValuesError` が `model` 経由でも到達できる。
+- **実測**（`cargo bench -p data-grid --bench large_grid -- undo_100k`。10 万行 × 30 列の適用 → 取り消し）: **3.1295 s → 1.8534 s（−40.8%。criterion の mean、10 サンプル）**。呼び出し元を材料ごとの `set_row_values` へ一時的に戻して測った値が前者である（**測った後に元へ戻し、痕跡が無いことを確認した**）。

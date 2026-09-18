@@ -90,7 +90,8 @@
 //! 形式破損の診断である。モデル操作の失敗(実在しないシート・行の指定、順列でない並び替え
 //! 要求、位置指定の挿入の範囲外)は表のどの変種にも対応しないため、`DocumentError` に
 //! 増やさず本モジュールの最小ローカル型 [`UnknownSheet`] / [`UnknownRow`] /
-//! [`ReorderError`] / [`CellWriteError`] / [`RowRemovalError`] / [`RowInsertionError`]
+//! [`ReorderError`] / [`CellWriteError`] / [`RowValuesError`] / [`RowRemovalError`] /
+//! [`RowInsertionError`]
 //! とする
 //! ([`IdParseError`](crate::ids::IdParseError) と同じ
 //! 「表に無いものはローカルに暫く置く」パターン)。panic にしないので呼び出し元が
@@ -235,6 +236,33 @@ pub enum CellWriteError {
         column: usize,
         /// 対象シートが持つ列の数(範囲の上界)。
         columns: usize,
+    },
+}
+
+/// [`Document::set_rows_values`] の失敗。
+///
+/// [`UnknownRow`] / [`CellWriteError`] / [`RowRemovalError`] と同じ規律のモデル局所の
+/// 誤り型である: 判別可能な変種がそれぞれ文脈(どのシート・どの行)だけを持ち、表示用の
+/// 文言を持たない(文言は呼び出し元が組み立てる)。design エラー表(I/O・形式診断の
+/// 10 変種)に対応変種が無いため `DocumentError` には含めない。
+///
+/// 2 変種は[`Document::set_rows_values`]の事前検査(1 パス)が判別する: シート自体が
+/// 未知・対象シートに属さない行。[`CellWriteError`] を拡張しないのは、**行の値の並びの
+/// 置換に列の概念が無い**ためである(列の添字を運ぶ `UnknownColumn` はこの経路で
+/// 判別されることがなく、持てば死んだ変種になる)。
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum RowValuesError {
+    /// 指定シート自体が文書に存在しない。
+    #[error("no such sheet in document: {sheet}")]
+    UnknownSheet {
+        /// 指定されたシート識別子。
+        sheet: SheetId,
+    },
+    /// 指定行が対象シートに属さない(他シートの行・他文書の行)。
+    #[error("no row {row} in sheet")]
+    UnknownRow {
+        /// 指定されたが存在しなかった行識別子。
+        row: RowId,
     },
 }
 
@@ -683,6 +711,42 @@ impl Document {
             .find(|s| s.id() == sheet)
             .ok_or(CellWriteError::UnknownSheet { sheet })?
             .set_cells(cells)
+    }
+
+    /// 指定シートの複数の行の**値の並びをまとめて置き換える**(要件 3.5, 3.7 の一括の口)。
+    ///
+    /// `rows` の各要素は(行識別子, その行の新しい値の並び)である。値の個数は**そのまま
+    /// その行の幅になる**: 列数に満たない並びも列数より長い並びもそのまま置き換え
+    /// (`Document::set_row_values` と同じ「追加ではなく置換」)、幅 0 の並びは
+    /// 「値なし 1 件」ではなく「値なしを 1 件も持たない」になる(`Row::set_values` が
+    /// 並びを丸ごと差し替えるため)。セル単位の [`Document::set_cells`] が値を持つ位置まで
+    /// 行を**伸ばす**のに対し、本メソッドは**行を縮められる** — 差し戻し(取り消し)が
+    /// 材料の幅をそのまま戻せる所以である(`crates/data-grid` の `EditApply::write_material_rows`)。
+    ///
+    /// **行の探索は 1 度の走査で済ませる**: 行の位置の索引(行数に対する 1 パス)を 1 度だけ
+    /// 作り、事前検査と適用の双方でそれを引く。合計 O(行数 + 材料数) であり、
+    /// [`Document::set_row_values`] を材料数だけ繰り返す形(材料ごとに線形探索が走るため
+    /// O(行数 × 材料数))にはしない — 10 万行の取り消しが要件 11 の対象である。
+    ///
+    /// 未知のシート([`RowValuesError::UnknownSheet`])・対象シートに属さない行
+    /// ([`RowValuesError::UnknownRow`])は判別可能な変種として返し、**1 つでも不正なら
+    /// どの行の値も変更しない**(部分適用なし。`set_cells` と同じ規律)。
+    ///
+    /// **同じ行が 1 回の呼び出しに重複して現れた場合は、入力順の last-wins** である
+    /// (入力の並びの順に適用するため、後ろの値の並びが残る。決定的であり、順序を入れ替えれば
+    /// 結果も変わる。重複を弾くことも畳むこともしない — [`Document::set_cells`] と同じ契約)。
+    ///
+    /// **行の集合・並び・識別子は変えない**(置換であって追加でも移動でもない)。
+    pub fn set_rows_values(
+        &mut self,
+        sheet: SheetId,
+        rows: &[(RowId, Vec<CellValue>)],
+    ) -> Result<(), RowValuesError> {
+        self.sheets
+            .iter_mut()
+            .find(|s| s.id() == sheet)
+            .ok_or(RowValuesError::UnknownSheet { sheet })?
+            .set_rows_values(rows)
     }
 
     /// 指定シートから複数の行を**1 回の呼び出しで**取り除き、**取り除いた行を返す**
