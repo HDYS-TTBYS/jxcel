@@ -53,7 +53,7 @@
 # | `outcome=ran` | `outcome` | 2.1（実行できた） |
 # | `listed=5` / `names=…`（保存順の 5 件） | `listed` / `names` | 1.3（実行せずに一覧を提示する） |
 # | `changes_set_cells=1`（他 3 つは 0） | `changes.set_cells` ほか | 5.1, 5.5（1 セルだけ書き、その合計を提示する） |
-# | `elapsed_ms` が数値である | `elapsedMs` | 2.3（所要を計測できる形） |
+# | `elapsed_ms` が数値である | `elapsedMs` | 11.3（所要を計測できる形にし、予算を実起動の観測で判定できるようにする。**2.3 ではない** — 2.3 は「戻り値を 1 つの面に提示する」であり、面の側（4.4 の vitest）が判定する） |
 # | `capabilities` が空（標本は宣言しない） | `capabilities` | 8.2（宣言している能力を提示する） |
 # | `outcome=failed` / `layer=execution` / `reason` に例外の文言 | `outcome` / `layer` / `reason` | 9.1（理由） |
 # | `frames` の先頭が `line=3` / `macro_name` は実行した名前 | `frames[i].line` / `.macro_name` / `.column` | 9.1, 9.3（ソース上の位置。**保存されたソースの原位置**） |
@@ -748,7 +748,7 @@ for kind in inserted_rows removed_rows duplicated_rows; do
 done
 case "$(obs_value 1 elapsed_ms)" in
   '' | *[!0-9]*)
-    report_failure "実行の所要が数値ではありません（elapsed_ms=$(obs_value 1 elapsed_ms)。要件 2.3）"
+    report_failure "実行の所要が数値ではありません（elapsed_ms=$(obs_value 1 elapsed_ms)。要件 11.3。**2.3 ではない** — 2.3 は面の側が判定する）"
     ;;
 esac
 # **製品の記録の 1 行**（要件 2.6）: 成否・出力・変更の有無が 1 件残っていること。**出力は行数**
