@@ -147,6 +147,8 @@ import {
 } from "../features/grid/gridObservation";
 import { resolveVerificationInitialScreen } from "./verificationScreen";
 import { SessionClosePrompt } from "./sessionClose";
+import { MACRO_SURFACE_STORE } from "../features/macro/MacroPanel";
+import { installMacroRunRequests } from "../features/macro/requests";
 
 /**
  * 1.4 が置いた初期画面（`InitialScreen`）の識別子。**9.6 以降は既定で表示される画面ではない**
@@ -510,6 +512,16 @@ export function Layout(): ReactElement {
   // メニュー項目も落とさない（選ばれた区画を示した状態でこの画面へ遷移する）。
   useEffect(
     () => installDiagnosticsRequests(router.navigate),
+    [router.navigate],
+  );
+
+  // メニューからのマクロの実行の導線（macro-runtime スペックのタスク 4.4。要件 2.1）。**実行の
+  // 入口はメニューの 1 項目だけである** — 要求を受けると面（グリッド画面の中のパネル）が
+  // 一覧から選ばせ、能力を提示してから実行する。購読をシェルが張るのは、**別の画面を見ている
+  // 間に選ばれた要求を落とさない**ためであり、遷移先の識別子（グリッド画面）を知っているのが
+  // 器だけであるためである（`src/features/macro/requests.ts` の module doc）。
+  useEffect(
+    () => installMacroRunRequests(MACRO_SURFACE_STORE, router.navigate, GRID_SCREEN_ID),
     [router.navigate],
   );
 

@@ -92,6 +92,7 @@ import {
   gridScreenRowOperationSettled,
   gridScreenSelectionChanged,
   gridScreenSessionChanged,
+  gridScreenSheetReopened,
   gridScreenViewSettled,
   initialGridScreenModel,
   loadEditorReference,
@@ -101,6 +102,13 @@ import {
   type GridScreenState,
 } from "./GridScreen";
 import { EMPTY_GRID_VIEW } from "./gridClient";
+// マクロの実行の面（macro-runtime スペックのタスク 4.4）。**本画面が載せる側である** —
+// 実行中でも表が使えることの検査が、偽の保持を渡して実行中の提示を読む。
+import type { MacroSurfaceBinding } from "../macro/MacroPanel";
+import { createMacroSurfaceStore, type MacroSurfaceStore } from "../macro/store";
+import type { MacroClient } from "../macro/macroClient";
+import type { MacroListResponse } from "../../ipc/bindings";
+import type { IpcClientResult } from "../../ipc/client";
 import { REFERENCE_PAGE_SIZE, type ReferenceRows } from "./referenceRows";
 import { createColumnSpace } from "./columnSpace";
 import { DEFAULT_COLUMN_WIDTH, createDisplayState } from "./displayState";
@@ -331,12 +339,15 @@ function failingIndex(): (
 }
 
 /** 状態を描いたマーク付け（画面が実際に DOM へ出すものを読む）。 */
-function markOf(model: GridScreenModel): string {
+function markOf(model: GridScreenModel, macro?: MacroSurfaceBinding): string {
   return renderToStaticMarkup(
     createElement(GridScreenView, {
       model,
       // 効果は走らないので、この口が呼ばれることはない（描かれるものだけを読む）。
       client: fakeClient({ state: err<DocumentStateResponse>() }),
+      // **マクロの実行の面は省略できる**（省略したときは何も描かれない）。実行の面を読む検査
+      // （`markOf(model, binding)`）だけが渡す。
+      ...(macro === undefined ? {} : { macro }),
       onRetry: () => undefined,
       onDismissNotice: () => undefined,
       onDismissEditReport: () => undefined,
@@ -4599,5 +4610,176 @@ describe("表の組み立てと可視区間の知らせを、画面が渡す 3 �
       { fact: "paint_failed", failure: "no_canvas", colors: null },
     ]);
     connection.dispose();
+  });
+});
+
+// ===========================================================================
+// マクロの実行の面との結び付き（macro-runtime スペックのタスク 4.4）
+// ===========================================================================
+
+/**
+ * 実行の面（`../macro`）との結び付きの検査である。**本画面が持つのは 2 つだけである。**
+ *
+ * 1. **適用の後の開き直し**（要件 2.5）— マクロが変更を入れたあと、**いま表示しているシート**を
+ *    `grid_open_sheet` で開き直す（先頭のシートへ勝手に切り替えない）。実行の面から
+ *    「変更が入った」と告げられる入口が `MacroSurfaceBinding.onApplied` であり、その先の処理が
+ *    [`gridScreenSheetReopened`] である
+ * 2. **実行中も表が使えること**（要件 2.2）— パネルは表と同じ画面に並ぶバーであり、実行中に
+ *    足されるのは「実行中」の 1 行だけである（覆いも対話の窓も無い）。**表の面とその操作は
+ *    そのまま描かれる**
+ *
+ * 実行の面自身の流れ（一覧・能力の提示・結果・失敗）は `src/features/macro/*.test.ts` が固定する。
+ */
+describe("マクロの変更の適用後の開き直し（macro-runtime 4.4。要件 2.5）", () => {
+  it("**いま表示しているシート**を開き直す（先頭のシートへ切り替えない）", async () => {
+    const client = fakeClient({
+      state: ok(openDocument([sheetOf("s1", "先頭のシート", 1, 3), sheetOf("s2", "表示中のシート", 1, 3)])),
+      open: ok(openedSheet({ columns: [descriptor(0, "列")], row_count: 3 })),
+      view: ok(derivedView(3)),
+    });
+    // **2 番目のシートを表示している状態を組む**（表示対象は先頭とは限らない。10.x の画面は
+    // シートを選ぶ経路を持たないが、表示の対象は境界の状態から来る）。
+    const model = gridScreenLoaded(
+      initialGridScreenModel(),
+      await loadGridScreenState(client, undefined, "s2"),
+    );
+    const before = [...client.calls];
+
+    const after = await gridScreenSheetReopened(client, model);
+
+    // **開き直すのは表示中のシートである**（`grid_open_sheet:s2`。`s1` ではない）。
+    expect(client.calls.slice(before.length)).toEqual([
+      "document_state",
+      "grid_open_sheet:s2",
+      "grid_set_view:000",
+    ]);
+    if (after.state.status !== "ready") {
+      throw new Error("開き直した結果が表を描く状態にならなかった");
+    }
+    expect(after.state.sheet).toBe("s2");
+    // **告知と報告は残る**（文書は差し替わっていない）。
+    expect(after.notice).toBe(model.notice);
+    expect(after.editReport).toBe(model.editReport);
+    // 読み込みの番号は動かさない（開く効果を走り直させない）。
+    expect(after.attempt).toBe(model.attempt);
+  });
+
+  it("文書に表示中のシートが無ければ先頭へ落ちる（表の対象を失わない）", async () => {
+    const client = fakeClient({
+      state: ok(openDocument([sheetOf("s9", "新しいシート", 1, 2)])),
+      open: ok(openedSheet({ columns: [descriptor(0, "列")], row_count: 2 }, "1")),
+      view: ok(derivedView(2, 0, [], "2")),
+    });
+    // 前の文書のシート（`s1`）を表示していた状態から、文書が差し替わった後を作る。
+    const loaded = await loadGridScreenState(
+      fakeClient({
+        state: ok(openDocument([sheetOf("s1", "前のシート", 1, 1)])),
+        open: ok(openedSheet({ columns: [descriptor(0, "前の列")], row_count: 1 })),
+        view: ok(derivedView(1)),
+      }),
+    );
+
+    const after = await gridScreenSheetReopened(
+      client,
+      gridScreenLoaded(initialGridScreenModel(), loaded),
+    );
+
+    expect(client.calls).toEqual([
+      "document_state",
+      "grid_open_sheet:s9",
+      "grid_set_view:000",
+    ]);
+    if (after.state.status !== "ready") {
+      throw new Error("開き直した結果が表を描く状態にならなかった");
+    }
+    expect(after.state.sheet).toBe("s9");
+  });
+
+  it("状態を読めなければ告知を出し、**表は古いまま残す**（取り違えない）", async () => {
+    const client = fakeClient({
+      state: ok(openDocument([sheetOf("s1", "シート", 1, 3)])),
+      open: ok(openedSheet({ columns: [descriptor(0, "列")], row_count: 3 })),
+      view: ok(derivedView(3)),
+    });
+    const model = gridScreenLoaded(initialGridScreenModel(), await loadGridScreenState(client));
+    const broken = fakeClient({ state: err<DocumentStateResponse>() });
+
+    const after = await gridScreenSheetReopened(broken, model);
+
+    // **表示は動かさない**（何が変わったか分からない状態で表を捨てない）。告知に理由を出す。
+    expect(after.state).toBe(model.state);
+    expect(after.notice).toContain("マクロの変更を表示に反映できませんでした");
+    expect(after.notice).toContain("表示が古い可能性があります");
+    // **成功の腕の再試行の番号は動かさない**（告知から再試行できる。`gridScreenFailed` と同じ形）。
+    expect(after.attempt).toBe(model.attempt);
+  });
+});
+
+describe("実行中も表が使える（macro-runtime 4.4。要件 2.2）", () => {
+  /** 実行が終わらない保持（**実行中のまま**である。境界の約束を解決しない）。 */
+  async function runningStore(): Promise<MacroSurfaceStore> {
+    const listed: IpcClientResult<MacroListResponse> = ok({
+      context: CONTEXT,
+      macros: [
+        { name: "棚卸し", kind: "typescript", capabilities: ["file.read"], failure: null },
+      ],
+    });
+    const client: MacroClient = {
+      list: () => Promise.resolve(listed),
+      run: () => new Promise<never>(() => undefined),
+    };
+    const store = createMacroSurfaceStore(client);
+    store.refresh();
+    await Promise.resolve();
+    await Promise.resolve();
+    store.choose("棚卸し");
+    store.run();
+    return store;
+  }
+
+  it("実行中でも表とその操作が描かれ、覆いも対話の窓も出ない", async () => {
+    const client = fakeClient({
+      state: ok(openDocument([sheetOf("s1", "シート", 2, 3)])),
+      open: ok(
+        openedSheet({ columns: [descriptor(0, "列 A"), descriptor(1, "列 B")], row_count: 3 }),
+      ),
+      view: ok(derivedView(3, 0, [descriptor(0, "列 A"), descriptor(1, "列 B")])),
+    });
+    const model = gridScreenLoaded(initialGridScreenModel(), await loadGridScreenState(client));
+    const store = await runningStore();
+    expect(store.getState().running).toEqual({ name: "棚卸し" });
+
+    const markup = markOf(model, { store, onApplied: () => undefined });
+
+    // **実行中である**（1 行）。
+    expect(markup).toContain('data-macro-running="true"');
+    expect(markup).toContain("実行中: 棚卸し");
+    // **表はそのまま描かれる**（実行が表の表示を置き換えない）。
+    expect(markup).toContain("jxcel-grid-table");
+    // **表の操作もそのまま残る**（数え上げの行・列ごとの操作・表示の操作・行の操作・履歴）。
+    expect(markup).toContain("jxcel-grid-selection-counts");
+    expect(markup).toContain("jxcel-grid-view-bar");
+    expect(markup).toContain("jxcel-grid-row-ops");
+    expect(markup).toContain("jxcel-grid-history");
+    // **覆いも対話の窓も無い**（`aria-modal` も `role="dialog"` も出さない）。
+    expect(markup).not.toContain("aria-modal");
+    expect(markup).not.toContain('role="dialog"');
+    // 表の操作は**押せる形で出る**（実行の面が無効化する操作は 1 つも無い。`disabled` を
+    // 出すのは境界の端で列を動かせない 2 つの操作（`./viewBar`）だけで、実行とは関係が無い）。
+    expect(markup).toContain('data-testid="jxcel-grid-insert-row"');
+    expect(markup).toContain('data-testid="jxcel-grid-undo"');
+  });
+
+  it("実行の面を渡さなければ何も描かない（表の状態だけを読む検査）", async () => {
+    const client = fakeClient({
+      state: ok(openDocument([sheetOf("s1", "シート", 1, 3)])),
+      open: ok(openedSheet({ columns: [descriptor(0, "列")], row_count: 3 })),
+      view: ok(derivedView(3)),
+    });
+    const model = gridScreenLoaded(initialGridScreenModel(), await loadGridScreenState(client));
+
+    const markup = markOf(model);
+    expect(markup).toContain("jxcel-grid-screen");
+    expect(markup).not.toContain("jxcel-macro-panel");
   });
 });

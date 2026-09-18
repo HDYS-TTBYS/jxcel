@@ -366,6 +366,29 @@
  *   本 module は写像を渡すだけであり（`GridSurface` は `summary` から 1 つ引き、巡回は押下ごとに
  *   `summary.columns` から引く）、**バー（`./violationBar`）と `gridScreenNextViolation` は
  *   表示の位置を受け取る側なので変わっていない**
+ *
+ * # 4.4 が載せたもの（マクロの実行の面。**macro-runtime スペック**）
+ *
+ * `macro-runtime` のタスク 4.4 が実行の面を本画面へ載せた。**本 module が担うのは 2 つだけである**
+ * — 面そのもの（一覧・能力の提示・実行中・結果・失敗）は `src/features/macro/` が持つ。
+ *
+ * | 何 | どこ | なぜ本画面か |
+ * |---|---|---|
+ * | パネルの描画（**表と並ぶバー**） | `GridScreenView` の `macro`（[`MacroSurfaceBinding`]）。省略できる | 要件 2.2（実行中も表の表示と操作を止めない）は、**実行の面が表と同じ画面に在る**ことで満たす。覆いも対話の窓も出さない |
+ * | 適用の後の開き直し（要件 2.5） | [`gridScreenSheetReopened`] を `macro` の `onApplied` から呼ぶ | **いま表示しているシート**を知っているのが本画面だからである（先頭のシートへ切り替えない）。適用のあとの表示は古い（`src-tauri/src/commands/grid.rs` の `with_displayed` の doc） |
+ *
+ * **メニューからの要求の購読は本 module ではなく器（`src/shell/Layout.tsx`）が張る** — 要求は
+ * 画面が表示されていない間に届きうるので、購読は画面のマウントより早い必要があり、遷移先の
+ * 識別子を知っているのも器だけだからである（`src/features/macro/requests.ts` の module doc）。
+ *
+ * **取り込みの向きは一方向である**: 本 module → `../macro`。実行の面は本画面を知らない（面の
+ * 保持は module にあり、実行は画面の差し替えを越えて続く）。
+ *
+ * **単体テストが観測しないもの（4.4）**: 実行の面の効果（マウント時の `macro_list`・適用の通知の
+ * 購読）は `node` の環境では走らないので、**結線の 3 行は削っても生存する**（9.3 の残余と同じ
+ * 規律である）。面の流れは `src/features/macro/*.test.ts`、本画面が持つ 2 つは
+ * `GridScreen.test.ts` の「マクロの実行の面との結び付き」節が固定する。実起動での
+ * 「一覧 → 能力の提示 → 実行 → 結果」は 5.1 / 5.2 の観測が受け取る。
  */
 import {
   useCallback,
@@ -482,6 +505,10 @@ import type {
   VisibleSpan,
 } from "./renderer/port";
 import { EMPTY_GRID_VIEW, createGridClient, type GridClient } from "./gridClient";
+// マクロの実行の面（tasks.md 4.4。macro-runtime スペック）。**取り込みの向きは一方向である** —
+// 本 module が本パネルを載せ、本パネルはグリッド画面を知らない（画面の識別子も渡さない。
+// パネルの遷移は `src/shell/Layout.tsx` が担う）。
+import { MacroPanel, MACRO_SURFACE_STORE, type MacroSurfaceBinding } from "../macro/MacroPanel";
 
 /**
  * この画面の識別子。`src/shell/Layout.tsx` の登録簿が同じ綴りを使うための単一の定義である
@@ -1672,10 +1699,18 @@ export function needsViewRefresh(options: {
  * `answer` は**既に読んだ答え**である（省略できる）。文書の差し替えへの追随（10.7）は通知を
  * 受けて `document_state` を 1 回読んでからここへ来るので、**渡されたときは読み直さない** —
  * 同じ問い合わせを 2 回にしないためである（読みの回数は検査が呼び出しの形で数える）。
+ *
+ * `preferredSheet` は**開くシートの識別子**である（省略できる）。省略したときは**先頭の
+ * シート**を開く（開いた直後の規律。シートを選ぶ手段は本機能の外である）。渡すのは 1 か所
+ * だけである — マクロの変更の適用後の開き直し（[`gridScreenSheetReopened`]）は、**いま
+ * 表示しているシート**を開き直す必要がある（文書の先頭とは限らない。**表示しているものを
+ * 画面の都合で別のシートへ切り替えてはならない**）。文書にその識別子が無ければ先頭へ落ちる
+ * （文書が差し替わった直後でも、表の対象を失わないためである）。
  */
 export async function loadGridScreenState(
   client: GridClient,
   answer?: IpcClientResult<DocumentStateResponse>,
+  preferredSheet?: string,
 ): Promise<GridScreenState> {
   const read = answer ?? (await client.readDocumentState());
   if (read.status === "error") {
@@ -1699,7 +1734,11 @@ export async function loadGridScreenState(
     };
   }
 
-  const sheet = session.sheets[0];
+  const sheets = session.sheets;
+  const sheet =
+    preferredSheet === undefined
+      ? sheets[0]
+      : (sheets.find((candidate) => candidate.id === preferredSheet) ?? sheets[0]);
   if (sheet === undefined) {
     return { status: "failed", message: "このドキュメントにはシートがありません", canRetry: true };
   }
@@ -1870,6 +1909,68 @@ export async function gridScreenSessionChanged(
       `文書の差し替えに追随できませんでした: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+}
+
+// ===========================================================================
+// 2.9 マクロの変更の適用後の開き直し（macro-runtime 4.4。要件 2.5）
+// ===========================================================================
+
+/**
+ * **マクロの変更が適用されたあと、いま表示しているシートを開き直す**（macro-runtime スペックの
+ * tasks.md 4.4。要件 2.5）。
+ *
+ * # なぜ画面が開き直すのか
+ *
+ * マクロの変更は `document-session` の 1 回の `edit` として適用される（要件 5.1）。適用は
+ * `data-grid` の適用経路を通るので、**この画面が持っているものは適用の直後には古い** —
+ * 開いたときの要約（行数）・表示の順序・違反の索引は、セッションが開かれた時点のものである。
+ * `src-tauri/src/commands/grid.rs` の `with_displayed` の doc が定めるとおり、**適用の後の表示は
+ * 画面が `grid_open_sheet` を呼び直して作り直す**。
+ *
+ * # なぜ文書の変化の通知では足りないのか
+ *
+ * マクロの実行が変更を適用すると、適応層は `DOCUMENT_SESSION_CHANGED_EVENT` を 1 回送る
+ * （`src/features/grid/documentRequests.ts` が購読する）。しかし
+ * [`gridScreenSessionChanged`] は**同じ文書の同じシート**の通知では何もしない — あの関数の
+ * 対象は文書の差し替えであり、内容だけが変わったことを `document_state` から知る手段が無い
+ * ためである（同関数の doc）。**内容が変わったことを知っているのは実行の面だけ**であるから、
+ * その通知がこの関数を呼ぶ。
+ *
+ * # 何を開き直すか
+ *
+ * **いま表示しているシート**（[`presentedSheetOf`]）である。先頭のシートではない — 表示して
+ * いるものを画面の都合で切り替えてはならない（[`loadGridScreenState`] の `preferredSheet`）。
+ * 文書にそのシートがまだ在ればそれを、無ければ先頭を開く（文書が差し替わった直後でも表の
+ * 対象を失わない）。
+ *
+ * 開き直しは**表示の指定と選択を初期へ戻す**（開いた直後の状態になる）。適用のあとの作り直しで
+ * あり、行列の並びは保証されない（`grid_open_sheet` がセッションを作り直すためである）— これは
+ * 文書の差し替えへの追随（[`gridScreenSessionChanged`]）と同じ扱いである。
+ *
+ * **投げない。** 封筒の失敗は告知に写す（表示は古いままであることを利用者に告げる）。
+ */
+export async function gridScreenSheetReopened(
+  client: GridClient,
+  model: GridScreenModel,
+): Promise<GridScreenModel> {
+  const presented = presentedSheetOf(model.state);
+  const read = await client.readDocumentState();
+  if (read.status === "error") {
+    return gridScreenFailed(
+      model,
+      `マクロの変更を表示に反映できませんでした（表示が古い可能性があります）: ${describeIpcError(
+        read.error,
+      )}`,
+    );
+  }
+  return {
+    // 読み込みの番号は動かさない（動かすと開く効果が走り直し、同じシートをもう一度開く）。
+    attempt: model.attempt,
+    state: await loadGridScreenState(client, read, presented ?? undefined),
+    // **告知と報告は残す**（文書は差し替わっていない。前の失敗・前の確定は同じ文書の話である）。
+    notice: model.notice,
+    editReport: model.editReport,
+  };
 }
 
 // ===========================================================================
@@ -3635,6 +3736,14 @@ export interface GridScreenViewProps {
    * 差し替えの口である（検査は偽の実装を渡せる。8.1 の `loadGridScreenState` と同じ規律）。
    */
   readonly client: GridClient;
+  /**
+   * マクロの実行の面（tasks.md 4.4。macro-runtime スペック）。**省略できる。**
+   *
+   * 省略したときに何も描かないのは、**表の状態だけを読む検査**（`GridScreen.test.ts` の
+   * `markOf`）が、実行の面の状態を持ち込まずに済むようにするためである。実物の画面
+   * （[`GridScreen`]）はつねに渡す。
+   */
+  readonly macro?: MacroSurfaceBinding;
   /** 開く流れをやり直す（失敗の提示の「再試行」）。 */
   readonly onRetry: () => void;
   /** 告知を閉じる。 */
@@ -3706,6 +3815,7 @@ export function GridScreenView({
   onPaintFailed,
   model,
   client,
+  macro,
   onRetry,
   onDismissNotice,
   onDismissEditReport,
@@ -3730,6 +3840,13 @@ export function GridScreenView({
 }: GridScreenViewProps): ReactElement {
   return (
     <section data-testid="jxcel-grid-screen" aria-label="グリッド" style={ROOT_STYLE}>
+      {/*
+        マクロの実行の面（tasks.md 4.4。macro-runtime スペック）。**表より上**（告知よりさらに
+        上）に置く — 実行中でも表と並んで見え、操作を止めない（要件 2.2）。パネルは高さを
+        区切った一覧を持ち、表を押し出さない。省略されたとき（表の状態だけを読む検査）は
+        何も描かない。
+      */}
+      {macro === undefined ? null : <MacroPanel binding={macro} />}
       {model.notice === null ? null : (
         <div data-testid="jxcel-grid-notice" role="status" style={NOTICE_STYLE}>
           <span style={MESSAGE_STYLE}>{model.notice}</span>
@@ -3913,6 +4030,44 @@ export function GridScreen(): ReactElement {
   });
   useEffect(
     () => installDocumentChangeRequests(() => void documentChangeRef.current()),
+    [],
+  );
+
+  /**
+   * マクロの変更の適用後の開き直し（macro-runtime 4.4。要件 2.5）。
+   *
+   * 実行の面（パネル）が**変更が入ったことを知っている唯一の側**なので、その通知
+   * （`MacroSurfaceBinding.onApplied`）でここへ来る。入口を**最新の状態機械を指す参照**に
+   * するのは、購読が 1 回だけ設置されるためである（`documentChangeRef` と同じ規律）。
+   *
+   * **遅れて届いた開き直しは捨てる**（2 つの実行が続いても、古いほうの組み直しが新しいほうの
+   * 表示を上書きしない）。文書の変化の通知（`DOCUMENT_SESSION_CHANGED_EVENT`）とは別の経路で
+   * ある — あちらは文書の差し替えのためであり、内容だけが変わった実行では何もしない
+   * （[`gridScreenSheetReopened`] の doc）。
+   */
+  const macroReloadRef = useRef<() => Promise<void>>(async () => undefined);
+  const macroTokenRef = useRef(0);
+  useEffect(() => {
+    macroReloadRef.current = async () => {
+      const token = (macroTokenRef.current += 1);
+      const next = await gridScreenSheetReopened(DEFAULT_CLIENT, model);
+      if (token !== macroTokenRef.current) {
+        return;
+      }
+      setModel(next);
+    };
+  });
+
+  /**
+   * 実行の面へ渡す結び付け。**`onApplied` は安定でなければならない** — パネルの効果が
+   * 結び付けを依存に持つので、描くたびに新しい関数を渡すと購読が張り直される（
+   * `src/features/macro/MacroPanel.tsx` の `MacroPanel`）。
+   */
+  const macro = useMemo<MacroSurfaceBinding>(
+    () => ({
+      store: MACRO_SURFACE_STORE,
+      onApplied: () => void macroReloadRef.current(),
+    }),
     [],
   );
 
@@ -4145,6 +4300,7 @@ export function GridScreen(): ReactElement {
     <GridScreenView
       model={model}
       client={DEFAULT_CLIENT}
+      macro={macro}
       onRetry={retry}
       onDismissNotice={dismissNotice}
       onDismissEditReport={dismissEditReport}
