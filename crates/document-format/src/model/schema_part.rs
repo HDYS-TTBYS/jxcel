@@ -857,7 +857,7 @@ mod tests {
             format!(r#"{{"root":0,"types":[{{"id":"{ID_A}"}}]}}"#),
             format!(r#"{{"root":0,"types":[{{"id":"{ID_A}","id":"{ID_B}","definition":{{}}}}]}}"#),
             format!(r#"{{"root":0,"types":[{{"id":"{ID_A}","definition":1,"definition":2}}]}}"#),
-            format!(r#"{{"root":0,"types":[{{"id":"not-a-ulid","definition":{{}}}}]}}"#),
+            r#"{"root":0,"types":[{"id":"not-a-ulid","definition":{}}]}"#.to_owned(),
         ];
         for text in &cases {
             invalid_container(text);

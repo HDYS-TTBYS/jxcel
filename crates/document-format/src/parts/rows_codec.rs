@@ -663,7 +663,7 @@ mod tests {
             CellValue::float(index as f64 + 0.5),
             match index % 5 {
                 0 => CellValue::Null,
-                1 => CellValue::Bool(index % 2 == 0),
+                1 => CellValue::Bool(index.is_multiple_of(2)),
                 2 => CellValue::Decimal(format!("{index}.25")),
                 3 => CellValue::Nested(NestedValue::Object(vec![
                     ("z".into(), CellValue::Int(1)),

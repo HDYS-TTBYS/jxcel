@@ -262,32 +262,32 @@ pub fn app_data_base_dir_with(
         if let Some(xdg_data_home) = non_empty_env(lookup, "XDG_DATA_HOME") {
             return Ok(xdg_data_home);
         }
-        return match non_empty_env(lookup, "HOME") {
+        match non_empty_env(lookup, "HOME") {
             Some(home) => Ok(home.join(".local").join("share")),
             None => Err(SettingsError::AppDataDirUnavailable {
                 reason: "XDG_DATA_HOME も HOME も設定されていない".to_owned(),
             }),
-        };
+        }
     }
 
     #[cfg(target_os = "macos")]
     {
-        return match non_empty_env(lookup, "HOME") {
+        match non_empty_env(lookup, "HOME") {
             Some(home) => Ok(home.join("Library").join("Application Support")),
             None => Err(SettingsError::AppDataDirUnavailable {
                 reason: "HOME が設定されていない".to_owned(),
             }),
-        };
+        }
     }
 
     #[cfg(windows)]
     {
-        return match non_empty_env(lookup, "APPDATA") {
+        match non_empty_env(lookup, "APPDATA") {
             Some(app_data) => Ok(app_data),
             None => Err(SettingsError::AppDataDirUnavailable {
                 reason: "APPDATA が設定されていない".to_owned(),
             }),
-        };
+        }
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]

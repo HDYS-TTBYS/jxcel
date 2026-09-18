@@ -518,7 +518,7 @@ fn different_callers_share_the_same_process() {
         .expect("起動中の種類は get が返す");
     assert_eq!(via_get.pid(), from_a.pid(), "get が別のプロセスを報告した");
 
-    let count = count_settled_sidecars(&[from_a.clone()], "共有確認時");
+    let count = count_settled_sidecars(std::slice::from_ref(&from_a), "共有確認時");
     assert_eq!(
         count, 1,
         "種類ごとに高々 1 つのはずである（OS 上のプロセス数 {count}）"
@@ -575,7 +575,7 @@ fn ensure_respawns_after_unexpected_exit() {
     );
 
     // 最初の子は既に回収済みなので、生存しているのは 2 つ目だけである。
-    let count = count_settled_sidecars(&[second.clone()], "再起動後");
+    let count = count_settled_sidecars(std::slice::from_ref(&second), "再起動後");
     assert_eq!(
         count, 1,
         "再起動後も種類ごとに高々 1 つである（OS 上のプロセス数 {count}）"
@@ -625,7 +625,7 @@ fn ensure_itself_respawns_a_dead_registered_child() {
         "ensure が死んだ登録をそのまま返した（起動し直していない）"
     );
 
-    let count = count_settled_sidecars(&[second.clone()], "ensure による再起動後");
+    let count = count_settled_sidecars(std::slice::from_ref(&second), "ensure による再起動後");
     assert_eq!(
         count, 1,
         "ensure の再起動後も種類ごとに高々 1 つである（OS 上のプロセス数 {count}）"
@@ -923,7 +923,7 @@ fn shutdown_all_graceful_stage_precedes_forced_kill() {
     let handle = supervisor.ensure(&spec).expect("起動できる");
     let _guard = SidecarGuard::new(handle.clone());
 
-    let started_count = count_settled_sidecars(&[handle.clone()], "猶予段の検証の前");
+    let started_count = count_settled_sidecars(std::slice::from_ref(&handle), "猶予段の検証の前");
     assert_eq!(
         started_count, 1,
         "猶予信号を無視する子が起動しているはずである（OS 上のプロセス数 {started_count}）"
@@ -1336,11 +1336,10 @@ fn crlf_at_the_pipe_cap_is_trimmed_end_to_end() {
     drop(stdin);
 
     let mut observed: Vec<Vec<u8>> = Vec::new();
-    loop {
-        match recv_event(&events, Duration::from_secs(20), "断片と終了通知") {
-            SidecarEvent::Output { line, .. } => observed.push(line.into_bytes()),
-            SidecarEvent::Exited { .. } => break,
-        }
+    while let SidecarEvent::Output { line, .. } =
+        recv_event(&events, Duration::from_secs(20), "断片と終了通知")
+    {
+        observed.push(line.into_bytes());
     }
 
     // 上限未満・ちょうど・超過（上限 + 1 バイト）・内容 `\r` を含む上限ちょうど・空行。
@@ -1475,20 +1474,18 @@ fn two_independent_subscribers_both_receive_the_events() {
         let mut saw_ready = false;
         let mut saw_echo = false;
         while !(saw_ready && saw_echo) {
-            match recv_event(events, Duration::from_secs(10), name) {
-                SidecarEvent::Output {
-                    stream: SidecarStream::Stdout,
-                    line,
-                    ..
-                } => {
-                    if line.starts_with("sidecar-smoke ready") {
-                        saw_ready = true;
-                    }
-                    if line == "echo: hello" {
-                        saw_echo = true;
-                    }
+            if let SidecarEvent::Output {
+                stream: SidecarStream::Stdout,
+                line,
+                ..
+            } = recv_event(events, Duration::from_secs(10), name)
+            {
+                if line.starts_with("sidecar-smoke ready") {
+                    saw_ready = true;
                 }
-                _ => {}
+                if line == "echo: hello" {
+                    saw_echo = true;
+                }
             }
         }
     }

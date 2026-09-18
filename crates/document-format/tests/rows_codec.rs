@@ -321,11 +321,9 @@ fn rows_with_different_key_columns_are_rejected() {
     let entry = rows_entry(sheet);
     let first = format!(r#"{{"$id":"{ROW_1}","a":1,"b":2}}"#);
     // 対照: 3 行が同じ形なら通る（拒否が形の不一致だけを狙っていること）。
-    let uniform = format!(
-        "{first}\n{}\n{}\n",
-        format!(r#"{{"$id":"{ROW_2}","a":3,"b":4}}"#),
-        format!(r#"{{"$id":"{ROW_3}","a":5,"b":6}}"#),
-    );
+    let second = format!(r#"{{"$id":"{ROW_2}","a":3,"b":4}}"#);
+    let third = format!(r#"{{"$id":"{ROW_3}","a":5,"b":6}}"#);
+    let uniform = format!("{first}\n{second}\n{third}\n");
     let decoded = RowsCodec::decode(&entry, uniform.as_bytes()).expect("同一形の行は通る");
     assert_eq!(3, decoded.rows().len());
 
@@ -573,11 +571,9 @@ fn decoded_rows_expose_the_files_own_column_order() {
     let sheet: SheetId = SHEET_B.parse().expect("標本 ULID");
     let entry = rows_entry(sheet);
     // 列名の並びが呼び出し元の与える順序と違っても、ファイルのキー順がそのまま列順になる。
-    let input = format!(
-        "{}\n{}\n",
-        format!(r#"{{"$id":"{ROW_1}","b":1,"a":2}}"#),
-        format!(r#"{{"$id":"{ROW_2}","b":3,"a":4}}"#),
-    );
+    let first = format!(r#"{{"$id":"{ROW_1}","b":1,"a":2}}"#);
+    let second = format!(r#"{{"$id":"{ROW_2}","b":3,"a":4}}"#);
+    let input = format!("{first}\n{second}\n");
     let decoded: SheetRows = RowsCodec::decode(&entry, input.as_bytes()).expect("復号");
     assert_eq!(sheet, decoded.sheet());
     assert_eq!(vec!["b".to_string(), "a".to_string()], decoded.columns());
@@ -603,11 +599,9 @@ fn keys_outside_the_writers_image_are_rejected() {
     let entry = rows_entry(sheet);
 
     // 像内: 素の列名・`$$` 始まり（`$` 始まり列名のエスケープ形）・完全一致の `$id`。
-    let inside = format!(
-        "{}\n{}\n",
-        format!(r#"{{"$id":"{ROW_1}","plain":1,"$$escaped":2}}"#),
-        format!(r#"{{"$id":"{ROW_2}","plain":3,"$$escaped":4}}"#),
-    );
+    let first = format!(r#"{{"$id":"{ROW_1}","plain":1,"$$escaped":2}}"#);
+    let second = format!(r#"{{"$id":"{ROW_2}","plain":3,"$$escaped":4}}"#);
+    let inside = format!("{first}\n{second}\n");
     let decoded = RowsCodec::decode(&entry, inside.as_bytes()).expect("像内のキーは通る");
     assert_eq!(
         vec!["plain".to_string(), "$escaped".to_string()],
@@ -637,13 +631,11 @@ fn keys_outside_the_writers_image_are_rejected() {
     }
 
     // 2 行目以降でも像外キーは拒否される（キー列の一致検査が先に弾く）。
-    let second = format!(
-        "{}\n{}\n",
-        format!(r#"{{"$id":"{ROW_1}","a":1}}"#),
-        format!(r#"{{"$id":"{ROW_2}","$x":1}}"#),
-    );
+    let row_1 = format!(r#"{{"$id":"{ROW_1}","a":1}}"#);
+    let row_2 = format!(r#"{{"$id":"{ROW_2}","$x":1}}"#);
+    let later = format!("{row_1}\n{row_2}\n");
     let Err(DocumentError::InvalidContainer { entry: label }) =
-        RowsCodec::decode(&entry, second.as_bytes())
+        RowsCodec::decode(&entry, later.as_bytes())
     else {
         panic!("2 行目の像外キーが受理された");
     };

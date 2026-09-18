@@ -497,8 +497,9 @@ pub struct Supervisor {
     /// [`SidecarSupervisor::ensure`] がロックを保持してこの不変条件を守る。
     registry: Arc<Mutex<HashMap<SidecarKind, SidecarHandle>>>,
     verify: Arc<IntegrityVerifier>,
-    /// 猶予段で強制段へ移るまでに待つ時間。本番は [`DEFAULT_GRACE`]、テストは
-    /// [`Supervisor::with_grace`] が短い値を与える。
+    /// 猶予段で強制段へ移るまでに待つ時間。既定値は [`DEFAULT_GRACE`] だが、本番は
+    /// `SIDECAR_SHUTDOWN_GRACE`（`src-tauri/src/lifecycle.rs`）を
+    /// [`Supervisor::with_grace`] で与え、テストは短い値を与える。
     grace: Duration,
     /// 出来事の配布先。起動した子の読み取りスレッドと監視スレッドが共有する。
     subscribers: Arc<Subscribers>,
@@ -556,10 +557,11 @@ impl Supervisor {
         self
     }
 
-    /// 猶予時間を差し替える（テスト seam）。
+    /// 猶予時間を差し替える（テスト seam として用意し、本番でも使う）。
     ///
     /// テストは短い値（数百ミリ秒）を与えて、猶予段と強制段の段階を現実的な時間で観測する。
-    /// 本番は [`DEFAULT_GRACE`] のまま使う。
+    /// 本番は `SIDECAR_SHUTDOWN_GRACE`（`src-tauri/src/lifecycle.rs`。Unix は 3 秒、
+    /// Windows は 300 ms）を与える。
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.grace = grace;
         self
@@ -1355,12 +1357,15 @@ mod tests {
     /// （不一致 0 が合格条件）。
     #[test]
     fn fragments_reconstruct_to_bufread_lines_for_every_string() {
-        const ALPHABET: [u8; 3] = [b'x', b'\r', b'\n'];
+        // 一致しなかった 1 件（入力, 上限, 読み取りの分割, 実際, 参照）。
+        type Mismatch = (Vec<u8>, usize, usize, Vec<String>, Vec<String>);
+
+        const ALPHABET: [u8; 3] = *b"x\r\n";
         const MAX_SYMBOLS: usize = 7;
 
         let mut cases = 0usize;
         let mut mismatches = 0usize;
-        let mut preview: Vec<(Vec<u8>, usize, usize, Vec<String>, Vec<String>)> = Vec::new();
+        let mut preview: Vec<Mismatch> = Vec::new();
         for cap in 1..=8usize {
             for length in 0..=MAX_SYMBOLS {
                 let total = ALPHABET.len().pow(length as u32);

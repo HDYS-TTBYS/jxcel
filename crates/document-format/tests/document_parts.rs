@@ -182,8 +182,11 @@ fn rows(document: &Document) -> Vec<Vec<(String, Vec<CellValue>)>> {
         .collect()
 }
 
+/// ルートスキーマの（ルートバイト列, 型定義識別子, 参照）。
+type SchemaView = (Vec<u8>, Vec<String>, Vec<(String, String)>);
+
 /// ルートスキーマの（ルートバイト列, 型定義識別子, 参照）をシート順に写す。
-fn schemas(document: &Document) -> Vec<(Vec<u8>, Vec<String>, Vec<(String, String)>)> {
+fn schemas(document: &Document) -> Vec<SchemaView> {
     document
         .sheets()
         .iter()

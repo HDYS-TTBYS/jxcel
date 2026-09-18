@@ -404,7 +404,7 @@ impl ManifestPart {
         }
 
         // 入力順は捨て、エントリ名の昇順へ固定する（モジュール docs「索引の順序」）。
-        parts.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        parts.sort_unstable_by_key(|entry| entry.name);
 
         if let Some(pair) = parts.windows(2).find(|pair| pair[0].name == pair[1].name) {
             return Err(invalid_manifest(format!(

@@ -369,7 +369,7 @@ impl DocumentParts {
         }
 
         // 入力順は捨て、エントリ名の昇順へ固定する（design「DocumentParts」の決定的順序）。
-        parts.sort_by(|left, right| left.name.cmp(&right.name));
+        parts.sort_by_key(|part| part.name);
 
         if let Some(pair) = parts.windows(2).find(|pair| pair[0].name == pair[1].name) {
             return Err(invalid(&pair[1].name, "duplicate part entry"));

@@ -201,7 +201,7 @@ impl Blake3Digest {
             return Err(invalid());
         }
         let mut out = [0u8; Self::LEN];
-        for (i, pair) in bytes.chunks_exact(2).enumerate() {
+        for (i, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
             let hi = hex_digit_value(pair[0]).ok_or_else(invalid)?;
             let lo = hex_digit_value(pair[1]).ok_or_else(invalid)?;
             out[i] = hi << 4 | lo;

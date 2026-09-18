@@ -279,8 +279,7 @@ fn failed_write_removes_the_temporary_file_and_rolls_back() {
 
     let error = store
         .set(&BLOCKER_KEY, &"value")
-        .err()
-        .expect("置換は失敗するはず");
+        .expect_err("置換は失敗するはず");
     assert!(
         matches!(error, SettingsError::WriteFailed { .. }),
         "書き込みの失敗として返らない: {error:?}"
@@ -357,10 +356,9 @@ fn concurrent_writes_do_not_lose_updates() {
     let barrier = Arc::new(Barrier::new(CONCURRENT_THREADS));
 
     let mut handles = Vec::new();
-    for thread_index in 0..CONCURRENT_THREADS {
+    for (thread_index, key) in CONCURRENT_KEYS.iter().copied().enumerate() {
         let store = Arc::clone(&store);
         let barrier = Arc::clone(&barrier);
-        let key = CONCURRENT_KEYS[thread_index];
         handles.push(thread::spawn(move || {
             barrier.wait();
             for write_index in 0..CONCURRENT_WRITES_PER_THREAD {
@@ -374,12 +372,10 @@ fn concurrent_writes_do_not_lose_updates() {
     }
 
     // 同じ実体から見える。
-    for thread_index in 0..CONCURRENT_THREADS {
+    for (thread_index, key) in CONCURRENT_KEYS.iter().enumerate() {
         let expected = format!("{thread_index}:{}", CONCURRENT_WRITES_PER_THREAD - 1);
         assert_eq!(
-            store
-                .get::<String>(&CONCURRENT_KEYS[thread_index])
-                .as_deref(),
+            store.get::<String>(key).as_deref(),
             Some(expected.as_str()),
             "スレッド {thread_index} の書き込みが見えない"
         );
@@ -388,12 +384,10 @@ fn concurrent_writes_do_not_lose_updates() {
     // ディスクから開き直しても見える（書き込みは `set` の戻りまでに永続化されている）。
     drop(store);
     let (fresh, _) = open(scratch.path()).expect("開き直せる");
-    for thread_index in 0..CONCURRENT_THREADS {
+    for (thread_index, key) in CONCURRENT_KEYS.iter().enumerate() {
         let expected = format!("{thread_index}:{}", CONCURRENT_WRITES_PER_THREAD - 1);
         assert_eq!(
-            fresh
-                .get::<String>(&CONCURRENT_KEYS[thread_index])
-                .as_deref(),
+            fresh.get::<String>(key).as_deref(),
             Some(expected.as_str()),
             "スレッド {thread_index} の書き込みがディスクに残っていない（失われた更新）"
         );
@@ -1166,7 +1160,7 @@ const CRASH_KEY: SettingsKey = SettingsKey::AppearanceTheme;
 
 /// 長さ `bytes` の、`marker` だけからなる値（状態 A と状態 B で長さを揃える）。
 fn crash_state(marker: char, bytes: usize) -> String {
-    std::iter::repeat(marker).take(bytes).collect()
+    std::iter::repeat_n(marker, bytes).collect()
 }
 
 /// 状態 `marker` だけを持つ設定ファイルのバイト列（親子が同じ関数から作る）。

@@ -900,7 +900,7 @@ mod tests {
     /// 名前）を分散させて確かめる。
     #[test]
     fn columns_are_mandatory_and_preserved_verbatim() {
-        let expected = vec![
+        let expected = [
             ("01K4ANRRG004HMASW9NF6YY093", Vec::new()),
             (
                 "01K4ANRSF804HMASW9QKFG04HM",
@@ -1094,11 +1094,11 @@ mod tests {
             ("sheets 欠落", format!(r#"{{"document_id":"{id}"}}"#)),
             (
                 "document_id が数値",
-                format!(r#"{{"document_id":7,"sheets":[]}}"#),
+                r#"{"document_id":7,"sheets":[]}"#.to_string(),
             ),
             (
                 "document_id が null",
-                format!(r#"{{"document_id":null,"sheets":[]}}"#),
+                r#"{"document_id":null,"sheets":[]}"#.to_string(),
             ),
             (
                 "document_id が ULID でない",

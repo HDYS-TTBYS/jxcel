@@ -536,7 +536,7 @@ mod tests {
         }
 
         // 失敗箇所のラベルはタスク 2.2 のまま（root の失敗は root、型定義の失敗は id）。
-        let root_label = invalid_label(&format!(r#"{{"root":{{"$ref":1}}}}"#));
+        let root_label = invalid_label(r#"{"root":{"$ref":1}}"#);
         assert!(
             root_label.contains("root"),
             "root ラベルが無い: {root_label}"

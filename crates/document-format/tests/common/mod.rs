@@ -229,9 +229,7 @@ pub fn rows(document: &Document) -> Vec<Vec<(String, Vec<CellValue>)>> {
 ///
 /// `definition` の**バイト列**まで含めるのは、`TypeDefId` の一致だけでは
 /// 型定義ペイロードの差を見逃すためである（往復の同一性はここで固定する）。
-pub fn schemas(
-    document: &Document,
-) -> Vec<(Vec<u8>, Vec<(String, Vec<u8>)>, Vec<(String, String)>)> {
+pub fn schemas(document: &Document) -> Vec<SchemaView> {
     document
         .sheets()
         .iter()
@@ -284,19 +282,24 @@ pub fn macros(document: &Document) -> Vec<(String, MacroKind, Vec<u8>)> {
         .collect()
 }
 
+/// シートごとのルートスキーマの射影（[`DocumentView::schemas`] の要素）。
+///
+/// （ルートのバイト列, 型定義の（識別子, `definition` のバイト列）の列, 型参照の（元, 先）の列）。
+pub type SchemaView = (Vec<u8>, Vec<(String, Vec<u8>)>, Vec<(String, String)>);
+
 /// モデルを公開面から余さず写し取った比較用の射影。
 ///
 /// 往復の同一性判定（「完全に同一のモデル」）はこの型の等値で行う。項目の対応は:
 ///
-/// * [`Self::document_id`]: ドキュメント識別子。
-/// * [`Self::sheets`]: シートの**文書順**・識別子・名前・**列名の順序付き一覧**。
-/// * [`Self::rows`]: 行の**行順**・`RowId`・セル値の列（`CellValue` の等値）。
-/// * [`Self::schemas`]: ルートの**バイト列**（決定性の確認を兼ねる）・型定義の
+/// * [`Self::document_id`] — ドキュメント識別子。
+/// * [`Self::sheets`] — シートの**文書順**・識別子・名前・**列名の順序付き一覧**。
+/// * [`Self::rows`] — 行の**行順**・`RowId`・セル値の列（`CellValue` の等値）。
+/// * [`Self::schemas`] — ルートの**バイト列**（決定性の確認を兼ねる）・型定義の
 ///   `TypeDefId` と `definition` の**バイト列**・型参照の（元, 先）。
-/// * [`Self::attachments`]: 添付の識別子とバイト列（全件、識別子の昇順）。
-/// * [`Self::macros`]: マクロの（名前・種別・ソース）の**保存順**の一覧（ソースはバイト列）。
-/// * [`Self::unreferenced_attachments`]: 未参照添付の一覧（往復で落ちていないこと）。
-/// * [`Self::parts`]: モデルの wire 射影（`to_parts` のエントリ名とバイト列）。
+/// * [`Self::attachments`] — 添付の識別子とバイト列（全件、識別子の昇順）。
+/// * [`Self::macros`] — マクロの（名前・種別・ソース）の**保存順**の一覧（ソースはバイト列）。
+/// * [`Self::unreferenced_attachments`] — 未参照添付の一覧（往復で落ちていないこと）。
+/// * [`Self::parts`] — モデルの wire 射影（`to_parts` のエントリ名とバイト列）。
 ///   未知フィールド（保持フィールド）に公開アクセサが無いため、その保持は
 ///   この射影のバイト列で比較する（エンコードは決定的なので、内容が同じなら
 ///   バイト列も同じ。要件 3.1）。
@@ -305,7 +308,7 @@ pub struct DocumentView {
     pub document_id: document_format::DocumentId,
     pub sheets: Vec<(SheetId, String, Vec<String>)>,
     pub rows: Vec<Vec<(String, Vec<CellValue>)>>,
-    pub schemas: Vec<(Vec<u8>, Vec<(String, Vec<u8>)>, Vec<(String, String)>)>,
+    pub schemas: Vec<SchemaView>,
     pub attachments: Vec<(String, Vec<u8>)>,
     pub macros: Vec<(String, MacroKind, Vec<u8>)>,
     pub unreferenced_attachments: Vec<String>,
@@ -660,7 +663,7 @@ pub fn sample_with_unknown_fields(marker: &str) -> Document {
 
 /// エントリの中身を 1 つだけ組み替える（[`entries_with_preserved_fields`] の補助）。
 fn replace_entry(
-    entries: &mut Vec<(EntryName, Vec<u8>)>,
+    entries: &mut [(EntryName, Vec<u8>)],
     name: EntryName,
     rewrite: impl FnOnce(String) -> String,
 ) {

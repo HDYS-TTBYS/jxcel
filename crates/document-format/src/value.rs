@@ -898,8 +898,7 @@ mod tests {
     fn serialize_reports_the_variant_name_and_never_null() {
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let err = serde_json::to_string(&CellValue::Float(bad))
-                .err()
-                .expect("NaN/Inf が Serialize で黙って通った");
+                .expect_err("NaN/Inf が Serialize で黙って通った");
             assert!(
                 err.to_string().contains("NonRepresentableNumber"),
                 "シリアライズエラーに変種名が現れない: {err}"
@@ -1192,7 +1191,7 @@ mod tests {
         let cases: [f64; 9] = [
             0.1 + 0.2,              // 0.30000000000000004(17 有効数字)
             1.0000000000000002,     // 1.0 の次の浮動小数
-            -4.0000000000000009,    // -4 の 1 ULP 下
+            -4.000_000_000_000_001, // -4 の 1 ULP 下
             9007199254740993.0,     // 2^53 + 1(奇数の壁)
             5e-324,                 // 最小非正規数
             f64::MIN_POSITIVE,      // 正規数の最小

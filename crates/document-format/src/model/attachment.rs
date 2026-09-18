@@ -350,7 +350,7 @@ mod tests {
         let deep = registry.add(b"deep".to_vec());
         let orphan = registry.add(b"orphan".to_vec());
 
-        let values = vec![
+        let values = [
             CellValue::Nested(NestedValue::Object(vec![
                 (
                     "ptr".to_string(),
@@ -393,7 +393,7 @@ mod tests {
         let mut registry = AttachmentRegistry::new();
         let id = registry.add(b"payload".to_vec());
         let hex = id.to_hex();
-        let values = vec![
+        let values = [
             CellValue::Text(hex.clone()),
             CellValue::Decimal(hex.clone()),
             CellValue::Nested(NestedValue::Object(vec![(hex.clone(), CellValue::Null)])),
@@ -409,7 +409,7 @@ mod tests {
         let mut registry = AttachmentRegistry::new();
         let stored = registry.add(b"stored".to_vec());
         let stranger = AttachmentId::from_bytes(b"never registered");
-        let values = vec![CellValue::Attachment(stranger)];
+        let values = [CellValue::Attachment(stranger)];
         assert_eq!(
             vec![stored],
             registry.unreferenced_attachments(values.iter())

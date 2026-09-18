@@ -75,12 +75,7 @@ pub fn admit(names: &[&str]) -> Result<Vec<EntryName>, DocumentError> {
 /// 持ち込まない。
 fn duplicate_path<'a>(names: &[&'a str]) -> Option<&'a str> {
     let mut seen: BTreeSet<&'a str> = BTreeSet::new();
-    for name in names {
-        if !seen.insert(name) {
-            return Some(name);
-        }
-    }
-    None
+    names.iter().copied().find(|name| !seen.insert(name))
 }
 
 #[cfg(test)]

@@ -123,17 +123,17 @@ pub fn log_dir_with(
 ) -> Result<PathBuf, DiagnosticsError> {
     #[cfg(target_os = "linux")]
     {
-        return linux_log_dir(lookup);
+        linux_log_dir(lookup)
     }
 
     #[cfg(target_os = "macos")]
     {
-        return macos_log_dir_with(lookup);
+        macos_log_dir_with(lookup)
     }
 
     #[cfg(windows)]
     {
-        return windows_log_dir_with(lookup);
+        windows_log_dir_with(lookup)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
@@ -215,7 +215,9 @@ pub fn windows_log_dir_with(
 /// `log::LevelFilter` へ**そのまま 1 対 1 で**対応付けて適用する（`Off` → `Off`、`Error` →
 /// `Error`、…、`Trace` → `Trace`）。本モジュールは `log` クレートに依存しないため、対応付けは
 /// アダプタ層が持つ。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum DiagnosticsLevel {
     /// 記録しない（`log::LevelFilter::Off`）。
@@ -225,17 +227,12 @@ pub enum DiagnosticsLevel {
     /// 失敗と警告を記録する。
     Warn,
     /// 失敗・警告・通常の出来事を記録する（既定）。
+    #[default]
     Info,
     /// 開発時の詳細を記録する。
     Debug,
     /// 最も細かい記録。
     Trace,
-}
-
-impl Default for DiagnosticsLevel {
-    fn default() -> Self {
-        Self::Info
-    }
 }
 
 impl DiagnosticsLevel {
@@ -538,7 +535,7 @@ fn write_counted<W: Write>(writer: &mut W, bytes: &[u8], total: &mut u64) -> io:
 ///
 /// 原因の分類は `source_failure` が運ぶので、ここでは一時ファイルを破棄させられればよい。
 fn interrupted() -> io::Error {
-    io::Error::new(io::ErrorKind::Other, "記録の読み取りを中断した")
+    io::Error::other("記録の読み取りを中断した")
 }
 
 // ---------------------------------------------------------------------------
