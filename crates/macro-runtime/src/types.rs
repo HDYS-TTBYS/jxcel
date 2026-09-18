@@ -710,7 +710,8 @@ fn without_comments_and_strings(text: &str) -> String {
     while let Some(character) = chars.next() {
         match character {
             '/' if chars.peek() == Some(&'/') => {
-                while let Some(next) = chars.next() {
+                // `by_ref` で借りたまま走査する（`break` した位置から外側の走査が続く）。
+                for next in chars.by_ref() {
                     if next == '\n' {
                         out.push('\n');
                         break;

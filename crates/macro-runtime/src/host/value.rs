@@ -306,7 +306,7 @@ fn scalar_variant(kind: TypeKind) -> Option<ValueVariant> {
 fn number_of(value: f64) -> CellValue {
     // 2^63（`i64::MAX as f64` と同じ丸め上がった値）。
     const TWO_POW_63: f64 = 9_223_372_036_854_775_808.0;
-    if value.fract() == 0.0 && value >= -TWO_POW_63 && value < TWO_POW_63 {
+    if value.fract() == 0.0 && (-TWO_POW_63..TWO_POW_63).contains(&value) {
         CellValue::Int(value as i64)
     } else {
         CellValue::float(value)

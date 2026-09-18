@@ -33,10 +33,7 @@ fn main() {
 
     if let Err(divergence) = macro_runtime::types::check() {
         eprintln!("生成できない（宣言の無い型がある）: {divergence}");
-        eprintln!(
-            "宣言を足すのは {} である。",
-            "crates/macro-runtime/src/types.rs の catalog()"
-        );
+        eprintln!("宣言を足すのは crates/macro-runtime/src/types.rs の catalog() である。");
         std::process::exit(1);
     }
     let generated =

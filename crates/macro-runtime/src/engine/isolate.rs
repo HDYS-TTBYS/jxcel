@@ -982,7 +982,7 @@ fn column_value<'s, 'i>(
     column: &ColumnTypeInfo,
 ) -> Result<v8::Local<'s, v8::Object>, JsErrorBox> {
     let name = string(scope, &column.name)?;
-    let kind = string(scope, &crate::host::value::type_kind_name(column.kind))?;
+    let kind = string(scope, crate::host::value::type_kind_name(column.kind))?;
     let required = v8::Boolean::new(scope, column.required);
     let unique = v8::Boolean::new(scope, column.unique);
     object(

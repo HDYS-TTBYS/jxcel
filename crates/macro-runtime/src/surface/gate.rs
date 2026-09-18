@@ -113,7 +113,7 @@ pub fn check_call(
             return Err(CallRefusal::MissingCapability { api, capability });
         }
     }
-    if !registered.iter().any(|entry| *entry == api.name) {
+    if !registered.contains(&api.name) {
         return Err(CallRefusal::Unimplemented { api });
     }
     Ok(api)
