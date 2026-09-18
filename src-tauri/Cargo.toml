@@ -52,9 +52,9 @@ app-shell = { path = "../crates/app-shell" }
 # クレートにのみ依存し、業務ロジックを持たない）。**本クレート自身は文書を保持しない** —
 # 保持・読み込み・未保存の追跡は `document-session` が所有し、ここはその公開面
 # （`DocumentSessions`）を `Arc` で 1 実体だけ持ち、境界（コマンド・宿主の連鎖）へ写す。
-# 依存方針は `crates/document-session/Cargo.toml` と design.md が定める（本クレートから
-# `document-format` への**通常依存は足さない** — 形式を直接使うのはテストだけであり、
-# 下の `[dev-dependencies]` にだけ置く）。
+# 依存方針は `crates/document-session/Cargo.toml` と design.md が定める（**形式を扱う経路は
+# 本クレートに置かない** — 文書の読み書きは `document-session` の内側だけであり、下の
+# `document-format` への依存は縫い目（`HostPort`）の型を綴るためだけに在る）。
 document-session = { path = "../crates/document-session" }
 
 # グリッドのドメイン（タスク 6.2 のコマンド面が使う。design.md「GridCommands」の
@@ -74,6 +74,57 @@ data-grid = { path = "../crates/data-grid" }
 # 種別が増えたときに気づける検査はここにしか置けない（tasks.md 6.1 の申し送り。検査は
 # `commands/grid.rs` の `type_kind_tag_covers_every_type_kind`）。
 schema-engine = { path = "../crates/schema-engine" }
+
+# マクロの実行基盤（マクロ実行機能。design.md「Allowed Dependencies」はエンジンの依存を
+# `document-format` / `schema-engine` に限り、**アダプタ層にだけ** `document-session` /
+# `data-grid` / 本クレートとの結線を許す）。本クレートが使うのは
+# **ホストの縫い目 `HostPort` と、その周りの型**（`ChangeSet` / `SheetInfo` / `RunRequest` /
+# `MacroActor`）だけである — エンジンは文書を知らず、文書へ繋ぐのはアダプタの仕事である
+# （`src-tauri/src/macro_host.rs`）。
+#
+# ホスト側（`crates/macro-runtime`）とアダプタ（本クレート）を 1 つのビルドで結ぶのは、層の
+# 鎖の終端だからである（`structure.md`「層の鎖」: 文書 → グリッド → アダプタ）。実行基盤は
+# `deno_core` の V8 を抱えるため、**本クレートのビルド時間と配布物の大きさが増える**
+# （実測は `tech.md`「Known Risks」に記録する）。
+macro-runtime = { path = "../crates/macro-runtime" }
+
+# 能力 `net`（`host.netFetch`。要件 8.1）の HTTP クライアント。エンジンは門だけを持ち、
+# **実際に取るのはアダプタ側**である（`macro-runtime` スペックの design.md「Open Questions /
+# Risks」3）。
+#
+# feature を 2 つに絞る:
+#   - `blocking`: ホストの縫い目は**同期の腕**である（`HostPort::net_fetch`）。実行は専用の
+#     スレッドの上で走っているため、非同期の口を呼ぶには実行文脈の外へ出る必要がある。
+#     `blocking` はその 1 経路をクレート側に持たせる。
+#   - `rustls-no-provider`: TLS は `rustls` を使い、**暗号器は自分で据える**（下の `rustls`）。
+#     `rustls` feature（＝ aws-lc-rs）を選ばないのは、aws-lc-rs が CMake と nasm を要する
+#     ためである（ビルドの前提を増やさない）。`native-tls` も採らない — 3 OS の既定 TLS に
+#     委ねる分だけ前提は軽いが、Linux のビルドと配布物に OpenSSL の開発ファイルと共有
+#     ライブラリを要求する（本アプリは追加のライブラリを要さずに起動することを要件にして
+#     いる）。
+# 既定 feature（`charset` / `http2` / `system-proxy`）は、取得の用途（テキストを 1 つ取る）に
+# 要らないので切る。**`tauri` の Linux / Windows ビルドは `reqwest` を引かない**（android と
+# iOS 系だけが引く）ため、`Cargo.lock` には解決として在るが、配布物の依存グラフへは本行が
+# 初めて載せる。
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+
+# `reqwest` の `rustls-no-provider` が要求する**暗号器**（`rustls::crypto::CryptoProvider`）。
+#
+# `rustls` の既定の暗号器は aws-lc-rs（CMake と nasm を要する）であるため、既定 feature を
+# 切って `ring`（C のコンパイラと perl だけで組める）を選ぶ。据え付けはアダプタが
+# `net_fetch` の初回に 1 度だけ行う（`src-tauri/src/macro_host.rs` の
+# `install_crypto_provider`）。`reqwest` と `rustls` の feature は和集合になるため、
+# ここで `ring` を有効にすることが `reqwest` の側にも効く。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+# 値と識別子の型（**縫い目の型だけ**。design.md「Allowed Dependencies」のアダプタの上流）。
+#
+# `macro_runtime::host::HostPort` の署名は `document_format` の型を名指す（`SheetId` /
+# `RowId` / `CellValue`）ため、実装する側はこの 3 つを綴れる必要がある。**形式を扱う経路は
+# 足さない** — 文書の読みは `document-session` の `read` の閉包の内側だけで行い、`Document`
+# を名指す関数を本クレートに置かない（`commands/grid.rs` の同じ規律）。タスク 4.1 の
+# `macro_host.rs` が使うのは、値の型・識別子の型・`Change` の分解だけである。
+document-format = { path = "../crates/document-format" }
 
 # 設定値の形の直列化（タスク 6.3）。`window.geometry` は design.md「Logical Data Model」が
 # **オブジェクト**と定めているため、位置とサイズの 4 フィールドを持つ構造体を derive で
@@ -154,11 +205,8 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsA
 tauri-build = { version = "2.6.3", features = [] }
 
 [dev-dependencies]
-# **テストだけが使う**（配布物の依存グラフへ足さない）。`session/host.rs` の連鎖のテストが、
-# 引き渡しの成功を観測するために**本物の文書**（一時ディレクトリの `.jxcel`）を作る。
-# 本番の経路が形式を直接使うことは無い — 形式を扱うのは `document-session` の内側だけである
-# （`cargo tree -p jxcel` に現れないことを受入で示す）。
-document-format = { path = "../crates/document-format" }
+# テスト専用の依存は無い（`macro_host` のテストが使う `document-format` は、本番の縫い目の
+# 型を綴るために通常依存に在る）。
 
 [features]
 # **検証専用の引き金を有効にする（既定では無効）。**

@@ -435,6 +435,20 @@
 
 ## Implementation Notes
 
+### マクロの実行が実測した取り消しの費用（2026-09-18。**本スペックの領分**）
+
+`macro-runtime` の 4.2（`src-tauri/src/macro_apply.rs`）が、10 万行の変更の**取り消しに 35.2 秒**を
+実測した（同じ条件の**適用は 259.9ms**）。原因は本スペックの `write_material_rows` が行ごとに
+`Document::set_row_values` を呼び、`document-format` の `Sheet::set_row_values` が行を**線形探索**
+する（`rows.iter_mut().find`）ことである。費用は 行数 × 書いた行数。`set_cells` は既に
+「索引を 1 度作る」規律を採っているので、同じ規律を `write_material_rows` 側へ広げるのが素直な修正である
+（`document-format` が位置で書く口を持つ形も考えられる）。
+
+マクロの側で回避する道は無い — 命令語彙に行の値を一括で置換する口が `RestoreValues` しかなく、
+`EditCommand::SetCells` は「打たれた文字」で判定を通るため値の変種が変わり行幅も戻せない。
+**製品から見える**（大きなマクロの変更を取り消すと 35 秒待つ）。本スペックで扱うべき残件として記録する。
+
+
 - **9.2 が確定させたもの（親が記録する）**: 観測の台本は 3 つでできている — 検証専用の観測の画面
   `src/features/grid/gridObservation.tsx`（**製品の `GridScreen` をそのまま描く**）、検査器
   `scripts/check-grid-observation.sh`（POSIX sh。3 OS のランナーで同じものを走らせる）、3 OS の段

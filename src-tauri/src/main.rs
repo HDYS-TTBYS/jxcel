@@ -22,6 +22,8 @@
 mod commands;
 mod dialog;
 mod lifecycle;
+mod macro_apply;
+mod macro_host;
 mod menu;
 mod ports;
 mod session;
