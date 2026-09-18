@@ -1063,12 +1063,18 @@ mod tests {
         assert_eq!(count, names.len(), "2 つの種別が同じ綴りへ潰れている");
     }
 
-    /// 種別の綴りは**変種名そのもの**である（`app-shell` の `TypeKindTag` と同じ綴りであり、
-    /// `src-tauri` の検査が `format!("{kind:?}")` で両者を突き合わせる）。
+    /// 種別の綴りは**変種名そのもの**である（`host/value.rs` の `type_kind_name` の
+    /// 網羅 `match` を、変種名の綴りに固定する）。
     ///
-    /// 綴りの `match` は手で書かれており（`host/value.rs` の `type_kind_name`）、
-    /// **網羅性は rustc が守るが、綴りの正しさは守らない**。1 つでもずれればこの検査が落ちる
-    /// — `TypeKind::ALL` を走査した合併型と、実行時の札が食い違う状態を作らない。
+    /// 同じ概念の IPC 境界の札（`app-shell/src/ipc/grid.rs` の `TypeKindTag`）も同じ綴りを
+    /// 採っており、`src-tauri/src/commands/grid.rs` の検査（`type_kind_tag_covers_every_type_kind`）
+    /// が `TypeKind` と `TypeKindTag` の綴りを突き合わせている。**本クレートから `app-shell`
+    /// は参照できない**（層の鎖）ため、`type_kind_name` と `TypeKindTag` を直接突き合わせる
+    /// 検査は無い（`host/value.rs` の doc の**申し送り**）。
+    ///
+    /// 綴りの `match` は手で書かれており、**網羅性は rustc が守るが、綴りの正しさは守らない**。
+    /// 1 つでもずれればこの検査が落ちる — `TypeKind::ALL` を走査した合併型と、実行時の札が
+    /// 食い違う状態を作らない。
     #[test]
     fn the_kind_spelling_is_the_variant_name() {
         for kind in TypeKind::ALL {
