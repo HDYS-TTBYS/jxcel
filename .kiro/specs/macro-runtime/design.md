@@ -160,6 +160,10 @@ crates/macro-runtime/
 └── src/
     ├── lib.rs                  # 層の鎖の宣言と公開面の再輸出
     ├── error.rs                # MacroError（判別可能な列挙。表示の文言を持たない）
+    │                           # ※ 2026-09-18 の実装では独立したファイルを置かず、外から見える
+    │                           #   エラー（MacroError: busy / stopped）は api.rs に置いた。層の内側の
+    │                           #   失敗は engine/outcome.rs の MacroFailure が担う（層ごとに失敗の型が
+    │                           #   あるため、共通の error モジュールは要らなかった）
     ├── source/
     │   ├── mod.rs              # 層: マクロの記録とソースの解釈
     │   ├── record.rs           # MacroRecord / MacroKind / 名前の規則 / パートの往復
