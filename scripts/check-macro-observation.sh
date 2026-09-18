@@ -160,7 +160,8 @@ EXPECTED_FAILURE_REASON='検証用の失敗'
 
 # `標本の拒否` の拒否の層（要件 8.3, 9.2）。層は `host_rejected:<拒んだ API の名前>` の形で
 # 運ばれる（`verificationMacroRun.ts` の `flattenFailure`）。**能力の名前は `reason` の欄に
-# 現れる**（拒否の理由は `host api host.fileRead requires capability file.read` である）。
+# 現れる**（拒否の理由は「ホスト API host.fileRead には能力 file.read の宣言が要る」である。
+# 2026-09-18 にエンジンの理由を日本語へ揃えたため、引用を追随させた）。
 EXPECTED_REJECTION_LAYER='host_rejected:fileRead'
 EXPECTED_REJECTION_CAPABILITY='file.read'
 # `標本の拒否` が `host.fileRead` を呼ぶ位置（**保存されたソースの原位置**。9.2）。2 行目の

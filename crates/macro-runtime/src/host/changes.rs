@@ -206,7 +206,7 @@ impl fmt::Display for ChangeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RemovedRow { sheet, row } => {
-                write!(f, "row {row} of sheet {sheet} has been removed in this run")
+                write!(f, "行 {row} はこの実行で既に削除された（シート {sheet}）")
             }
         }
     }

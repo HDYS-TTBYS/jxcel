@@ -76,14 +76,14 @@ impl CallRefusal {
 impl fmt::Display for CallRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownApi { name } => write!(f, "unknown host api {name}"),
+            Self::UnknownApi { name } => write!(f, "知らないホスト API {name}"),
             Self::MissingCapability { api, capability } => write!(
                 f,
-                "host api {} requires capability {capability}",
+                "ホスト API {} には能力 {capability} の宣言が要る",
                 api.js_name()
             ),
             Self::Unimplemented { api } => {
-                write!(f, "host api {} is not implemented", api.js_name())
+                write!(f, "ホスト API {} の実体がまだ無い", api.js_name())
             }
         }
     }

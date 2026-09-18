@@ -28,8 +28,30 @@
  * 直接呼ばれる。`src/shell/ScreenBoundary.tsx` はイベントハンドラと非同期の失敗を捕まえないので、
  * ここから例外を出さない — 境界の口（[`MacroClient`]）は封筒を返し（`src/ipc/client.ts` の
  * `invokeCommand` は拒否を封筒へ写す）、失敗は面の状態として現れる。
+ *
+ * # 一覧を求める前に、文書が付いているかを見る（**起動直後の一過性の失敗を出さない**）
+ *
+ * 一覧は**そのウィンドウの文書の中身**である。したがって文書がまだ関連付いていないウィンドウ
+ * （起動直後。パネルは文書の読み込みより先にマウントされる）で `macro_list` を求めると、
+ * 呼び出しは経路の失敗として返り、**器はそれを記録に 1 行の失敗として書き**（`log::error!`）、
+ * 面は「読み込めませんでした」を一瞬出す。実害は薄い（文書が付いた時点の通知で取り直して
+ * 成功する）が、記録の雑音であり、利用者にも失敗が見える。
+ *
+ * そこで [`MacroSurfaceStore.refresh`] は `macro_list` の前に `document_state` を読む:
+ *
+ * | 状態 | すること |
+ * |------|---------|
+ * | `Open` | 一覧を求める（**呼ぶのはこの腕だけである**） |
+ * | `Absent` | **何もしない**（一覧は「読み込み中」のまま。文書が付いた時点の通知が取り直す） |
+ * | `Unavailable` | 一覧は失敗であり、理由は**文書が読めなかった理由**をそのまま出す |
+ *
+ * `Absent` を失敗にしないのは、それが**失敗ではなく順序**（文書はこれから付く）だからである。
+ * 待つのを解くのは [`./requests`] の [`installMacroListRefresh`]（`DOCUMENT_SESSION_CHANGED_EVENT`
+ * の購読）であり、面は要求を足さない。この読みは冪等であり、**文書の解決そのもの**でもある
+ * （`src-tauri/src/session/commands.rs` の `document_state` は生成要求の位置を最初のアクセスで
+ * 解決する。要件 1.2）ので、起動直後の読みはそのまま `Open` を返す。
  */
-import { describeIpcError } from "../../ipc/client";
+import { assertNever, describeIpcError } from "../../ipc/client";
 import type { MacroClient } from "./macroClient";
 import {
   initialMacroSurfaceState,
@@ -56,6 +78,10 @@ export interface MacroSurfaceStore {
   subscribe: (listener: () => void) => () => void;
   /**
    * 一覧を取り直す（要件 1.3、1.4）。**画面のマウント時と、文書が差し替わったとき**に呼ぶ。
+   *
+   * **文書がまだ関連付いていないときは一覧を求めない**（module doc「一覧を求める前に、文書が
+   * 付いているかを見る」）。`document_state` を先に読み、`Open` のときだけ `macro_list` を
+   * 呼ぶ — `Absent` は失敗ではなく順序であり、一覧は「読み込み中」のまま待つ。
    *
    * 前の答えより後に届いた答えだけを採用する（文書を続けて開いたとき、古い文書の一覧で
    * 新しい文書の面が上書きされないようにする）。
@@ -108,15 +134,41 @@ export function createMacroSurfaceStore(client: MacroClient): MacroSurfaceStore 
   const refresh = (): void => {
     const token = (listToken += 1);
     publish(macroSurfaceReloadStarted(state));
-    void client.list().then((answer) => {
+    // **一覧の前に文書の状態を読む**（module doc「一覧を求める前に、文書が付いているかを見る」）。
+    void client.readDocumentState().then((answer) => {
       if (token !== listToken) {
         return;
       }
-      publish(
-        answer.status === "ok"
-          ? macroSurfaceLoaded(state, answer.data.macros)
-          : macroSurfaceLoadFailed(state, describeIpcError(answer.error)),
-      );
+      if (answer.status === "error") {
+        publish(macroSurfaceLoadFailed(state, describeIpcError(answer.error)));
+        return;
+      }
+      const session = answer.data.status;
+      switch (session.state) {
+        // **まだ文書が付いていない**（起動直後）。失敗ではないので、一覧は読み込み中のまま
+        // 据え置く — 文書が付いた時点の通知（`./requests` の購読）が取り直す。
+        case "Absent":
+          return;
+        // 文書は在るが読めなかった。一覧は求めず（求めても同じ理由で失敗する）、**理由を
+        // そのまま**失敗として出す（文言は組み立てない。`./surface` の規律）。
+        case "Unavailable":
+          publish(macroSurfaceLoadFailed(state, session.reason));
+          return;
+        case "Open":
+          break;
+        default:
+          return assertNever(session, "文書の状態の分岐が網羅されていない");
+      }
+      void client.list().then((listed) => {
+        if (token !== listToken) {
+          return;
+        }
+        publish(
+          listed.status === "ok"
+            ? macroSurfaceLoaded(state, listed.data.macros)
+            : macroSurfaceLoadFailed(state, describeIpcError(listed.error)),
+        );
+      });
     });
   };
 

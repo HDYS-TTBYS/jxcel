@@ -18,7 +18,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { DOCUMENT_SESSION_CHANGED_EVENT, MACRO_RUN_REQUESTED_EVENT } from "../../ipc/bindings";
 import type { IpcClientResult } from "../../ipc/client";
-import type { MacroListResponse } from "../../ipc/bindings";
+import type { DocumentStateResponse, MacroListResponse } from "../../ipc/bindings";
 import type { MacroClient } from "./macroClient";
 import { installMacroListRefresh, installMacroRunRequests } from "./requests";
 import { createMacroSurfaceStore } from "./store";
@@ -33,13 +33,31 @@ async function settle(): Promise<void> {
   await Promise.resolve();
 }
 
-/** 偽の境界（一覧だけを数える）。 */
+/** 偽の境界（一覧だけを数える）。**文書は開いている**（一覧を求める側の経路を通す）。 */
 function countingClient(calls: string[]): MacroClient {
   const empty: IpcClientResult<MacroListResponse> = {
     status: "ok",
     data: { context: { window: "doc-1" }, macros: [] },
   };
+  const opened: IpcClientResult<DocumentStateResponse> = {
+    status: "ok",
+    data: {
+      context: { window: "doc-1" },
+      status: {
+        state: "Open",
+        name: "棚卸し.jxcel",
+        origin: "file",
+        unsaved: false,
+        revision: 1,
+        sheets: [],
+      },
+    },
+  };
   return {
+    readDocumentState: () => {
+      calls.push("document_state");
+      return Promise.resolve(opened);
+    },
     list: () => {
       calls.push("macro_list");
       return Promise.resolve(empty);
@@ -88,7 +106,7 @@ describe("メニューからの実行の要求の購読（要件 2.1）", () => 
 
     // **面は「選ばせる段」に入り、一覧を取り直している**（遷移先で一覧が出る）。
     expect(store.getState().picking).toBe(true);
-    expect(calls).toEqual(["macro_list"]);
+    expect(calls).toEqual(["document_state", "macro_list"]);
     // 遷移は器が決める（識別子をこの module は知らない）。
     expect(destinations).toEqual(["grid"]);
 
@@ -150,11 +168,16 @@ describe("文書の差し替えの購読（要件 1.3）", () => {
     handler({ payload: { 何か: "想定外の本文" } });
     await settle();
     // **本文を解釈しない**（どんな本文でも取り直しは同じである）。
-    expect(calls).toEqual(["macro_list"]);
+    expect(calls).toEqual(["document_state", "macro_list"]);
 
     handler({ payload: null });
     await settle();
-    expect(calls).toEqual(["macro_list", "macro_list"]);
+    expect(calls).toEqual([
+      "document_state",
+      "macro_list",
+      "document_state",
+      "macro_list",
+    ]);
 
     stop();
   });

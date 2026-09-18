@@ -95,7 +95,9 @@ export function MacroPanel({ binding }: { readonly binding: MacroSurfaceBinding 
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState);
 
   // 一覧は**開いた時点で出す**（要件 1.3）。マウントのたびに取り直すので、文書が差し替わった
-  // あとに画面が組み直されても、出るのは新しい文書の一覧である。
+  // あとに画面が組み直されても、出るのは新しい文書の一覧である。**文書がまだ付いていない
+  // ときは保持が待つ**（`./store` の module doc「一覧を求める前に、文書が付いているかを見る」）
+  // ので、起動直後の一過性の失敗は出ない。
   useEffect(() => {
     store.refresh();
   }, [store]);

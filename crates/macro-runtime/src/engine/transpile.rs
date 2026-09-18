@@ -143,7 +143,7 @@ impl Transpiler {
         let specifier = ModuleSpecifier::parse(&module_name).map_err(|error| {
             MacroFailure::new(
                 FailureKind::Transpile,
-                format!("cannot use {module_name} as a module name: {error}"),
+                format!("モジュール名として使えない {module_name}: {error}"),
                 Vec::new(),
             )
         })?;
@@ -184,7 +184,7 @@ impl Transpiler {
             .map_err(|error| {
                 MacroFailure::new(
                     FailureKind::Transpile,
-                    format!("cannot transpile {module_name}: {error}"),
+                    format!("{module_name} を変換できない: {error}"),
                     Vec::new(),
                 )
             })?
@@ -195,7 +195,7 @@ impl Transpiler {
         let source_map = emitted.source_map.ok_or_else(|| {
             MacroFailure::new(
                 FailureKind::Transpile,
-                format!("no source map was emitted for {module_name}"),
+                format!("{module_name} の写し（source map）が出力されない"),
                 Vec::new(),
             )
         })?;
@@ -265,7 +265,7 @@ fn syntax_failure(record: &MacroRecord, diagnostic: &ParseDiagnostic) -> MacroFa
     let position = diagnostic.display_position();
     MacroFailure::new(
         FailureKind::Transpile,
-        format!("syntax error: {}", diagnostic.message()),
+        format!("構文の誤り: {}", diagnostic.message()),
         vec![Frame::at(
             record.name.clone(),
             None,
@@ -294,14 +294,14 @@ fn with_source_mapping_url(
         deno_core::sourcemap::SourceMap::from_slice(source_map.as_bytes()).map_err(|error| {
             MacroFailure::new(
                 FailureKind::Transpile,
-                format!("cannot read the source map of {module_name}: {error}"),
+                format!("{module_name} の写し（source map）を読めない: {error}"),
                 Vec::new(),
             )
         })?;
     let data_url = decoded.to_data_url().map_err(|error| {
         MacroFailure::new(
             FailureKind::Transpile,
-            format!("cannot encode the source map of {module_name}: {error}"),
+            format!("{module_name} の写し（source map）を符号化できない: {error}"),
             Vec::new(),
         )
     })?;
@@ -454,7 +454,7 @@ mod tests {
 
         assert_eq!(failure.kind, FailureKind::Transpile);
         assert!(
-            failure.message.starts_with("syntax error: "),
+            failure.message.starts_with("構文の誤り: "),
             "理由が構文の誤りでない: {}",
             failure.message
         );

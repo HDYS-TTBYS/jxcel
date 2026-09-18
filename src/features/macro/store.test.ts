@@ -12,6 +12,8 @@
  * 4. **経路の失敗（封筒の失敗腕）は実行の失敗と別の値になる**（実行そのものが始まらなかった）
  * 5. **遅れて届いた一覧の答えは捨てる**（文書を続けて開いても、古い文書の一覧で新しい面を
  *    上書きしない）
+ * 6. **文書がまだ付いていないときは一覧を求めない**（起動直後の一過性の失敗を出さない。
+ *    一覧は読み込み中のまま待ち、文書が読めなかったときは理由がそのまま失敗になる）
  *
  * 境界は偽の実装である（`node` 環境には IPC が無い）。**本物のコマンド名は
  * `macroClient.ts` が持つ**ので、ここでは「どの名前で何回呼ばれたか」だけを読む。
@@ -20,6 +22,7 @@ import { describe, expect, it } from "vitest";
 
 import type { IpcClientResult } from "../../ipc/client";
 import type {
+  DocumentStateResponse,
   MacroListResponse,
   MacroRunOutcome,
   MacroRunResponse,
@@ -60,20 +63,65 @@ function changes(setCells: number): MacroRunOutcome {
 }
 
 /**
- * 偽の境界。**実行の答えを外から解決できる**（実行中の状態を作るために要る）。
+ * 文書が開いている（`Open`）答の応答。**既定である** — 文書が付いている普通の場合の経路を
+ * そのまま通す。
+ */
+function opened(): IpcClientResult<DocumentStateResponse> {
+  return {
+    status: "ok",
+    data: {
+      context: { window: "doc-1" },
+      status: {
+        state: "Open",
+        name: "棚卸し.jxcel",
+        origin: "file",
+        unsaved: false,
+        revision: 1,
+        sheets: [],
+      },
+    },
+  };
+}
+
+/** 文書がまだ関連付いていない（`Absent`）答の応答（**起動直後**）。 */
+function absent(): IpcClientResult<DocumentStateResponse> {
+  return { status: "ok", data: { context: { window: "doc-1" }, status: { state: "Absent" } } };
+}
+
+/** 文書は在るが読めなかった（`Unavailable`）答の応答。 */
+function unavailable(reason: string): IpcClientResult<DocumentStateResponse> {
+  return {
+    status: "ok",
+    data: { context: { window: "doc-1" }, status: { state: "Unavailable", reason } },
+  };
+}
+
+/**
+ * 偽の境界。**実行と文書の状態の答えを外から解決できる**（実行中の状態と、起動直後の
+ * 「文書がまだ無い」状態を作るために要る）。
+ *
+ * 保留の約束は `new Promise` で組む — **`Promise.withResolvers` は使えない**（`tsconfig.json`
+ * の `lib` が ES2024 を含まない。`src/shell/verificationMacroRun.ts` と同じ理由である）。
  */
 function fakeClient(): {
   readonly client: MacroClient;
   readonly calls: string[];
   /** 次に返す一覧の答え（積むと、読む順に 1 つずつ返る。空なら空の一覧）。 */
   readonly listAnswers: IpcClientResult<MacroListResponse>[];
+  /** 次に返す文書の状態の答え（積むと、読む順に 1 つずつ返る。空なら開いている）。 */
+  readonly sessionAnswers: IpcClientResult<DocumentStateResponse>[];
   /** 保留中の実行の答えを解決する（**実行中の状態を外から作る**）。 */
   readonly settleRun: (answer: IpcClientResult<MacroRunResponse>) => void;
 } {
   const calls: string[] = [];
   const listAnswers: IpcClientResult<MacroListResponse>[] = [];
+  const sessionAnswers: IpcClientResult<DocumentStateResponse>[] = [];
   const pending: ((answer: IpcClientResult<MacroRunResponse>) => void)[] = [];
   const client: MacroClient = {
+    readDocumentState: () => {
+      calls.push("document_state");
+      return Promise.resolve(sessionAnswers.shift() ?? opened());
+    },
     list: () => {
       calls.push("macro_list");
       return Promise.resolve(listAnswers.shift() ?? listed([]));
@@ -89,6 +137,7 @@ function fakeClient(): {
     client,
     calls,
     listAnswers,
+    sessionAnswers,
     settleRun: (answer) => {
       const resolve = pending.shift();
       if (resolve === undefined) {
@@ -107,7 +156,7 @@ async function settle(): Promise<void> {
 }
 
 describe("一覧の流れ（要件 1.3、1.4）", () => {
-  it("取り直すと macro_list を 1 回呼び、一覧を入れる", async () => {
+  it("取り直すと文書の状態を読んでから macro_list を 1 回呼び、一覧を入れる", async () => {
     const fake = fakeClient();
     const store = createMacroSurfaceStore(fake.client);
     expect(store.getState().list.status).toBe("loading");
@@ -116,7 +165,8 @@ describe("一覧の流れ（要件 1.3、1.4）", () => {
     store.refresh();
     await settle();
 
-    expect(fake.calls).toEqual(["macro_list"]);
+    // **一覧の前に文書の状態を読む**（起動直後の一過性の失敗を出さないための順序である）。
+    expect(fake.calls).toEqual(["document_state", "macro_list"]);
     const list = store.getState().list;
     expect(list.status).toBe("ready");
     if (list.status !== "ready") {
@@ -145,6 +195,52 @@ describe("一覧の流れ（要件 1.3、1.4）", () => {
     // どの層の失敗か（`describeIpcError` の前置き）も落とさない。
     expect(list.message).toContain("このウィンドウにはドキュメントがありません");
     expect(list.message).toContain("ドキュメント");
+  });
+
+  it("文書がまだ付いていないときは一覧を求めず、読み込み中のまま待つ（起動直後の一過性の失敗を出さない）", async () => {
+    const fake = fakeClient();
+    const store = createMacroSurfaceStore(fake.client);
+
+    // 起動直後: 文書はまだ関連付いていない（`document_state` は `Absent`）。
+    fake.sessionAnswers.push(absent());
+    store.refresh();
+    await settle();
+
+    // **一覧を求めない** — 求めた呼び出しは経路の失敗になり、記録に 1 行残る。
+    expect(fake.calls).toEqual(["document_state"]);
+    expect(store.getState().list.status).toBe("loading");
+
+    // 文書が付いた時点の通知（`./requests` の購読）が取り直す。そのときは一覧が出る。
+    fake.listAnswers.push(listed([summary("棚卸し")]));
+    store.refresh();
+    await settle();
+
+    const list = store.getState().list;
+    expect(list.status).toBe("ready");
+    if (list.status !== "ready") {
+      throw new Error("一覧が読めた状態にならなかった");
+    }
+    expect(list.macros.map((macro) => macro.name)).toEqual(["棚卸し"]);
+  });
+
+  it("文書が読めなかったときは、その理由がそのまま失敗になる（一覧は求めない）", async () => {
+    const fake = fakeClient();
+    const store = createMacroSurfaceStore(fake.client);
+
+    const reason = "位置 /tmp/消えた.jxcel のドキュメントを読めない";
+    fake.sessionAnswers.push(unavailable(reason));
+    store.refresh();
+    await settle();
+
+    // 求めても同じ理由で失敗するので、一覧は求めない。
+    expect(fake.calls).toEqual(["document_state"]);
+    const list = store.getState().list;
+    expect(list.status).toBe("failed");
+    if (list.status !== "failed") {
+      throw new Error("失敗の状態にならなかった");
+    }
+    // **文言は組み立てない**（理由は境界が組んだものをそのまま出す）。
+    expect(list.message).toBe(reason);
   });
 
   it("遅れて届いた一覧の答えは捨てる（古い文書の一覧で上書きしない）", async () => {
@@ -202,7 +298,12 @@ describe("要求から実行までの 4 つの流れ（要件 2.1、8.2、2.5）
     store.request();
     expect(store.getState().picking).toBe(true);
     await settle();
-    expect(fake.calls).toEqual(["macro_list", "macro_list"]);
+    expect(fake.calls).toEqual([
+      "document_state",
+      "macro_list",
+      "document_state",
+      "macro_list",
+    ]);
 
     // 3. 選択（能力の提示）。**まだ実行していない。**
     store.choose("棚卸し");
@@ -218,7 +319,13 @@ describe("要求から実行までの 4 つの流れ（要件 2.1、8.2、2.5）
     store.run();
     expect(store.getState().running).toEqual({ name: "棚卸し" });
     expect(store.getState().chosen).toBeNull();
-    expect(fake.calls).toEqual(["macro_list", "macro_list", "macro_run:棚卸し"]);
+    expect(fake.calls).toEqual([
+      "document_state",
+      "macro_list",
+      "document_state",
+      "macro_list",
+      "macro_run:棚卸し",
+    ]);
 
     // 5. 結果（変更が入った → 表示を作り直す通知が 1 回）。
     fake.settleRun(ran(changes(2)));

@@ -326,7 +326,7 @@ impl fmt::Display for RegistrationMismatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "declaration and registration differ: unregistered [{}], undeclared [{}]",
+            "宣言と登録が一致しない: 未登録 [{}] / 宣言に無い [{}]",
             self.missing.join(", "),
             self.undeclared.join(", ")
         )

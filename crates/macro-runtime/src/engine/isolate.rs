@@ -239,7 +239,7 @@ impl Isolate {
         let module = ModuleSpecifier::parse(&name).map_err(|error| {
             MacroFailure::new(
                 FailureKind::Transpile,
-                format!("cannot use {name} as a module name: {error}"),
+                format!("モジュール名として使えない {name}: {error}"),
                 Vec::new(),
             )
         })?;
@@ -797,7 +797,7 @@ fn op_console_write(
         // ブートストラップが渡す添字しか来ない（`console` の口は [`CONSOLE_LEVELS`] から
         // 生成される）。範囲外は**黙って別の水準にしない** — 記録の水準が化けるためである。
         return Err(JsErrorBox::generic(format!(
-            "unknown console level: {level}"
+            "知らない console の水準: {level}"
         )));
     };
     let run = state.borrow_mut::<RunState>();
@@ -807,12 +807,14 @@ fn op_console_write(
 
 /// JS のシート識別子を文書の型へ戻す（読めなければ理由つきで拒む）。
 fn sheet_id(text: &str) -> Result<SheetId, JsErrorBox> {
-    SheetId::from_str(text).map_err(|_| JsErrorBox::generic(format!("invalid sheet id: {text:?}")))
+    SheetId::from_str(text)
+        .map_err(|_| JsErrorBox::generic(format!("シートの識別子として読めない: {text:?}")))
 }
 
 /// JS の行識別子を文書の型へ戻す。
 fn row_id(text: &str) -> Result<RowId, JsErrorBox> {
-    RowId::from_str(text).map_err(|_| JsErrorBox::generic(format!("invalid row id: {text:?}")))
+    RowId::from_str(text)
+        .map_err(|_| JsErrorBox::generic(format!("行の識別子として読めない: {text:?}")))
 }
 
 /// JS の行識別子の並びを読む。
@@ -935,12 +937,12 @@ fn value_from_v8<'s, 'i>(
             return scalar.to_value(kind).ok_or_else(|| {
                 // `Mapping::Plain` は「型が変種をただ 1 つ決める」ことを意味するため、ここへは
                 // 来ない（来たら写像の規則が壊れている — 成功を装わない）。
-                JsErrorBox::generic(format!("cannot map a value to {kind:?}"))
+                JsErrorBox::generic(format!("値を {kind:?} へ写せない"))
             });
         }
     }
     deno_core::serde_v8::from_v8::<CellValue>(scope, value)
-        .map_err(|error| JsErrorBox::generic(format!("cannot read a cell value: {error}")))
+        .map_err(|error| JsErrorBox::generic(format!("セルの値を読めない: {error}")))
 }
 
 /// 列の添字に対応する型（宣言より後ろのセルは型が決まらないため `Any`）。
@@ -1038,7 +1040,7 @@ fn cell_value<'s, 'i>(
         JsView::Scalar(JsScalar::Number(value)) => Ok(v8::Number::new(scope, value).into()),
         JsView::Scalar(JsScalar::Str(text)) => Ok(string(scope, &text)?.into()),
         JsView::SelfDescribing(value) => deno_core::serde_v8::to_v8(scope, value)
-            .map_err(|error| JsErrorBox::generic(format!("cannot write a cell value: {error}"))),
+            .map_err(|error| JsErrorBox::generic(format!("セルの値を書けない: {error}"))),
     }
 }
 
@@ -1164,12 +1166,12 @@ impl ModuleLoader for MacroModuleLoader {
     ) -> Result<ModuleSpecifier, JsErrorBox> {
         if specifier.starts_with(MODULE_SCHEME) {
             return ModuleSpecifier::parse(specifier).map_err(|error| {
-                JsErrorBox::generic(format!("cannot resolve {specifier}: {error}"))
+                JsErrorBox::generic(format!("{specifier} を解決できない: {error}"))
             });
         }
         // `macro:` 以外は解決しない。**名前を挙げる**（要件 3.5）。
         Err(JsErrorBox::generic(format!(
-            "cannot resolve import {specifier:?} in {referrer}"
+            "{referrer} の取り込み {specifier:?} を解決できない"
         )))
     }
 
@@ -1189,7 +1191,7 @@ impl MacroModuleLoader {
         // 実行するマクロのモジュールだけを読む。他の名前は解決しない（要件 3.5）。
         if module_specifier != &self.module {
             return Err(JsErrorBox::generic(format!(
-                "macro module {module_specifier} cannot be imported"
+                "マクロのモジュール {module_specifier} を取り込めない"
             )));
         }
         let transpiled = self.transpiler.transpile(&self.record).map_err(|failure| {

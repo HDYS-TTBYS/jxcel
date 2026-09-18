@@ -4725,6 +4725,9 @@ describe("実行中も表が使える（macro-runtime 4.4。要件 2.2）", () =
       ],
     });
     const client: MacroClient = {
+      // **文書は開いている**（一覧を求める側の経路を通す。`src/features/macro/store.ts` の
+      // 「一覧を求める前に、文書が付いているかを見る」）。
+      readDocumentState: () => Promise.resolve(ok(openDocument([]))),
       list: () => Promise.resolve(listed),
       run: () => new Promise<never>(() => undefined),
     };

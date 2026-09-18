@@ -142,7 +142,7 @@ impl fmt::Display for DeclarationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownCapability { name, line, column } => {
-                write!(f, "unknown capability {name} at {line}:{column}")
+                write!(f, "知らない能力 {name}（{line}:{column}）")
             }
         }
     }
