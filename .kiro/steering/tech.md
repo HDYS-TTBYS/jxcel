@@ -76,9 +76,10 @@ Cargo ワークスペース（`crates/*` + `src-tauri`）とフロントエン�
 | ビルド | `cargo build --workspace --all-targets` |
 | テスト | `cargo test --workspace --no-fail-fast` |
 | 決定性の検証（3 OS でバイト一致） | `cargo test -p document-format --test determinism` |
-| 生成物のドリフト | `cargo test -p app-shell --test bindings_drift` |
-| 生成物の再生成 | `cargo run -p app-shell --bin generate-bindings` |
+| 生成物のドリフト | `cargo test -p app-shell --test bindings_drift` / `cargo test -p macro-runtime --test macro_host_dts_drift` |
+| 生成物の再生成 | `cargo run -p app-shell --bin generate-bindings`（`src/ipc/bindings.ts`） / `cargo run -p macro-runtime --bin generate-macro-types`（`types/macro-host.d.ts`） |
 | フロントエンドの型検査 / lint / ビルド | `npm run typecheck` / `npm run lint` / `npm run build` |
+| Rust の静的検査 | `cargo clippy --workspace --all-targets`（**qlty からは動かさない** — 指摘を捨てて「0 件」と表示するため `.qlty/qlty.toml` で外してある。理由はその場に書いてある。この開発機ではホストのツールチェーンを絶対パスで起動する — `~/.rustup/toolchains/<stable>/bin/cargo clippy`。シムのコンテナには `cargo-clippy` が無い） |
 | ベンチマーク | `cargo bench -p document-format -p schema-engine -p document-session -p data-grid -p macro-runtime -- --save-baseline=main` |
 | 性能予算の判定 | `bash scripts/check-bench-budget.sh` |
 | 起動時間予算の判定 | `bash scripts/check-startup-budget.sh` |
@@ -86,8 +87,9 @@ Cargo ワークスペース（`crates/*` + `src-tauri`）とフロントエン�
 | 脆弱性検査 | `cargo audit` |
 | 配布物の生成 | `npx tauri build --bundles <形式>` |
 | 検証用の形の生成 | `JXCEL_VERIFICATION_BUILD=1 npx tauri build --no-bundle --features verification-triggers` |
+| 3 OS の実起動観測（開発機でも同じ段を走らせる） | `bash scripts/ci/linux/verify-document-session.sh` / `…/verify-grid-observation.sh` / `…/verify-macro-observation.sh`（**GUI を起動するのでビルド用の環境変数を外して**走らせる。規約は `verification.md`） |
 
-**不変条件の検査は `scripts/check-*.sh` に揃っている**（依存下限・性能予算・起動時間・生成物のドリフト・権限の逸脱・配信先中立な資産の依存・コアクレートの tauri 非依存・禁止プラグイン・コマンドと権限の一致・出荷物への検証コード混入・配布物の補助プロセス整合性・3 OS の実画面検証・**文書のセッションの 3 OS 観測**）。**規約と一覧の考え方は `.kiro/steering/verification.md` に置く。**
+**不変条件の検査は `scripts/check-*.sh` に揃っている**（依存下限・性能予算・起動時間・生成物のドリフト・権限の逸脱・配信先中立な資産の依存・コアクレートの tauri 非依存・禁止プラグイン・コマンドと権限の一致・出荷物への検証コード混入・配布物の補助プロセス整合性・3 OS の実画面検証・**3 OS の実起動観測（文書のセッション / グリッド / マクロ）**）。**規約と一覧の考え方は `.kiro/steering/verification.md` に置く。**
 
 `Cargo.lock` は追跡する。jxcel はライブラリではなくアプリケーションであり、下記の依存下限を固定する方針は lockfile が追跡されていて初めて意味を持つ。
 

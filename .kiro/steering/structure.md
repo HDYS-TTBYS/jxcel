@@ -21,7 +21,7 @@ Rust ドメインクレートは Tauri に依存してはならない。この�
 ### ドメインクレートの内部構造（`document-format` / `schema-engine` が確立）
 新しいドメインクレートもこの 4 つに従う。
 
-- **依存の鎖を各層の `mod.rs` 冒頭に書く。** 層を一方向に並べ（例 `Ids / Value → Model → Json → Parts → Container → Api`、`error / types → declaration → registry → compile → { coerce, validate } → write → evolution → api`、**`error / state → session → change → table → api`**）、**左の層だけを参照する**。鎖の文言そのものを冒頭の doc に置くのは、越境が「読めば分かる」状態を保つためである
+- **依存の鎖を各層の `mod.rs` 冒頭に書く。** 層を一方向に並べ（例 `Ids / Value → Model → Json → Parts → Container → Api`、`error / types → declaration → registry → compile → { coerce, validate } → write → evolution → api`、**`error / state → session → change → table → api`**、`error / types → view → edit → history → transport → api`（`data-grid`）、**`error / source → surface → host → engine → types → api`**（`macro-runtime`。`engine → types` の逆向き参照が実装中に実際に生じ、綴りの源を `host/value.rs` へ寄せて解消した）、**左の層だけを参照する**。鎖の文言そのものを冒頭の doc に置くのは、越境が「読めば分かる」状態を保つためである
 - **公開面は根の再輸出に集める。** 下位モジュールは `pub mod` のままでよく、根に `pub use` を並べる（`document-format` / `app-shell` と同じ形）。**下流は根の名前だけを使う。** これは**コンパイラ強制ではない規約**である（`pub mod` 経由で下位に到達できる）。強制したくなったら 3 クレート同時の設計変更として扱う
 - **兄弟のドメインクレートへの依存は一方向に限る。** `document-format` が依存グラフの根であり、**下流はこれに依存してよい**（例 `schema-engine → document-format`）。逆流は不可。兄弟同士が循環する形は作らない
 - **誤り型は判別可能な列挙体とし、診断に必要な文脈だけを持ち、表示用の文言を持たない**（表示は呼び出し元が組み立てる。`DocumentError` / `SchemaError` が同じ規約）。**「宣言・入力が壊れている」と「値が合わない」は別の型にする** — 前者は処理を止め、後者は止めない（1 つの型にすると「1 件の不正な値で全体が開けない」という振る舞いが型として表現できてしまう）
@@ -55,12 +55,13 @@ Tauri の機能を使うスペックでも、**GUI なしでテストできる�
 **内部の分け方**（`app-shell` が確立）: `shell/` = 器（レイアウト・遷移・外観・画面単位のエラー隔離・終了拒否・描画通知）、`features/<feature>/` = 画面、`ipc/` = 生成された型と薄い呼び出しラッパ、`shared/` = 配信先中立の資産
 
 ### 個別画面の契約（`app-shell` が確立。全 UI スペックが従う）
-画面は `src/shell/Layout.tsx` の**画面登録簿に 1 件登録する**だけで差し込まれる。守ることは 4 つ。
+画面は `src/shell/Layout.tsx` の**画面登録簿に 1 件登録する**だけで差し込まれる。守ることは 5 つ。
 
 - **受け取るのは `ScreenProps { screenId, navigate }` だけ**（`src/shell/router.tsx`）。画面が自前のレイアウト・遷移・履歴を持ってはならない。遷移の仕組みはシェルに 1 つだけある
 - **配色は持たない**。シェルが `<html>` に与える `var(--jxcel-*)` を参照する（明暗の追随が画面ごとの分岐なしに成立する理由）
 - **エラー隔離はシェルの仕事**。境界は領域の中の画面 1 式だけを包むので、画面が投げても器は生き残る。画面側で例外を握り潰さない
 - **ユーザー向けでない画面（3 OS の描画確認用など）は検証専用の経路に置く**。出荷物に到達経路を作らない（後述の検証コードの節）
+- **別の画面のデータを操作する機能は、独立した画面にせず、その画面の中のパネルとして置く**（例 `macro-runtime` の実行の面はグリッド画面の中にある）。独立した画面にすると**操作している間に対象の表が見えず**、要件（実行の間も画面が使える等）を満たせない。設計が独立した画面を前提にしていても要件と食い違うなら**面の側を要件に合わせ、食い違いを design に記録する**
 
 現在の領域の識別は `data-shell-screen` で外から読める。**後続スペックの画面もこの契約に従えば `Layout.tsx` の登録簿に 1 行足すだけで入る。**
 
@@ -72,7 +73,7 @@ Tauri の機能を使うスペックでも、**GUI なしでテストできる�
 ### マクロ向け型定義
 **Location**: `types/`
 **Purpose**: ホスト API と標準マクロライブラリの `.d.ts`
-**規則**: 手書きしない。ドメインクレートから生成する。LSP の補完品質はここに直結する
+**規則**: 手書きしない。ドメインクレートから生成する。LSP の補完品質はここに直結する。**生成元は型を公開する側のクレートが持ち**（`cargo run -p macro-runtime --bin generate-macro-types` → `types/macro-host.d.ts`）、**生成物のパスと再生成コマンドはクレート内の定数**（`GENERATED_PATH` / `REGENERATE_COMMAND`）が唯一の源である。**ドリフトは結合テストで固定する**（`tests/macro_host_dts_drift.rs`。`src/ipc/bindings.ts` の `bindings_drift` と同じ形）。**上流クレート（`document-format` / `schema-engine`）に導出を足さない** — 境界の型の導出は `crates/app-shell/src/ipc/` の下に限る（`ipc-contract.md`）。カタログを写経せず、列挙体の全件走査（`TypeKind::ALL`）から作る
 
 ## Naming Conventions
 
