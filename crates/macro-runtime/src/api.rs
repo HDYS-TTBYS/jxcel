@@ -232,7 +232,10 @@ pub trait MacroRuntimeApi {
 
 impl MacroRuntimeApi for MacroRuntime {
     fn list(&self, records: &[MacroRecord]) -> Vec<MacroSummary> {
-        records.iter().map(|record| self.summarize(record)).collect()
+        records
+            .iter()
+            .map(|record| self.summarize(record))
+            .collect()
     }
 
     fn store(&self, records: &mut Vec<MacroRecord>, record: MacroRecord) -> MacroSummary {
@@ -441,18 +444,28 @@ mod tests {
                 .iter()
                 .map(|record| (record.name.as_str(), record.source.as_str()))
                 .collect::<Vec<_>>(),
-            vec![("棚卸し", "export default 3;\n"), ("集計", "export default 2;\n")],
+            vec![
+                ("棚卸し", "export default 3;\n"),
+                ("集計", "export default 2;\n")
+            ],
             "置き換えで位置が動いた、または別の記録が変わった"
         );
 
         let summary = runtime.store(&mut records, record("検算", "export default 4;\n"));
         assert_eq!(summary.name.as_str(), "検算");
         assert_eq!(records.len(), 3);
-        assert_eq!(records[2].name.as_str(), "検算", "新しい名前が末尾に足されていない");
+        assert_eq!(
+            records[2].name.as_str(),
+            "検算",
+            "新しい名前が末尾に足されていない"
+        );
 
         // **解釈できないソースでも保存は成立する**（要件 1.4 は一覧の提示の要求である）。
         let summary = runtime.store(&mut records, record("書きかけ", "const x = ;\n"));
-        assert!(!summary.is_runnable(), "解釈できないソースに理由が付いていない");
+        assert!(
+            !summary.is_runnable(),
+            "解釈できないソースに理由が付いていない"
+        );
         assert_eq!(records.len(), 4, "解釈できないソースの保存が落ちた");
     }
 
@@ -506,7 +519,10 @@ mod tests {
             } => {
                 assert_eq!(value, "42");
                 assert_eq!(
-                    output.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
+                    output
+                        .iter()
+                        .map(|line| line.text.as_str())
+                        .collect::<Vec<_>>(),
                     vec!["はじめます"]
                 );
                 assert!(changes.is_empty(), "書き込みをしていない実行に件数が付いた");

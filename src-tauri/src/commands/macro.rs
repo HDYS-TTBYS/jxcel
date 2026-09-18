@@ -189,7 +189,9 @@ fn macro_state(app: &AppHandle) -> Option<State<'_, MacroRuntime>> {
                     log::info!("マクロの実行基盤を管理状態として置いた");
                 }
                 Err(error) => {
-                    log::error!("マクロの実行基盤を起こせなかった（専用スレッドを作れない）: {error}");
+                    log::error!(
+                        "マクロの実行基盤を起こせなかった（専用スレッドを作れない）: {error}"
+                    );
                 }
             }
         }
@@ -487,9 +489,7 @@ fn apply_failure(command: &str, label: &WindowLabel, error: &MacroApplyError) ->
             sheet,
             values,
             columns,
-        } => format!(
-            "追加する行の値の数 {values} がシート {sheet} の列数 {columns} を越えている"
-        ),
+        } => format!("追加する行の値の数 {values} がシート {sheet} の列数 {columns} を越えている"),
         // 上流の拒否・写像の前提の崩れ・変更集合の不在・セッションの失敗は、上流の文言を運ぶ
         // （どれも「経路の前提が崩れた」であり、利用者が直せる種類の誤りではない）。
         MacroApplyError::Rejected { .. }
@@ -529,10 +529,13 @@ fn describe_run(
         } => ("ran", "(なし)", *changes, *elapsed_ms),
         RunOutcome::Failed { .. } => ("failed", "(なし)", ChangeSummary::default(), elapsed_ms),
         RunOutcome::Aborted {
-            limit,
-            elapsed_ms,
-            ..
-        } => ("aborted", limit.as_str(), ChangeSummary::default(), *elapsed_ms),
+            limit, elapsed_ms, ..
+        } => (
+            "aborted",
+            limit.as_str(),
+            ChangeSummary::default(),
+            *elapsed_ms,
+        ),
     };
     format!(
         "macro_run: ウィンドウ = {} / マクロ = {name} / 種別 = {} / 結果 = {result} / \
@@ -686,14 +689,7 @@ pub async fn macro_run(
         // 中で閉じるため、`Arc` を複製して持ち込む。
         let settings = Arc::clone(&working.state::<Arc<FileSettingsStore>>());
         match macro_state(&working) {
-            Some(runtime) => answer_run(
-                &runtime,
-                &documents,
-                &grids,
-                &settings,
-                &label,
-                &request,
-            ),
+            Some(runtime) => answer_run(&runtime, &documents, &grids, &settings, &label, &request),
             None => IpcResult::Err {
                 error: path_failure(command, &label, "実行基盤を起こせない"),
             },
@@ -1205,10 +1201,7 @@ mod tests {
                 .set_row_values(
                     sheet,
                     row,
-                    vec![
-                        CellValue::Text(label.to_owned()),
-                        CellValue::Int(quantity),
-                    ],
+                    vec![CellValue::Text(label.to_owned()), CellValue::Int(quantity)],
                 )
                 .expect("標本の行は実在する");
         }
@@ -1276,9 +1269,7 @@ mod tests {
     fn settings(scratch: &Scratch) -> Arc<FileSettingsStore> {
         let directory = scratch.path.join("settings");
         std::fs::create_dir_all(&directory).expect("設定のディレクトリを作れる");
-        open_settings(&directory)
-            .expect("設定ストアを開ける")
-            .0
+        open_settings(&directory).expect("設定ストアを開ける").0
     }
 
     /// 成功の腕からデータを取り出す。
@@ -1580,7 +1571,10 @@ export default 行.cells[1];
             } => {
                 assert_eq!(value, "1", "戻り値が文書から読んだ値でない");
                 assert_eq!(
-                    output.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
+                    output
+                        .iter()
+                        .map(|line| line.text.as_str())
+                        .collect::<Vec<_>>(),
                     vec!["書き換えた"],
                     "console の出力が回収されていない"
                 );
@@ -1707,10 +1701,11 @@ export default 行.cells[1];
                 .expect("文書を読める"),
             before
         );
-        let line = record_lines()
-            .pop()
-            .expect("記録の行がある");
-        assert!(line.contains("結果 = failed"), "記録が失敗を運んでいない: {line}");
+        let line = record_lines().pop().expect("記録の行がある");
+        assert!(
+            line.contains("結果 = failed"),
+            "記録が失敗を運んでいない: {line}"
+        );
     }
 
     /// 名前が文書に無い実行は**経路の失敗**であり、記録を残さない（要件 2.1 の前提）。
@@ -1874,7 +1869,10 @@ export default 行.cells[1];
                 sheet: sheet.clone(),
             },
         ));
-        let generation: u64 = opened.generation.parse().expect("世代は 10 進の文字列である");
+        let generation: u64 = opened
+            .generation
+            .parse()
+            .expect("世代は 10 進の文字列である");
 
         // 実行するマクロ: 標本のシートを 1 行読み、**数秒動き続けて**から結果を返す。
         // 戻り値は標本から読んだ内容そのものであり、標本が読めたことの表明を兼ねる。
@@ -1956,20 +1954,13 @@ export default 行.cells[1];
             let after = documents
                 .read(&label, &mut |document| document.sheets()[0].rows().len())
                 .expect("文書を読める");
-            assert_eq!(
-                after,
-                before + 1,
-                "実行の最中に文書の操作が通っていない"
-            );
+            assert_eq!(after, before + 1, "実行の最中に文書の操作が通っていない");
 
             match running.join().expect("実行のスレッドは完走する") {
                 IpcResult::Ok { data } => match &data.outcome {
                     MacroRunOutcome::Ran { value, .. } => {
                         // 戻り値の提示は JSON である（要件 2.3）ため、文字列は引用符つきで返る。
-                        assert_eq!(
-                            value, "\"台帳/1\"",
-                            "マクロが標本のシートを読めていない"
-                        );
+                        assert_eq!(value, "\"台帳/1\"", "マクロが標本のシートを読めていない");
                     }
                     other => panic!("成功を期待したが {other:?} を返した"),
                 },

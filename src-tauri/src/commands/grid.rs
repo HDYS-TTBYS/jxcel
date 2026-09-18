@@ -433,7 +433,10 @@ impl GridSessions {
         // 触らない — 適用の後の表示は画面が `grid_open_sheet` を呼び直して作り直す。
         // design.md「System Flows」の「実行の流れ」）。
         let SheetEntry {
-            history, schema, sheet, ..
+            history,
+            schema,
+            sheet,
+            ..
         } = &mut *entry;
         let sheet = sheet.parse::<SheetId>().ok()?;
         Some(run(sheet, schema, history))

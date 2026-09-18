@@ -166,9 +166,7 @@ fn run(runtime: &MacroRuntime, host: Arc<dyn HostPort>, name: &str, source: &str
 /// 成功した実行の戻り値と変更の件数を取り出す（失敗と打ち切りは理由つきで panic する）。
 fn ran<'a>(outcome: &'a RunOutcome, what: &str) -> (&'a str, usize) {
     match outcome {
-        RunOutcome::Ran {
-            value, changes, ..
-        } => (value.as_str(), changes.total()),
+        RunOutcome::Ran { value, changes, .. } => (value.as_str(), changes.total()),
         other => panic!("{what}: 成功を期待したが {other:?} を返した"),
     }
 }
@@ -341,9 +339,12 @@ fn column_types(document: &Document, sheet: SheetId) -> Result<Vec<ColumnTypeInf
             })
         })
         .collect::<Result<Vec<TypeDefinition>, SchemaError>>()
-        .map_err(|error| HostError::new(format!("シート {sheet} の型定義を解釈できない: {error}")))?;
-    let resolver = resolve(&schema, &definitions)
-        .map_err(|error| HostError::new(format!("シート {sheet} の型の参照を解決できない: {error}")))?;
+        .map_err(|error| {
+            HostError::new(format!("シート {sheet} の型定義を解釈できない: {error}"))
+        })?;
+    let resolver = resolve(&schema, &definitions).map_err(|error| {
+        HostError::new(format!("シート {sheet} の型の参照を解決できない: {error}"))
+    })?;
     Ok(schema
         .columns
         .iter()
@@ -463,9 +464,5 @@ fn rewrite_10k_rows(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    read_100k_rows_x_30_columns,
-    rewrite_10k_rows
-);
+criterion_group!(benches, read_100k_rows_x_30_columns, rewrite_10k_rows);
 criterion_main!(benches);

@@ -42,7 +42,12 @@ impl log::Log for CaptureLogger {
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        let line = format!("[{}][{}] {}", record.target(), record.level(), record.args());
+        let line = format!(
+            "[{}][{}] {}",
+            record.target(),
+            record.level(),
+            record.args()
+        );
         CAPTURED
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())

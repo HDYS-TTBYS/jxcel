@@ -64,14 +64,16 @@ use macro_runtime::{
 const TRIVIAL_SOURCE: &str = "export default \"計測\";\n";
 
 /// 時間の上限を測るマクロ（終わらない繰り返し。標本の `標本の打ち切り` と同じ形である）。
-const SPIN_SOURCE: &str = "let total = 0;\nwhile (true) {\n  total += 1;\n}\nexport default total;\n";
+const SPIN_SOURCE: &str =
+    "let total = 0;\nwhile (true) {\n  total += 1;\n}\nexport default total;\n";
 
 /// メモリの上限を測るマクロ（**確保し続ける**）。
 ///
 /// 数を保持し続ける形にする（`chunks` が生かし続けるので GC でも戻らない）。1 回の確保は
 /// 1 万要素の倍精度配列（約 80 KB）であり、**文字列ではない** — 文字列の連結は V8 の
 /// 最大文字列長（約 512 MB）に先に当たりうるため、上限の種類を取り違える危険がある。
-const ALLOCATE_SOURCE: &str = "const chunks = [];\nwhile (true) {\n  chunks.push(new Array(10000).fill(1.5));\n}\n";
+const ALLOCATE_SOURCE: &str =
+    "const chunks = [];\nwhile (true) {\n  chunks.push(new Array(10000).fill(1.5));\n}\n";
 
 /// ホストの縫い目（**呼ばれたら理由つきで拒む**）。
 ///
@@ -196,9 +198,9 @@ fn run(runtime: &MacroRuntime, name: &str, source: &str, limits: Limits) -> (Run
 /// 結果を 1 行に写す。
 fn describe(outcome: &RunOutcome) -> String {
     match outcome {
-        RunOutcome::Ran {
-            value, changes, ..
-        } => format!("ran / 戻り値 = {value} / 変更 = {} 件", changes.total()),
+        RunOutcome::Ran { value, changes, .. } => {
+            format!("ran / 戻り値 = {value} / 変更 = {} 件", changes.total())
+        }
         RunOutcome::Failed { failure } => {
             format!("failed / {:?} / {}", failure.kind, failure.message)
         }
@@ -216,7 +218,11 @@ fn describe(outcome: &RunOutcome) -> String {
 
 /// 実行の結果と、実行の前後の `VmRSS` / `VmHWM`、実行中の `VmRSS` の山を 1 行ずつ出す。
 fn report(label: &str, outcome: &RunOutcome, elapsed: Duration, peak_rss: u64) {
-    println!("計測: {label} = {} ms / {}", elapsed.as_millis(), describe(outcome));
+    println!(
+        "計測: {label} = {} ms / {}",
+        elapsed.as_millis(),
+        describe(outcome)
+    );
     if let Some(peak) = (peak_rss > 0).then_some(peak_rss) {
         println!("計測: {label} の実行中の VmRSS の山 = {}", kb(peak));
     }
@@ -234,12 +240,25 @@ fn measure_isolate(code: &mut u8) {
     let started = Instant::now();
     let runtime = MacroRuntime::new().expect("実行基盤（actor）を起こせる");
     let spawn = started.elapsed();
-    println!("計測: 実行基盤の起動（isolate は作らない） = {} ms", spawn.as_millis());
+    println!(
+        "計測: 実行基盤の起動（isolate は作らない） = {} ms",
+        spawn.as_millis()
+    );
 
     for attempt in 1..=3 {
-        let (outcome, elapsed) = run(&runtime, "計測（仕事をしない）", TRIVIAL_SOURCE, Limits::default());
+        let (outcome, elapsed) = run(
+            &runtime,
+            "計測（仕事をしない）",
+            TRIVIAL_SOURCE,
+            Limits::default(),
+        );
         let peak = 0;
-        report(&format!("実行 {attempt} 回目（isolate の生成を含む）"), &outcome, elapsed, peak);
+        report(
+            &format!("実行 {attempt} 回目（isolate の生成を含む）"),
+            &outcome,
+            elapsed,
+            peak,
+        );
         if !matches!(outcome, RunOutcome::Ran { .. }) {
             println!("計測: 期待と違う結果（{attempt} 回目）");
             *code = 1;
@@ -266,16 +285,16 @@ fn measure_isolate(code: &mut u8) {
 
     let started = Instant::now();
     runtime.shutdown().expect("専用スレッドを畳める");
-    println!("計測: 実行基盤の後始末 = {} ms", started.elapsed().as_millis());
+    println!(
+        "計測: 実行基盤の後始末 = {} ms",
+        started.elapsed().as_millis()
+    );
 }
 
 /// 時間の上限（製品の既定 = 30 秒）の精度を測る。
 fn measure_time(code: &mut u8) {
     let limits = Limits::default();
-    println!(
-        "計測: 時間の上限 = {} ms（既定）",
-        limits.time.as_millis()
-    );
+    println!("計測: 時間の上限 = {} ms（既定）", limits.time.as_millis());
     let runtime = MacroRuntime::new().expect("実行基盤（actor）を起こせる");
     let watch = RssWatch::start();
     let (outcome, elapsed) = run(&runtime, "計測（終わらない繰り返し）", SPIN_SOURCE, limits);
@@ -305,7 +324,12 @@ fn measure_time(code: &mut u8) {
     }
 
     // 打ち切りの後に同じ実行基盤で次の実行ができる（要件 6.4 の復帰）。
-    let (again, elapsed) = run(&runtime, "計測（打ち切りの後）", TRIVIAL_SOURCE, Limits::default());
+    let (again, elapsed) = run(
+        &runtime,
+        "計測（打ち切りの後）",
+        TRIVIAL_SOURCE,
+        Limits::default(),
+    );
     report("打ち切りの後の実行", &again, elapsed, 0);
     if !matches!(again, RunOutcome::Ran { .. }) {
         println!("計測: 打ち切りの後の実行が成功しない");
@@ -350,7 +374,12 @@ fn measure_memory(code: &mut u8) {
     }
 
     // 打ち切りの後に同じ実行基盤で次の実行ができる（要件 6.4 の復帰）。
-    let (again, elapsed) = run(&runtime, "計測（打ち切りの後）", TRIVIAL_SOURCE, Limits::default());
+    let (again, elapsed) = run(
+        &runtime,
+        "計測（打ち切りの後）",
+        TRIVIAL_SOURCE,
+        Limits::default(),
+    );
     report("打ち切りの後の実行", &again, elapsed, 0);
     if !matches!(again, RunOutcome::Ran { .. }) {
         println!("計測: 打ち切りの後の実行が成功しない");
@@ -370,8 +399,19 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::from(2_u8);
     }
 
-    println!("計測: 実行環境 = {} {}", std::env::consts::OS, std::env::consts::ARCH);
-    println!("計測: ビルド = {}", if cfg!(debug_assertions) { "debug" } else { "release" });
+    println!(
+        "計測: 実行環境 = {} {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    println!(
+        "計測: ビルド = {}",
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
+    );
     let mut code = 0_u8;
     match what.as_str() {
         "isolate" => measure_isolate(&mut code),

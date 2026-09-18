@@ -213,22 +213,24 @@ fn specimen() -> Document {
     document
         .set_sheet_columns(
             sheet,
-            SPECIMEN_COLUMNS.iter().map(|name| (*name).to_owned()).collect(),
+            SPECIMEN_COLUMNS
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
         )
         .expect("いま追加したシートは実在する");
     document
         .set_root_schema(sheet, specimen_schema())
         .expect("いま追加したシートは実在する");
     for (name, quantity) in SPECIMEN_ROWS {
-        let row = document.add_row(sheet).expect("いま追加したシートは実在する");
+        let row = document
+            .add_row(sheet)
+            .expect("いま追加したシートは実在する");
         document
             .set_row_values(
                 sheet,
                 row,
-                vec![
-                    CellValue::Text(name.to_owned()),
-                    CellValue::Int(quantity),
-                ],
+                vec![CellValue::Text(name.to_owned()), CellValue::Int(quantity)],
             )
             .expect("いま追加した行は実在する");
     }
@@ -295,7 +297,9 @@ fn describe_content(document: &Document, source_bytes: usize) -> String {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() != 1 {
-        eprintln!("使い方: make-macro-document <出力先>（例: target/observation/macro-sample.jxcel）");
+        eprintln!(
+            "使い方: make-macro-document <出力先>（例: target/observation/macro-sample.jxcel）"
+        );
         return ExitCode::from(2);
     }
     let path = PathBuf::from(&args[0]);
@@ -361,9 +365,6 @@ fn main() -> ExitCode {
         .map(|record| record.source().len())
         .sum();
     println!("{}", describe_content(&reopened, source_bytes));
-    println!(
-        "標本を書き出した: パス={} バイト数={bytes}",
-        path.display()
-    );
+    println!("標本を書き出した: パス={} バイト数={bytes}", path.display());
     ExitCode::SUCCESS
 }

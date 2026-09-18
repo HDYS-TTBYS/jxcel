@@ -772,17 +772,13 @@ fn macro_run_script() -> Option<String> {
         };
         literals.push(literal);
     }
-    log::info!(
-        "検証用のマクロの実行を要求した: 名前={}",
-        names.join(", "),
-    );
+    log::info!("検証用のマクロの実行を要求した: 名前={}", names.join(", "),);
     Some(format!(
         "window.{} = [{}];",
         VERIFY_MACRO_RUN_GLOBAL,
         literals.join(", ")
     ))
 }
-
 
 /// 検証専用: グリッドの観測を要求する初期化スクリプト（9.2）。
 ///
