@@ -21,6 +21,7 @@
 //! | [`transpile`] | TypeScript → JavaScript とソースマップ（**結線は 3.2**） | 3.1 |
 
 pub mod actor;
+pub(crate) mod isolate;
 pub mod limits;
 pub mod outcome;
 pub mod transpile;

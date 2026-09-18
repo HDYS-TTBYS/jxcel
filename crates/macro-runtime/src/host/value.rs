@@ -99,6 +99,10 @@
 //! - **非有限の数値**（`NaN` / `±Infinity`）は `Float` のまま写す。拒否は書き出し側
 //!   （`document-format` の門）が行う（そこで `NaN` を `null` へ黙って変換しないのは
 //!   上流の規則である）。
+//! - **種別の綴り**（`host.columns` が返す `kind`）も本モジュールが決める
+//!   （[`type_kind_name`]）。`.d.ts` の `TypeKind` の合併型（タスク 3.3 の生成器が
+//!   `TypeKind::ALL` を走査して組む）と、実行時に op が返す札が**同じ 1 箇所から出る**
+//!   ようにするためである（食い違えばマクロ側の型検査が嘘になる）
 //! - マクロ向けの型定義（要件 4.6 / 10.1）では、これらの型が 1 つの型として現れる:
 //!   `type CellValue = null | boolean | number | string | CellValue[] | { [key: string]:
 //!   CellValue };`（タスク 3.3 の生成器が宣言表と本モジュールの型から
@@ -134,6 +138,40 @@ impl Mapping {
             Some(_) => Mapping::Plain,
             None => Mapping::SelfDescribing,
         }
+    }
+}
+
+/// 種別の**マクロから見える綴り**（`host.columns` が返す `kind`。要件 4.1, 4.2）。
+///
+/// 変種名をそのまま使うのは、同じ概念の**兄弟の表**（`crates/app-shell/src/ipc/grid.rs` の
+/// `TypeKindTag`。IPC 境界の札）が同じ綴りを採っているためである（2026-09-18 に 14 種を
+/// 突き合わせて一致を確認した。ただし層の鎖により本クレートから `app-shell` は参照できない）。
+/// 綴りをここ 1 箇所に置くのは、`.d.ts` の `TypeKind` の合併型（タスク 3.3 の生成器が
+/// `TypeKind::ALL` を走査して組む）と、op が実行時に返す札が**同じ源から出る**ようにする
+/// ためである（食い違えばマクロ側の型検査が嘘になる）。
+///
+/// 両者の一致を**機械で**保つ検査はまだ無い（今は目視）。`macro-runtime` をアプリへ結線して
+/// 両方を見られる層ができた時点で突き合わせの検査を足す（**申し送り**）。
+///
+/// **網羅的な `match` にしてある**: `schema-engine` のカタログに種別が足されれば
+/// ここがコンパイルエラーになり、`.d.ts` の合併型（`TypeKind::ALL` を走査して作る）と
+/// 実行時の値のどちらかが黙って古くなることを防ぐ（要件 10.1）。
+pub fn type_kind_name(kind: TypeKind) -> &'static str {
+    match kind {
+        TypeKind::Int => "Int",
+        TypeKind::Float => "Float",
+        TypeKind::Decimal => "Decimal",
+        TypeKind::Text => "Text",
+        TypeKind::Bool => "Bool",
+        TypeKind::Date => "Date",
+        TypeKind::DateTime => "DateTime",
+        TypeKind::Enum => "Enum",
+        TypeKind::Ref => "Ref",
+        TypeKind::Attachment => "Attachment",
+        TypeKind::Object => "Object",
+        TypeKind::Array => "Array",
+        TypeKind::Any => "Any",
+        TypeKind::Custom => "Custom",
     }
 }
 

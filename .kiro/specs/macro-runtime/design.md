@@ -395,8 +395,12 @@ impl MacroRuntimeApi for MacroRuntime {
 
 **Dependencies**
 
-- Inbound: `MacroRuntimeApi` — 実行の要求（P0）
-- Outbound: `HostPort` — 読みの要求と出力の受け渡し（P0）
+- Inbound: `MacroRuntimeApi` — 実行の要求（P0）。**縫い目（`HostPort`）も実行の要求と一緒に渡る**: 変更集合は
+  実行 1 回のトランザクション境界でありアダプタが実行ごとに作るため、`MacroActor::run(request, port: Arc<dyn HostPort>)` の
+  引数に置く（**2026-09-18 の実装（3.2）で確定**。本節の `run(&self, request)` に対する追加）
+- Outbound: `HostPort` — 読みの要求と出力の受け渡し（P0）。**口は 3 つ**: 読み／書きの集約（`with_changes(&mut dyn FnMut(&ChangeSet))`。
+  変更集合を複製しない）／能力。設計時の `overlay()` と `emit()` は置かない（前者は `read_rows` の内部の道具であり `&self` の
+  変更集約と両立しない。後者は出力の型が `engine` 層にあり層の鎖で `host` から参照できない）— **実測と理由は `host/mod.rs` の doc**
 - External: `deno_core`（`RuntimeOptions::create_params` / `module_loader` / `run_event_loop` / `v8_isolate`）、`v8`（`terminate_execution` / `heap_limits`）（P0）
 
 **Contracts**: Service [x] / State [x]
@@ -409,7 +413,8 @@ impl MacroRuntimeApi for MacroRuntime {
 
 **Implementation Notes**
 
-- Integration: `execute_script` → `run_event_loop(Default::default())` → Promise の状態を読む（`resolve` は使わない。`tech.md` の実測）
+- Integration: `module_loader` が `macro:` のモジュールを解決して**モジュールとして実行**し（`ModuleLoader` の中で
+  `Transpiler` が TS → JS とソースマップを担う）、`run_event_loop(Default::default())` → Promise の状態を読む。戻り値は**既定の輸出**（`export default`）である — **2026-09-18 の実装（3.2）で確定**: `execute_script` はモジュールの解決を通らず、変換したモジュールを読むには loader が要る（`resolve` は使わない。`tech.md` の実測）。
 - Validation: 「時間の上限で打ち切られる」「メモリの上限で打ち切られる」「打ち切りの後も同じスレッドで次の実行ができる」を結合検査で固定する
 - Risks: callback はランタイム文脈を要する（current-thread ランタイムの上で作る）。callback を付け忘れると V8 がプロセスを abort させるため、**isolate の生成は 1 箇所（`isolate.rs`）に閉じる**
 

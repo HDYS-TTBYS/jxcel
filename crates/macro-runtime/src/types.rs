@@ -30,7 +30,8 @@
 //!    `host/changes.rs` の [`CellWrite`]。macro-runtime は IPC 境界ではないため、
 //!    `ipc-contract.md` の射程外である（本クレートの値は V8 の境界を越え、JSON を通らない）
 //! 2. **上流の型は、マクロから見える綴りを本モジュールで決める**（[`FIXED_ALIASES`] と
-//!    [`type_kind_name`]）。導出を写すのではなく、**境界の綴り**を決めている。
+//!    [`type_kind_name`](crate::host::value::type_kind_name)）。導出を写すのではなく、
+//!    **境界の綴り**を決めている。
 //!    `TypeKind` の合併型は `schema-engine` の種別カタログ（`TypeKind::ALL`）を走査して
 //!    組み立て、**一覧を書き写さない**
 //!
@@ -76,6 +77,9 @@ use schema_engine::TypeKind;
 
 use crate::host::changes::CellWrite;
 use crate::host::overlay::{ColumnTypeInfo, ReadRow, RowPage, RowSpan, SheetInfo};
+// 種別の綴りの唯一の源は `host` 層にある（層の鎖: `engine` も `types` も参照できる）。
+// ここは再輸出である（生成器と検査が同じ綴りを読むための名前）。
+pub use crate::host::value::type_kind_name;
 use crate::surface::declaration::{ApiDecl, HOST_APIS, HOST_NAMESPACE};
 
 /// 生成物の位置（**リポジトリルートからの相対**。生成器と検査が同じ 1 つを読む）。
@@ -211,22 +215,11 @@ fn type_kind_declaration() -> HostTypeDecl {
         name: "TypeKind".to_owned(),
         source: "crates/schema-engine/src/types/mod.rs TypeKind::ALL",
         docs: Some(
-            "/**\n * 列に宣言された型の種別（`host.columns` が返す `kind`）。\n *\n * 綴りは `schema-engine` の種別カタログ（`TypeKind::ALL`）の変種名である。\n * マクロへ種別を渡す口は、この綴りを作る `macro_runtime::types::type_kind_name` を使う\n * （`.d.ts` と実行時の値が同じ綴りになる）。\n */"
+            "/**\n * 列に宣言された型の種別（`host.columns` が返す `kind`）。\n *\n * 綴りは `schema-engine` の種別カタログ（`TypeKind::ALL`）の変種名である。\n * マクロへ種別を渡す口は、この綴りを作る `macro_runtime::host::value::type_kind_name` を使う\n * （`.d.ts` と実行時の値が同じ綴りになる）。\n */"
                 .to_owned(),
         ),
         declaration: format!("type TypeKind = {union};"),
     }
-}
-
-/// 種別の**マクロから見える綴り**（`TypeKind` は `schema-engine` で `Serialize` を持たず、
-/// 種別トークンの綴り（`kind_token`）も `pub(crate)` であるため、境界の綴りはここが決める）。
-///
-/// 変種名をそのまま使うのは、同じ概念の境界の札（`app-shell` の `TypeKindTag`）が同じ綴りを
-/// 採っているためである（`src-tauri` の検査が `format!("{kind:?}")` で両者を突き合わせる）。
-/// **マクロへ種別を渡す口（タスク 3.2 の op）はこの関数を使う** — 使わないと `.d.ts` の
-/// 合併型と実行時の値が食い違い、乖離が機械検査に載らない。
-pub fn type_kind_name(kind: TypeKind) -> String {
-    format!("{kind:?}")
 }
 
 /// `.d.ts` を組み立てる（**決定的**。同じ入力から常に同じバイト列を返す）。
@@ -1068,6 +1061,23 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(count, names.len(), "2 つの種別が同じ綴りへ潰れている");
+    }
+
+    /// 種別の綴りは**変種名そのもの**である（`app-shell` の `TypeKindTag` と同じ綴りであり、
+    /// `src-tauri` の検査が `format!("{kind:?}")` で両者を突き合わせる）。
+    ///
+    /// 綴りの `match` は手で書かれており（`host/value.rs` の `type_kind_name`）、
+    /// **網羅性は rustc が守るが、綴りの正しさは守らない**。1 つでもずれればこの検査が落ちる
+    /// — `TypeKind::ALL` を走査した合併型と、実行時の札が食い違う状態を作らない。
+    #[test]
+    fn the_kind_spelling_is_the_variant_name() {
+        for kind in TypeKind::ALL {
+            assert_eq!(
+                format!("{kind:?}"),
+                type_kind_name(kind),
+                "種別の綴りが変種名と一致しない"
+            );
+        }
     }
 
     /// 生成物は**モジュールではない**（`import` / `export` を書かない）。

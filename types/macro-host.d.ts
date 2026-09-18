@@ -235,7 +235,7 @@ row_count: number, };
  * 列に宣言された型の種別（`host.columns` が返す `kind`）。
  *
  * 綴りは `schema-engine` の種別カタログ（`TypeKind::ALL`）の変種名である。
- * マクロへ種別を渡す口は、この綴りを作る `macro_runtime::types::type_kind_name` を使う
+ * マクロへ種別を渡す口は、この綴りを作る `macro_runtime::host::value::type_kind_name` を使う
  * （`.d.ts` と実行時の値が同じ綴りになる）。
  */
 type TypeKind = "Int" | "Float" | "Decimal" | "Text" | "Bool" | "Date" | "DateTime" | "Enum" | "Ref" | "Attachment" | "Object" | "Array" | "Any" | "Custom";

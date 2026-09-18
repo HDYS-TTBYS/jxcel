@@ -118,6 +118,10 @@ tsserver は C-ABI を持たない JS プログラムであり、ライブラリ
    **確定した形**（動かなかった形も実測であり、記録として残す）:
    - 専用 OS スレッドが `JsRuntime` を所有し、その上で **current-thread の tokio ランタイムを 1 つ**回す。**`LocalSet` を挟まない**（挟んだ形では deferred op の完了が届かなかった）。多スレッド側からは **mpsc + oneshot** 越しに呼ぶ（isolate は境界を越えない）
    - **`JsRuntime::resolve` を使わない** — 実測で、イベントループが回り切った後でも返らなかった。正しい形は「`execute_script` → `run_event_loop(Default::default()).await` → **Promise の状態を読む**（`Local::try_cast::<Promise>()` の `state()` / `result()`）」
+   - **op は panic してはならない（2026-09-18 の実測。スパイク時点の想定を訂正）**: op は `extern "C"` の境界を越えて
+     呼ばれるため、本体の panic は `panic_cannot_unwind` になり **`catch_unwind` では捕まらず SIGABRT でプロセスが落ちる**
+     （`Deno.core.ops.op_panic("…")` を JS から踏んで実測。`deno_core` 0.412）。したがって **op の失敗は `Result` で返す**
+     （マクロへは JS の例外として見える）。`macro-runtime` の isolate は panic を捕捉しない
    - 非同期 op は **`#[op2]` を `async fn` に付ける**（`deno_core` 自身の検査 `runtime/tests/ops.rs` と同じ形）。`(lazy)` / `(deferred)` は完了が Promise へ届かなかった
    - op の状態は**型として受け取る**（非同期は `Rc<RefCell<OpState>>`、同期は `&mut OpState`）。`#[state]` 属性はこの版に無い
    - op は JS から **`Deno.core.ops.<name>()`** で呼ぶ。**`op_panic` は `deno_core` が持つ組込**であり、同じ名前の op を登録すると `Found ops with duplicate names` で isolate の生成に失敗する
