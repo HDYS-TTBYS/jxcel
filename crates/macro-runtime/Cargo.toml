@@ -80,3 +80,19 @@ bench = false
 [[bench]]
 name = "scaffold"
 harness = false
+
+# 5.1（実起動の観測の前提）が起動の引数へ渡す**標本の文書**（実行できるマクロを 1 件持ち、
+# そのマクロが書き込む先のシートと行を持つもの）を書き出す例。**検証専用である** —
+# `examples/` はアプリのバイナリにも配布物にも入らないが、それに加えて**非既定の feature を
+# 要求する**ので、既定のビルドではコンパイルすらされない（`verification.md`「検証専用の
+# コードの置き場」の Rust 側の規約。`crates/data-grid/Cargo.toml` の同じ節と同じ形）。
+#
+# 本クレートには標本の生成器が無い（**1.4 の生成器は `document-format` と `data-grid` が
+# 持つ**）ので、例は文書を上流の公開面（`Document` のモデル API と `DocumentFormatApi::save`）
+# だけで組み立てる — 生の JSON も ZIP も書かない。
+[features]
+verification-samples = []
+
+[[example]]
+name = "make-macro-document"
+required-features = ["verification-samples"]

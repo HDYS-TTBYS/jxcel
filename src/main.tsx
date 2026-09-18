@@ -72,9 +72,9 @@ async function mountShell(root: HTMLElement): Promise<void> {
   // verification-triggers`）では、初期化スクリプトが載せたグローバルがあるときだけ働く。
   // 転送は初回描画の後に回るので、8.2 のハートビートと起動予算（10.3）は変わらない。
   //
-  // **この 1 箇所だけ意図的に動的 import を使う**（静的 import では要件を満たせない）。
-  // 静的 import は到達不能な分岐の中にあってもモジュールグラフへ引き込まれ、依存先
-  // （`@tauri-apps/api/event` など）が副作用を持つと Rollup が木を落とせない。配布物から
+  // **検証専用のモジュールはこの分岐の中だけで、意図的に動的 import を使う**（静的 import では
+  // 要件を満たせない）。静的 import は到達不能な分岐の中にあってもモジュールグラフへ引き込まれ、
+  // 依存先（`@tauri-apps/api/event` など）が副作用を持つと Rollup が木を落とせない。配布物から
   // 確実に落ちるのは、**到達不能な動的 import の塊**（Rollup が生成自体を取りやめる）だけ
   // である。
   if (__JXCEL_VERIFICATION__) {
@@ -82,6 +82,16 @@ async function mountShell(root: HTMLElement): Promise<void> {
       "./shell/verificationBulk"
     );
     installVerificationBulkTransfer();
+
+    // 検証専用: 起動時のマクロの実行の仕込み（`macro-runtime` スペックの 5.1）。
+    // `JXCEL_VERIFICATION_MACRO_RUN` が指すマクロを、製品の面の保持を通して
+    // 「一覧 → 選択 → 実行」まで駆動する（`src/shell/verificationMacroRun.ts`）。
+    // **上の一括転送と同じ判断で動的 import にする**（配布物のバンドルから塊ごと落ちる）。
+    // 駆動はグリッドが表を描くまで待つので、マウントの前後は結果を変えない。
+    const { installVerificationMacroRun } = await import(
+      "./shell/verificationMacroRun"
+    );
+    installVerificationMacroRun();
   }
 
   // **マウントの直前に仕掛ける。** 通知は入れ子の `requestAnimationFrame`（2 フレーム）から

@@ -540,6 +540,15 @@ pub fn run() -> Result<(), StartupError> {
     #[cfg(feature = "verification-triggers")]
     register_bulk_result_listener(app.handle());
 
+    // 手順 4.3 の続き（検証専用）: マクロの実行の観測を診断の記録へ流すリスナ（`macro-runtime`
+    //   スペックの 5.1）。フロントエンド（`src/shell/verificationMacroRun.ts`）が
+    //   `JXCEL_VERIFICATION_MACRO_RUN` の名前のマクロを「一覧 → 選択 → 実行」まで駆動し、
+    //   結果をイベントで送るので、ここで受けて記録の 1 行に写す。**一括転送のリスナと同じ位置**
+    //   （記録機構のロガーの取り付け後・ウィンドウの読み込み前）に置く。**既定のビルドには
+    //   この購読もイベント名も存在しない**（`verification-triggers` feature）。
+    #[cfg(feature = "verification-triggers")]
+    register_macro_observation_listener(app.handle());
+
     // 手順 4.4: 補助プロセスの出力を診断の記録先へ流す購読（要件 5.9。タスク 8.1）。
     //   **位置の根拠**: 記録機構のロガーは手順 4 の `Builder::build` で取り付けられるため、
     //   それより前では `log::…!` がどこにも残らない。逆にこれより後では、補助プロセスを
@@ -2342,6 +2351,41 @@ fn register_bulk_result_listener(app: &AppHandle) {
 
     app.listen(VERIFY_BULK_RESULT_EVENT, |event| {
         log::info!("一括転送の結果: {}", event.payload());
+    });
+}
+
+/// 検証専用: フロントエンドが行った**マクロの観測**を受け取るイベントの名前（5.1）。
+///
+/// **`src/shell/verificationMacroRun.ts` の `MACRO_OBSERVATION_EVENT` と同じ綴りでなければ
+/// ならない。** 既定のビルドにはどちらか一方しか存在しない検証専用の対の契約である。
+#[cfg(feature = "verification-triggers")]
+const VERIFY_MACRO_OBSERVATION_EVENT: &str = "jxcel-verification-macro-observation";
+
+/// 検証専用: マクロの実行の観測を診断の記録へ 1 行で残す（`macro-runtime` スペックの 5.1）。
+///
+/// フロントエンド（`src/shell/verificationMacroRun.ts`）が `JXCEL_VERIFICATION_MACRO_RUN` の
+/// 名前のマクロを**製品の面の保持を通して**「一覧 → 選択 → 実行」まで駆動し、その結果
+/// （一覧の件数と名前・選んだ名前・宣言されている能力・結果の 3 値・変更の件数・失敗の理由と
+/// フレーム・打ち切りの種類）をこのイベントで送る。ここはそれを受けて記録へ写すだけである。
+///
+/// # なぜ製品の記録（`macro_run` の 1 行）だけでは足りないのか
+///
+/// 製品の行は**実行**の事実（名前・種別・結果・打ち切り・変更の件数・所要）を持ち、
+/// **失敗の理由とフレームを持たない**（要件 8.3 の「ソースと値は出さない」の帰結であり、
+/// 4.3 の設計である）。5.2 は「失敗の理由とフレーム」「能力の拒否」をも記録から判定するので、
+/// **検証専用の観測の行**が要る。本行は検証用の形にだけ入る（配布物には購読もイベント名も
+/// 存在しない）。
+///
+/// **戻り値と `console` の出力は運ばない**（値が記録へ流れる経路を作らない。要件 8.3 の精神）。
+/// 運ぶのは上に挙げた閉じた事実だけである。本文は `emit` が直列化した JSON 文字列なので、
+/// **解釈せずにそのまま 1 行として写す**（`register_bulk_result_listener` と同じ選択であり、
+/// `serde_json` を直接依存に足さない理由でもある）。
+#[cfg(feature = "verification-triggers")]
+fn register_macro_observation_listener(app: &AppHandle) {
+    use tauri::Listener;
+
+    app.listen(VERIFY_MACRO_OBSERVATION_EVENT, |event| {
+        log::info!("マクロの観測: {}", event.payload());
     });
 }
 

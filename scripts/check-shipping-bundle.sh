@@ -26,7 +26,10 @@
 #   1. `dist/` に JavaScript の資産が 1 つ以上ある（ビルドされていない入力で空回りしない）
 #   2. 検証専用の識別子が 1 つも現れない:
 #      `JXCEL_VERIFICATION`（環境変数名とグローバル名 `__JXCEL_VERIFICATION_*` をまとめて覆う）、
-#      `verificationBulk` / `verificationScreen`（検証専用モジュールの名前）、
+#      `verificationBulk` / `verificationScreen` / `verificationMacroRun`（検証専用モジュールの
+#      名前。`verificationMacroRun` は `macro-runtime` スペックの 5.1 が足した起動時の
+#      マクロの実行の仕込みであり、`src/main.tsx` の `__JXCEL_VERIFICATION__` の分岐からだけ
+#      動的 import される）、
 #      `verification-triggers`（cargo feature 名）
 #   3. 10.4 の両画面の識別子（`smoke-table` / `smoke-editor`）が**現れる** — 配布物の初回描画を
 #      担保するだけでなく、10.4 の方式 A（両画面は**検証用の形でも配布物と共通のスモーク画面の
@@ -96,6 +99,7 @@ const FORBIDDEN_TOKENS = [
   'JXCEL_VERIFICATION',
   'verificationBulk',
   'verificationScreen',
+  'verificationMacroRun',
   'verification-triggers',
 ];
 

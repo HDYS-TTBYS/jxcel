@@ -619,6 +619,110 @@ fn is_verify_switch_on(value: &str) -> bool {
     value.trim() == "1"
 }
 
+// ---------------------------------------------------------------------------
+// 検証専用: マクロの実行の観測（macro-runtime スペックの 5.1）の引き金
+// ---------------------------------------------------------------------------
+
+/// 検証専用: 起動時に実行するマクロの名前を指定する環境変数。
+///
+/// **`verification-triggers` feature の下にのみ存在する**（既定のビルドには環境変数の読み取り
+/// 自体が入らない）。`macro-runtime` スペックの 5.1 が、**「一覧 → 選択 → 実行」を起動時に
+/// 仕込む**ために置いた。
+///
+/// # なぜ画面の押下ではないのか（4.4 の申し送り）
+///
+/// 「選ぶ → 実行する」の押下は **AT-SPI では再現できない** — この機械の WebKitGTK は DOM を
+/// アクセシビリティの木へ露出しない（4.4 の実測）。したがって 5.1 の引き金は**画面の押下では
+/// なく、起動時の仕込み**であり、値は「どのマクロを実行するか」だけを運ぶ。実行の要求そのものは
+/// 製品の経路（`macro_run` のコマンドとフロントエンドの面）を通る — 検証専用の実行経路を
+/// 別に持たない（`window/close.rs` の拒否と `session/verification.rs` と同じ規律）。
+///
+/// # 併せて要る指定（**この引き金だけでは実行まで進まない**）
+///
+/// 1. **起動の引数に標本の文書を渡す**（`crates/macro-runtime/examples/make-macro-document.rs`
+///    が書き出す `.jxcel`。標本のマクロの名前は `標本の記入`）。
+/// 2. `JXCEL_VERIFICATION_INITIAL_SCREEN=grid` — マクロの変更を適用するには、そのウィンドウで
+///    **グリッドがシートを開いている**ことが要る（`crates/macro-runtime` の design.md
+///    「System Flows → 実行の流れ」と `src-tauri/src/commands/macro.rs` の表）。初期画面が
+///    グリッドでなければ、実行は「適用先が決まらない」経路の失敗として記録に残る
+///    （**黙って成功に見えることは無い**）。
+///
+/// # 側の分担
+///
+/// 値は [`macro_run_script`] がウィンドウの初期化スクリプトとしてグローバルへ書き、
+/// フロントエンド（`src/shell/verificationMacroRun.ts`。`src/main.tsx` が
+/// `__JXCEL_VERIFICATION__` の下でだけ動的 import する）が読んで、製品の面の保持
+/// （`MACRO_SURFACE_STORE`）を通して「一覧 → 選択 → 実行」を駆動する。**コマンドも権限も
+/// 増やしていない**（使うのは製品の `macro_list` / `macro_run` だけである）。
+#[cfg(feature = "verification-triggers")]
+const VERIFY_MACRO_RUN_ENV: &str = "JXCEL_VERIFICATION_MACRO_RUN";
+
+/// 起動時に実行するマクロの名前を載せるグローバルの名前。**`src/shell/verificationMacroRun.ts`
+/// の `VERIFICATION_MACRO_RUN_GLOBAL` と同じ綴りでなければならない**（既定のビルドには
+/// どちらか一方しか存在しない検証専用の対の契約）。
+#[cfg(feature = "verification-triggers")]
+const VERIFY_MACRO_RUN_GLOBAL: &str = "__JXCEL_VERIFICATION_MACRO_RUN__";
+
+/// 検証専用: マクロの名前を初期化スクリプトの**文字列リテラル**へ埋め込める形にする。
+///
+/// **`is_embeddable_screen_id` の白名簿は使えない** — 標本のマクロの名前は日本語
+/// （`標本の記入`）であり、ASCII の英数字だけを許すと**仕込みたい名前が 1 つも通らない**。
+/// 代わりに、**リテラルの外へ出る文字を拒み、リテラルの内側で意味を持つ 2 文字を
+/// エスケープする**:
+///
+/// - 制御文字（改行・タブ・NUL など）と行区切り（U+2028 / U+2029）は**名前として不正**として
+///   拒む（`None`）。マクロの名前は 1 行の名前であり、これらを含む名前が文書にあるなら、
+///   その名前を実行しない方がよい（エスケープして実行するより、拒んで記録に残す方がよい）。
+/// - `\` と `"` はエスケープする（名前として正当でありうる）。
+///
+/// 返るのは**引用符を含むリテラルそのもの**である（呼び出し元はそのまま代入式へ置く）。
+#[cfg(feature = "verification-triggers")]
+fn embeddable_macro_name(value: &str) -> Option<String> {
+    // 名前の長さの上限。標本の名前は数文字であり、1000 文字を超える名前は初期化スクリプトと
+    // 記録を無駄に大きくするだけである（`is_embeddable_screen_id` の 64 と同じ趣旨）。
+    const MAX_MACRO_NAME_BYTES: usize = 256;
+    if value.is_empty() || value.len() > MAX_MACRO_NAME_BYTES {
+        return None;
+    }
+    let mut literal = String::with_capacity(value.len() + 2);
+    literal.push('"');
+    for character in value.chars() {
+        match character {
+            '\\' => literal.push_str("\\\\"),
+            '"' => literal.push_str("\\\""),
+            '\u{2028}' | '\u{2029}' => return None,
+            other if other.is_control() => return None,
+            other => literal.push(other),
+        }
+    }
+    literal.push('"');
+    Some(literal)
+}
+
+/// 検証専用: 起動時のマクロの実行を要求する初期化スクリプト（5.1）。
+///
+/// 指定が無い・空・長すぎる・制御文字を含むときは `None` を返し、**仕込みは 1 つも起きない**
+/// （検査器は実行の記録が現れないので非 0 で落ちる — 黙って別のマクロを実行しない）。
+/// **どの名前を要求したかを記録に 1 行残す**（3 OS の段が起動の識別として読む。10.4 / 10.8 と
+/// 同じ規律）。
+#[cfg(feature = "verification-triggers")]
+fn macro_run_script() -> Option<String> {
+    let requested = std::env::var(VERIFY_MACRO_RUN_ENV).ok()?;
+    let literal = match embeddable_macro_name(&requested) {
+        Some(literal) => literal,
+        None => {
+            log::warn!(
+                "{} の値を実行するマクロの名前に使えない（無視する）: {requested:?}",
+                VERIFY_MACRO_RUN_ENV,
+            );
+            return None;
+        }
+    };
+    log::info!("検証用のマクロの実行を要求した: 名前={requested}");
+    Some(format!("window.{} = {literal};", VERIFY_MACRO_RUN_GLOBAL))
+}
+
+
 /// 検証専用: グリッドの観測を要求する初期化スクリプト（9.2）。
 ///
 /// 指定が無い・`1` でないときは `None` を返し、**観測の画面は起動しない**（登録簿に載るだけで
@@ -662,9 +766,9 @@ fn grid_paint_failure_script() -> Option<String> {
 /// 検証専用: 初期化スクリプトを 1 本にまとめる。
 ///
 /// `WebviewWindowBuilder::initialization_script` は複数回呼べるが、**呼び出しを 1 箇所に保つ**
-/// ためここで連結する（初期画面の指定・一括転送の指定・グリッドの観測の指定は独立であり、
-/// どれか 1 つだけでも有効でなければならない）。どれも指定が無ければ `None`（**無条件に
-/// 初期化スクリプトを足さない**）。
+/// ためここで連結する（初期画面の指定・一括転送の指定・グリッドの観測の指定・マクロの実行の
+/// 指定は独立であり、どれか 1 つだけでも有効でなければならない）。どれも指定が無ければ
+/// `None`（**無条件に初期化スクリプトを足さない**）。
 #[cfg(feature = "verification-triggers")]
 fn verification_init_script() -> Option<String> {
     let parts: Vec<String> = [
@@ -673,6 +777,7 @@ fn verification_init_script() -> Option<String> {
         grid_observation_script(),
         grid_paint_failure_script(),
         grid_paste_script(),
+        macro_run_script(),
     ]
     .into_iter()
     .flatten()
@@ -1132,6 +1237,42 @@ mod tests {
         assert!(!is_embeddable_screen_id("smoke;table"));
         assert!(!is_embeddable_screen_id("(smoke)"));
         assert!(!is_embeddable_screen_id("表"));
+    }
+
+    /// 検証専用のマクロの名前（5.1）も**初期化スクリプトのソースへ埋め込まれる**が、画面の
+    /// 識別子とは違い**日本語でありうる**（標本のマクロは `標本の記入` である）。したがって
+    /// 白名簿ではなく、**リテラルの外へ出る文字を拒み、リテラルの中で意味を持つ 2 文字を
+    /// エスケープする**。ここが壊れると、任意の式を混ぜられる（または日本語の名前が実行できなく
+    /// なる）ので、両側を固定する。
+    #[cfg(feature = "verification-triggers")]
+    #[test]
+    fn a_macro_name_is_embedded_as_a_quoted_and_escaped_literal() {
+        use super::embeddable_macro_name;
+
+        // 標本の名前（CJK と空白。そのまま引用符で囲む）。
+        assert_eq!(
+            embeddable_macro_name("標本の記入").as_deref(),
+            Some("\"標本の記入\"")
+        );
+        // リテラルの内側で意味を持つ 2 文字はエスケープする（名前としては正当である）。
+        assert_eq!(
+            embeddable_macro_name("say \"hi\"\\").as_deref(),
+            Some("\"say \\\"hi\\\"\\\\\"")
+        );
+        // **リテラルの外へ出る文字は拒む**（改行・タブ・NUL・行区切り）。エスケープして実行
+        // するより、拒んで記録に残す方がよい（名前は 1 行の名前である）。
+        assert_eq!(embeddable_macro_name(""), None);
+        assert_eq!(embeddable_macro_name("改行\nあり"), None);
+        assert_eq!(embeddable_macro_name("タブ\tあり"), None);
+        assert_eq!(embeddable_macro_name("nul\0あり"), None);
+        assert_eq!(embeddable_macro_name("行区切り\u{2028}あり"), None);
+        assert_eq!(embeddable_macro_name("段落区切り\u{2029}あり"), None);
+        // 長さの上限は**バイト数**である（`is_embeddable_screen_id` と同じ趣旨）。
+        assert!(embeddable_macro_name(&"a".repeat(256)).is_some());
+        assert_eq!(embeddable_macro_name(&"a".repeat(257)), None);
+        // 標本の名前は日本語であり 1 文字 3 バイトである（`標本の記入` は 15 バイトで内側）。
+        assert!(embeddable_macro_name(&"あ".repeat(85)).is_some());
+        assert_eq!(embeddable_macro_name(&"あ".repeat(86)), None);
     }
 
     /// 検証専用の行数の一覧（要件 4.5 / タスク 10.8）は**初期化スクリプトのソースへそのまま

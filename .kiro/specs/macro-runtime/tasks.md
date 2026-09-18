@@ -164,7 +164,7 @@
   - _Requirements: 1.3, 1.4, 2.3, 2.4, 2.5, 2.7, 8.2, 9.1, 9.2, 9.3_
 
 - [ ] 5. Validation: 実起動の観測・予算・記録
-- [ ] 5.1 検証専用の引き金とマクロ入りの標本（観測の前提）
+- [x] 5.1 検証専用の引き金とマクロ入りの標本（観測の前提）
   - 非既定 feature（`verification-triggers`）と環境変数 1 系統で、**実行の観測を起動時に仕込める**ようにする（検証専用の初期画面または引き金。既定のビルドには読み取りが入らない）
   - マクロを 1 件持つ標本の文書を用意する（上流の生成器を使い、**手で作った文書を置かない**）
   - **観測**: 検証用のビルドを起動すると、仕込まれたマクロが一覧に現れ、既定のビルドでは同じ起動が仕込みを一切読まない
@@ -214,3 +214,32 @@
   持つ）で行う。`macro-runtime` の側では直さない。
 - **テストへの影響**: 10 万行の往復そのものは回していない（回すと 35 秒）。往復の意味論は小さい標本で、
   10 万行は適用と材料の被覆で固定している（`macro_apply` のテストの doc に実測値つきで記載）。
+
+### 5.1 が置いたもの（引き金と標本。**5.2 が読む前提**）
+
+- **引き金**: `JXCEL_VERIFICATION_MACRO_RUN=<マクロ名>`（`verification-triggers` の下。
+  `src-tauri/src/window/mod.rs` の `macro_run_script`）＋ `JXCEL_VERIFICATION_INITIAL_SCREEN=grid`。
+  起動時に `src/shell/verificationMacroRun.ts` が**製品の面の保持**（`MACRO_SURFACE_STORE`）を通して
+  「一覧 → 選択 → 実行」を駆動する（**押下ではなく仕込み**である理由は 4.4 の申し送り: この機械の
+  WebKitGTK は DOM をアクセシビリティの木へ露出しない）。**グリッドの初期画面が要る** — マクロの変更を
+  適用するには、そのウィンドウでグリッドがシートを開いている必要がある（`grid_open_sheet` が先）。
+- **記録**: 製品の `macro_run:` の 1 行に加えて、検証専用の観測の 1 行
+  （`マクロの観測: {…}`。`src-tauri/src/lifecycle.rs` の `register_macro_observation_listener`）が出る。
+  運ぶのは 一覧の件数と名前・選んだ名前・宣言されている能力・結果の 3 値・変更の件数・打ち切りの種類・
+  失敗の層と理由とフレーム。**製品の行は失敗の理由とフレームを持たない**（要件 8.3 の帰結）ので、
+  5.2 の「失敗の理由とフレーム」「能力の拒否」はこの行が唯一の読み口である。
+- **標本**: `cargo run -p macro-runtime --example make-macro-document --features verification-samples -- <出力先>`。
+  `crates/macro-runtime/examples/make-macro-document.rs` が `document-format` と `schema-engine` の
+  公開面だけで「1 シート（在庫: 品名 / 数量、3 行）＋マクロ 1 件（標本の記入。1 セルだけ書く）」を組み立て、
+  保存・開き直し・中身の 1 行を出す。**2 回の生成はバイト列として一致しない**（識別子が ULID である）が、
+  `標本の内容:` の行は一致する（実測で一致を確認）。
+- **落とし穴（実測。5.2 / 5.3 が踏まないように）**: `SchemaPart::empty()`（`{"root":null}`）を持つ文書は
+  **表を開けない** — 表を開く経路は宣言から列の計画を組み、列 0 本の計画は `GridSession::open` が拒む。
+  症状は `grid_open_sheet: … 失敗 = ドキュメントを扱えない` の 1 行だけで、理由は記録に出ない
+  （`IpcError` の `Display` が詳細を落とす）。標本は**列の宣言を型つきで持つ**必要がある
+  （本タスクは `schema-engine` の正準出力（`schema_to_text`）＋ `SchemaPart::parse` で作っている）。
+- **既定のビルドの非読み取り**（検査で固定）: 既定の `target/debug/jxcel` に `JXCEL_VERIFICATION` /
+  `JXCEL_VERIFICATION_MACRO_RUN` / 観測のイベント名 / 記録の文言が **0 件**（`strings -a`）であり、
+  既定の `dist/` に対して `scripts/check-shipping-bundle.sh` が 0 で終わる（**同スクリプトの禁止語に
+  `verificationMacroRun` を足した**ので、混入すれば落ちる。検証用の形の `dist/` に対しては実際に非 0 で
+  落ちることも実測した）。
