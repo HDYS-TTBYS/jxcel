@@ -158,7 +158,31 @@ run_check() {
 }
 
 echo "観測: 7 つの筋書き（成功と出力の記録・失敗・拒否・打ち切りと復帰・保存と開き直し・読みの予算・書き換えの予算）"
-run_check "$verify" --timeout=180
+# **ホストの GUI が一時的に失敗したときだけ 1 回再試行する**（無条件の再試行はしない）。
+# 実測（2026-09-18、この開発機）: 同じ実行ファイルと同じ標本で、観測の行が 1 行も出ずに落ちることが
+# あった。アプリの出力の末尾に GTK のアイコンのローダーの失敗が出ており
+# （`Gtk:ERROR … ensure_surface_for_gicon …`。サンドボックス化された画像ローダー（bwrap + glycin）が
+# ホスト側で失敗するためで、アプリのコードの退行ではない）、**再試行すると通る**（失敗 1 回の後、
+# 2 回連続で成功）。したがって**この署名が出たときだけ 1 回だけ**再試行し、再試行したことを出力に残す。
+run_positive() {
+  if output=$(run_check "$verify" --timeout=180 2>&1); then
+    printf '%s\n' "$output"
+    return 0
+  fi
+  if printf '%s\n' "$output" | grep -q 'ensure_surface_for_gicon'; then
+    echo "注意: GUI の画像ローダーがホスト側で失敗した（ensure_surface_for_gicon）。1 回だけ再試行する"
+    output=$(run_check "$verify" --timeout=180 2>&1) || {
+      printf '%s\n' "$output"
+      echo "NG: 再試行でも観測が成立しなかった（ホストの GUI の問題が続いている）" >&2
+      return 1
+    }
+    printf '%s\n' "$output"
+    return 0
+  fi
+  printf '%s\n' "$output"
+  return 1
+}
+run_positive
 
 # ---------------------------------------------------------------------------
 # 反証: **既定 feature の現ソースのビルド**は検証専用の環境変数を読まないので、観測の行は
