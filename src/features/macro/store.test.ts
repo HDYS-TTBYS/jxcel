@@ -162,7 +162,7 @@ describe("一覧の流れ（要件 1.3、1.4）", () => {
     expect(store.getState().list.status).toBe("loading");
 
     fake.listAnswers.push(listed([summary("棚卸し", ["file.read"])]));
-    store.refresh();
+    store.dispatch({ type: "refresh" });
     await settle();
 
     // **一覧の前に文書の状態を読む**（起動直後の一過性の失敗を出さないための順序である）。
@@ -183,7 +183,7 @@ describe("一覧の流れ（要件 1.3、1.4）", () => {
       status: "error",
       error: { kind: "Document", detail: { message: "このウィンドウにはドキュメントがありません" } },
     });
-    store.refresh();
+    store.dispatch({ type: "refresh" });
     await settle();
 
     const list = store.getState().list;
@@ -203,7 +203,7 @@ describe("一覧の流れ（要件 1.3、1.4）", () => {
 
     // 起動直後: 文書はまだ関連付いていない（`document_state` は `Absent`）。
     fake.sessionAnswers.push(absent());
-    store.refresh();
+    store.dispatch({ type: "refresh" });
     await settle();
 
     // **一覧を求めない** — 求めた呼び出しは経路の失敗になり、記録に 1 行残る。
@@ -212,7 +212,7 @@ describe("一覧の流れ（要件 1.3、1.4）", () => {
 
     // 文書が付いた時点の通知（`./requests` の購読）が取り直す。そのときは一覧が出る。
     fake.listAnswers.push(listed([summary("棚卸し")]));
-    store.refresh();
+    store.dispatch({ type: "refresh" });
     await settle();
 
     const list = store.getState().list;
@@ -229,7 +229,7 @@ describe("一覧の流れ（要件 1.3、1.4）", () => {
 
     const reason = "位置 /tmp/消えた.jxcel のドキュメントを読めない";
     fake.sessionAnswers.push(unavailable(reason));
-    store.refresh();
+    store.dispatch({ type: "refresh" });
     await settle();
 
     // 求めても同じ理由で失敗するので、一覧は求めない。
@@ -259,9 +259,9 @@ describe("一覧の流れ（要件 1.3、1.4）", () => {
         }),
     };
     const store2 = createMacroSurfaceStore(slow);
-    store2.refresh();
+    store2.dispatch({ type: "refresh" });
     await settle();
-    store2.refresh();
+    store2.dispatch({ type: "refresh" });
     await settle();
 
     // 2 回目（後の要求）の答えが先に届いた、という状況を作る。
@@ -290,12 +290,12 @@ describe("要求から実行までの 4 つの流れ（要件 2.1、8.2、2.5）
 
     // 1. 一覧（開いた時点で出る）。
     fake.listAnswers.push(listed([summary("棚卸し", ["file.read", "net"])]));
-    store.refresh();
+    store.dispatch({ type: "refresh" });
     await settle();
 
     // 2. メニューからの要求（一覧から選ばせる段へ入り、一覧を取り直す）。
     fake.listAnswers.push(listed([summary("棚卸し", ["file.read", "net"])]));
-    store.request();
+    store.dispatch({ type: "request" });
     expect(store.getState().picking).toBe(true);
     await settle();
     expect(fake.calls).toEqual([
@@ -306,7 +306,7 @@ describe("要求から実行までの 4 つの流れ（要件 2.1、8.2、2.5）
     ]);
 
     // 3. 選択（能力の提示）。**まだ実行していない。**
-    store.choose("棚卸し");
+    store.dispatch({ type: "choose", name: "棚卸し" });
     expect(store.getState().chosen).toBe("棚卸し");
     expect(store.getState().picking).toBe(false);
     expect(fake.calls).not.toContain("macro_run:棚卸し");
@@ -316,7 +316,7 @@ describe("要求から実行までの 4 つの流れ（要件 2.1、8.2、2.5）
     store.subscribeApplied(() => {
       applied.push("適用された");
     });
-    store.run();
+    store.dispatch({ type: "run" });
     expect(store.getState().running).toEqual({ name: "棚卸し" });
     expect(store.getState().chosen).toBeNull();
     expect(fake.calls).toEqual([
@@ -345,11 +345,11 @@ describe("要求から実行までの 4 つの流れ（要件 2.1、8.2、2.5）
     // そのあと遷移先の面が**マウント時に一覧を取り直す**（`refresh`）。ここで段を落とすと、
     // 一覧は出るのに「選ぶ」が 1 つも出ない画面になる（実起動で観測した取り違えである）。
     fake.listAnswers.push(listed([summary("棚卸し", ["file.read"])]));
-    store.request();
+    store.dispatch({ type: "request" });
     expect(store.getState().picking).toBe(true);
 
     fake.listAnswers.push(listed([summary("棚卸し", ["file.read"])]));
-    store.refresh();
+    store.dispatch({ type: "refresh" });
     expect(store.getState().picking).toBe(true);
     await settle();
 
@@ -359,7 +359,7 @@ describe("要求から実行までの 4 つの流れ（要件 2.1、8.2、2.5）
       throw new Error("一覧が読めた状態にならなかった");
     }
     // **選択を提示できる**（要求が生きている）。
-    store.choose("棚卸し");
+    store.dispatch({ type: "choose", name: "棚卸し" });
     expect(store.getState().chosen).toBe("棚卸し");
     expect(store.getState().picking).toBe(false);
   });
@@ -368,16 +368,16 @@ describe("要求から実行までの 4 つの流れ（要件 2.1、8.2、2.5）
     const fake = fakeClient();
     const store = createMacroSurfaceStore(fake.client);
     fake.listAnswers.push(listed([summary("棚卸し")]));
-    store.refresh();
+    store.dispatch({ type: "refresh" });
     await settle();
-    store.choose("棚卸し");
-    store.run();
+    store.dispatch({ type: "choose", name: "棚卸し" });
+    store.dispatch({ type: "run" });
     expect(store.getState().running).toEqual({ name: "棚卸し" });
 
     // **実行の答えが返る前に、別の一覧の取り直しが完了する**
     // （実行のために面が止まっていないことの証拠である）。
     fake.listAnswers.push(listed([summary("棚卸し"), summary("別のマクロ")]));
-    store.refresh();
+    store.dispatch({ type: "refresh" });
     await settle();
     const list = store.getState().list;
     if (list.status !== "ready") {
@@ -388,8 +388,8 @@ describe("要求から実行までの 4 つの流れ（要件 2.1、8.2、2.5）
     expect(store.getState().running).toEqual({ name: "棚卸し" });
 
     // 実行中に選ぼうとしても、次の実行は始まらない（導線を出していないのと同じ判断）。
-    store.choose("別のマクロ");
-    store.run();
+    store.dispatch({ type: "choose", name: "別のマクロ" });
+    store.dispatch({ type: "run" });
     expect(fake.calls.filter((call) => call.startsWith("macro_run:"))).toEqual([
       "macro_run:棚卸し",
     ]);
@@ -399,15 +399,15 @@ describe("要求から実行までの 4 つの流れ（要件 2.1、8.2、2.5）
     const fake = fakeClient();
     const store = createMacroSurfaceStore(fake.client);
     fake.listAnswers.push(listed([summary("棚卸し")]));
-    store.refresh();
+    store.dispatch({ type: "refresh" });
     await settle();
     const applied: string[] = [];
     store.subscribeApplied(() => {
       applied.push("適用された");
     });
 
-    store.choose("棚卸し");
-    store.run();
+    store.dispatch({ type: "choose", name: "棚卸し" });
+    store.dispatch({ type: "run" });
     fake.settleRun(
       ran({
         outcome: "Failed",
@@ -420,8 +420,8 @@ describe("要求から実行までの 4 つの流れ（要件 2.1、8.2、2.5）
     expect(applied).toEqual([]);
 
     // 打ち切りも同じである（**実行中は解除され、次の実行ができる**）。
-    store.choose("棚卸し");
-    store.run();
+    store.dispatch({ type: "choose", name: "棚卸し" });
+    store.dispatch({ type: "run" });
     fake.settleRun(
       ran({
         outcome: "Aborted",
@@ -445,15 +445,15 @@ describe("要求から実行までの 4 つの流れ（要件 2.1、8.2、2.5）
     const fake = fakeClient();
     const store = createMacroSurfaceStore(fake.client);
     fake.listAnswers.push(listed([summary("棚卸し")]));
-    store.refresh();
+    store.dispatch({ type: "refresh" });
     await settle();
     const applied: string[] = [];
     store.subscribeApplied(() => {
       applied.push("適用された");
     });
 
-    store.choose("棚卸し");
-    store.run();
+    store.dispatch({ type: "choose", name: "棚卸し" });
+    store.dispatch({ type: "run" });
     fake.settleRun(ran(changes(0)));
     await settle();
 
@@ -465,10 +465,10 @@ describe("要求から実行までの 4 つの流れ（要件 2.1、8.2、2.5）
     const fake = fakeClient();
     const store = createMacroSurfaceStore(fake.client);
     fake.listAnswers.push(listed([summary("棚卸し")]));
-    store.refresh();
+    store.dispatch({ type: "refresh" });
     await settle();
-    store.choose("棚卸し");
-    store.run();
+    store.dispatch({ type: "choose", name: "棚卸し" });
+    store.dispatch({ type: "run" });
 
     fake.settleRun({
       status: "error",
@@ -491,15 +491,15 @@ describe("要求から実行までの 4 つの流れ（要件 2.1、8.2、2.5）
     const fake = fakeClient();
     const store = createMacroSurfaceStore(fake.client);
     fake.listAnswers.push(listed([summary("棚卸し")]));
-    store.refresh();
+    store.dispatch({ type: "refresh" });
     await settle();
-    store.choose("棚卸し");
-    store.run();
+    store.dispatch({ type: "choose", name: "棚卸し" });
+    store.dispatch({ type: "run" });
     fake.settleRun(ran(changes(1)));
     await settle();
     expect(store.getState().result).not.toBeNull();
 
-    store.dismissResult();
+    store.dispatch({ type: "dismiss-result" });
     expect(store.getState().result).toBeNull();
     // **一覧はそのままである**（閉じるのは提示だけである）。
     expect(store.getState().list.status).toBe("ready");

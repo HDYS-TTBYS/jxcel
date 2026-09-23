@@ -62,11 +62,7 @@ function broken(name = "壊れたマクロ"): MacroSummary {
 function markOf(state: MacroSurfaceState): string {
   const props: MacroPanelViewProps = {
     state,
-    onRefresh: () => undefined,
-    onChoose: () => undefined,
-    onCancelChoice: () => undefined,
-    onRun: () => undefined,
-    onDismissResult: () => undefined,
+    dispatch: () => undefined,
   };
   return renderToStaticMarkup(createElement(MacroPanelView, props));
 }

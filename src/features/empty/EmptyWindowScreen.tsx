@@ -183,6 +183,19 @@ type CreateState =
   | { readonly status: "created" }
   | { readonly status: "refused"; readonly reason: string }
   | { readonly status: "failed"; readonly message: string };
+/** 画面内の操作意図。状態遷移と副作用は画面メディエーターだけが処理する。 */
+type EmptyWindowEvent =
+  | { readonly type: "retry" }
+  | { readonly type: "open-document" }
+  | { readonly type: "create-document" };
+
+type EmptyWindowDispatch = (event: EmptyWindowEvent) => void;
+
+type EmptyWindowPresentationState = Readonly<{
+  session: SessionState;
+  open: OpenState;
+  create: CreateState;
+}>;
 
 /** 画面の枠。シェルの配色（`APPEARANCE_VARS`）だけを参照する。 */
 const PANEL_STYLE = {
@@ -205,19 +218,21 @@ function Action({
   testId,
   label,
   disabled,
-  onClick,
+  dispatch,
+  event,
 }: {
   readonly testId: string;
   readonly label: string;
   readonly disabled: boolean;
-  readonly onClick: () => void;
+  readonly dispatch: EmptyWindowDispatch;
+  readonly event: EmptyWindowEvent;
 }): ReactElement {
   return (
     <button
       type="button"
       data-testid={testId}
       disabled={disabled}
-      onClick={onClick}
+      onClick={() => dispatch(event)}
       style={{
         font: "inherit",
         fontSize: "0.9375rem",
@@ -458,12 +473,37 @@ export function EmptyWindowScreen(): ReactElement {
     );
   }, []);
 
+  const dispatch = useCallback<EmptyWindowDispatch>((event) => {
+    switch (event.type) {
+      case "retry":
+        void loadSession();
+        return;
+      case "open-document":
+        void openDocument();
+        return;
+      case "create-document":
+        void requestNewDocument();
+        return;
+      default:
+        assertNever(event);
+    }
+  }, [loadSession, openDocument, requestNewDocument]);
+
+  return (
+    <EmptyWindowView state={{ session, open, create }} dispatch={dispatch} />
+  );
+}
+
+function EmptyWindowView({ state, dispatch }: {
+  readonly state: EmptyWindowPresentationState;
+  readonly dispatch: EmptyWindowDispatch;
+}): ReactElement {
+  const { session, open, create } = state;
+
   return (
     <section
       data-testid="jxcel-empty-window"
-      // 外から読める観測点。**セッションの状態の判別子**（`Absent` / `Open` / `Unavailable`）と、
-      // 問い合わせ自体の状態（`loading` / `failed`）を出す。関連付けの記録ではない
-      // （モジュール doc「判定はセッションの状態だけを使う」）。
+      // 外から読める観測点。セッション状態の判別子と問い合わせ状態を示す。
       data-document-state={
         session.status === "ready" ? session.state.state : session.status
       }
@@ -491,9 +531,8 @@ export function EmptyWindowScreen(): ReactElement {
               testId="jxcel-empty-state-retry"
               label="再試行"
               disabled={false}
-              onClick={() => {
-                void loadSession();
-              }}
+              dispatch={dispatch}
+              event={{ type: "retry" }}
             />
           </div>
         </>
@@ -519,17 +558,15 @@ export function EmptyWindowScreen(): ReactElement {
               testId="jxcel-empty-new-document"
               label="新規作成"
               disabled={create.status === "running"}
-              onClick={() => {
-                void requestNewDocument();
-              }}
+              dispatch={dispatch}
+              event={{ type: "create-document" }}
             />
             <Action
               testId="jxcel-empty-open-document"
               label="既存ファイルを開く…"
               disabled={open.status === "running"}
-              onClick={() => {
-                void openDocument();
-              }}
+              dispatch={dispatch}
+              event={{ type: "open-document" }}
             />
           </div>
 

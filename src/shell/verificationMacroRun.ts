@@ -282,8 +282,8 @@ async function drive(
     }
 
     // 3. 選ぶ（要件 8.2 の能力の提示へ入る）→ 実行する（要件 2.1）。
-    store.choose(name);
-    store.run();
+    store.dispatch({ type: "choose", name });
+    store.dispatch({ type: "run" });
     const settled = await waitForRun(store, name);
     if (settled === null) {
       await report(observationFailure(name, "timed-out", summary, macros));
@@ -321,7 +321,7 @@ async function waitForList(store: MacroSurfaceStore): Promise<MacroSummary[] | n
     }
     if (Date.now() >= nextAttempt) {
       nextAttempt = Date.now() + LIST_RETRY_MS;
-      store.refresh();
+      store.dispatch({ type: "refresh" });
     }
     await sleep(POLL_INTERVAL_MS);
   }

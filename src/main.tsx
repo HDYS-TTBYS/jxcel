@@ -4,9 +4,8 @@
  * 所有: アプリ起動の結線（design.md「File Structure Plan」の `src/main.tsx`）。
  * 要件: 1.1（3 OS それぞれで起動できる配布物）, 1.2（追加のインストール無しで起動）。
  *
- * サーバ側描画（SSR）は行わない。Tauri は SSR を支援せず、SPA のみである
- * （design.md「Technology Stack」）。画面の中身は `shell/Layout` が持ち、本ファイルは
- * マウントと起動時の前提確認だけを行う。
+ * （`shell/Root` が持ち）、本ファイルは Root を単一の React root へ結線し、起動時の前提確認を行う。
+ * すべての UI コンポーネントはこの Root の子孫として描画される。
  *
  * 本ファイルはタスク 1.4 が実体を置いた。初期画面の領域定義はタスク 9.1 が
  * `shell/` 配下を育てて拡張した。外観の解決（タスク 9.2）は `shell/theme` が持つ。
@@ -15,7 +14,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { installCloseVeto } from "./shell/closeVeto";
-import { Layout } from "./shell/Layout";
+import { Root } from "./shell/Layout";
 import { installRenderHeartbeat } from "./shell/renderHeartbeat";
 import { installSessionClosePrompt } from "./shell/sessionClose";
 import { bootstrapAppearance } from "./shell/theme";
@@ -106,7 +105,7 @@ async function mountShell(root: HTMLElement): Promise<void> {
 
   createRoot(root).render(
     <StrictMode>
-      <Layout />
+      <Root />
     </StrictMode>,
   );
 }

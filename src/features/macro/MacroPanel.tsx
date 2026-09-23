@@ -89,69 +89,27 @@ export const MACRO_SURFACE_STORE: MacroSurfaceStore = createMacroSurfaceStore(cr
  */
 export function MacroPanel({ binding }: { readonly binding: MacroSurfaceBinding }): ReactElement {
   const { store, onApplied } = binding;
-  // 3 つ目の引数（サーバ側の取得関数）は **`renderToStaticMarkup` の描画に要る** — 渡さないと
-  // React が例外を投げ、画面の契約を確かめる検査（`GridScreen.test.ts`）が実物の画面を描けない。
-  // ここでは同じ取得関数で足りる（保持は module にあり、描画のたびに同じ値を返す）。
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState);
-
-  // 一覧は**開いた時点で出す**（要件 1.3）。マウントのたびに取り直すので、文書が差し替わった
-  // あとに画面が組み直されても、出るのは新しい文書の一覧である。**文書がまだ付いていない
-  // ときは保持が待つ**（`./store` の module doc「一覧を求める前に、文書が付いているかを見る」）
-  // ので、起動直後の一過性の失敗は出ない。
-  useEffect(() => {
-    store.refresh();
-  }, [store]);
-
-  // 文書の差し替え・破棄への追随（要件 1.3）。**本文は読まない** — 一覧を取り直すだけである。
+  useEffect(() => { store.dispatch({ type: "refresh" }); }, [store]);
   useEffect(() => installMacroListRefresh(store), [store]);
-
-  // 実行が文書を変えたときの作り直し（要件 2.5）。
   useEffect(() => store.subscribeApplied(onApplied), [store, onApplied]);
-
-  return (
-    <MacroPanelView
-      state={state}
-      onRefresh={store.refresh}
-      onChoose={store.choose}
-      onCancelChoice={store.cancelChoice}
-      onRun={store.run}
-      onDismissResult={store.dismissResult}
-    />
-  );
+  return <MacroPanelView state={state} dispatch={store.dispatch} />;
 }
 
-/** 見た目へ渡すもの。**状態と操作だけである**（保持は [`MacroPanel`] が繋ぐ）。 */
+export type MacroPanelEvent =
+  | { readonly type: "refresh" }
+  | { readonly type: "choose"; readonly name: string }
+  | { readonly type: "cancel-choice" }
+  | { readonly type: "run" }
+  | { readonly type: "dismiss-result" };
+
+/** 見た目へ渡すもの。イベントは機能の仲介役へ 1 つの口で送る。 */
 export interface MacroPanelViewProps {
   readonly state: MacroSurfaceState;
-  /** 一覧を取り直す（読み込みの失敗の「再試行」）。 */
-  readonly onRefresh: () => void;
-  /** 一覧から 1 件を選ぶ（要件 8.2 の能力の提示へ移る）。 */
-  readonly onChoose: (name: string) => void;
-  /** 選択を取り消す（**何も送らない**）。 */
-  readonly onCancelChoice: () => void;
-  /** 選ばれている 1 件を実行する（要件 2.1）。 */
-  readonly onRun: () => void;
-  /** 結果を閉じる（**文書も値も動かない**）。 */
-  readonly onDismissResult: () => void;
+  readonly dispatch: (event: MacroPanelEvent) => void;
 }
 
-/**
- * 面の見た目。**状態だけを受け取る純粋な描画である**ので、検査は状態ごとにこれを呼んで
- * 「何が DOM へ出るか」を読める（`src/features/grid/GridScreen.tsx` の `GridScreenView` と
- * 同じ規律）。
- *
- * **実行中は 1 行を足すだけである**（`data-macro-running` の 1 行）。選択の区画からは実行の
- * 操作が消えるが（2 つ目の実行の導線を出さない。要件 2.7 と同じ判断）、**一覧はそのまま残り、
- * 操作できる** — 表と同じ画面に並ぶ限り、実行はほかの表示を止めない。
- */
-export function MacroPanelView({
-  state,
-  onRefresh,
-  onChoose,
-  onCancelChoice,
-  onRun,
-  onDismissResult,
-}: MacroPanelViewProps): ReactElement {
+export function MacroPanelView({ state, dispatch }: MacroPanelViewProps): ReactElement {
   const chosen = chosenSummary(state);
   return (
     <section
@@ -163,62 +121,45 @@ export function MacroPanelView({
     >
       <h2 style={HEADING_STYLE}>マクロ</h2>
       {state.running === null ? null : (
-        // **実行中に出るのはこの 1 行だけである**（覆いも対話の窓も出さない。上の module doc）。
         <p data-testid="jxcel-macro-running" role="status" style={MESSAGE_STYLE}>
           {`実行中: ${state.running.name}`}
         </p>
       )}
       {state.result === null ? null : (
-        <MacroResultView run={state.result} onDismiss={onDismissResult} />
+        <MacroResultView run={state.result} dispatch={dispatch} />
       )}
       {chosen === null ? null : (
         <div data-testid="jxcel-macro-capabilities" data-macro-name={chosen.name} style={BLOCK_STYLE}>
           <h3 style={SUBHEADING_STYLE}>実行する前に、宣言している能力を確認してください</h3>
           <p style={MESSAGE_STYLE}>{`マクロ「${chosen.name}」（${describeKind(chosen.kind)}）`}</p>
           {chosen.capabilities.length === 0 ? (
-            // 解釈できた 1 件で宣言が無い場合である（解釈できなかった 1 件は選べないのでここへ
-            // 来ない。要件 1.4 の理由は一覧に出ている）。
             <p data-testid="jxcel-macro-no-capability" style={MESSAGE_STYLE}>
               宣言している能力はありません（ファイルとネットワークに触れません）。
             </p>
           ) : (
             <ul data-testid="jxcel-macro-capability-list" style={LIST_STYLE}>
               {chosen.capabilities.map((capability) => (
-                // **綴りは境界の値そのままである**（`file.read` / `file.write` / `net`。生成物の
-                // `MacroCapabilityTag` の doc が「そのまま利用者へ見せられる」と定めている）。
-                <li
-                  key={capability}
-                  data-testid="jxcel-macro-capability"
-                  data-macro-capability={capability}
-                  style={ITEM_STYLE}
-                >
+                <li key={capability} data-testid="jxcel-macro-capability" data-macro-capability={capability} style={ITEM_STYLE}>
                   {capability}
                 </li>
               ))}
             </ul>
           )}
           {canPresentRun(state) ? (
-            <button type="button" data-testid="jxcel-macro-run" onClick={onRun} style={BUTTON_STYLE}>
+            <button type="button" data-testid="jxcel-macro-run" onClick={() => dispatch({ type: "run" })} style={BUTTON_STYLE}>
               実行する
             </button>
           ) : (
-            // **実行中は次の実行の導線を出さない**（実行は 1 つずつである。押しても断られる
-            // 操作を提示しない — 要件 2.7 と同じ判断である）。
             <p data-testid="jxcel-macro-run-blocked" style={MESSAGE_STYLE}>
               実行中です。終わってから実行できます。
             </p>
           )}
-          <button
-            type="button"
-            data-testid="jxcel-macro-cancel"
-            onClick={onCancelChoice}
-            style={BUTTON_STYLE}
-          >
+          <button type="button" data-testid="jxcel-macro-cancel" onClick={() => dispatch({ type: "cancel-choice" })} style={BUTTON_STYLE}>
             取り消す
           </button>
         </div>
       )}
-      <MacroListView state={state} onRefresh={onRefresh} onChoose={onChoose} />
+      <MacroListView state={state} dispatch={dispatch} />
     </section>
   );
 }
@@ -229,15 +170,7 @@ export function MacroPanelView({
  * `picking` のときだけ「選ぶ」の操作が出る（**実行の入口はメニューの 1 項目**であり、面は
  * その要求を受けて選択を提示する）。
  */
-function MacroListView({
-  state,
-  onRefresh,
-  onChoose,
-}: {
-  readonly state: MacroSurfaceState;
-  readonly onRefresh: () => void;
-  readonly onChoose: (name: string) => void;
-}): ReactElement {
+function MacroListView({ state, dispatch }: { readonly state: MacroSurfaceState; readonly dispatch: (event: MacroPanelEvent) => void }): ReactElement {
   const list = state.list;
   switch (list.status) {
     case "loading":
@@ -253,7 +186,7 @@ function MacroListView({
           <button
             type="button"
             data-testid="jxcel-macro-list-retry"
-            onClick={onRefresh}
+            onClick={() => dispatch({ type: "refresh" })}
             style={BUTTON_STYLE}
           >
             再試行
@@ -312,7 +245,7 @@ function MacroListView({
                     type="button"
                     data-testid="jxcel-macro-choose"
                     data-macro-name={macro.name}
-                    onClick={() => onChoose(macro.name)}
+                    onClick={() => dispatch({ type: "choose", name: macro.name })}
                     style={BUTTON_STYLE}
                   >
                     選ぶ
@@ -335,18 +268,12 @@ function MacroListView({
  * 打ち切りは失敗と**別の値**であり（生成物の `MacroRunOutcome` の doc）、提示も別である —
  * 失敗は「どこで失敗したか」を、打ち切りは「どちらの上限に当たったか」を言う。
  */
-function MacroResultView({
-  run,
-  onDismiss,
-}: {
-  readonly run: SettledMacroRun;
-  readonly onDismiss: () => void;
-}): ReactElement {
+function MacroResultView({ run, dispatch }: { readonly run: SettledMacroRun; readonly dispatch: (event: MacroPanelEvent) => void }): ReactElement {
   const dismiss = (
     <button
       type="button"
       data-testid="jxcel-macro-result-dismiss"
-      onClick={onDismiss}
+      onClick={() => dispatch({ type: "dismiss-result" })}
       style={BUTTON_STYLE}
     >
       閉じる
@@ -420,7 +347,6 @@ function MacroResultView({
           <p data-testid="jxcel-macro-elapsed" style={MESSAGE_STYLE}>
             {`打ち切りまでの所要 ${String(result.elapsedMs)} ms`}
           </p>
-          {/* **打ち切りも理由とフレームを伴う**（どこで当たったかが分かる。要件 6.1、6.2）。 */}
           <MacroFailure failure={result.failure} />
           {dismiss}
         </div>
@@ -428,7 +354,6 @@ function MacroResultView({
     case "rejected":
       return (
         <div data-testid="jxcel-macro-result-rejected" style={BLOCK_STYLE}>
-          {/* **実行そのものが始まらなかった**（実行の失敗とは別である。文書は変わっていない）。 */}
           <h3 style={SUBHEADING_STYLE}>{`実行できませんでした: ${run.name}`}</h3>
           <p data-testid="jxcel-macro-rejected-reason" style={MESSAGE_STYLE}>
             {result.message}
@@ -440,7 +365,6 @@ function MacroResultView({
       return assertNever(result, "実行の結果の分岐が網羅されていない");
   }
 }
-
 /** 失敗の提示（要件 2.4、9.1、9.2、9.3）。**失敗と打ち切りと、解釈できなかった理由が使う。** */
 function MacroFailure({ failure }: { readonly failure: MacroFailurePresentation }): ReactElement {
   const layer = failure.layer;

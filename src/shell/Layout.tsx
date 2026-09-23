@@ -1,11 +1,18 @@
 /**
- * シェルのレイアウト — 個別機能の画面が差し込まれる領域（`ShellRegion`）と、その外側の
- * シェル自身のクロームを定義する器。
+ * Root — 個別機能の画面が差し込まれる領域（`ShellRegion`）と、その外側のアプリ共通クロームを定義する。
  *
- * 所有: `ShellLayout`（design.md「Components and Interfaces → Frontend Layer」、
- * 「Directory Structure」の `src/shell/Layout.tsx`）。
- * 要件: 1.1, 1.2（3 OS で初期画面が描画されること）, 9.1（画面が差し込まれる領域の定義）,
- * 9.3, 9.4（明暗の外観と、明示選択の優先・永続化。タスク 9.2）。
+ * 所有: `Root`（アプリケーション全体の階層の根）。画面遷移・外観・アプリ共通の購読を裁定し、
+ * 個別の業務動作は各 feature の Mediator/state machine へ委譲する。
+ * 要件: 1.1, 1.2, 9.1, 9.3, 9.4（画面の登録・描画・外観）。
+ *
+ * # Root 配下の責務
+ *
+ * すべての画面と機能は `main.tsx` の単一 React root から本コンポーネントの子として描画する。
+ * Root は階層の組み立て、画面遷移、テーマ、画面境界、共通イベント購読を持つ。
+ * 機能ごとの Mediator が操作の状態遷移と外部作用を所有し、その配下の View は描画用の値を受け、
+ * 型付きイベントを 1 つの dispatch 口へ親方向に送る。View に判断規則や業務状態を持たせない。
+ *
+ * 既存の feature 境界は保つ。単一巨大 Mediator に異なる画面の状態を混在させない。
  *
  * # 画面の契約（**個別機能が守る側**）
  *
@@ -466,7 +473,7 @@ export function ShellRegion({
  * 領域へ渡すだけである。外観は `./theme` のカスタムプロパティに従い、本コンポーネントが
  * 持つのは選択の表示と入口（[`AppearanceControl`]）だけである。
  */
-export function Layout(): ReactElement {
+export function Root(): ReactElement {
   // 検証専用の初期画面の選択（要件 10.4。`./verificationScreen`）。**`__JXCEL_VERIFICATION__`
   // は Vite の `define` が埋め込むビルド時定数であり、既定のビルド（配布物）では `false` で
   // ある。したがってこの条件式は定数畳み込みで `null` になり、参照されなくなった

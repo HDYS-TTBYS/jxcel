@@ -87,31 +87,22 @@ export interface MacroSurfaceStore {
    * 新しい文書の面が上書きされないようにする）。
    */
   refresh: () => void;
-  /**
-   * メニューからの要求を受けた（要件 2.1）。**一覧を取り直し、選ばせる段へ入る。**
-   *
-   * 要求の本文は読まない（`MACRO_RUN_REQUESTED_EVENT` の荷は無い。`src-tauri/src/commands/macro.rs`
-   * の `MenuSelection` の扱い）。
-   */
   request: () => void;
-  /** 一覧から 1 件を選ぶ（要件 8.2 の能力の提示へ移る）。実行できない 1 件は選べない。 */
   choose: (name: string) => void;
-  /** 選択を取り消す（**何も送らない**）。 */
   cancelChoice: () => void;
-  /**
-   * 選ばれている 1 件を実行する（要件 2.1、2.5）。**結果を待たない**（面と表は実行中も使える）。
-   */
   run: () => void;
-  /** 直近の結果を閉じる（**文書も値も動かない**）。 */
   dismissResult: () => void;
-  /**
-   * **変更が適用された**ことの購読（要件 2.5）。購読者は**変更が入ったときだけ**呼ばれる。
-   *
-   * 呼ぶのは、実行が `Ran` で終わり、かつ変更の件数が 1 件以上であるときだけである —
-   * 失敗・打ち切り・変更 0 件では文書が動いておらず、作り直す理由が無い（要件 6.3、7.3）。
-   */
+  dispatch: (event: MacroSurfaceEvent) => void;
   subscribeApplied: (listener: () => void) => () => void;
 }
+
+export type MacroSurfaceEvent =
+  | { readonly type: "refresh" }
+  | { readonly type: "request" }
+  | { readonly type: "choose"; readonly name: string }
+  | { readonly type: "cancel-choice" }
+  | { readonly type: "run" }
+  | { readonly type: "dismiss-result" };
 
 /**
  * 保持を作る。**境界の口は差し替えられる**（検査は偽の実装を渡す。
@@ -171,6 +162,57 @@ export function createMacroSurfaceStore(client: MacroClient): MacroSurfaceStore 
       });
     });
   };
+  const choose = (name: string): void => {
+    publish(macroSurfaceChosen(state, name));
+  };
+  const cancelChoice = (): void => {
+    publish(macroSurfaceChoiceCancelled(state));
+  };
+  const run = (): void => {
+    if (state.running !== null) {
+      return;
+    }
+    const name = state.chosen;
+    if (name === null) {
+      return;
+    }
+    publish(macroSurfaceRunStarted(state, name));
+    void client.run(name).then((answer) => {
+      if (answer.status === "error") {
+        publish(
+          macroSurfaceRunSettled(state, name, {
+            kind: "rejected",
+            message: describeIpcError(answer.error),
+          }),
+        );
+        return;
+      }
+      const result = resultPresentation(answer.data.outcome);
+      publish(macroSurfaceRunSettled(state, name, result));
+      if (result.kind === "ran" && result.changed) {
+        for (const listener of [...applied]) {
+          listener();
+        }
+      }
+    });
+  };
+  const dismissResult = (): void => {
+    publish(macroSurfaceResultDismissed(state));
+  };
+  const dispatch = (event: MacroSurfaceEvent): void => {
+    switch (event.type) {
+      case "refresh": refresh(); return;
+      case "request":
+        refresh();
+        publish(macroSurfacePickRequested(state));
+        return;
+      case "choose": choose(event.name); return;
+      case "cancel-choice": cancelChoice(); return;
+      case "run": run(); return;
+      case "dismiss-result": dismissResult(); return;
+      default: return assertNever(event, "マクロ操作イベントの分岐が網羅されていない");
+    }
+  };
 
   return {
     getState: () => state,
@@ -180,51 +222,13 @@ export function createMacroSurfaceStore(client: MacroClient): MacroSurfaceStore 
         listeners.delete(listener);
       };
     },
-    refresh,
-    request: () => {
-      refresh();
-      publish(macroSurfacePickRequested(state));
-    },
-    choose: (name) => {
-      publish(macroSurfaceChosen(state, name));
-    },
-    cancelChoice: () => {
-      publish(macroSurfaceChoiceCancelled(state));
-    },
-    run: () => {
-      // **実行は 1 つずつである**（要件 2.2 の裏返し。2 つ目は Rust 側も「実行中である」として
-      // 断る）。導線は実行中に 1 つも出ないので、ここへ来るのは競合した押下だけである。
-      if (state.running !== null) {
-        return;
-      }
-      const name = state.chosen;
-      if (name === null) {
-        return;
-      }
-      publish(macroSurfaceRunStarted(state, name));
-      void client.run(name).then((answer) => {
-        if (answer.status === "error") {
-          // **実行そのものが始まらなかった**（経路の失敗。文書は変わっていない）。
-          publish(
-            macroSurfaceRunSettled(state, name, {
-              kind: "rejected",
-              message: describeIpcError(answer.error),
-            }),
-          );
-          return;
-        }
-        const result = resultPresentation(answer.data.outcome);
-        publish(macroSurfaceRunSettled(state, name, result));
-        if (result.kind === "ran" && result.changed) {
-          for (const listener of [...applied]) {
-            listener();
-          }
-        }
-      });
-    },
-    dismissResult: () => {
-      publish(macroSurfaceResultDismissed(state));
-    },
+    refresh: () => dispatch({ type: "refresh" }),
+    request: () => dispatch({ type: "request" }),
+    choose: (name) => dispatch({ type: "choose", name }),
+    cancelChoice: () => dispatch({ type: "cancel-choice" }),
+    run: () => dispatch({ type: "run" }),
+    dismissResult: () => dispatch({ type: "dismiss-result" }),
+    dispatch,
     subscribeApplied: (listener) => {
       applied.add(listener);
       return () => {

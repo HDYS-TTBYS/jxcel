@@ -2324,132 +2324,53 @@ const CONFIRM_STYLE = {
  */
 const UNKNOWN_CELL: RenderCell = { text: "", variant: "Any", violated: false, loading: true };
 
+export type GridScreenEvent =
+  | { readonly type: "retry" }
+  | { readonly type: "notice-dismissed" }
+  | { readonly type: "edit-report-dismissed" }
+  | { readonly type: "selection-changed"; readonly selection: RendererSelection | null }
+  | { readonly type: "edit-started"; readonly position: CellPosition; readonly initialText: string }
+  | { readonly type: "edit-settled"; readonly settlement: CellEditSettlement }
+  | { readonly type: "next-violation" }
+  | { readonly type: "violation-read"; readonly reading: ViolationReading }
+  | { readonly type: "expansion-changed"; readonly state: GridExpansionState }
+  | { readonly type: "detail-opened"; readonly position: CellPosition }
+  | { readonly type: "detail-closed" }
+  | { readonly type: "detail-edit-settled"; readonly settlement: CellEditSettlement }
+  | { readonly type: "edit-settled"; readonly settlement: CellEditSettlement }
+  | { readonly type: "column-resized"; readonly displayPosition: number; readonly width: number }
+  | { readonly type: "column-moved"; readonly from: number; readonly to: number }
+  | { readonly type: "view-changed"; readonly operation: ViewOperation }
+  | { readonly type: "row-operation-settled"; readonly settlement: RowOperationSettlement }
+  | { readonly type: "paste-settled"; readonly settlement: PasteSettlement }
+  | { readonly type: "history-settled"; readonly settlement: HistorySettlement }
+  | { readonly type: "delete-requested"; readonly confirmation: DeleteConfirmation }
+  | { readonly type: "delete-cancelled" }
+  | { readonly type: "operation-refused"; readonly message: string }
+  | { readonly type: "paint-failed"; readonly message: string }
+  | { readonly type: "row-operation-requested"; readonly target: RowOperationTarget }
+  | { readonly type: "row-selection-requested"; readonly kind: "delete" | "duplicate" }
+  | { readonly type: "history-requested"; readonly direction: GridHistoryDirection }
+  | { readonly type: "view-settled"; readonly settlement: GridViewSettlement };
+export type GridScreenDispatch = (event: GridScreenEvent) => void;
+
 /** 表を組み立てる指定。 */
 interface GridSurfaceProps {
-  /** 開いたシートの識別子（窓の要求が名乗る。`grid_open_sheet` に渡した文字列と同一である）。 */
   readonly sheet: string;
-  /** 開いた応答の要約（列の構成と行数）。 */
   readonly summary: GridSheetSummary;
-  /**
-   * **描かれる列の並び**（表示順。要件 8.2）。
-   *
-   * 画面が 1 度だけ組んで渡す（`./viewOps` の [`drawnColumns`]）— 表・列ごとの操作の行・
-   * 窓の記憶の写像が**同じ 1 つの並び**を見るようにするためである（写像が 2 つあると、
-   * 描かれている値と編集の宛先が別の列を指す）。
-   */
   readonly columns: readonly ColumnDescriptor[];
-  /**
-   * **いまの表示状態**（8.8。要件 8.1、8.2）。列幅と表示上の列順である。
-   *
-   * ここへ渡るのは**読み取りのためだけ**である（`renderColumns` は描画のための組み立てであり、
-   * 状態を変えない）。表がこの値から組むのは、移植口へ渡す列（見出しと幅）だけである — 表示の
-   * 位置の空間（[`columns`]）は画面が 1 度だけ組んで渡す。
-   */
   readonly display: DisplayStateStore;
-  /**
-   * 描かれる列の内容の同一性（[`layoutKeyOf`]）。**面を組み直す合図である。**
-   *
-   * 幅と並びは移植口へ次の `mount` の仕様として届く（押し込む口が無い）ので、この鍵が
-   * 変わったときに器・窓の記憶・移植口を**揃って組み直す**。
-   */
   readonly layoutKey: string;
-  /**
-   * 行の集合の同一性（[`rowOrderKeyOf`]）。**面を組み直す合図である。**
-   *
-   * 並べ替えと絞り込みは「何番目の行がどの行か」を変えるので、**取得済みの窓は別の行を指す**
-   * （7.3 の `clear` の doc）。世代（`generation`）では代用できない — 世代は値だけの編集でも
-   * 進む（応答が運ぶ値であり、画面が規則を持つのではない。タスク 10.1）が、そのとき行の並びは
-   * 動かない（要件 8.8）。
-   */
   readonly rowOrderKey: string;
-  /** 可視行の数（窓が覆う行数）。 */
   readonly visibleRows: number;
-  /**
-   * 絞り込みで隠れている行の数（要件 8.7）。**面を組み直す合図でもある** — 行の増減のあとに
-   * 隠れている数だけが変わった場合（絞り込みの条件に合わない行を足した場合）は、可視行数も
-   * 並びも動かないので、この数が唯一の手掛かりである。
-   */
   readonly hiddenRows: number;
-  /**
-   * いまの世代（**10 進の文字列**。源は境界の応答ただ 1 つである。タスク 10.1）。
-   *
-   * **依存には入れない**（入れると、編集のたびに器を組み直して走査の位置を失う）。組み立ての
-   * 時点の値として読み、以後の変化は専用の効果が記憶へ下ろす。
-   */
   readonly generation: string;
-  /** 選択（現在位置と矩形）。**画面の状態が持つ唯一の値である**（写しをここに作らない）。 */
   readonly selection: RendererSelection;
-  /** 編集中のセル（要件 3.1）。`null` なら編集していない。 */
   readonly editing: CellEdit | null;
-  /** 開いている詳細表示（8.5。要件 5.5）。`null` なら開いていない。 */
   readonly detail: CellDetail | null;
-  /** 削除の確認を待っている対象（8.6。要件 6.5）。`null` なら尋ねていない。 */
   readonly pendingDelete: DeleteConfirmation | null;
-  /**
-   * 境界の口。**編集の 1 往復（`./cellEdit`）が使う** — カードの記憶（下）と組にするのは、
-   * 確定が宛先（窓の行の識別子）と、適用のあとの作り直し（影響を受けた行の窓を捨てる）の
-   * 両方を要するためである。
-   */
   readonly client: GridClient;
-  /** 選択が変わった（打鍵・ポインタのどちらでも）ことを画面へ上げる口。 */
-  readonly onSelectionChange: (selection: RendererSelection | null) => void;
-  /** 編集が起動された（要件 3.1。位置と、いま描かれている値）ことを画面へ上げる口。 */
-  readonly onEditStarted: (position: CellPosition, initialText: string) => void;
-  /** 確定の 1 往復の結果を画面へ上げる口（要件 3.3、3.4、3.5、3.6）。 */
-  readonly onEditSettled: (settlement: CellEditSettlement) => void;
-  /**
-   * 詳細表示の中の編集の結果を画面へ上げる口（要件 5.7）。**セルの編集と同じ遷移を使う**
-   * （`./cellEdit` の 1 往復は同一であり、違うのは反映の遷移だけである）。
-   */
-  readonly onDetailEditSettled: (settlement: CellEditSettlement) => void;
-  /** 詳細表示を閉じる（8.5。**値も文書も動かない**）。 */
-  readonly onDetailClosed: () => void;
-  /**
-   * いまの位置の違反の読み取りを画面へ上げる口（要件 4.2、4.6）。
-   *
-   * 窓の印と行の識別子を読むには記憶が要る（[`WindowCache`]）ので、**引くのはここ**であり、
-   * 画面の状態へ入れるのは遷移（[`gridScreenViolationReason`]）である。
-   */
-  readonly onViolationRead: (reading: ViolationReading) => void;
-  /** 列の幅が変わった（要件 8.1。**表示位置**で報せられる）。 */
-  readonly onColumnResize: (displayPosition: number, width: number) => void;
-  /** 列が並びの中で運ばれた（要件 8.2。**表示順の位置どうし**で報せられる）。 */
-  readonly onColumnMove: (from: number, to: number) => void;
-  /**
-   * 行の操作（8.6。要件 6.1、6.2、6.3）を画面へ上げる口。
-   *
-   * **表が行うのは判断と往復だけであり、状態を持つのは画面である**（`./cellEdit` が確定の
-   * 結果を `onEditSettled` で上げるのと同じ形である）。
-   */
-  readonly onRowOperationSettled: (settlement: RowOperationSettlement) => void;
-  /**
-   * 貼り付けの 1 往復（8.7。要件 7.3、7.4、1.7）の結果を画面へ上げる口。
-   *
-   * **行数を置き換え、現在位置を寄せるのは画面の遷移である**（[`gridScreenPasteSettled`]）。
-   * 貼り付けは行を補充しうるので、反映の形は行の操作と同じ 1 つを通る。
-   */
-  readonly onPasteSettled: (settlement: PasteSettlement) => void;
-  /**
-   * 取り消し・やり直しの 1 往復（8.9。要件 9.2、9.3、9.8）の結果を画面へ上げる口。
-   *
-   * **画面の中の 2 つの操作とメニューの活性化が、この 1 つの口へ着く**（`./history` の
-   * `HistoryEntry`）。反映（[`gridScreenHistorySettled`]）は 8.6 の行の操作と同じ形を通る。
-   */
-  readonly onHistorySettled: (settlement: HistorySettlement) => void;
-  /** 削除の確認を求める（要件 6.5。**送っていない**。数を示して尋ねるだけである）。 */
-  readonly onDeleteRequested: (confirmation: DeleteConfirmation) => void;
-  /** 確認への取り消し（**送らない**）。 */
-  readonly onDeleteCancelled: () => void;
-  /** 返さずに理由を告げる（複製と貼り付けの拒否。8.6 の行の操作はここへ来ない）。 */
-  readonly onRefused: (message: string) => void;
-  /**
-   * **表の描画が成立しなかった**ことを画面へ上げる口（要件 12.2。tasks.md 9.3）。
-   *
-   * 告知 1 行へ出るが、**内容の領域は置き換えない** — 1 つの失敗で表示中の表を失わない。
-   * [`GridSurfaceProps.onRefused`] と別の口にしてあるのは、**「送らなかった」ことが理由では
-   * ない**ためである: 利用者の操作は何も起こっておらず、表そのものが描けていない。
-   */
-  readonly onPaintFailed: (message: string) => void;
+  readonly dispatch: GridScreenDispatch;
 }
 
 /**
@@ -2532,22 +2453,9 @@ function GridSurface({
   detail,
   pendingDelete,
   client,
-  onSelectionChange,
-  onEditStarted,
-  onEditSettled,
-  onDetailEditSettled,
-  onDetailClosed,
-  onViolationRead,
-  onColumnResize,
-  onColumnMove,
-  onRowOperationSettled,
-  onPasteSettled,
-  onHistorySettled,
-  onDeleteRequested,
-  onDeleteCancelled,
-  onRefused,
-  onPaintFailed,
+  dispatch: parentDispatch,
 }: GridSurfaceProps): ReactElement {
+  let dispatch: GridScreenDispatch = parentDispatch;
   const containerRef = useRef<HTMLDivElement | null>(null);
   // 移植口の取っ手。**窓の到着（非同期）と選択の効果が使う**ので、効果の外に置く。
   const handleRef = useRef<RendererHandle | null>(null);
@@ -2636,7 +2544,7 @@ function GridSurface({
     if (mark === "clear") {
       // 印が無い。引くものが無い（取り下げる）。ここは同期的に答える — 動いた直後に古い理由が
       // 残る瞬間を作らない。
-      onViolationRead({ kind: "cleared" });
+      dispatch({ type: "violation-read", reading: { kind: "cleared" } });
       return;
     }
     void reasonInRow({
@@ -2648,7 +2556,7 @@ function GridSurface({
       if (token !== violationTokenRef.current) {
         return;
       }
-      onViolationRead(reading);
+      dispatch({ type: "violation-read", reading });
     });
   };
 
@@ -2667,7 +2575,7 @@ function GridSurface({
     }
     // 引き受けた打鍵はブラウザの走査を止める（矢印は器をスクロールさせてしまう）。
     event.preventDefault();
-    onSelectionChange(next);
+    dispatch({ type: "selection-changed", selection: next });
   };
 
   // 表そのものの組み立て。**選択が変わっても組み直さない** — 器を作り直すと React の根と
@@ -2718,7 +2626,7 @@ function GridSurface({
       client,
       cache: () => cacheRef.current,
       visibleRows,
-      onSettled: onPasteSettled,
+      onSettled: (settlement) => dispatch({ type: "paste-settled", settlement }),
       // 適用のあとは違反を引き直す（要件 4.6。セルの編集・行の操作と同じ規律である）。
       onApplied: () => {
         refreshViolation(selectionRef.current.current, true);
@@ -2739,7 +2647,7 @@ function GridSurface({
     // 組み直しの直後は「はじめて測った 1 本」から判定が始まる（`./renderHealth` の doc）。
     const health = installGridRenderHealth({
       // 表の描画が成立しなかったことを告知 1 行へ出す（要件 12.2）。
-      onPaintFailed,
+      onPaintFailed: (message) => dispatch({ type: "paint-failed", message }),
       // **可視区間の知らせは画面の既存の処理が先である**（窓の先読みと、追随の判断の材料。
       // 8.2）。結線はこれを包んで、そのあとに走査の標本を始める（要件 12.3）。
       onVisibleSpanChange: (span) => {
@@ -2762,23 +2670,24 @@ function GridSurface({
         rowMarkers: ROW_MARKERS,
         getCell: (position) => cache.getCell(position),
         // 編集の起動（要件 3.1）。**現在位置と、いま描かれている値**を画面へ上げる。
-        onActivateEditor: onEditStarted,
-        onSelectionChange,
+        onActivateEditor: (position, initialText) => dispatch({ type: "edit-started", position, initialText }),
+        onSelectionChange: (next) => dispatch({ type: "selection-changed", selection: next }),
         // 見えている区間の知らせ（8.2 が移植口へ足した口である）。**追随の判断の材料**であり、
         // 同時に窓の先読みの材料でもある（この行が 8.1 の申し送りの答えである）。
         // **走査のフレーム時間の標本もここから始まる**（要件 12.3。開始は上の結線が持つ）。
         onVisibleSpanChange: health.onVisibleSpanChange,
         // 列幅と列の移動（8.8。要件 8.1、8.2）。**知らせは表示位置で来る**ので、そのまま
         // 画面の遷移へ渡す（写し直さない）。
-        onColumnResize,
-        onColumnMove,
+        onColumnResize: (displayPosition, width) =>
+          dispatch({ type: "column-resized", displayPosition, width }),
+        onColumnMove: (from, to) => dispatch({ type: "column-moved", from, to }),
         // 複製と貼り付け（8.7。要件 7.1、7.2、7.3、7.4）。**3 つの口は `./clipboard` の
         // 面が組む**（材料と行き先を渡すだけであり、判断も往復も本 module には書かない —
         // 画面の関数本体に置くと `node` 環境の検査から組み立てられない。`createClipboardSurface`）。
         copyRange: clipboard.copyRange,
         pasteAt: clipboard.pasteAt,
         sendPaste: clipboard.sendPaste,
-        onRefused,
+        onRefused: (message) => dispatch({ type: "operation-refused", message }),
       }),
     );
     handleRef.current = handle;
@@ -2906,23 +2815,13 @@ function GridSurface({
     position: CellPosition,
     intent: CellEditIntent,
     carrier: EditCarrier,
-    /** 結果の反映先（**セルの編集と詳細表示の編集で違う遷移である**）。 */
-    onSettled: (settlement: CellEditSettlement) => void,
+    resultEvent: "edit-settled" | "detail-edit-settled",
   ): void => {
     const cache = cacheRef.current;
-    if (cache === null) {
-      // 器がまだ無い（描かれていない）。編集も開いていないので、ここへは来ない。
-      return;
-    }
+    if (cache === null) return;
     void settleCellEdit({ client, cache, position, intent, carrier }).then((settlement) => {
-      onSettled(settlement);
-      if (settlement.status !== "applied") {
-        return;
-      }
-      // **適用のあとは違反を引き直す**（要件 4.6）。解消されたなら理由は出ず（境界の索引は
-      // 既に新しい）、残っているなら新しい理由が出る。窓の印は取り直しの途中で古いので、
-      // **到着でもう一度**引く（新しく生じた違反を取りこぼさない）。
-      refreshViolation(selectionRef.current.current, true);
+      dispatch({ type: resultEvent, settlement });
+      if (settlement.status === "applied") refreshViolation(selectionRef.current.current, true);
     });
   };
 
@@ -2939,33 +2838,15 @@ function GridSurface({
       position,
       { kind: "cancel" },
       columnEditor(columns[position.column] ?? null).carrier,
-      onDetailEditSettled,
+      "detail-edit-settled",
     );
   };
-
-  /**
-   * 行の操作の 1 往復（8.6。要件 6.1、6.2、6.3）。**宛先は境界が解く** — 画面は可視の序数
-   * （または末尾）をそのまま送り、**識別子を引かない**（10.4 が `RowTarget` / `RowAnchor` を
-   * 足して、写像の所有者をドメインの `RowOrder` 1 つにした）ので、往復はここから起動する
-   * （セルの編集と同じ配置である）。
-   *
-   * 器がまだ無いときは往復を起こさない。**投げない**（`applyRowOperation` が投げない）。
-   */
   const runRowOperation = (intent: RowSendIntent): void => {
     const cache = cacheRef.current;
-    if (cache === null) {
-      return;
-    }
+    if (cache === null) return;
     void applyRowOperation({ client, cache, intent }).then((settlement) => {
-      onRowOperationSettled(settlement);
-      if (settlement.status !== "applied") {
-        return;
-      }
-      // **適用のあとは違反を引き直す**（要件 4.6。セルの編集と同じ規律である）。消えた行の
-      // 違反は消え、残っている行の理由は新しく出る。**窓は捨てられている**（行数が変わった）ので、
-      // いまの位置が未取得なら到着でもう一度引く（`refreshViolation` が予約する）。行が消えて
-      // 位置が新しい範囲へ寄った場合は、選択の効果が新しい位置で引き直す。
-      refreshViolation(selectionRef.current.current, true);
+      dispatch({ type: "row-operation-settled", settlement });
+      if (settlement.status === "applied") refreshViolation(selectionRef.current.current, true);
     });
   };
 
@@ -2990,51 +2871,10 @@ function GridSurface({
         // **送る対象は可視の序数である**（識別子を引き集める口も、文書の位置へ写す口も
         // 画面には無い — 解くのはドメインである。要件 8.6、tasks.md 10.4）。
         send: runRowOperation,
-        confirm: onDeleteRequested,
-        cancel: onDeleteCancelled,
+        confirm: (confirmation) => dispatch({ type: "delete-requested", confirmation }),
+        cancel: () => dispatch({ type: "delete-cancelled" }),
       },
     );
-  };
-
-  /** 選択の行を対象にする操作（**表の外の行は対象にしない**。対象が無ければ何もしない）。 */
-  const requestRows = (kind: "delete" | "duplicate"): void => {
-    const targets = rowTargets(selection, visibleRows);
-    if (targets === null) {
-      return;
-    }
-    requestRowOperation(
-      kind === "delete" ? { kind: "delete", targets } : { kind: "duplicate", targets },
-    );
-  };
-
-  /**
-   * 履歴（取り消し・やり直し）の 1 往復（8.9。要件 9.2、9.3、9.8）。
-   *
-   * **画面の中の 2 つの操作と、メニューの活性化が、この 1 つの関数へ来る**（`./history` の
-   * `HistoryEntry` がその口である）。判断（捨てる前の移動先の解決、行数の作り直し）は
-   * `./history` が持ち、ここが担うのは往復の起動と、結果の行き先（画面の遷移と違反の引き直し）
-   * だけである（8.6 / 8.7 と同じ分担である）。
-   *
-   * **器がまだ無いときは送らない。**履歴は文書のものであり表のものではないが、応答を受けた
-   * あとに**窓の記憶を作り直す**（`clear`）ので、その先が無ければ往復を起こす意味が無い
-   * （`runRowOperation` と同じ判断である。**投げない** — `applyHistory` が投げない）。
-   */
-  const runHistory = (direction: GridHistoryDirection): void => {
-    const cache = cacheRef.current;
-    if (cache === null) {
-      return;
-    }
-    void applyHistory({ client, cache, direction }).then((settlement) => {
-      onHistorySettled(settlement);
-      if (settlement.status !== "applied") {
-        // **進める履歴が無い**（要件 9.2、9.3 の正常な結果）か、経路が失敗したかである。
-        // どちらも文書も表示も動いていないので、違反を引き直す理由が無い。
-        return;
-      }
-      // **適用のあとは違反を引き直す**（要件 4.6。セルの編集・行の操作・貼り付けと同じ規律で
-      // ある）。取り消しは違反を消しも生みもする（保持された値が戻るためである）。
-      refreshViolation(selectionRef.current.current, true);
-    });
   };
 
   /**
@@ -3047,18 +2887,30 @@ function GridSurface({
    * 古い閉包を握ると、**反映先が古い状態のまま**になる（`handleRef` / `selectionRef` と同じ規律
    * である）。下の効果が毎回の描画のあとに参照を最新へ差し替える。
    */
+  const runHistory = (direction: GridHistoryDirection): void => {
+    const cache = cacheRef.current;
+    if (cache === null) return;
+    void applyHistory({ client, cache, direction }).then((settlement) => {
+      dispatch({ type: "history-settled", settlement });
+      if (settlement.status === "applied") refreshViolation(selectionRef.current.current, true);
+    });
+  };
+  dispatch = (event) => {
+    switch (event.type) {
+      case "row-operation-requested": requestRowOperation(event.target); return;
+      case "row-selection-requested": {
+        const targets = rowTargets(selectionRef.current, visibleRows);
+        if (targets !== null) requestRowOperation(event.kind === "delete" ? { kind: "delete", targets } : { kind: "duplicate", targets });
+        return;
+      }
+      case "history-requested": runHistory(event.direction); return;
+      default: parentDispatch(event); return;
+    }
+  };
   const historyEntryRef = useRef<(direction: GridHistoryDirection) => void>(runHistory);
-  useEffect(() => {
-    historyEntryRef.current = runHistory;
-  });
-  useEffect(
-    () => installGridHistoryRequests((direction) => historyEntryRef.current(direction)),
-    [],
-  );
-
+  useEffect(() => { historyEntryRef.current = runHistory; });
+  useEffect(() => installGridHistoryRequests((direction) => historyEntryRef.current(direction)), []);
   return (
-    // 窓の到着の回数を属性にも出す（**描き直しを起こした数の観測**であり、`arrivals` を使う
-    // 唯一の場所である）。
     <div data-window-arrivals={arrivals} style={SURFACE_STYLE}>
       {/*
         取り消しとやり直し（8.9。要件 9.2、9.3、9.9）。**行の操作の行の隣に出す** — どちらも
@@ -3066,38 +2918,21 @@ function GridSurface({
         **メニューの活性化と同じ入口**（`runHistory`）を叩く。
       */}
       <HistoryOperations
-        onUndo={() => {
-          runHistory("undo");
-        }}
-        onRedo={() => {
-          runHistory("redo");
-        }}
+        onUndo={() => dispatch({ type: "history-requested", direction: "undo" })}
+        onRedo={() => dispatch({ type: "history-requested", direction: "redo" })}
       />
-      {/*
-        行の操作と、その対象の数（8.6。要件 6.1、6.2、6.3、6.5）。**表の上に出す** — 消す行も
-        足す位置も**いまの選択**であり、その提示（数え上げの行）の隣に在るのが読める位置である。
-        行数は要件 6.2 が示す数（`summary.row_count`）であり、行が増減すればここが直ちに変わる。
-      */}
       <RowOperations
         rowCount={summary.row_count}
         pendingDelete={pendingDelete}
-        onInsert={() => {
-          requestRowOperation({ kind: "insert", at: selection.current.row });
-        }}
-        onDelete={() => {
-          requestRows("delete");
-        }}
-        onDuplicate={() => {
-          requestRows("duplicate");
-        }}
+        onInsert={() => dispatch({ type: "row-operation-requested", target: { kind: "insert", at: selection.current.row } })}
+        onDelete={() => dispatch({ type: "row-selection-requested", kind: "delete" })}
+        onDuplicate={() => dispatch({ type: "row-selection-requested", kind: "duplicate" })}
         onConfirm={() => {
-          if (pendingDelete === null) {
-            return;
+          if (pendingDelete !== null) {
+            dispatch({ type: "row-operation-requested", target: { kind: "confirmDelete", targets: pendingDelete } });
           }
-          // **確認の答えである**（閾値を見ない — 尋ねるのは 1 度だけである）。
-          requestRowOperation({ kind: "confirmDelete", targets: pendingDelete });
         }}
-        onCancel={onDeleteCancelled}
+        onCancel={() => dispatch({ type: "delete-cancelled" })}
       />
       {/*
         選択の数え上げ（要件 2.5）。**利用者に見える数は 1 起点である**（内部の序数は 0 起点）。
@@ -3128,12 +2963,8 @@ function GridSurface({
           edit={editing}
           column={columns[editing.position.column] ?? null}
           client={client}
-          onCommit={(text, carrier) => {
-            settle(editing.position, { kind: "commit", text }, carrier, onEditSettled);
-          }}
-          onCancel={(carrier) => {
-            settle(editing.position, { kind: "cancel" }, carrier, onEditSettled);
-          }}
+          onCommit={(text, carrier) => settle(editing.position, { kind: "commit", text }, carrier, "edit-settled")}
+          onCancel={(carrier) => settle(editing.position, { kind: "cancel" }, carrier, "edit-settled")}
         />
       )}
       {/*
@@ -3151,14 +2982,9 @@ function GridSurface({
           // 未取得は `null` であり、空の並び（違反なし）と区別する（要件 4.5）。
           innerViolations={detailMarks}
           editKey={detail.edit}
-          onCommit={(text, carrier) => {
-            // **運び手は面が登録簿から引いたものである**（要件 10.3。表は型を見ない）。
-            settle(detail.position, { kind: "commit", text }, carrier, onDetailEditSettled);
-          }}
-          onCancel={() => {
-            settleDetailCancel(detail.position);
-          }}
-          onClose={onDetailClosed}
+          onCommit={(text, carrier) => settle(detail.position, { kind: "commit", text }, carrier, "detail-edit-settled")}
+          onCancel={() => settleDetailCancel(detail.position)}
+          onClose={() => dispatch({ type: "detail-closed" })}
         />
       )}
       <div
@@ -3624,69 +3450,10 @@ function columnKey(column: ColumnDescriptor): string {
 }
 
 /** 内容の領域。**状態を網羅的に分岐する**（新しい変種を足すと型検査がここで落ちる）。 */
-function GridScreenBody({
-  model,
-  client,
-  onRetry,
-  onSelectionChange,
-  onEditStarted,
-  onEditSettled,
-  onNextViolation,
-  onViolationRead,
-  onExpansion,
-  onDetailOpened,
-  onDetailEditSettled,
-  onDetailClosed,
-  onColumnWidth,
-  onColumnMove,
-  onView,
-  onRowOperationSettled,
-  onPasteSettled,
-  onHistorySettled,
-  onDeleteRequested,
-  onDeleteCancelled,
-  onRefused,
-  onPaintFailed,
-}: {
+function GridScreenBody({ model, client, dispatch }: {
   readonly model: GridScreenModel;
-  /** 境界の口（表を描く腕が、編集の 1 往復に使う）。 */
   readonly client: GridClient;
-  readonly onRetry: () => void;
-  readonly onSelectionChange: (selection: RendererSelection | null) => void;
-  readonly onEditStarted: (position: CellPosition, initialText: string) => void;
-  readonly onEditSettled: (settlement: CellEditSettlement) => void;
-  /** バーの「次の違反へ」（要件 4.4）。 */
-  readonly onNextViolation: () => void;
-  /** 表が読んだ違反の提示（要件 4.2、4.6）。 */
-  readonly onViolationRead: (reading: ViolationReading) => void;
-  /** 列の展開の操作（要件 5.1、5.2）。**送るのはいまの指定に足した完全な記述である。** */
-  readonly onExpansion: (state: GridExpansionState) => void;
-  /** 詳細表示の入口（要件 5.4、5.5）。 */
-  readonly onDetailOpened: (position: CellPosition) => void;
-  /** 列の幅の変更（8.8。要件 8.1。**表示位置**で指す）。 */
-  readonly onColumnWidth: (displayPosition: number, width: number) => void;
-  /** 列の表示位置の変更（8.8。要件 8.2。**表示順の位置どうし**で指す）。 */
-  readonly onColumnMove: (from: number, to: number) => void;
-  /** 並べ替え・絞り込みの操作（8.8。要件 8.3、8.4）。 */
-  readonly onView: (operation: ViewOperation) => void;
-  /** 詳細表示の中の編集の結果（要件 5.7）。 */
-  readonly onDetailEditSettled: (settlement: CellEditSettlement) => void;
-  /** 詳細表示を閉じる（**値も文書も動かない**）。 */
-  readonly onDetailClosed: () => void;
-  /** 行の操作の 1 往復の結果（8.6。要件 6.1、6.2、6.3）。 */
-  readonly onRowOperationSettled: (settlement: RowOperationSettlement) => void;
-  /** 貼り付けの 1 往復の結果（8.7。要件 7.3、7.4、1.7）。 */
-  readonly onPasteSettled: (settlement: PasteSettlement) => void;
-  /** 取り消し・やり直しの 1 往復の結果（8.9。要件 9.2、9.3、9.8）。 */
-  readonly onHistorySettled: (settlement: HistorySettlement) => void;
-  /** 削除の確認を求める（8.6。要件 6.5。**送っていない**）。 */
-  readonly onDeleteRequested: (confirmation: DeleteConfirmation) => void;
-  /** 確認への取り消し（8.6。**送らない**）。 */
-  readonly onDeleteCancelled: () => void;
-  /** 送らずに理由を告げる（8.6。挿入の位置を写せない・識別子が届いていない）。 */
-  readonly onRefused: (message: string) => void;
-  /** 表の描画が成立しなかった（9.3。要件 12.2。**内容の領域は置き換えない**）。 */
-  readonly onPaintFailed: (message: string) => void;
+  readonly dispatch: GridScreenDispatch;
 }): ReactElement {
   const state = model.state;
   /**
@@ -3714,7 +3481,7 @@ function GridScreenBody({
           <h2 style={HEADING_STYLE}>シートを開けませんでした</h2>
           <p style={MESSAGE_STYLE}>{state.message}</p>
           {state.canRetry ? (
-            <button type="button" data-testid="jxcel-grid-retry" onClick={onRetry} style={BUTTON_STYLE}>
+            <button type="button" data-testid="jxcel-grid-retry" onClick={() => dispatch({ type: "retry" })} style={BUTTON_STYLE}>
               再試行
             </button>
           ) : null}
@@ -3759,7 +3526,7 @@ function GridScreenBody({
           <ViolationBar
             total={state.violationTotal}
             presentation={state.violation}
-            onNext={onNextViolation}
+            onNext={() => dispatch({ type: "next-violation" })}
           />
           {/*
             列ごとの操作（8.5。要件 5.1、5.2、5.4、5.6）。**表の上に出す** — 移植口に「見出しの
@@ -3767,15 +3534,11 @@ function GridScreenBody({
             名前と操作を並べる方が、どの列の操作かが読める。
           */}
           <NestedColumnControls
-            // **表示順の構成を渡す**（8.8）。列ごとの操作は「その位置に描かれている列」に
-            // つくものであり、位置（詳細表示の宛先）は表示の位置である — 構成の順で渡すと、
-            // 並びを変えた後で**別の列の名前と操作**が並ぶ。
             columns={columns}
             view={state.view}
-            // 詳細表示は**現在位置の行**の値について開く。
             currentRow={state.selection.current.row}
-            onExpansion={onExpansion}
-            onDetail={onDetailOpened}
+            onExpansion={(next) => dispatch({ type: "expansion-changed", state: next })}
+            onDetail={(position) => dispatch({ type: "detail-opened", position })}
           />
           {/*
             表示の操作（8.8。要件 8.1、8.2、8.3、8.4、8.7）。**表の上に出す** — 列幅も列順も
@@ -3788,9 +3551,9 @@ function GridScreenBody({
             view={state.view}
             visibleRows={state.visibleRows}
             hiddenRows={state.hiddenRows}
-            onColumnWidth={onColumnWidth}
-            onColumnMove={onColumnMove}
-            onView={onView}
+            onColumnWidth={(displayPosition, width) => dispatch({ type: "column-resized", displayPosition, width })}
+            onColumnMove={(from, to) => dispatch({ type: "column-moved", from, to })}
+            onView={(operation) => dispatch({ type: "view-changed", operation })}
           />
           <GridSurface
             sheet={state.sheet}
@@ -3807,21 +3570,7 @@ function GridScreenBody({
             detail={state.detail}
             pendingDelete={state.pendingDelete}
             client={client}
-            onSelectionChange={onSelectionChange}
-            onEditStarted={onEditStarted}
-            onEditSettled={onEditSettled}
-            onDetailEditSettled={onDetailEditSettled}
-            onDetailClosed={onDetailClosed}
-            onViolationRead={onViolationRead}
-            onColumnResize={onColumnWidth}
-            onColumnMove={onColumnMove}
-            onRowOperationSettled={onRowOperationSettled}
-            onPasteSettled={onPasteSettled}
-            onHistorySettled={onHistorySettled}
-            onDeleteRequested={onDeleteRequested}
-            onDeleteCancelled={onDeleteCancelled}
-            onRefused={onRefused}
-            onPaintFailed={onPaintFailed}
+            dispatch={dispatch}
           />
         </>
       );
@@ -3830,219 +3579,47 @@ function GridScreenBody({
   }
 }
 
-/** 見た目へ渡すもの。**状態と操作だけである**（読み込みは [`GridScreen`] が持つ）。 */
+/** 見た目へ渡すもの。状態と型付きイベントの単一送信口を受け取る。 */
 export interface GridScreenViewProps {
   readonly model: GridScreenModel;
-  /**
-   * 境界の口。**表を描く腕が編集の 1 往復に使う**（入力手段の 2 つの口 → `./cellEdit`）。
-   * 差し替えの口である（検査は偽の実装を渡せる。8.1 の `loadGridScreenState` と同じ規律）。
-   */
   readonly client: GridClient;
-  /**
-   * マクロの実行の面（tasks.md 4.4。macro-runtime スペック）。**省略できる。**
-   *
-   * 省略したときに何も描かないのは、**表の状態だけを読む検査**（`GridScreen.test.ts` の
-   * `markOf`）が、実行の面の状態を持ち込まずに済むようにするためである。実物の画面
-   * （[`GridScreen`]）はつねに渡す。
-   */
   readonly macro?: MacroSurfaceBinding;
-  /** 開く流れをやり直す（失敗の提示の「再試行」）。 */
-  readonly onRetry: () => void;
-  /** 告知を閉じる。 */
-  readonly onDismissNotice: () => void;
-  /**
-   * 選択が変わった（打鍵・ポインタのどちらでも）。要件 2.1、2.2、2.3。
-   *
-   * `null` は**実装が選択を解除した**こと（Glide の Escape など）である。画面はそれを
-   * 取り下げず、いまの選択を置き直す（[`gridScreenSelectionChanged`] の doc）。
-   */
-  readonly onSelectionChange: (selection: RendererSelection | null) => void;
-  /** 編集が起動された（要件 3.1。位置と、いま描かれている値）。 */
-  readonly onEditStarted: (position: CellPosition, initialText: string) => void;
-  /** 確定の 1 往復の結果（要件 3.3、3.4、3.5、3.6）。 */
-  readonly onEditSettled: (settlement: CellEditSettlement) => void;
-  /** 直近の確定の報告を閉じる（**文書も値も動かない**）。 */
-  readonly onDismissEditReport: () => void;
-  /**
-   * バーが指示する「次の違反へ」（要件 4.4）。
-   *
-   * **表の外の出来事である**（境界への問い合わせと、現在位置の移動）。表を描く腕の外に
-   * 置いてあるのは、巡回が要するものが**境界の口と可視行数だけ**であり、窓の記憶も移植口の
-   * 取っ手も要さないためである（追随は現在位置の移動から自動的に起きる — 要件 2.4）。
-   */
-  readonly onNextViolation: () => void;
-  /** 表が読んだ違反の提示（要件 4.2、4.6）。 */
-  readonly onViolationRead: (reading: ViolationReading) => void;
-  /** 列の展開の操作（8.5。要件 5.1、5.2）。 */
-  readonly onExpansion: (state: GridExpansionState) => void;
-  /** 詳細表示の入口（8.5。要件 5.4、5.5）。 */
-  readonly onDetailOpened: (position: CellPosition) => void;
-  /** 詳細表示の中の編集の結果（8.5。要件 5.7）。 */
-  readonly onDetailEditSettled: (settlement: CellEditSettlement) => void;
-  /** 詳細表示を閉じる（8.5）。 */
-  readonly onDetailClosed: () => void;
-  /**
-   * 列の幅の変更（8.8。要件 8.1）。
-   *
-   * **移植口の知らせ（`RendererSpec.onColumnResize`）と、列ごとの操作の入力の両方がここへ
-   * 来る** — 2 つを別の経路にすると、片方だけが幅を動かす日が来る（8.7 が複製の入口を
-   * 1 つに寄せたのと同じ判断である）。
-   */
-  readonly onColumnWidth: (displayPosition: number, width: number) => void;
-  /** 列の表示位置の変更（8.8。要件 8.2。**表示順の位置どうし**である）。 */
-  readonly onColumnMove: (from: number, to: number) => void;
-  /** 並べ替え・絞り込みの操作（8.8。要件 8.3、8.4）。 */
-  readonly onView: (operation: ViewOperation) => void;
-  /** 行の操作の 1 往復の結果（8.6。要件 6.1、6.2、6.3、6.5）。 */
-  readonly onRowOperationSettled: (settlement: RowOperationSettlement) => void;
-  /** 貼り付けの 1 往復の結果（8.7。要件 7.3、7.4、1.7）。 */
-  readonly onPasteSettled: (settlement: PasteSettlement) => void;
-  /** 取り消し・やり直しの 1 往復の結果（8.9。要件 9.2、9.3、9.8）。 */
-  readonly onHistorySettled: (settlement: HistorySettlement) => void;
-  /** 削除の確認を求める（8.6。要件 6.5。**送っていない**）。 */
-  readonly onDeleteRequested: (confirmation: DeleteConfirmation) => void;
-  /** 確認への取り消し（8.6。**送らない**）。 */
-  readonly onDeleteCancelled: () => void;
-  /** 送らずに理由を告げる（8.6）。 */
-  readonly onRefused: (message: string) => void;
-  /** 表の描画が成立しなかった（9.3。要件 12.2。**内容の領域は置き換えない**）。 */
-  readonly onPaintFailed: (message: string) => void;
+  readonly dispatch: GridScreenDispatch;
 }
 
-/**
- * 画面の見た目。**状態だけを受け取る純粋な描画である**ので、検査は状態ごとにこれを呼んで
- * 「何が DOM へ出るか」を読める（`GridScreen.test.ts`）。
- */
-export function GridScreenView({
-  onPaintFailed,
-  model,
-  client,
-  macro,
-  onRetry,
-  onDismissNotice,
-  onDismissEditReport,
-  onSelectionChange,
-  onEditStarted,
-  onEditSettled,
-  onNextViolation,
-  onViolationRead,
-  onExpansion,
-  onDetailOpened,
-  onDetailEditSettled,
-  onDetailClosed,
-  onColumnWidth,
-  onColumnMove,
-  onView,
-  onRowOperationSettled,
-  onPasteSettled,
-  onHistorySettled,
-  onDeleteRequested,
-  onDeleteCancelled,
-  onRefused,
-}: GridScreenViewProps): ReactElement {
+/** 画面の見た目。状態を描き、操作意図をイベントとして送り返す。 */
+export function GridScreenView({ model, client, macro, dispatch }: GridScreenViewProps): ReactElement {
   return (
     <section data-testid="jxcel-grid-screen" aria-label="グリッド" style={ROOT_STYLE}>
-      {/*
-        マクロの実行の面（tasks.md 4.4。macro-runtime スペック）。**表より上**（告知よりさらに
-        上）に置く — 実行中でも表と並んで見え、操作を止めない（要件 2.2）。パネルは高さを
-        区切った一覧を持ち、表を押し出さない。省略されたとき（表の状態だけを読む検査）は
-        何も描かない。
-      */}
       {macro === undefined ? null : <MacroPanel binding={macro} />}
       {model.notice === null ? null : (
         <div data-testid="jxcel-grid-notice" role="status" style={NOTICE_STYLE}>
           <span style={MESSAGE_STYLE}>{model.notice}</span>
-          <button
-            type="button"
-            data-testid="jxcel-grid-notice-dismiss"
-            onClick={onDismissNotice}
-            style={BUTTON_STYLE}
-          >
-            閉じる
-          </button>
+          <button type="button" data-testid="jxcel-grid-notice-dismiss" onClick={() => dispatch({ type: "notice-dismissed" })} style={BUTTON_STYLE}>閉じる</button>
         </div>
       )}
       {model.editReport === null ? null : (
         <div data-testid="jxcel-grid-edit-report" role="status" style={NOTICE_STYLE}>
           <div style={REPORT_BODY_STYLE}>
-            {/*
-              型強制（要件 3.4）。**変換が起きたこと**と、**変換前の値**を出す。前後の表示文字列は
-              どちらも境界が運んだものである（`GridCoercionNotice` の doc）— 画面は解釈しない。
-            */}
             {model.editReport.coercions.length === 0 ? null : (
               <ul data-testid="jxcel-grid-coercions" style={REPORT_LIST_STYLE}>
                 {model.editReport.coercions.map((coercion) => (
-                  <li
-                    key={`${coercion.cell.row}:${String(coercion.cell.column)}`}
-                    data-coercion-row={coercion.cell.row}
-                    data-coercion-column={coercion.cell.column}
-                    data-coercion-before={coercion.before}
-                    data-coercion-after={coercion.after}
-                  >
+                  <li key={`${coercion.cell.row}:${String(coercion.cell.column)}`} data-coercion-row={coercion.cell.row} data-coercion-column={coercion.cell.column} data-coercion-before={coercion.before} data-coercion-after={coercion.after}>
                     {`型強制: 行「${coercion.cell.row}」の ${String(coercion.cell.column + 1)} 列目 — 変換前「${coercion.before}」／変換後「${coercion.after}」`}
                   </li>
                 ))}
               </ul>
             )}
-            {/*
-              残った違反（要件 3.5。**提示の本体は 8.4**）。**値は文書に残っている** — 判定する
-              側は編集を決して拒否せず、適合しない値も破棄せずに返す（`grid_apply_edit` の doc）。
-              総数は**シート全体**の数である（再検証した列に閉じているのは、下に並ぶ位置のほうである）。
-            */}
             {model.editReport.violationTotal === 0 ? null : (
-              <p
-                data-testid="jxcel-grid-violations"
-                data-violation-total={model.editReport.violationTotal}
-                data-violation-count={model.editReport.violations.length}
-                style={MESSAGE_STYLE}
-              >
-                {`違反 ${String(model.editReport.violationTotal)} 件（シート全体の総数）${
-                  model.editReport.violations.length === 0
-                    ? ""
-                    : `: ${model.editReport.violations
-                        .map(
-                          (violation) =>
-                            `行「${violation.row ?? "（行なし）"}」の ${String(violation.column + 1)} 列目`,
-                        )
-                        .join("、")}`
-                }`}
+              <p data-testid="jxcel-grid-violations" data-violation-total={model.editReport.violationTotal} data-violation-count={model.editReport.violations.length} style={MESSAGE_STYLE}>
+                {`違反 ${String(model.editReport.violationTotal)} 件（シート全体の総数）${model.editReport.violations.length === 0 ? "" : `: ${model.editReport.violations.map((violation) => `行「${violation.row ?? "（行なし）"}」の ${String(violation.column + 1)} 列目`).join("、")}`}`}
               </p>
             )}
           </div>
-          <button
-            type="button"
-            data-testid="jxcel-grid-edit-report-dismiss"
-            onClick={onDismissEditReport}
-            style={BUTTON_STYLE}
-          >
-            閉じる
-          </button>
+          <button type="button" data-testid="jxcel-grid-edit-report-dismiss" onClick={() => dispatch({ type: "edit-report-dismissed" })} style={BUTTON_STYLE}>閉じる</button>
         </div>
       )}
-      <GridScreenBody
-        model={model}
-        client={client}
-        onRetry={onRetry}
-        onSelectionChange={onSelectionChange}
-        onEditStarted={onEditStarted}
-        onEditSettled={onEditSettled}
-        onNextViolation={onNextViolation}
-        onViolationRead={onViolationRead}
-        onExpansion={onExpansion}
-        onDetailOpened={onDetailOpened}
-        onDetailEditSettled={onDetailEditSettled}
-        onDetailClosed={onDetailClosed}
-        onColumnWidth={onColumnWidth}
-        onColumnMove={onColumnMove}
-        onView={onView}
-        onRowOperationSettled={onRowOperationSettled}
-        onPasteSettled={onPasteSettled}
-        onHistorySettled={onHistorySettled}
-        onDeleteRequested={onDeleteRequested}
-        onDeleteCancelled={onDeleteCancelled}
-        onRefused={onRefused}
-        onPaintFailed={onPaintFailed}
-      />
+      <GridScreenBody model={model} client={client} dispatch={dispatch} />
     </section>
   );
 }
@@ -4067,19 +3644,7 @@ export function GridScreen(): ReactElement {
    * 動いた現在位置を巻き戻さない）。
    */
   const traversalRef = useRef(0);
-  /**
-   * 表示の指定を送った世代。**遅れて届いた答えを捨てる**（巡回と同じ規律。二度押しの 1 つ目が
-   * 後から届いても、その間に組んだ指定を巻き戻さない）。
-   */
   const viewRef = useRef(0);
-  /**
-   * 送る途中の表示の指定（**まだ応答が返っていない押下を畳む**）。
-   *
-   * 指定は**完全な記述**である（生成物の `GridViewSpec` の doc）ので、2 つの押下が続くと
-   * 2 つ目は 1 つ目の**応答を待たずに**組まれる。そのとき `ready.view` を起点にすると、1 つ目の
-   * 押下が指定から消える（ドメインは要求に現れない展開を折りたたみへ戻す）。押された指定を
-   * ここへ積んでから送る。
-   */
   const pendingViewRef = useRef<GridViewSpec | null>(null);
 
   useEffect(() => {
@@ -4179,259 +3744,67 @@ export function GridScreen(): ReactElement {
     }),
     [],
   );
-
-  const retry = useCallback(() => {
-    setModel(gridScreenRetried);
-  }, []);
-  const dismissNotice = useCallback(() => {
-    setModel(gridScreenNoticeDismissed);
-  }, []);
-  const select = useCallback((selection: RendererSelection | null) => {
-    // **器に届かない失敗と同じ側である**（イベントハンドラ）。ここは状態の遷移だけであり、
-    // 表を描いていないときは遷移が自分で何もしない（`gridScreenSelectionChanged`）。
-    setModel((current) => gridScreenSelectionChanged(current, selection));
-  }, []);
-  const startEdit = useCallback((position: CellPosition, initialText: string) => {
-    setModel((current) => gridScreenEditStarted(current, position, initialText));
-  }, []);
-  const settleEdit = useCallback((settlement: CellEditSettlement) => {
-    // **非同期の結果である**（`ScreenBoundary` は効果の同期の例外しか捕まえない）。遷移は
-    // 全域であり、投げない（`gridScreenEditSettled`）。
-    setModel((current) => gridScreenEditSettled(current, settlement));
-  }, []);
-  const dismissEditReport = useCallback(() => {
-    setModel(gridScreenEditReportDismissed);
-  }, []);
-  const readViolation = useCallback((reading: ViolationReading) => {
-    // **表から上がってくる読み取りである**（窓の印と行の識別子を読んだ結果）。遷移は全域で
-    // あり、投げない（`gridScreenViolationReason`）。
-    setModel((current) => gridScreenViolationReason(current, reading));
-  }, []);
-  const goToNextViolation = useCallback(() => {
-    const state = model.state;
-    if (state.status !== "ready") {
-      return;
-    }
-    const token = (traversalRef.current += 1);
-    // 起点（いまの行の次）を決めるのは `./violations` である（そこに規則があり、検査もある）。
-    // **写像も渡す**（`./columnSpace`）— 着地点は表示の位置でなければならない（境界が運ぶのは
-    // 文書の列であり、展開と**表示上の列順**があると一致しない。`./violations` の module doc）。
-    // 並びは**描かれる列**（表示順）である — 構成の順で組むと、並びを変えた後で**別の列へ
-    // 現在位置が着く**（要件 8.2、8.6 と同じ取り違えである）。
-    void nextViolation({
-      client: DEFAULT_CLIENT,
-      current: state.selection.current,
-      rowCount: state.visibleRows,
-      space: createColumnSpace(drawnColumns(state.summary.columns, state.display)),
-    }).then((reading) => {
-      if (token !== traversalRef.current) {
+  const dispatch = useCallback((event: GridScreenEvent): void => {
+    switch (event.type) {
+      case "retry": setModel(gridScreenRetried); return;
+      case "notice-dismissed": setModel(gridScreenNoticeDismissed); return;
+      case "edit-report-dismissed": setModel(gridScreenEditReportDismissed); return;
+      case "selection-changed": setModel((current) => gridScreenSelectionChanged(current, event.selection)); return;
+      case "edit-started": setModel((current) => gridScreenEditStarted(current, event.position, event.initialText)); return;
+      case "edit-settled": setModel((current) => gridScreenEditSettled(current, event.settlement)); return;
+      case "next-violation": {
+        const state = model.state;
+        if (state.status !== "ready") return;
+        const token = (traversalRef.current += 1);
+        void nextViolation({ client: DEFAULT_CLIENT, current: state.selection.current, rowCount: state.visibleRows, space: createColumnSpace(drawnColumns(state.summary.columns, state.display)) }).then((reading) => {
+          if (token === traversalRef.current) setModel((current) => gridScreenNextViolation(current, reading));
+        });
         return;
       }
-      setModel((current) => gridScreenNextViolation(current, reading));
-    });
+      case "expansion-changed":
+      case "view-changed": {
+        const state = model.state;
+        if (state.status !== "ready") return;
+        const token = (viewRef.current += 1);
+        const operation = event.type === "expansion-changed"
+          ? { kind: "expansion" as const, state: event.state }
+          : event.operation;
+        const next = applyViewOperation(pendingViewRef.current ?? state.view, operation);
+        pendingViewRef.current = next;
+        void applyGridView(DEFAULT_CLIENT, next).then((settlement) => {
+          if (token !== viewRef.current) return;
+          pendingViewRef.current = null;
+          setModel((current) => gridScreenViewSettled(current, settlement));
+        });
+        return;
+      }
+      case "violation-read": setModel((current) => gridScreenViolationReason(current, event.reading)); return;
+      case "row-operation-settled":
+        setModel((current) => gridScreenRowOperationSettled(current, event.settlement));
+        return;
+      case "paste-settled":
+        setModel((current) => gridScreenPasteSettled(current, event.settlement));
+        return;
+      case "history-settled":
+        setModel((current) => gridScreenHistorySettled(current, event.settlement));
+        return;
+      case "delete-requested": setModel((current) => gridScreenDeleteRequested(current, event.confirmation)); return;
+      case "delete-cancelled": setModel(gridScreenDeleteCancelled); return;
+      case "operation-refused":
+      case "paint-failed": setModel((current) => gridScreenFailed(current, event.message)); return;
+      case "detail-opened": setModel((current) => gridScreenDetailOpened(current, event.position)); return;
+      case "detail-closed": setModel(gridScreenDetailClosed); return;
+      case "detail-edit-settled": setModel((current) => gridScreenDetailEditSettled(current, event.settlement)); return;
+      case "column-resized": setModel((current) => gridScreenColumnResized(current, event.displayPosition, event.width)); return;
+      case "column-moved": setModel((current) => gridScreenColumnMoved(current, event.from, event.to)); return;
+      case "row-operation-requested":
+      case "row-selection-requested":
+      case "history-requested":
+      case "view-settled":
+        return;
+      default: return assertNever(event);
+    }
   }, [model]);
 
-  /**
-   * **表示の指定を 1 つ適用する**（要件 5.1、5.2、5.3、8.3、8.4）。
-   *
-   * 4 つの入口（展開・並べ替え・絞り込み・数の取り直し）がここへ集まる。**送るのは常に
-   * 「完全な記述」である**（ドメインは要求に現れない指定を既定へ戻す）ので、操作は
-   * [`applyViewOperation`] で 1 つの指定へ写してから送る — 部分的な指定を送る経路を作らない。
-   *
-   * 送る途中の指定は [`pendingViewRef`] へ積む — 2 つの押下が続くと、2 つ目は 1 つ目の応答を
-   * 待たずに組まれるので、`ready.view` を起点にすると**1 つ目の押下が指定から消える**。
-   *
-   * `update` は**いま送ろうとしている指定**（まだ応答が返っていない押下を含む）から組み立てる
-   * 関数である。状態（`ready.view`）から組むと、押下が続いたときに前の押下を落とす。
-   */
-  const sendView = useCallback(
-    (update: (view: GridViewSpec) => GridViewSpec) => {
-      const state = model.state;
-      if (state.status !== "ready") {
-        return;
-      }
-      const token = (viewRef.current += 1);
-      const next = update(pendingViewRef.current ?? state.view);
-      pendingViewRef.current = next;
-      void applyGridView(DEFAULT_CLIENT, next).then((settlement) => {
-        if (token !== viewRef.current) {
-          return;
-        }
-        // 応答が返った（適用されたか、失敗したか）。**次の押下は状態を起点に組む。**
-        pendingViewRef.current = null;
-        setModel((current) => gridScreenViewSettled(current, settlement));
-      });
-    },
-    [model],
-  );
-
-  /** 列の展開の操作（要件 5.1、5.2、5.3）。**他の 2 つの指定を落とさないためにここを通る。** */
-  const expand = useCallback(
-    (expansion: GridExpansionState) => {
-      sendView((view) => applyViewOperation(view, { kind: "expansion", state: expansion }));
-    },
-    [sendView],
-  );
-
-  /** 並べ替えと絞り込みの操作（8.8。要件 8.3、8.4）。 */
-  const updateView = useCallback(
-    (operation: ViewOperation) => {
-      sendView((view) => applyViewOperation(view, operation));
-    },
-    [sendView],
-  );
-
-  /**
-   * 列の幅の変更（8.8。要件 8.1）。**移植口の知らせと列ごとの入力が同じここへ来る**
-   * （2 つを別の経路にすると、片方だけが幅を動かす日が来る）。
-   */
-  const resizeColumn = useCallback((displayPosition: number, width: number) => {
-    setModel((current) => gridScreenColumnResized(current, displayPosition, width));
-  }, []);
-
-  /** 列の表示位置の変更（8.8。要件 8.2。**幅は動かない** — 7.5 の規則である）。 */
-  const moveColumn = useCallback((from: number, to: number) => {
-    setModel((current) => gridScreenColumnMoved(current, from, to));
-  }, []);
-  const openDetail = useCallback((position: CellPosition) => {
-    setModel((current) => gridScreenDetailOpened(current, position));
-  }, []);
-  const closeDetail = useCallback(() => {
-    setModel(gridScreenDetailClosed);
-  }, []);
-  const settleDetailEdit = useCallback((settlement: CellEditSettlement) => {
-    // セルの編集と同じ規律である（違うのは、面を初期状態へ戻す鍵が進むことだけである）。
-    setModel((current) => gridScreenDetailEditSettled(current, settlement));
-  }, []);
-  /**
-   * 行の操作の 1 往復の結果（8.6。要件 6.1、6.2、6.3、6.5）。
-   *
-   * **非同期の結果である**（`ScreenBoundary` は効果の同期の例外しか捕まえない）。遷移は全域で
-   * あり、投げない（`gridScreenRowOperationSettled`）。
-   */
-  const settleRowOperation = useCallback(
-    (settlement: RowOperationSettlement) => {
-      const state = model.state;
-      setModel((current) => gridScreenRowOperationSettled(current, settlement));
-      // **行の集合が変わったなら数を取り直す**（要件 8.7）。指定が行を絞っている間、適用の
-      // 応答が運ぶ行数はシートの行数であり、可視行数でも隠れた行の数でもない — 数を知る
-      // 唯一の源は表示の指定の応答である（`needsViewRefresh` の doc）。
-      if (
-        state.status === "ready" &&
-        settlement.status === "applied" &&
-        needsViewRefresh({
-          view: state.view,
-          outcome: settlement.outcome,
-          sheetRowsBefore: state.summary.row_count,
-        })
-      ) {
-        sendView((view) => view);
-      }
-    },
-    [model, sendView],
-  );
-  /** 削除の確認を求める（**送っていない。**数を示して尋ねるだけである。要件 6.5）。 */
-  const requestDelete = useCallback((confirmation: DeleteConfirmation) => {
-    setModel((current) => gridScreenDeleteRequested(current, confirmation));
-  }, []);
-  /** 確認への取り消し（**境界へ 1 つも送らない**。文書も表示も動かない）。 */
-  const cancelDelete = useCallback(() => {
-    setModel(gridScreenDeleteCancelled);
-  }, []);
-  /** 行の操作を送らなかった理由（識別子が届いていない・位置を写せない）を告知へ出す。 */
-  const refuseRowOperation = useCallback((message: string) => {
-    setModel((current) => gridScreenFailed(current, message));
-  }, []);
-  /**
-   * **表の描画が成立しなかった**ことを告知へ出す（9.3。要件 12.2）。
-   *
-   * 既存の告知の腕（[`gridScreenFailed`]）へ出すだけである — **状態を置き換えない**ので、
-   * 表はそのまま残る。記録（12.3 と同じ記録の口）は表の面が行う（`./renderHealth`）。
-   */
-  const refusePaintFailure = useCallback((message: string) => {
-    setModel((current) => gridScreenFailed(current, message));
-  }, []);
-  /**
-   * 貼り付けの 1 往復の結果（8.7。要件 7.3、7.4、1.7）。
-   *
-   * **非同期の結果である**（`ScreenBoundary` は効果の同期の例外しか捕まえない）。遷移は全域で
-   * あり、投げない（`gridScreenPasteSettled`）。
-   */
-  const settlePaste = useCallback(
-    (settlement: PasteSettlement) => {
-      const state = model.state;
-      setModel((current) => gridScreenPasteSettled(current, settlement));
-      // 貼り付けも**行を補充しうる**ので、行の操作と同じ判断を通る（要件 7.4、8.7）。
-      if (
-        state.status === "ready" &&
-        settlement.status === "applied" &&
-        needsViewRefresh({
-          view: state.view,
-          outcome: settlement.outcome,
-          sheetRowsBefore: state.summary.row_count,
-        })
-      ) {
-        sendView((view) => view);
-      }
-    },
-    [model, sendView],
-  );
-
-  /**
-   * 取り消し・やり直しの 1 往復の結果（8.9。要件 9.2、9.3、9.8）。
-   *
-   * **非同期の結果である**（`ScreenBoundary` は効果の同期の例外しか捕まえない）。遷移は全域で
-   * あり、投げない（`gridScreenHistorySettled`）。
-   */
-  const settleHistory = useCallback(
-    (settlement: HistorySettlement) => {
-      const state = model.state;
-      setModel((current) => gridScreenHistorySettled(current, settlement));
-      // 取り消しは**行数を変えうる**（行の追加・削除・複製・貼り付けの補充の逆命令である）ので、
-      // 行の操作・貼り付けと同じ判断を通る（要件 8.7）。指定が行を絞っている間は、応答が運ぶ
-      // 行数がシートの行数であって可視行数ではない — 数を知る唯一の源は表示の指定の応答である。
-      if (
-        state.status === "ready" &&
-        settlement.status === "applied" &&
-        needsViewRefresh({
-          view: state.view,
-          outcome: settlement.outcome,
-          sheetRowsBefore: state.summary.row_count,
-        })
-      ) {
-        sendView((view) => view);
-      }
-    },
-    [model, sendView],
-  );
-
-  return (
-    <GridScreenView
-      model={model}
-      client={DEFAULT_CLIENT}
-      macro={macro}
-      onRetry={retry}
-      onDismissNotice={dismissNotice}
-      onDismissEditReport={dismissEditReport}
-      onSelectionChange={select}
-      onEditStarted={startEdit}
-      onEditSettled={settleEdit}
-      onNextViolation={goToNextViolation}
-      onViolationRead={readViolation}
-      onExpansion={expand}
-      onDetailOpened={openDetail}
-      onDetailEditSettled={settleDetailEdit}
-      onDetailClosed={closeDetail}
-      onColumnWidth={resizeColumn}
-      onColumnMove={moveColumn}
-      onView={updateView}
-      onRowOperationSettled={settleRowOperation}
-      onPasteSettled={settlePaste}
-      onHistorySettled={settleHistory}
-      onDeleteRequested={requestDelete}
-      onDeleteCancelled={cancelDelete}
-      onRefused={refuseRowOperation}
-      onPaintFailed={refusePaintFailure}
-    />
-  );
+  return <GridScreenView model={model} client={DEFAULT_CLIENT} macro={macro} dispatch={dispatch} />;
 }

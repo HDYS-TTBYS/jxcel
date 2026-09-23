@@ -121,11 +121,19 @@ function describeEditing(text: string, edited: boolean): string {
 }
 
 /**
- * 文字編集を伴う描画の最小画面。**`ScreenProps` 以外の props を受け取らない**（画面の契約。
- * `src/shell/Layout.tsx`）。
+ * 文字編集を伴う描画の最小画面。画面は文字列状態を所有し、`EditorSmokeView` は描画状態と変更イベントを受ける。
  */
 export function EditorSmoke(): ReactElement {
   const [text, setText] = useState(INITIAL_TEXT);
+  return <EditorSmokeView text={text} onChange={(value) => setText(value)} />;
+}
+
+interface EditorSmokeViewProps {
+  readonly text: string;
+  readonly onChange: (text: string) => void;
+}
+
+function EditorSmokeView({ text, onChange }: EditorSmokeViewProps): ReactElement {
   const edited = text !== INITIAL_TEXT;
 
   return (
@@ -140,14 +148,11 @@ export function EditorSmoke(): ReactElement {
       </header>
       <textarea
         data-testid="jxcel-smoke-editor"
-        // 編集が起きたかどうかを外から 1 式で読めるようにする（10.4 の実アプリ確認）。
         data-edited={edited ? "true" : "false"}
         aria-label="描画確認用のテキスト"
         spellCheck={false}
         value={text}
-        onChange={(event) => {
-          setText(event.target.value);
-        }}
+        onChange={(event) => onChange(event.target.value)}
         style={TEXTAREA_STYLE}
       />
       <p data-testid="jxcel-smoke-editor-status" data-edited={edited ? "true" : "false"} style={STATUS_STYLE}>

@@ -63,7 +63,7 @@ export function installMacroRunRequests(
       const stop = await listen(MACRO_RUN_REQUESTED_EVENT, () => {
         // **先に面の状態を動かしてから遷移する**（遷移先の面がマウント時に現在の状態を読むので、
         // 順序が逆だと「選ばせる段」でない一瞬が描かれる。診断の導線と同じ理由である）。
-        store.request();
+        store.dispatch({ type: "request" });
         navigate(destination);
       });
       if (cancelled) {
@@ -94,7 +94,7 @@ export function installMacroListRefresh(store: MacroSurfaceStore): () => void {
   void (async () => {
     try {
       const stop = await listen(DOCUMENT_SESSION_CHANGED_EVENT, () => {
-        store.refresh();
+        store.dispatch({ type: "refresh" });
       });
       if (cancelled) {
         stop();

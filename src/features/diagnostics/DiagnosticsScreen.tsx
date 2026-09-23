@@ -44,6 +44,7 @@ import {
   useState,
   type ReactElement,
   type ReactNode,
+  type RefCallback,
 } from "react";
 import { listen } from "@tauri-apps/api/event";
 
@@ -128,6 +129,21 @@ type VerbosityState =
     }
   | { readonly status: "failed"; readonly message: string };
 
+/** 画面の描画状態。ビューには不変のスナップショットだけを渡す。 */
+type DiagnosticsPresentationState = Readonly<{
+  activeSection: string;
+  location: LocationState;
+  exported: ExportState;
+  verbosity: VerbosityState;
+}>;
+
+/** 描画側から診断の仲介役へ送る操作。 */
+type DiagnosticsEvent =
+  | { readonly type: "export" }
+  | { readonly type: "set-verbosity"; readonly level: DiagnosticsLevel };
+
+type DiagnosticsDispatch = (event: DiagnosticsEvent) => void;
+
 /** 区画の共通の枠。シェルの配色（`APPEARANCE_VARS`）だけを参照する。 */
 const PANEL_STYLE = {
   padding: "1.25rem 1.5rem",
@@ -182,19 +198,21 @@ function Action({
   testId,
   label,
   disabled,
-  onClick,
+  dispatch,
+  event,
 }: {
+  readonly dispatch: DiagnosticsDispatch;
+  readonly event: DiagnosticsEvent;
   readonly testId: string;
   readonly label: string;
   readonly disabled: boolean;
-  readonly onClick: () => void;
 }): ReactElement {
   return (
     <button
       type="button"
       data-testid={testId}
       disabled={disabled}
-      onClick={onClick}
+      onClick={() => dispatch(event)}
       style={{
         font: "inherit",
         fontSize: "0.875rem",
@@ -246,7 +264,7 @@ export function DiagnosticsScreen(): ReactElement {
     status: "loading",
   });
 
-  const locations = useRef<(HTMLElement | null)[]>([]);
+  const locations = useRef<(HTMLDivElement | null)[]>([]);
 
   /** 保存場所を読み直す（**例外を外へ出さない**。封筒の失敗は区画の中へ出す）。 */
   const loadLocation = useCallback(async (): Promise<void> => {
@@ -321,14 +339,12 @@ export function DiagnosticsScreen(): ReactElement {
     };
   }, []);
 
-  // メニューから選ばれた区画を、見える位置へ送る。強調（`data-diagnostics-active`）は
-  // 描画側が付けている。
+  // メニューで選ばれた区画を見える位置へ送る。
   useEffect(() => {
     const index =
       activeSection === "location" ? 0 : activeSection === "export" ? 1 : 2;
     locations.current[index]?.scrollIntoView({ block: "nearest" });
   }, [activeSection]);
-
   /** 書き出しを要求する（宛先は Rust 側が決める。この画面はパスを渡さない）。 */
   const exportDiagnostics = useCallback(async (): Promise<void> => {
     setExported({ status: "running" });
@@ -369,6 +385,41 @@ export function DiagnosticsScreen(): ReactElement {
     [],
   );
 
+  const dispatch = useCallback((event: DiagnosticsEvent): void => {
+    switch (event.type) {
+      case "export":
+        void exportDiagnostics();
+        break;
+      case "set-verbosity":
+        void changeVerbosity(event.level);
+        break;
+    }
+  }, [changeVerbosity, exportDiagnostics]);
+
+  return (
+    <DiagnosticsView
+      state={{ activeSection, location, exported, verbosity }}
+      dispatch={dispatch}
+      sectionRefs={[
+        (element) => { locations.current[0] = element; },
+        (element) => { locations.current[1] = element; },
+        (element) => { locations.current[2] = element; },
+      ]}
+    />
+  );
+}
+
+/** 診断の表示だけを行うビュー。状態遷移と副作用は画面の仲介役が所有する。 */
+function DiagnosticsView({
+  state,
+  dispatch,
+  sectionRefs,
+}: {
+  readonly state: DiagnosticsPresentationState;
+  readonly dispatch: DiagnosticsDispatch;
+  readonly sectionRefs: readonly RefCallback<HTMLDivElement>[];
+}): ReactElement {
+  const { activeSection, location, exported, verbosity } = state;
   return (
     <div
       data-testid="jxcel-diagnostics-screen"
@@ -385,7 +436,7 @@ export function DiagnosticsScreen(): ReactElement {
         開く操作は行いません（表示された文字列は選択してコピーできます）。
       </p>
 
-      <div ref={(element) => { locations.current[0] = element; }}>
+      <div ref={sectionRefs[0]}>
         <Panel section="location" active={activeSection === "location"} heading="記録の保存場所">
           <p style={{ margin: "0 0 0.5rem" }}>記録は次の場所に保存されています。</p>
           {location.status === "loading" ? (
@@ -420,7 +471,7 @@ export function DiagnosticsScreen(): ReactElement {
         </Panel>
       </div>
 
-      <div ref={(element) => { locations.current[1] = element; }}>
+      <div ref={sectionRefs[1]}>
         <Panel section="export" active={activeSection === "export"} heading="診断情報の書き出し">
           <p style={{ margin: "0 0 0.5rem" }}>
             保存されている記録を 1 つのファイルにまとめて書き出します。書き出し先は OS の
@@ -431,9 +482,8 @@ export function DiagnosticsScreen(): ReactElement {
             testId="jxcel-diagnostics-export"
             label={exported.status === "running" ? "書き出し中…" : "書き出す"}
             disabled={exported.status === "running"}
-            onClick={() => {
-              void exportDiagnostics();
-            }}
+            dispatch={dispatch}
+            event={{ type: "export" }}
           />
           {exported.status === "done" ? (
             <p data-testid="jxcel-diagnostics-export-result" style={{ margin: "0.5rem 0 0" }}>
@@ -454,12 +504,8 @@ export function DiagnosticsScreen(): ReactElement {
         </Panel>
       </div>
 
-      <div ref={(element) => { locations.current[2] = element; }}>
-        <Panel
-          section="verbosity"
-          active={activeSection === "verbosity"}
-          heading="記録の詳細度"
-        >
+      <div ref={sectionRefs[2]}>
+        <Panel section="verbosity" active={activeSection === "verbosity"} heading="記録の詳細度">
           {verbosity.status === "loading" ? (
             <p data-testid="jxcel-diagnostics-verbosity-value" style={{ margin: 0 }}>
               読み込み中…
@@ -484,9 +530,7 @@ export function DiagnosticsScreen(): ReactElement {
                       data-testid={`jxcel-diagnostics-verbosity-option-${level}`}
                       aria-pressed={chosen}
                       disabled={verbosity.saving}
-                      onClick={() => {
-                        void changeVerbosity(level);
-                      }}
+                      onClick={() => dispatch({ type: "set-verbosity", level })}
                       style={{
                         font: "inherit",
                         fontSize: "0.8125rem",

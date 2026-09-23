@@ -357,33 +357,9 @@ function markOf(model: GridScreenModel, macro?: MacroSurfaceBinding): string {
   return renderToStaticMarkup(
     createElement(GridScreenView, {
       model,
-      // 効果は走らないので、この口が呼ばれることはない（描かれるものだけを読む）。
       client: fakeClient({ state: err<DocumentStateResponse>() }),
-      // **マクロの実行の面は省略できる**（省略したときは何も描かれない）。実行の面を読む検査
-      // （`markOf(model, binding)`）だけが渡す。
       ...(macro === undefined ? {} : { macro }),
-      onRetry: () => undefined,
-      onDismissNotice: () => undefined,
-      onDismissEditReport: () => undefined,
-      onColumnWidth: () => undefined,
-      onColumnMove: () => undefined,
-      onView: () => undefined,
-      onSelectionChange: () => undefined,
-      onEditStarted: () => undefined,
-      onEditSettled: () => undefined,
-      onNextViolation: () => undefined,
-      onViolationRead: () => undefined,
-      onExpansion: () => undefined,
-      onDetailOpened: () => undefined,
-      onDetailEditSettled: () => undefined,
-      onDetailClosed: () => undefined,
-      onDeleteRequested: () => undefined,
-      onDeleteCancelled: () => undefined,
-      onRowOperationSettled: () => undefined,
-      onPasteSettled: () => undefined,
-      onHistorySettled: () => undefined,
-      onRefused: () => undefined,
-      onPaintFailed: () => undefined,
+      dispatch: () => undefined,
     }),
   );
 }
@@ -4866,11 +4842,11 @@ describe("実行中も表が使える（macro-runtime 4.4。要件 2.2）", () =
       run: () => new Promise<never>(() => undefined),
     };
     const store = createMacroSurfaceStore(client);
-    store.refresh();
+    store.dispatch({ type: "refresh" });
     await Promise.resolve();
     await Promise.resolve();
-    store.choose("棚卸し");
-    store.run();
+    store.dispatch({ type: "choose", name: "棚卸し" });
+    store.dispatch({ type: "run" });
     return store;
   }
 
