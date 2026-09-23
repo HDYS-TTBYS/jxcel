@@ -87,3 +87,5 @@ Skills with "Parallel Research" sections list independent work items that benefi
 ## ユーザー追加
 - Before committing, ALWAYS run auto-formatting with `qlty fmt`
 - Before finishing, ALWAYS run `qlty check --fix --level=low` and fix any lint errors
+- すべてのコンポーネントを Root からなる階層構造下に置き、各コンポーネントは MVP パターンの Passive View として描画に関わるパラメータだけを操作し、動作は Chain of Responsibility でイベントをバブリングさせて、ステートマシンとして振る舞う Mediator に裁定させること。
+- GUIをスクリーンショットで確認すること
